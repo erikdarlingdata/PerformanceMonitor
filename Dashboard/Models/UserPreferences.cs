@@ -92,6 +92,9 @@ namespace PerformanceMonitorDashboard.Models
         public bool McpEnabled { get; set; } = false;
         public int McpPort { get; set; } = 5150;
 
+        // Update check settings
+        public bool CheckForUpdatesOnStartup { get; set; } = true;
+
         // Alert suppression (persisted)
         public List<string> SilencedServers { get; set; } = new();
         public List<string> SilencedServerTabs { get; set; } = new();

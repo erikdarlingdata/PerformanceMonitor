@@ -56,6 +56,9 @@ public partial class App : Application
     public static bool AlertDeadlockEnabled { get; set; } = true;
     public static int AlertDeadlockThreshold { get; set; } = 1;
 
+    /* Update check settings */
+    public static bool CheckForUpdatesOnStartup { get; set; } = true;
+
     /* SMTP email alert settings */
     public static bool SmtpEnabled { get; set; } = false;
     public static string SmtpServer { get; set; } = "";
@@ -194,6 +197,9 @@ public partial class App : Application
             if (root.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.GetInt32();
+
+            /* Update check settings */
+            if (root.TryGetProperty("check_for_updates_on_startup", out v)) CheckForUpdatesOnStartup = v.GetBoolean();
 
             /* SMTP settings */
             if (root.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.GetBoolean();

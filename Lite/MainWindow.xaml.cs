@@ -121,6 +121,8 @@ public partial class MainWindow : Window
 
             await RefreshOverviewAsync();
             StatusText.Text = "Ready - Collection active";
+
+            _ = CheckForUpdatesOnStartupAsync();
         }
         catch (Exception ex)
         {
@@ -130,6 +132,37 @@ public partial class MainWindow : Window
                 "Initialization Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
+        }
+    }
+
+    private async Task CheckForUpdatesOnStartupAsync()
+    {
+        try
+        {
+            if (!App.CheckForUpdatesOnStartup) return;
+
+            var result = await UpdateCheckService.CheckForUpdateAsync();
+            if (result?.IsUpdateAvailable == true)
+            {
+                var answer = MessageBox.Show(
+                    $"Performance Monitor {result.LatestVersion} is available (you have {result.CurrentVersion}).\n\nWould you like to open the download page?",
+                    "Update Available",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Information);
+
+                if (answer == MessageBoxResult.Yes)
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = result.ReleaseUrl,
+                        UseShellExecute = true
+                    });
+                }
+            }
+        }
+        catch
+        {
+            // Never crash on update check failure
         }
     }
 

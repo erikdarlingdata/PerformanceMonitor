@@ -43,13 +43,12 @@
                     Check for Updates
                 </Hyperlink>
             </TextBlock>
+            <TextBlock x:Name="UpdateStatusText" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,3,0,0" Visibility="Collapsed"/>
         </StackPanel>
 
-        <!-- Credits -->
+        <!-- Links -->
         <StackPanel Grid.Row="4">
-            <TextBlock Text="Credits" FontWeight="Bold" Margin="0,0,0,5"/>
-            <TextBlock Text="Created by Erik Darling" FontSize="12"/>
-            <TextBlock FontSize="12" Margin="0,5,0,0">
+            <TextBlock FontSize="12">
                 <Hyperlink x:Name="DarlingDataLink" Click="DarlingDataLink_Click">
                     www.erikdarling.com
                 </Hyperlink>
