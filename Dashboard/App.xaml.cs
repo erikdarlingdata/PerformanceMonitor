@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -21,8 +22,33 @@ namespace PerformanceMonitorDashboard
         private const string MutexName = "PerformanceMonitorDashboard_SingleInstance";
         private Mutex? _singleInstanceMutex;
 
+        // DPI awareness for proper scaling on high DPI displays
+        private enum PROCESS_DPI_AWARENESS
+        {
+            Process_DPI_Unaware = 0,
+            Process_System_DPI_Aware = 1,
+            Process_Per_Monitor_DPI_Aware = 2
+        }
+
+        private enum DPI_AWARENESS_CONTEXT
+        {
+            Unaware = -1,
+            SystemAware = -2,
+            PerMonitorAware = -3,
+            PerMonitorAwareV2 = -4
+        }
+
+        [DllImport("SHCore.dll", SetLastError = true)]
+        private static extern bool SetProcessDpiAwareness(PROCESS_DPI_AWARENESS awareness);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetProcessDpiAwarenessContext(int dpiFlag);
+
         protected override void OnStartup(StartupEventArgs e)
         {
+            // Enable per-monitor DPI awareness for proper scaling on high DPI displays
+            EnableDpiAwareness();
+
             // Check for existing instance
             _singleInstanceMutex = new Mutex(true, MutexName, out bool isNewInstance);
 
@@ -63,6 +89,40 @@ namespace PerformanceMonitorDashboard
             _singleInstanceMutex?.Dispose();
 
             base.OnExit(e);
+        }
+
+        private static void EnableDpiAwareness()
+        {
+            try
+            {
+                // Try PerMonitorV2 first (Windows 10 1703+) - best scaling quality
+                if (Environment.OSVersion.Version.Major >= 10)
+                {
+                    try
+                    {
+                        SetProcessDpiAwarenessContext((int)DPI_AWARENESS_CONTEXT.PerMonitorAwareV2);
+                        return;
+                    }
+                    catch
+                    {
+                        // Fall through to try other methods
+                    }
+                }
+
+                // Try PerMonitor awareness (Windows 8.1+)
+                try
+                {
+                    SetProcessDpiAwareness(PROCESS_DPI_AWARENESS.Process_Per_Monitor_DPI_Aware);
+                }
+                catch
+                {
+                    // If all else fails, WPF will use system DPI awareness
+                }
+            }
+            catch
+            {
+                // Silently fail - WPF will handle DPI at a basic level
+            }
         }
 
         private void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
