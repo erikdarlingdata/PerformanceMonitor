@@ -16,6 +16,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Database;
@@ -36,6 +37,26 @@ public partial class ServerTab : UserControl
     private readonly Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.Panels.LegendPanel?> _legendPanels = new();
     private List<SelectableItem> _waitTypeItems = new();
     private List<SelectableItem> _perfmonCounterItems = new();
+    private readonly List<(ScottPlot.Plottables.Scatter Scatter, string WaitType)> _waitStatsScatters = new();
+    private readonly System.Windows.Controls.Primitives.Popup _waitStatsHoverPopup;
+    private readonly System.Windows.Controls.TextBlock _waitStatsHoverText;
+    private DateTime _lastHoverUpdate;
+
+    /* Column filtering */
+    private Popup? _filterPopup;
+    private ColumnFilterPopup? _filterPopupContent;
+    private readonly Dictionary<DataGrid, IDataGridFilterManager> _filterManagers = new();
+    private DataGridFilterManager<QuerySnapshotRow>? _querySnapshotsFilterMgr;
+    private DataGridFilterManager<QueryStatsRow>? _queryStatsFilterMgr;
+    private DataGridFilterManager<ProcedureStatsRow>? _procStatsFilterMgr;
+    private DataGridFilterManager<QueryStoreRow>? _queryStoreFilterMgr;
+    private DataGridFilterManager<BlockedProcessReportRow>? _blockedProcessFilterMgr;
+    private DataGridFilterManager<DeadlockProcessDetail>? _deadlockFilterMgr;
+    private DataGridFilterManager<RunningJobRow>? _runningJobsFilterMgr;
+    private DataGridFilterManager<ServerConfigRow>? _serverConfigFilterMgr;
+    private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
+    private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
+    private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
 
     private static readonly HashSet<string> _defaultPerfmonCounters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -97,6 +118,34 @@ public partial class ServerTab : UserControl
 
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();
+
+        /* Initialize column filter managers */
+        InitializeFilterManagers();
+
+        /* Wait stats hover tooltip */
+        _waitStatsHoverText = new System.Windows.Controls.TextBlock
+        {
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE0, 0xE0, 0xE0)),
+            FontSize = 13
+        };
+        _waitStatsHoverPopup = new System.Windows.Controls.Primitives.Popup
+        {
+            PlacementTarget = WaitStatsChart,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Relative,
+            IsHitTestVisible = false,
+            AllowsTransparency = true,
+            Child = new System.Windows.Controls.Border
+            {
+                Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x33, 0x33, 0x33)),
+                BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x55, 0x55, 0x55)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(3),
+                Padding = new Thickness(8, 4, 8, 4),
+                Child = _waitStatsHoverText
+            }
+        };
+        WaitStatsChart.MouseMove += WaitStatsChart_MouseMove;
+        WaitStatsChart.MouseLeave += WaitStatsChart_MouseLeave;
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -443,18 +492,18 @@ public partial class ServerTab : UserControl
             AppLogger.DataDiag("ServerTab", $"  TempDb: {tempDbTask.Result.Count}, BlockedProcessReports: {blockedProcessTask.Result.Count}, Deadlocks: {deadlockTask.Result.Count}");
             AppLogger.DataDiag("ServerTab", $"  WaitTypes: {waitTypesTask.Result.Count}, PerfmonCounters: {perfmonCountersTask.Result.Count}, QueryStore: {queryStoreTask.Result.Count}");
 
-            /* Update grids */
-            QuerySnapshotsGrid.ItemsSource = snapshotsTask.Result;
-            QueryStatsGrid.ItemsSource = queryStatsTask.Result;
-            ProcedureStatsGrid.ItemsSource = procStatsTask.Result;
-            BlockedProcessReportGrid.ItemsSource = blockedProcessTask.Result;
-            DeadlockGrid.ItemsSource = DeadlockProcessDetail.ParseFromRows(deadlockTask.Result);
-            QueryStoreGrid.ItemsSource = queryStoreTask.Result;
-            ServerConfigGrid.ItemsSource = serverConfigTask.Result;
-            DatabaseConfigGrid.ItemsSource = databaseConfigTask.Result;
-            DatabaseScopedConfigGrid.ItemsSource = databaseScopedConfigTask.Result;
-            TraceFlagsGrid.ItemsSource = traceFlagsTask.Result;
-            RunningJobsGrid.ItemsSource = runningJobsTask.Result;
+            /* Update grids (via filter managers to preserve active filters) */
+            _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
+            _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
+            _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
+            _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(deadlockTask.Result));
+            _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
+            _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
+            _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
+            _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+            _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+            _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
 
             /* Update memory summary */
             UpdateMemorySummary(memoryTask.Result);
@@ -1067,6 +1116,7 @@ public partial class ServerTab : UserControl
 
             ClearChart(WaitStatsChart);
             ApplyDarkTheme(WaitStatsChart);
+            _waitStatsScatters.Clear();
 
             if (selected.Count == 0) { WaitStatsChart.Refresh(); return; }
 
@@ -1096,6 +1146,7 @@ public partial class ServerTab : UserControl
                 var plot = WaitStatsChart.Plot.Add.Scatter(times, waitTime);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                _waitStatsScatters.Add((plot, selected[i].DisplayName));
 
                 if (waitTime.Length > 0) globalMax = Math.Max(globalMax, waitTime.Max());
             }
@@ -1123,6 +1174,62 @@ public partial class ServerTab : UserControl
         {
             /* Ignore chart update errors */
         }
+    }
+
+    /* ========== Wait Stats Hover Tooltip ========== */
+
+    private void WaitStatsChart_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_waitStatsScatters.Count == 0) return;
+        var now = DateTime.UtcNow;
+        if ((now - _lastHoverUpdate).TotalMilliseconds < 50) return;
+        _lastHoverUpdate = now;
+
+        var pos = e.GetPosition(WaitStatsChart);
+        var pixel = new ScottPlot.Pixel(
+            (float)(pos.X * WaitStatsChart.DisplayScale),
+            (float)(pos.Y * WaitStatsChart.DisplayScale));
+        var mouseCoords = WaitStatsChart.Plot.GetCoordinates(pixel);
+
+        double bestDistance = double.MaxValue;
+        ScottPlot.DataPoint bestPoint = default;
+        string bestWaitType = "";
+
+        foreach (var (scatter, waitType) in _waitStatsScatters)
+        {
+            var nearest = scatter.Data.GetNearest(mouseCoords, WaitStatsChart.Plot.LastRender);
+            if (nearest.IsReal)
+            {
+                var nearestPixel = WaitStatsChart.Plot.GetPixel(new ScottPlot.Coordinates(nearest.X, nearest.Y));
+                double dx = nearestPixel.X - pixel.X;
+                double dy = nearestPixel.Y - pixel.Y;
+                double dist = dx * dx + dy * dy;
+                if (dist < bestDistance)
+                {
+                    bestDistance = dist;
+                    bestPoint = nearest;
+                    bestWaitType = waitType;
+                }
+            }
+        }
+
+        if (bestPoint.IsReal && bestDistance < 2500) // ~50px radius
+        {
+            var time = DateTime.FromOADate(bestPoint.X);
+            _waitStatsHoverText.Text = $"{bestWaitType}\n{bestPoint.Y:N1} ms/sec\n{time:HH:mm:ss}";
+            _waitStatsHoverPopup.HorizontalOffset = pos.X + 15;
+            _waitStatsHoverPopup.VerticalOffset = pos.Y + 15;
+            _waitStatsHoverPopup.IsOpen = true;
+        }
+        else
+        {
+            _waitStatsHoverPopup.IsOpen = false;
+        }
+    }
+
+    private void WaitStatsChart_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        _waitStatsHoverPopup.IsOpen = false;
     }
 
     /* ========== Perfmon Picker ========== */
@@ -1772,5 +1879,106 @@ public partial class ServerTab : UserControl
     public void StopRefresh()
     {
         _refreshTimer.Stop();
+    }
+
+    /* ========== Column Filtering ========== */
+
+    private void InitializeFilterManagers()
+    {
+        _querySnapshotsFilterMgr = new DataGridFilterManager<QuerySnapshotRow>(QuerySnapshotsGrid);
+        _queryStatsFilterMgr = new DataGridFilterManager<QueryStatsRow>(QueryStatsGrid);
+        _procStatsFilterMgr = new DataGridFilterManager<ProcedureStatsRow>(ProcedureStatsGrid);
+        _queryStoreFilterMgr = new DataGridFilterManager<QueryStoreRow>(QueryStoreGrid);
+        _blockedProcessFilterMgr = new DataGridFilterManager<BlockedProcessReportRow>(BlockedProcessReportGrid);
+        _deadlockFilterMgr = new DataGridFilterManager<DeadlockProcessDetail>(DeadlockGrid);
+        _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
+        _serverConfigFilterMgr = new DataGridFilterManager<ServerConfigRow>(ServerConfigGrid);
+        _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
+        _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
+        _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
+
+        _filterManagers[QuerySnapshotsGrid] = _querySnapshotsFilterMgr;
+        _filterManagers[QueryStatsGrid] = _queryStatsFilterMgr;
+        _filterManagers[ProcedureStatsGrid] = _procStatsFilterMgr;
+        _filterManagers[QueryStoreGrid] = _queryStoreFilterMgr;
+        _filterManagers[BlockedProcessReportGrid] = _blockedProcessFilterMgr;
+        _filterManagers[DeadlockGrid] = _deadlockFilterMgr;
+        _filterManagers[RunningJobsGrid] = _runningJobsFilterMgr;
+        _filterManagers[ServerConfigGrid] = _serverConfigFilterMgr;
+        _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
+        _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
+        _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
+    }
+
+    private void EnsureFilterPopup()
+    {
+        if (_filterPopup == null)
+        {
+            _filterPopupContent = new ColumnFilterPopup();
+            _filterPopup = new Popup
+            {
+                Child = _filterPopupContent,
+                StaysOpen = false,
+                Placement = PlacementMode.Bottom,
+                AllowsTransparency = true
+            };
+        }
+    }
+
+    private DataGrid? _currentFilterGrid;
+
+    private void FilterButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.Tag is not string columnName) return;
+
+        /* Walk up visual tree to find the parent DataGrid */
+        var dataGrid = FindParentDataGridFromElement(button);
+        if (dataGrid == null || !_filterManagers.TryGetValue(dataGrid, out var manager)) return;
+
+        _currentFilterGrid = dataGrid;
+
+        EnsureFilterPopup();
+
+        /* Rewire events to the current grid */
+        _filterPopupContent!.FilterApplied -= FilterPopup_FilterApplied;
+        _filterPopupContent.FilterCleared -= FilterPopup_FilterCleared;
+        _filterPopupContent.FilterApplied += FilterPopup_FilterApplied;
+        _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
+
+        /* Initialize with existing filter state */
+        manager.Filters.TryGetValue(columnName, out var existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter);
+
+        _filterPopup!.PlacementTarget = button;
+        _filterPopup.IsOpen = true;
+    }
+
+    private void FilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
+    {
+        if (_filterPopup != null)
+            _filterPopup.IsOpen = false;
+
+        if (_currentFilterGrid != null && _filterManagers.TryGetValue(_currentFilterGrid, out var manager))
+        {
+            manager.SetFilter(e.FilterState);
+        }
+    }
+
+    private void FilterPopup_FilterCleared(object? sender, EventArgs e)
+    {
+        if (_filterPopup != null)
+            _filterPopup.IsOpen = false;
+    }
+
+    private static DataGrid? FindParentDataGridFromElement(DependencyObject element)
+    {
+        var current = element;
+        while (current != null)
+        {
+            if (current is DataGrid dg)
+                return dg;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return null;
     }
 }
