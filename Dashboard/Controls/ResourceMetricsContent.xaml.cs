@@ -92,6 +92,10 @@ namespace PerformanceMonitorDashboard.Controls
         private List<WaitStatsDataPoint>? _allWaitStatsDetailData;
         private List<WaitTypeSelectionItem>? _waitTypeItems;
         private bool _isUpdatingWaitTypeSelection = false;
+        private readonly List<(ScottPlot.Plottables.Scatter Scatter, string WaitType)> _waitStatsScatters = new();
+        private readonly Popup _waitStatsHoverPopup;
+        private readonly System.Windows.Controls.TextBlock _waitStatsHoverText;
+        private DateTime _lastHoverUpdate;
         // Column filter popup and state
         private Popup? _filterPopup;
         private ColumnFilterPopup? _filterPopupContent;
@@ -115,6 +119,30 @@ namespace PerformanceMonitorDashboard.Controls
             InitializeComponent();
             SetupChartContextMenus();
             Loaded += OnLoaded;
+
+            _waitStatsHoverText = new System.Windows.Controls.TextBlock
+            {
+                Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE0, 0xE0, 0xE0)),
+                FontSize = 13
+            };
+            _waitStatsHoverPopup = new Popup
+            {
+                PlacementTarget = WaitStatsDetailChart,
+                Placement = System.Windows.Controls.Primitives.PlacementMode.Relative,
+                IsHitTestVisible = false,
+                AllowsTransparency = true,
+                Child = new System.Windows.Controls.Border
+                {
+                    Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x33, 0x33, 0x33)),
+                    BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x55, 0x55, 0x55)),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(3),
+                    Padding = new Thickness(8, 4, 8, 4),
+                    Child = _waitStatsHoverText
+                }
+            };
+            WaitStatsDetailChart.MouseMove += WaitStatsDetailChart_MouseMove;
+            WaitStatsDetailChart.MouseLeave += WaitStatsDetailChart_MouseLeave;
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -2029,6 +2057,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             WaitStatsDetailChart.Plot.Clear();
             TabHelpers.ApplyDarkModeToChart(WaitStatsDetailChart);
+            _waitStatsScatters.Clear();
 
             if (data == null || data.Count == 0 || _waitTypeItems == null)
             {
@@ -2081,6 +2110,7 @@ namespace PerformanceMonitorDashboard.Controls
                     if (legendText.Length > 25)
                         legendText = legendText.Substring(0, 22) + "...";
                     scatter.LegendText = legendText;
+                    _waitStatsScatters.Add((scatter, waitType.WaitType));
 
                     colorIndex++;
                 }
@@ -2107,6 +2137,60 @@ namespace PerformanceMonitorDashboard.Controls
             WaitStatsDetailChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(WaitStatsDetailChart);
             WaitStatsDetailChart.Refresh();
+        }
+
+        private void WaitStatsDetailChart_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (_waitStatsScatters.Count == 0) return;
+            var now = DateTime.UtcNow;
+            if ((now - _lastHoverUpdate).TotalMilliseconds < 50) return;
+            _lastHoverUpdate = now;
+
+            var pos = e.GetPosition(WaitStatsDetailChart);
+            var pixel = new ScottPlot.Pixel(
+                (float)(pos.X * WaitStatsDetailChart.DisplayScale),
+                (float)(pos.Y * WaitStatsDetailChart.DisplayScale));
+            var mouseCoords = WaitStatsDetailChart.Plot.GetCoordinates(pixel);
+
+            double bestDistance = double.MaxValue;
+            ScottPlot.DataPoint bestPoint = default;
+            string bestWaitType = "";
+
+            foreach (var (scatter, waitType) in _waitStatsScatters)
+            {
+                var nearest = scatter.Data.GetNearest(mouseCoords, WaitStatsDetailChart.Plot.LastRender);
+                if (nearest.IsReal)
+                {
+                    var nearestPixel = WaitStatsDetailChart.Plot.GetPixel(new ScottPlot.Coordinates(nearest.X, nearest.Y));
+                    double dx = nearestPixel.X - pixel.X;
+                    double dy = nearestPixel.Y - pixel.Y;
+                    double dist = dx * dx + dy * dy;
+                    if (dist < bestDistance)
+                    {
+                        bestDistance = dist;
+                        bestPoint = nearest;
+                        bestWaitType = waitType;
+                    }
+                }
+            }
+
+            if (bestPoint.IsReal && bestDistance < 2500) // ~50px radius
+            {
+                var time = DateTime.FromOADate(bestPoint.X);
+                _waitStatsHoverText.Text = $"{bestWaitType}\n{bestPoint.Y:N1} ms/sec\n{time:HH:mm:ss}";
+                _waitStatsHoverPopup.HorizontalOffset = pos.X + 15;
+                _waitStatsHoverPopup.VerticalOffset = pos.Y + 15;
+                _waitStatsHoverPopup.IsOpen = true;
+            }
+            else
+            {
+                _waitStatsHoverPopup.IsOpen = false;
+            }
+        }
+
+        private void WaitStatsDetailChart_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            _waitStatsHoverPopup.IsOpen = false;
         }
 
         #endregion
