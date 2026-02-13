@@ -263,7 +263,7 @@ public partial class RemoteCollectorService
 
             // Skip MFA servers if user has cancelled authentication
             // This prevents repeated popup dialogs during background data collection
-            if (server.AuthenticationType == "EntraMFA" && serverStatus.UserCancelledMfa)
+            if (server.AuthenticationType == AuthenticationTypes.EntraMFA && serverStatus.UserCancelledMfa)
             {
                 AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} SKIPPED - MFA authentication cancelled by user");
                 _logger?.LogDebug("Skipping collector '{Collector}' for server '{Server}' - user cancelled MFA",
@@ -424,7 +424,7 @@ public partial class RemoteCollectorService
     protected async Task<SqlConnection> CreateConnectionAsync(ServerConnection server, CancellationToken cancellationToken)
     {
         // For MFA servers, serialize authentication attempts to prevent multiple popups
-        bool isMfaServer = server.AuthenticationType == "EntraMFA";
+        bool isMfaServer = server.AuthenticationType == AuthenticationTypes.EntraMFA;
         bool mfaLockAcquired = false;
 
         try

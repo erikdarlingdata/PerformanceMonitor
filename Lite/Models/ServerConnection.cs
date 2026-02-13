@@ -21,9 +21,9 @@ public class ServerConnection
     public bool UseWindowsAuth { get; set; } = true;
     
     /// <summary>
-    /// Authentication type: "Windows", "SqlServer", or "EntraMFA"
+    /// Authentication type: Windows, SqlServer, or EntraMFA
     /// </summary>
-    public string AuthenticationType { get; set; } = "Windows";
+    public string AuthenticationType { get; set; } = AuthenticationTypes.Windows;
     
     public string? Description { get; set; }
     public DateTime CreatedDate { get; set; } = DateTime.Now;
@@ -56,8 +56,8 @@ public class ServerConnection
     [JsonIgnore]
     public string AuthenticationDisplay => AuthenticationType switch
     {
-        "EntraMFA" => "Microsoft Entra MFA",
-        "SqlServer" => "SQL Server",
+        AuthenticationTypes.EntraMFA => "Microsoft Entra MFA",
+        AuthenticationTypes.SqlServer => "SQL Server",
         _ => "Windows"
     };
 
@@ -76,7 +76,7 @@ public class ServerConnection
         string? username = null;
         string? password = null;
 
-        if (AuthenticationType == "SqlServer")
+        if (AuthenticationType == AuthenticationTypes.SqlServer)
         {
             var cred = credentialService.GetCredential(Id);
             if (cred.HasValue)
@@ -113,17 +113,17 @@ public class ServerConnection
             _ => SqlConnectionEncryptOption.Optional
         };
 
-        if (AuthenticationType == "Windows")
+        if (AuthenticationType == AuthenticationTypes.Windows)
         {
             builder.IntegratedSecurity = true;
         }
-        else if (AuthenticationType == "SqlServer")
+        else if (AuthenticationType == AuthenticationTypes.SqlServer)
         {
             builder.IntegratedSecurity = false;
             builder.UserID = username ?? string.Empty;
             builder.Password = password ?? string.Empty;
         }
-        else if (AuthenticationType == "EntraMFA")
+        else if (AuthenticationType == AuthenticationTypes.EntraMFA)
         {
             // Microsoft Entra MFA (Azure AD Interactive)
             builder.IntegratedSecurity = false;
@@ -143,7 +143,7 @@ public class ServerConnection
     /// </summary>
     public bool HasStoredCredentials(CredentialService credentialService)
     {
-        if (AuthenticationType == "Windows" || AuthenticationType == "EntraMFA")
+        if (AuthenticationType == AuthenticationTypes.Windows || AuthenticationType == AuthenticationTypes.EntraMFA)
         {
             return true;
         }

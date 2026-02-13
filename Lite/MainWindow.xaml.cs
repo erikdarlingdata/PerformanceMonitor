@@ -362,7 +362,7 @@ public partial class MainWindow : Window
         // Clear MFA cancellation flag when user explicitly connects
         // This gives them a fresh attempt at authentication
         var currentStatus = _serverManager.GetConnectionStatus(server.Id);
-        if (server.AuthenticationType == "EntraMFA" && currentStatus.UserCancelledMfa)
+        if (server.AuthenticationType == AuthenticationTypes.EntraMFA && currentStatus.UserCancelledMfa)
         {
             currentStatus.UserCancelledMfa = false;
             StatusText.Text = "Retrying MFA authentication...";

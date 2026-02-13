@@ -61,7 +61,7 @@ public partial class AddServerDialog : Window
         DatabaseNameBox.Text = existing.DatabaseName ?? "";
 
         // Set authentication mode
-        if (existing.AuthenticationType == "EntraMFA")
+        if (existing.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
             EntraMfaAuthRadio.IsChecked = true;
             
@@ -73,7 +73,7 @@ public partial class AddServerDialog : Window
                 EntraMfaUsernameBox.Text = cred.Value.Username;
             }
         }
-        else if (existing.AuthenticationType == "SqlServer")
+        else if (existing.AuthenticationType == AuthenticationTypes.SqlServer)
         {
             SqlAuthRadio.IsChecked = true;
             
@@ -238,19 +238,19 @@ public partial class AddServerDialog : Window
 
         if (WindowsAuthRadio.IsChecked == true)
         {
-            authenticationType = "Windows";
+            authenticationType = AuthenticationTypes.Windows;
             useWindowsAuth = true;
         }
         else if (EntraMfaAuthRadio.IsChecked == true)
         {
-            authenticationType = "EntraMFA";
+            authenticationType = AuthenticationTypes.EntraMFA;
             useWindowsAuth = false;
             // Optionally store username for MFA
             username = EntraMfaUsernameBox.Text.Trim();
         }
         else // SQL Server Authentication
         {
-            authenticationType = "SqlServer";
+            authenticationType = AuthenticationTypes.SqlServer;
             useWindowsAuth = false;
             username = UsernameBox.Text.Trim();
             password = PasswordBox.Password;

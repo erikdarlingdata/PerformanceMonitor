@@ -106,7 +106,7 @@ public class ServerManager
         }
 
         // Save credentials based on authentication type
-        if (server.AuthenticationType == "SqlServer" && !string.IsNullOrEmpty(username) && password != null)
+        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
             // For SQL Server auth, save both username and password
             if (!_credentialService.SaveCredential(server.Id, username, password))
@@ -114,7 +114,7 @@ public class ServerManager
                 throw new InvalidOperationException("Failed to save credentials to Windows Credential Manager");
             }
         }
-        else if (server.AuthenticationType == "EntraMFA" && !string.IsNullOrEmpty(username))
+        else if (server.AuthenticationType == AuthenticationTypes.EntraMFA && !string.IsNullOrEmpty(username))
         {
             // For MFA auth, save username (password can be empty)
             if (!_credentialService.SaveCredential(server.Id, username, string.Empty))
@@ -148,7 +148,7 @@ public class ServerManager
         }
 
         // Update credentials based on authentication type
-        if (server.AuthenticationType == "SqlServer" && !string.IsNullOrEmpty(username) && password != null)
+        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
             // For SQL Server auth, update both username and password
             if (!_credentialService.UpdateCredential(server.Id, username, password))
@@ -156,7 +156,7 @@ public class ServerManager
                 throw new InvalidOperationException("Failed to update credentials in Windows Credential Manager");
             }
         }
-        else if (server.AuthenticationType == "EntraMFA" && !string.IsNullOrEmpty(username))
+        else if (server.AuthenticationType == AuthenticationTypes.EntraMFA && !string.IsNullOrEmpty(username))
         {
             // For MFA auth, update username (password can be empty)
             if (!_credentialService.UpdateCredential(server.Id, username, string.Empty))
@@ -164,7 +164,7 @@ public class ServerManager
                 throw new InvalidOperationException("Failed to update username in Windows Credential Manager");
             }
         }
-        else if (server.AuthenticationType == "Windows")
+        else if (server.AuthenticationType == AuthenticationTypes.Windows)
         {
             // For Windows auth, remove any stored credentials
             _credentialService.DeleteCredential(server.Id);
@@ -269,7 +269,7 @@ public class ServerManager
         var previousStatus = GetConnectionStatus(serverId);
 
         // Skip interactive authentication methods during background checks
-        if (!allowInteractiveAuth && server.AuthenticationType == "EntraMFA")
+        if (!allowInteractiveAuth && server.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
             return new ServerConnectionStatus
             {
@@ -284,7 +284,7 @@ public class ServerManager
         }
 
         // Don't retry MFA if user previously cancelled, unless this is an explicit connection attempt
-        if (server.AuthenticationType == "EntraMFA" && previousStatus.UserCancelledMfa && !allowInteractiveAuth)
+        if (server.AuthenticationType == AuthenticationTypes.EntraMFA && previousStatus.UserCancelledMfa && !allowInteractiveAuth)
         {
             return new ServerConnectionStatus
             {
@@ -307,7 +307,7 @@ public class ServerManager
 
         // CRITICAL: Prevent connection checks while Add/Edit dialog is open
         // This prevents MFA popups when user is just configuring the server
-        if (Windows.AddServerDialog.IsDialogOpen && server.AuthenticationType == "EntraMFA")
+        if (Windows.AddServerDialog.IsDialogOpen && server.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
             return new ServerConnectionStatus
             {
@@ -393,7 +393,7 @@ public class ServerManager
             status.ErrorMessage = ex.Message;
             
             // Detect MFA cancellation (error code 0 with specific message patterns)
-            if (server.AuthenticationType == "EntraMFA" && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+            if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
             {
                 status.UserCancelledMfa = true;
                 status.ErrorMessage = "Authentication cancelled by user";
@@ -410,7 +410,7 @@ public class ServerManager
             status.ErrorMessage = ex.Message;
             
             // Detect MFA cancellation from generic exceptions
-            if (server.AuthenticationType == "EntraMFA" && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+            if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
             {
                 status.UserCancelledMfa = true;
                 status.ErrorMessage = "Authentication cancelled by user";
@@ -542,26 +542,26 @@ public class ServerManager
     /// <summary>
     /// Migrates server authentication configuration for backward compatibility.
     /// Old configs only had UseWindowsAuth, new code uses AuthenticationType.
-    /// If AuthenticationType is default "Windows" but UseWindowsAuth is false, set to "SqlServer".
+    /// If AuthenticationType is default Windows but UseWindowsAuth is false, set to SqlServer.
     /// </summary>
     private void MigrateServerAuthentication(List<ServerConnection> servers)
     {
         foreach (var server in servers)
         {
-            // If AuthenticationType is "Windows" (default) but UseWindowsAuth is false,
+            // If AuthenticationType is Windows (default) but UseWindowsAuth is false,
             // this is a SQL Server auth server from an old config
-            if (server.AuthenticationType == "Windows" && !server.UseWindowsAuth)
+            if (server.AuthenticationType == AuthenticationTypes.Windows && !server.UseWindowsAuth)
             {
-                server.AuthenticationType = "SqlServer";
+                server.AuthenticationType = AuthenticationTypes.SqlServer;
                 _logger?.LogInformation("Migrated server '{DisplayName}' authentication type from legacy UseWindowsAuth=false to AuthenticationType=SqlServer", 
                     server.DisplayName);
             }
             // Ensure UseWindowsAuth stays in sync with AuthenticationType for consistency
-            else if (server.AuthenticationType == "SqlServer" || server.AuthenticationType == "EntraMFA")
+            else if (server.AuthenticationType == AuthenticationTypes.SqlServer || server.AuthenticationType == AuthenticationTypes.EntraMFA)
             {
                 server.UseWindowsAuth = false;
             }
-            else if (server.AuthenticationType == "Windows")
+            else if (server.AuthenticationType == AuthenticationTypes.Windows)
             {
                 server.UseWindowsAuth = true;
             }
