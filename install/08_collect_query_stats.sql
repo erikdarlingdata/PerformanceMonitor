@@ -269,7 +269,7 @@ BEGIN
                                     THEN DATALENGTH(st.text)
                                     ELSE qs.statement_end_offset
                                 END - qs.statement_start_offset
-                            ) / 2
+                            ) / 2 + 1
                         )
                 END,
             query_plan_text = tqp.query_plan
