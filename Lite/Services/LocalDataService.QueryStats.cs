@@ -69,6 +69,7 @@ FROM query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   query_text NOT LIKE 'WAITFOR%'
 GROUP BY database_name, query_hash
 ORDER BY SUM(delta_elapsed_time) DESC
 LIMIT $4";

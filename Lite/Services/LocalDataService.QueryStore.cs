@@ -47,6 +47,7 @@ FROM query_store_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   query_text NOT LIKE 'WAITFOR%'
 GROUP BY database_name, query_id, plan_id, query_hash
 ORDER BY SUM(execution_count) * AVG(avg_duration_ms) DESC
 LIMIT $4";

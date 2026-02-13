@@ -748,6 +748,7 @@ namespace PerformanceMonitorDashboard.Services
                 OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
                 OR (qs.first_execution_time <= @fromDate AND qs.last_execution_time >= @toDate)))
         )
+        AND qs.query_text NOT LIKE N'WAITFOR%'
         ORDER BY
             qs.avg_worker_time_ms DESC;";
 
@@ -989,6 +990,7 @@ namespace PerformanceMonitorDashboard.Services
                 OR (qss.last_execution_time >= @fromDate AND qss.last_execution_time <= @toDate)
                 OR (qss.first_execution_time <= @fromDate AND qss.last_execution_time >= @toDate)))
         )
+        AND qss.query_sql_text NOT LIKE N'WAITFOR%'
         ORDER BY
             qss.avg_cpu_time_ms DESC
         OPTION
