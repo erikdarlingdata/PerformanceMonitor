@@ -113,15 +113,15 @@
                 Padding="16,8">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                 <StackPanel Orientation="Horizontal" Margin="0,0,20,0">
-                    <Ellipse Width="10" Height="10" Fill="#22C55E" Margin="0,0,6,0"/>
+                    <Ellipse Width="10" Height="10" Fill="#81C784" Margin="0,0,6,0"/>
                     <TextBlock Text="Healthy" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,20,0">
-                    <Ellipse Width="10" Height="10" Fill="#F59E0B" Margin="0,0,6,0"/>
+                    <Ellipse Width="10" Height="10" Fill="#FFD54F" Margin="0,0,6,0"/>
                     <TextBlock Text="Warning" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,20,0">
-                    <Ellipse Width="10" Height="10" Fill="#EF4444" Margin="0,0,6,0"/>
+                    <Ellipse Width="10" Height="10" Fill="#E57373" Margin="0,0,6,0"/>
                     <TextBlock Text="Critical" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal">

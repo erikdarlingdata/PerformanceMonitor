@@ -214,11 +214,11 @@
                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                     <TextBlock Text="✗"
                                FontSize="24"
-                               Foreground="#EF4444"
+                               Foreground="#E57373"
                                HorizontalAlignment="Center"/>
                     <TextBlock Text="Offline"
                                FontSize="12"
-                               Foreground="#EF4444"
+                               Foreground="#E57373"
                                HorizontalAlignment="Center"
                                Margin="0,4,0,0"/>
                 </StackPanel>

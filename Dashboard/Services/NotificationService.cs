@@ -9,6 +9,7 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitorDashboard.Interfaces;
@@ -33,9 +34,22 @@ namespace PerformanceMonitorDashboard.Services
             // Dispose any existing icon first
             _trayIcon?.Dispose();
 
-            _trayIcon = new TaskbarIcon
+            _trayIcon = new TaskbarIcon();
+
+            /* Custom dark tooltip (native ToolTipText uses Windows light theme) */
+            _trayIcon.TrayToolTip = new Border
             {
-                ToolTipText = "SQL Server Performance Monitor"
+                Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b")),
+                BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#33363e")),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(10, 8, 10, 8),
+                CornerRadius = new CornerRadius(4),
+                Child = new TextBlock
+                {
+                    Text = "SQL Server Performance Monitor",
+                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                    FontSize = 12
+                }
             };
 
             // Load dark theme for context menu styling
@@ -62,14 +76,14 @@ namespace PerformanceMonitorDashboard.Services
             var showItem = new MenuItem
             {
                 Header = "Show Dashboard",
-                Icon = new TextBlock { Text = "📊" }
+                Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent }
             };
             showItem.Click += (s, e) => ShowMainWindow();
 
             var settingsItem = new MenuItem
             {
                 Header = "Settings...",
-                Icon = new TextBlock { Text = "⚙" }
+                Icon = new TextBlock { Text = "⚙", Background = Brushes.Transparent }
             };
             settingsItem.Click += (s, e) => OpenSettings();
 
@@ -78,7 +92,7 @@ namespace PerformanceMonitorDashboard.Services
             var exitItem = new MenuItem
             {
                 Header = "Exit",
-                Icon = new TextBlock { Text = "✕" }
+                Icon = new TextBlock { Text = "✕", Background = Brushes.Transparent }
             };
             exitItem.Click += (s, e) => ExitApplication();
 

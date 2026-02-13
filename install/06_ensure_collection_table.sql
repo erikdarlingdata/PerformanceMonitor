@@ -57,7 +57,54 @@ BEGIN
         BEGIN
             IF @debug = 1
             BEGIN
-                RAISERROR(N'Table %s already exists', 0, 1, @full_table_name) WITH NOWAIT;
+                RAISERROR(N'Table %s already exists, checking for schema upgrades', 0, 1, @full_table_name) WITH NOWAIT;
+            END;
+
+            /*
+            Schema upgrade: Add is_processed column to raw XML tables if missing
+            This handles upgrades from older versions that did not track processing state
+            */
+            IF @table_name IN (N'blocked_process_xml', N'deadlock_xml')
+            BEGIN
+                IF NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM sys.columns AS c
+                    JOIN sys.tables AS t
+                      ON t.object_id = c.object_id
+                    JOIN sys.schemas AS s
+                      ON s.schema_id = t.schema_id
+                    WHERE s.name = N'collect'
+                    AND   t.name = @table_name
+                    AND   c.name = N'is_processed'
+                )
+                BEGIN
+                    DECLARE
+                        @alter_sql nvarchar(500) = N'ALTER TABLE ' + @full_table_name + N' ADD is_processed bit NOT NULL DEFAULT 0;';
+
+                    EXECUTE sys.sp_executesql
+                        @alter_sql;
+
+                    IF @debug = 1
+                    BEGIN
+                        RAISERROR(N'Added is_processed column to %s', 0, 1, @full_table_name) WITH NOWAIT;
+                    END;
+
+                    INSERT INTO
+                        config.collection_log
+                    (
+                        collector_name,
+                        collection_status,
+                        error_message
+                    )
+                    VALUES
+                    (
+                        N'ensure_collection_table',
+                        N'SCHEMA_UPGRADE',
+                        N'Added is_processed column to ' + @full_table_name
+                    );
+                END;
             END;
 
             RETURN;
@@ -296,15 +343,16 @@ BEGIN
         collect.deadlock_xml
     (
         id bigint IDENTITY NOT NULL,
-        collection_time datetime2(7) NOT NULL 
+        collection_time datetime2(7) NOT NULL
             DEFAULT SYSDATETIME(),
         event_time datetime2(7) NULL,
         deadlock_xml xml NOT NULL,
-        CONSTRAINT 
-            PK_deadlock_xml       
-        PRIMARY KEY CLUSTERED 
-            (collection_time, id) 
-        WITH 
+        is_processed bit NOT NULL DEFAULT 0,
+        CONSTRAINT
+            PK_deadlock_xml
+        PRIMARY KEY CLUSTERED
+            (collection_time, id)
+        WITH
             (DATA_COMPRESSION = PAGE)
     );
         END;
@@ -314,15 +362,16 @@ BEGIN
         collect.blocked_process_xml
     (
         id bigint IDENTITY NOT NULL,
-        collection_time datetime2(7) NOT NULL 
+        collection_time datetime2(7) NOT NULL
             DEFAULT SYSDATETIME(),
         event_time datetime2(7) NULL,
-        blocked_process_xml xml NOT NULL,     
-        CONSTRAINT 
-            PK_blocked_process_xml 
-        PRIMARY KEY CLUSTERED 
-            (collection_time, id) 
-        WITH 
+        blocked_process_xml xml NOT NULL,
+        is_processed bit NOT NULL DEFAULT 0,
+        CONSTRAINT
+            PK_blocked_process_xml
+        PRIMARY KEY CLUSTERED
+            (collection_time, id)
+        WITH
             (DATA_COMPRESSION = PAGE)
     );
         END;
@@ -1136,4 +1185,50 @@ END;
 GO
 
 PRINT 'Ensure collection table procedure created successfully';
+GO
+
+/*
+Schema upgrade: Add is_processed column to raw XML tables if missing
+This runs during installation to ensure the column exists before
+processors (files 23/25) reference it in their procedure definitions.
+The ensure_collection_table procedure also handles this for runtime upgrades.
+*/
+IF OBJECT_ID(N'collect.blocked_process_xml', N'U') IS NOT NULL
+AND NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.columns AS c
+    JOIN sys.tables AS t
+      ON t.object_id = c.object_id
+    JOIN sys.schemas AS s
+      ON s.schema_id = t.schema_id
+    WHERE s.name = N'collect'
+    AND   t.name = N'blocked_process_xml'
+    AND   c.name = N'is_processed'
+)
+BEGIN
+    ALTER TABLE collect.blocked_process_xml ADD is_processed bit NOT NULL DEFAULT 0;
+    PRINT 'Added is_processed column to collect.blocked_process_xml';
+END;
+GO
+
+IF OBJECT_ID(N'collect.deadlock_xml', N'U') IS NOT NULL
+AND NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.columns AS c
+    JOIN sys.tables AS t
+      ON t.object_id = c.object_id
+    JOIN sys.schemas AS s
+      ON s.schema_id = t.schema_id
+    WHERE s.name = N'collect'
+    AND   t.name = N'deadlock_xml'
+    AND   c.name = N'is_processed'
+)
+BEGIN
+    ALTER TABLE collect.deadlock_xml ADD is_processed bit NOT NULL DEFAULT 0;
+    PRINT 'Added is_processed column to collect.deadlock_xml';
+END;
 GO

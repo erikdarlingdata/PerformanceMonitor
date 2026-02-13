@@ -137,6 +137,30 @@ namespace PerformanceMonitorDashboard
             _displayRefreshTimer.Start();
 
             await CheckAllConnectionsAsync();
+
+            _ = CheckForUpdatesOnStartupAsync();
+        }
+
+        private async Task CheckForUpdatesOnStartupAsync()
+        {
+            try
+            {
+                var prefs = _preferencesService.GetPreferences();
+                if (!prefs.CheckForUpdatesOnStartup) return;
+
+                var result = await UpdateCheckService.CheckForUpdateAsync();
+                if (result?.IsUpdateAvailable == true)
+                {
+                    _notificationService?.ShowNotification(
+                        "Update Available",
+                        $"Performance Monitor {result.LatestVersion} is available (you have {result.CurrentVersion}). Check About for details.",
+                        NotificationType.Info);
+                }
+            }
+            catch
+            {
+                // Never crash on update check failure
+            }
         }
 
         private void StartMcpServerIfEnabled()

@@ -213,26 +213,26 @@ namespace PerformanceMonitorDashboard.Controls
 
                 var totalScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(totalXs, totalYs);
                 totalScatter.LineWidth = 2;
-                totalScatter.MarkerSize = 0;
-                totalScatter.Color = ScottPlot.Colors.Gray;
+                totalScatter.MarkerSize = 5;
+                totalScatter.Color = TabHelpers.ChartColors[9];
                 totalScatter.LegendText = "Total Memory";
 
                 var bufferScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(bufferXs, bufferYs);
                 bufferScatter.LineWidth = 2;
-                bufferScatter.MarkerSize = 0;
-                bufferScatter.Color = ScottPlot.Colors.Blue;
+                bufferScatter.MarkerSize = 5;
+                bufferScatter.Color = TabHelpers.ChartColors[0];
                 bufferScatter.LegendText = "Buffer Pool";
 
                 var cacheScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(cacheXs, cacheYs);
                 cacheScatter.LineWidth = 2;
-                cacheScatter.MarkerSize = 0;
-                cacheScatter.Color = ScottPlot.Colors.Green;
+                cacheScatter.MarkerSize = 5;
+                cacheScatter.Color = TabHelpers.ChartColors[1];
                 cacheScatter.LegendText = "Plan Cache";
 
                 var availScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(availXs, availYs);
                 availScatter.LineWidth = 2;
-                availScatter.MarkerSize = 0;
-                availScatter.Color = ScottPlot.Colors.Orange;
+                availScatter.MarkerSize = 5;
+                availScatter.Color = TabHelpers.ChartColors[2];
                 availScatter.LegendText = "Available Physical";
 
                 _legendPanels[MemoryStatsOverviewChart] = MemoryStatsOverviewChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -282,7 +282,7 @@ namespace PerformanceMonitorDashboard.Controls
 
                     if (item.BufferPoolPressureWarning && item.PlanCachePressureWarning)
                     {
-                        vline.Color = ScottPlot.Colors.Red.WithAlpha(0.5);
+                        vline.Color = TabHelpers.ChartColors[3].WithAlpha(0.5);
                         // Add legend entry for BP pressure (covers "both" case too)
                         if (!bpLegendAdded)
                         {
@@ -292,7 +292,7 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                     else if (item.BufferPoolPressureWarning)
                     {
-                        vline.Color = ScottPlot.Colors.Red.WithAlpha(0.3);
+                        vline.Color = TabHelpers.ChartColors[3].WithAlpha(0.3);
                         if (!bpLegendAdded)
                         {
                             vline.LegendText = "BP Pressure";
@@ -301,7 +301,7 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                     else
                     {
-                        vline.Color = ScottPlot.Colors.Orange.WithAlpha(0.3);
+                        vline.Color = TabHelpers.ChartColors[2].WithAlpha(0.3);
                         if (!pcLegendAdded)
                         {
                             vline.LegendText = "PC Pressure";
@@ -419,14 +419,14 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 var grantedScatter = MemoryGrantsChart.Plot.Add.Scatter(grantedXs, grantedYs);
                 grantedScatter.LineWidth = 2;
-                grantedScatter.MarkerSize = 0;
-                grantedScatter.Color = ScottPlot.Colors.Blue;
+                grantedScatter.MarkerSize = 5;
+                grantedScatter.Color = TabHelpers.ChartColors[0];
                 grantedScatter.LegendText = "Granted MB";
 
                 var targetScatter = MemoryGrantsChart.Plot.Add.Scatter(targetXs, targetYs);
                 targetScatter.LineWidth = 2;
-                targetScatter.MarkerSize = 0;
-                targetScatter.Color = ScottPlot.Colors.Orange;
+                targetScatter.MarkerSize = 5;
+                targetScatter.Color = TabHelpers.ChartColors[2];
                 targetScatter.LegendText = "Target MB";
 
                 _legendPanels[MemoryGrantsChart] = MemoryGrantsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -502,7 +502,7 @@ namespace PerformanceMonitorDashboard.Controls
                     .Select(x => x.ClerkType)
                     .ToList();
 
-                var colors = new[] { ScottPlot.Colors.Blue, ScottPlot.Colors.Green, ScottPlot.Colors.Orange, ScottPlot.Colors.Red, ScottPlot.Colors.Purple };
+                var colors = TabHelpers.ChartColors;
                 int colorIndex = 0;
 
                 foreach (var clerkType in topClerks)
@@ -519,7 +519,7 @@ namespace PerformanceMonitorDashboard.Controls
 
                         var scatter = MemoryClerksChart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
-                        scatter.MarkerSize = 0;
+                        scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
                         scatter.LegendText = clerkType.Length > 20 ? clerkType.Substring(0, 20) + "..." : clerkType;
                         colorIndex++;
@@ -647,8 +647,8 @@ namespace PerformanceMonitorDashboard.Controls
 
                     var singleScatter = PlanCacheChart.Plot.Add.Scatter(singleXs, singleYs);
                     singleScatter.LineWidth = 2;
-                    singleScatter.MarkerSize = 0;
-                    singleScatter.Color = ScottPlot.Colors.Red;
+                    singleScatter.MarkerSize = 5;
+                    singleScatter.Color = TabHelpers.ChartColors[3];
                     singleScatter.LegendText = "Single-Use";
 
                     // Multi-Use series with gap filling
@@ -658,8 +658,8 @@ namespace PerformanceMonitorDashboard.Controls
 
                     var multiScatter = PlanCacheChart.Plot.Add.Scatter(multiXs, multiYs);
                     multiScatter.LineWidth = 2;
-                    multiScatter.MarkerSize = 0;
-                    multiScatter.Color = ScottPlot.Colors.Green;
+                    multiScatter.MarkerSize = 5;
+                    multiScatter.Color = TabHelpers.ChartColors[1];
                     multiScatter.LegendText = "Multi-Use";
 
                     _legendPanels[PlanCacheChart] = PlanCacheChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -786,7 +786,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var highScatter = MemoryPressureEventsChart.Plot.Add.Scatter(xs, ys);
                     highScatter.LineWidth = 2;
                     highScatter.MarkerSize = 5;
-                    highScatter.Color = ScottPlot.Colors.Red;
+                    highScatter.Color = TabHelpers.ChartColors[3];
                     highScatter.LegendText = "High Pressure Events";
 
                     _legendPanels[MemoryPressureEventsChart] = MemoryPressureEventsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);

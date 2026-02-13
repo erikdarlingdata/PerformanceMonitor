@@ -243,9 +243,9 @@ namespace PerformanceMonitorDashboard.Controls
                 QueryStoreNoDataMessage.Visibility = queryStore.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
                 // Populate charts from time-series data
-                LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", ScottPlot.Colors.Blue);
-                LoadDurationChart(QueryPerfTrendsProcChart, await procDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", ScottPlot.Colors.Green);
-                LoadDurationChart(QueryPerfTrendsQsChart, await qsDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", ScottPlot.Colors.Purple);
+                LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0]);
+                LoadDurationChart(QueryPerfTrendsProcChart, await procDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[1]);
+                LoadDurationChart(QueryPerfTrendsQsChart, await qsDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[4]);
                 LoadExecChart(await execTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
             }
             catch (Exception ex)
@@ -915,18 +915,13 @@ namespace PerformanceMonitorDashboard.Controls
                     dataList.Select(d => d.CollectionTime),
                     dataList.Select(d => d.AvgDurationMs));
 
-                if (xs.Length > 0)
-                {
-                    var scatter = chart.Plot.Add.Scatter(xs, ys);
-                    scatter.LineWidth = 2;
-                    scatter.MarkerSize = 5;
-                    scatter.Color = color;
-                    scatter.LegendText = legendText;
+                var scatter = chart.Plot.Add.Scatter(xs, ys);
+                scatter.LineWidth = 2;
+                scatter.MarkerSize = 5;
+                scatter.Color = color;
+                scatter.LegendText = legendText;
 
-                    _legendPanels[chart] = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                    chart.Plot.Legend.FontSize = 12;
-                }
-                else
+                if (xs.Length == 0)
                 {
                     double xCenter = xMin + (xMax - xMin) / 2;
                     var noDataText = chart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
@@ -934,6 +929,9 @@ namespace PerformanceMonitorDashboard.Controls
                     noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                     noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
                 }
+
+                _legendPanels[chart] = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+                chart.Plot.Legend.FontSize = 12;
 
                 chart.Plot.Axes.DateTimeTicksBottom();
                 chart.Plot.Axes.SetLimitsX(xMin, xMax);
@@ -971,18 +969,13 @@ namespace PerformanceMonitorDashboard.Controls
                 dataList.Select(d => d.CollectionTime),
                 dataList.Select(d => (double)d.ExecutionsPerSecond));
 
-            if (xs.Length > 0)
-            {
-                var scatter = QueryPerfTrendsExecChart.Plot.Add.Scatter(xs, ys);
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 5;
-                scatter.Color = ScottPlot.Colors.Blue;
-                scatter.LegendText = "Executions/sec";
+            var scatter = QueryPerfTrendsExecChart.Plot.Add.Scatter(xs, ys);
+            scatter.LineWidth = 2;
+            scatter.MarkerSize = 5;
+            scatter.Color = TabHelpers.ChartColors[0];
+            scatter.LegendText = "Executions/sec";
 
-                _legendPanels[QueryPerfTrendsExecChart] = QueryPerfTrendsExecChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                QueryPerfTrendsExecChart.Plot.Legend.FontSize = 12;
-            }
-            else
+            if (xs.Length == 0)
             {
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = QueryPerfTrendsExecChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
@@ -990,6 +983,9 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
+
+            _legendPanels[QueryPerfTrendsExecChart] = QueryPerfTrendsExecChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+            QueryPerfTrendsExecChart.Plot.Legend.FontSize = 12;
 
             QueryPerfTrendsExecChart.Plot.Axes.DateTimeTicksBottom();
             QueryPerfTrendsExecChart.Plot.Axes.SetLimitsX(xMin, xMax);

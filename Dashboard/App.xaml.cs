@@ -65,6 +65,7 @@ namespace PerformanceMonitorDashboard
             base.OnExit(e);
         }
 
+
         private void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
         {
             var exception = e.ExceptionObject as Exception;

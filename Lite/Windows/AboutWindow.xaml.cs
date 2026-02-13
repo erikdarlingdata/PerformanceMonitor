@@ -9,6 +9,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Windows;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -18,6 +19,8 @@ public partial class AboutWindow : Window
     private const string IssuesUrl = "https://github.com/erikdarlingdata/PerformanceMonitor/issues";
     private const string ReleasesUrl = "https://github.com/erikdarlingdata/PerformanceMonitor/releases";
     private const string DarlingDataUrl = "https://www.erikdarling.com";
+
+    private string? _updateReleaseUrl;
 
     public AboutWindow()
     {
@@ -37,9 +40,37 @@ public partial class AboutWindow : Window
         OpenUrl(IssuesUrl);
     }
 
-    private void CheckUpdatesLink_Click(object sender, RoutedEventArgs e)
+    private async void CheckUpdatesLink_Click(object sender, RoutedEventArgs e)
     {
-        OpenUrl(ReleasesUrl);
+        UpdateStatusText.Text = "Checking for updates...";
+        UpdateStatusText.Visibility = Visibility.Visible;
+
+        var result = await UpdateCheckService.CheckForUpdateAsync(bypassCache: true);
+
+        if (result == null)
+        {
+            UpdateStatusText.Text = "Unable to check for updates. Please try again later.";
+        }
+        else if (result.IsUpdateAvailable)
+        {
+            _updateReleaseUrl = result.ReleaseUrl;
+            UpdateStatusText.Text = $"Update available: {result.LatestVersion} (you have {result.CurrentVersion})";
+            UpdateStatusText.Cursor = System.Windows.Input.Cursors.Hand;
+            UpdateStatusText.MouseLeftButtonUp += UpdateStatusText_Click;
+            UpdateStatusText.TextDecorations = System.Windows.TextDecorations.Underline;
+            UpdateStatusText.Foreground = FindResource("AccentBrush") as System.Windows.Media.Brush
+                ?? System.Windows.Media.Brushes.DodgerBlue;
+        }
+        else
+        {
+            UpdateStatusText.Text = $"You're up to date ({result.CurrentVersion})";
+        }
+    }
+
+    private void UpdateStatusText_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!string.IsNullOrEmpty(_updateReleaseUrl))
+            OpenUrl(_updateReleaseUrl);
     }
 
     private void DarlingDataLink_Click(object sender, RoutedEventArgs e)

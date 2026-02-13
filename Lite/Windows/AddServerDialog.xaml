@@ -43,7 +43,10 @@
             <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
                          IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
             <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
-                         Checked="AuthMode_Changed"/>
+                         Checked="AuthMode_Changed" Margin="0,0,0,4"/>
+            <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
+                         Checked="AuthMode_Changed"
+                         ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
         </StackPanel>
 
         <!-- SQL Auth Credentials -->
@@ -54,6 +57,13 @@
             <PasswordBox x:Name="PasswordBox" Background="{DynamicResource BackgroundLightBrush}"
                          Foreground="{DynamicResource ForegroundBrush}" BorderBrush="{DynamicResource BorderBrush}"
                          Padding="6,4"/>
+        </StackPanel>
+
+        <!-- Entra MFA Credentials -->
+        <StackPanel Grid.Row="6" x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,12">
+            <TextBlock Text="Username (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox x:Name="EntraMfaUsernameBox" Margin="0,0,0,8"
+                     ToolTip="Optional: Pre-populate the authentication dialog with this email"/>
         </StackPanel>
 
         <!-- Connection Options -->

@@ -417,8 +417,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.BadPagesDetected ?? 0)));
                 var scatter = BadPagesChart.Plot.Add.Scatter(xs, ys);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Red;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[3];
             }
             else
             {
@@ -445,8 +445,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.IntervalDumpRequests ?? 0)));
                 var scatter = DumpRequestsChart.Plot.Add.Scatter(xs, ys);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Orange;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[2];
             }
             else
             {
@@ -473,8 +473,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.IsAccessViolationOccurred ?? 0)));
                 var scatter = AccessViolationsChart.Plot.Add.Scatter(xs, ys);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Purple;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[4];
             }
             else
             {
@@ -501,8 +501,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.WriteAccessViolationCount ?? 0)));
                 var scatter = WriteAccessViolationsChart.Plot.Add.Scatter(xs, ys);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Blue;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[0];
             }
             else
             {
@@ -541,8 +541,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.NonYieldingTasksReported ?? 0)));
                 var scatter = NonYieldingTasksChart.Plot.Add.Scatter(xs, ys);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Red;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[3];
             }
             else
             {
@@ -569,8 +569,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.LatchWarnings ?? 0)));
                 var scatter = LatchWarningsChart.Plot.Add.Scatter(xs, ys);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Orange;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[2];
             }
             else
             {
@@ -605,7 +605,7 @@ namespace PerformanceMonitorDashboard.Controls
                     .Take(5) // Limit to top 5 types to avoid chart clutter
                     .ToList();
 
-                var colors = new[] { ScottPlot.Colors.Purple, ScottPlot.Colors.Blue, ScottPlot.Colors.Green, ScottPlot.Colors.Cyan, ScottPlot.Colors.Magenta };
+                var colors = TabHelpers.ChartColors;
                 int colorIndex = 0;
 
                 foreach (var spinlockType in spinlockTypes)
@@ -621,7 +621,7 @@ namespace PerformanceMonitorDashboard.Controls
                             typeData.Select(d => (double)(d.SpinlockBackoffs ?? 1))); // Use backoffs count or 1 if null
                         var scatter = SickSpinlocksChart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
-                        scatter.MarkerSize = 4;
+                        scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
                         scatter.LegendText = spinlockType ?? "Unknown";
                         colorIndex++;
@@ -665,8 +665,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.SystemCpuUtilization ?? 0)));
                 var sysScatter = CpuComparisonChart.Plot.Add.Scatter(sysXs, sysYs);
                 sysScatter.LineWidth = 2;
-                sysScatter.MarkerSize = 4;
-                sysScatter.Color = ScottPlot.Colors.Blue;
+                sysScatter.MarkerSize = 5;
+                sysScatter.Color = TabHelpers.ChartColors[0];
                 sysScatter.LegendText = "System CPU %";
 
                 // SQL CPU series
@@ -675,8 +675,8 @@ namespace PerformanceMonitorDashboard.Controls
                     orderedData.Select(d => (double)(d.SqlCpuUtilization ?? 0)));
                 var sqlScatter = CpuComparisonChart.Plot.Add.Scatter(sqlXs, sqlYs);
                 sqlScatter.LineWidth = 2;
-                sqlScatter.MarkerSize = 4;
-                sqlScatter.Color = ScottPlot.Colors.Green;
+                sqlScatter.MarkerSize = 5;
+                sqlScatter.Color = TabHelpers.ChartColors[1];
                 sqlScatter.LegendText = "SQL CPU %";
 
                 _legendPanels[CpuComparisonChart] = CpuComparisonChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -773,7 +773,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var scatter = SevereErrorsChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
                     scatter.MarkerSize = 5;
-                    scatter.Color = ScottPlot.Colors.Red;
+                    scatter.Color = TabHelpers.ChartColors[3];
                     scatter.LegendText = "Error Count";
 
                     _legendPanels[SevereErrorsChart] = SevereErrorsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -919,7 +919,7 @@ namespace PerformanceMonitorDashboard.Controls
                         var scatter = IOIssuesChart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
                         scatter.MarkerSize = 5;
-                        scatter.Color = ScottPlot.Colors.Red;
+                        scatter.Color = TabHelpers.ChartColors[3];
                         scatter.LegendText = "Latch Timeouts";
                     }
 
@@ -929,7 +929,7 @@ namespace PerformanceMonitorDashboard.Controls
                         var scatter = IOIssuesChart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
                         scatter.MarkerSize = 5;
-                        scatter.Color = ScottPlot.Colors.Orange;
+                        scatter.Color = TabHelpers.ChartColors[2];
                         scatter.LegendText = "Long IOs";
                     }
 
@@ -992,7 +992,7 @@ namespace PerformanceMonitorDashboard.Controls
                 if (filePathGroups.Count > 0)
                 {
                     hasData = true;
-                    var colors = new[] { ScottPlot.Colors.Blue, ScottPlot.Colors.Green, ScottPlot.Colors.Purple, ScottPlot.Colors.Cyan, ScottPlot.Colors.Magenta };
+                    var colors = TabHelpers.ChartColors;
                     int colorIndex = 0;
 
                     foreach (var group in filePathGroups)
@@ -1121,7 +1121,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var scatter = SchedulerIssuesChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
                     scatter.MarkerSize = 5;
-                    scatter.Color = ScottPlot.Colors.Orange;
+                    scatter.Color = TabHelpers.ChartColors[2];
                     scatter.LegendText = "Total Non-Yield Time";
 
                     _legendPanels[SchedulerIssuesChart] = SchedulerIssuesChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -1268,7 +1268,7 @@ namespace PerformanceMonitorDashboard.Controls
                         var scatter = MemoryConditionsChart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
                         scatter.MarkerSize = 5;
-                        scatter.Color = ScottPlot.Colors.Red;
+                        scatter.Color = TabHelpers.ChartColors[3];
                         scatter.LegendText = "OOM Exceptions";
                         hasData = true;
 
@@ -1366,7 +1366,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var scatter = CPUTasksChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
                     scatter.MarkerSize = 5;
-                    scatter.Color = ScottPlot.Colors.Blue;
+                    scatter.Color = TabHelpers.ChartColors[0];
                     scatter.LegendText = "Workers Created";
 
                     // Max Workers threshold line (horizontal)
@@ -1374,7 +1374,7 @@ namespace PerformanceMonitorDashboard.Controls
                     if (maxWorkersValue > 0)
                     {
                         var hLine = CPUTasksChart.Plot.Add.HorizontalLine(maxWorkersValue);
-                        hLine.Color = ScottPlot.Colors.Orange;
+                        hLine.Color = TabHelpers.ChartColors[2];
                         hLine.LineWidth = 2;
                         hLine.LinePattern = ScottPlot.LinePattern.Dashed;
                         hLine.LegendText = $"Max Workers ({maxWorkersValue})";
@@ -1394,7 +1394,7 @@ namespace PerformanceMonitorDashboard.Controls
                         var dlYs = unresolvableDLByHour.Select(b => 0.0).ToArray();
                         var dlScatter = CPUTasksChart.Plot.Add.Scatter(dlXs, dlYs);
                         dlScatter.LineWidth = 0;
-                        dlScatter.Color = ScottPlot.Colors.Red;
+                        dlScatter.Color = TabHelpers.ChartColors[3];
                         dlScatter.LegendText = "Unresolvable DL";
                         dlScatter.MarkerSize = 10;
                         dlScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
@@ -1413,7 +1413,7 @@ namespace PerformanceMonitorDashboard.Controls
                         var schedYs = schedDLByHour.Select(b => 0.0).ToArray();
                         var schedScatter = CPUTasksChart.Plot.Add.Scatter(schedXs, schedYs);
                         schedScatter.LineWidth = 0;
-                        schedScatter.Color = ScottPlot.Colors.Orange;
+                        schedScatter.Color = TabHelpers.ChartColors[2];
                         schedScatter.LegendText = "Sched Deadlock";
                         schedScatter.MarkerSize = 10;
                         schedScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
@@ -1433,7 +1433,7 @@ namespace PerformanceMonitorDashboard.Controls
                         var blockingYs = blockingByHour.Select(b => 0.0).ToArray(); // At bottom
                         var blockingScatter = CPUTasksChart.Plot.Add.Scatter(blockingXs, blockingYs);
                         blockingScatter.LineWidth = 0; // No connecting line
-                        blockingScatter.Color = ScottPlot.Colors.Yellow;
+                        blockingScatter.Color = TabHelpers.ChartColors[6];
                         blockingScatter.LegendText = "Blocking";
                         // Size points based on count - min 8, max 20, scaled by count
                         var maxCount = blockingByHour.Max(b => b.Count);
@@ -1566,7 +1566,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             if (dataList.Count > 0)
             {
-                var colors = new[] { ScottPlot.Colors.Blue, ScottPlot.Colors.Green, ScottPlot.Colors.Orange, ScottPlot.Colors.Red, ScottPlot.Colors.Purple, ScottPlot.Colors.Cyan, ScottPlot.Colors.Magenta, ScottPlot.Colors.DarkGreen };
+                var colors = TabHelpers.ChartColors;
 
                 /* Chart 1: Currently Allocated by Broker */
                 var brokerGroups = dataList
@@ -1587,7 +1587,7 @@ namespace PerformanceMonitorDashboard.Controls
 
                         var scatter = MemoryBrokerChart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
-                        scatter.MarkerSize = 0;
+                        scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
                         scatter.LegendText = brokerGroup.Key.Length > 25 ? brokerGroup.Key.Substring(0, 25) + "..." : brokerGroup.Key;
                         colorIndex++;
@@ -1613,8 +1613,8 @@ namespace PerformanceMonitorDashboard.Controls
 
                     var scatter = MemoryBrokerRatioChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 0;
-                    scatter.Color = ScottPlot.Colors.Blue;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = TabHelpers.ChartColors[0];
                     scatter.LegendText = "Memory Ratio";
                 }
 
@@ -1627,8 +1627,8 @@ namespace PerformanceMonitorDashboard.Controls
 
                     var scatter = MemoryBrokerRatioChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 0;
-                    scatter.Color = ScottPlot.Colors.Orange;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = TabHelpers.ChartColors[2];
                     scatter.LegendText = "Overall";
                 }
 
@@ -1795,7 +1795,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var scatter = MemoryNodeOOMChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
                     scatter.MarkerSize = 5;
-                    scatter.Color = ScottPlot.Colors.Red;
+                    scatter.Color = TabHelpers.ChartColors[3];
                     scatter.LegendText = "OOM Event Count";
 
                     _legendPanels[MemoryNodeOOMChart] = MemoryNodeOOMChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -1847,8 +1847,8 @@ namespace PerformanceMonitorDashboard.Controls
                     hasData = true;
                     var scatter = MemoryNodeOOMUtilChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 4;
-                    scatter.Color = ScottPlot.Colors.Blue;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = TabHelpers.ChartColors[0];
                 }
             }
 
@@ -1897,8 +1897,8 @@ namespace PerformanceMonitorDashboard.Controls
                     var ys = targetData.Select(d => (double)d.TargetKb!.Value / 1024.0).ToArray();
                     var scatter = MemoryNodeOOMMemoryChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 4;
-                    scatter.Color = ScottPlot.Colors.Green;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = TabHelpers.ChartColors[1];
                     scatter.LegendText = "Target";
                 }
 
@@ -1911,8 +1911,8 @@ namespace PerformanceMonitorDashboard.Controls
                     var ys = committedData.Select(d => (double)d.CommittedKb!.Value / 1024.0).ToArray();
                     var scatter = MemoryNodeOOMMemoryChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 4;
-                    scatter.Color = ScottPlot.Colors.Orange;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = TabHelpers.ChartColors[2];
                     scatter.LegendText = "Committed";
                 }
 
@@ -1925,8 +1925,8 @@ namespace PerformanceMonitorDashboard.Controls
                     var ys = totalPFData.Select(d => (double)d.TotalPageFileKb!.Value / 1024.0).ToArray();
                     var scatter = MemoryNodeOOMMemoryChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 4;
-                    scatter.Color = ScottPlot.Colors.Purple;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = TabHelpers.ChartColors[4];
                     scatter.LegendText = "Total Page File";
                 }
 
@@ -1939,8 +1939,8 @@ namespace PerformanceMonitorDashboard.Controls
                     var ys = availPFData.Select(d => (double)d.AvailablePageFileKb!.Value / 1024.0).ToArray();
                     var scatter = MemoryNodeOOMMemoryChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 4;
-                    scatter.Color = ScottPlot.Colors.Cyan;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = TabHelpers.ChartColors[5];
                     scatter.LegendText = "Avail Page File";
                 }
 
@@ -1970,9 +1970,9 @@ namespace PerformanceMonitorDashboard.Controls
         private void UpdateMemoryStateIndicators(IEnumerable<HealthParserMemoryNodeOOMItem> data)
         {
             // Indicator colors
-            var healthyBrush = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#22C55E"));
-            var warningBrush = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#F59E0B"));
-            var criticalBrush = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#EF4444"));
+            var healthyBrush = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#81C784"));
+            var warningBrush = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#FFD54F"));
+            var criticalBrush = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#E57373"));
             var unknownBrush = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#888888"));
 
             var dataList = data?.ToList() ?? new List<HealthParserMemoryNodeOOMItem>();

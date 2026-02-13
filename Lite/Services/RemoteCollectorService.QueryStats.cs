@@ -70,7 +70,7 @@ SELECT TOP (50)
                             THEN DATALENGTH(st.text)
                             ELSE qs.statement_end_offset
                         END - qs.statement_start_offset
-                    ) / 2
+                    ) / 2 + 1
                 )
         END
 FROM sys.dm_exec_query_stats AS qs
@@ -129,7 +129,7 @@ SELECT TOP (50)
                             THEN DATALENGTH(st.text)
                             ELSE qs.statement_end_offset
                         END - qs.statement_start_offset
-                    ) / 2
+                    ) / 2 + 1
                 )
         END
 FROM sys.dm_exec_query_stats AS qs

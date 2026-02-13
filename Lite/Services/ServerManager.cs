@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
@@ -104,11 +105,21 @@ public class ServerManager
             SaveServers();
         }
 
-        if (!server.UseWindowsAuth && !string.IsNullOrEmpty(username) && password != null)
+        // Save credentials based on authentication type
+        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
+            // For SQL Server auth, save both username and password
             if (!_credentialService.SaveCredential(server.Id, username, password))
             {
                 throw new InvalidOperationException("Failed to save credentials to Windows Credential Manager");
+            }
+        }
+        else if (server.AuthenticationType == AuthenticationTypes.EntraMFA && !string.IsNullOrEmpty(username))
+        {
+            // For MFA auth, save username (password can be empty)
+            if (!_credentialService.SaveCredential(server.Id, username, string.Empty))
+            {
+                throw new InvalidOperationException("Failed to save username to Windows Credential Manager");
             }
         }
 
@@ -136,15 +147,26 @@ public class ServerManager
             SaveServers();
         }
 
-        if (!server.UseWindowsAuth && !string.IsNullOrEmpty(username) && password != null)
+        // Update credentials based on authentication type
+        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
+            // For SQL Server auth, update both username and password
             if (!_credentialService.UpdateCredential(server.Id, username, password))
             {
                 throw new InvalidOperationException("Failed to update credentials in Windows Credential Manager");
             }
         }
-        else if (server.UseWindowsAuth)
+        else if (server.AuthenticationType == AuthenticationTypes.EntraMFA && !string.IsNullOrEmpty(username))
         {
+            // For MFA auth, update username (password can be empty)
+            if (!_credentialService.UpdateCredential(server.Id, username, string.Empty))
+            {
+                throw new InvalidOperationException("Failed to update username in Windows Credential Manager");
+            }
+        }
+        else if (server.AuthenticationType == AuthenticationTypes.Windows)
+        {
+            // For Windows auth, remove any stored credentials
             _credentialService.DeleteCredential(server.Id);
         }
 
@@ -226,7 +248,9 @@ public class ServerManager
     /// <summary>
     /// Checks the connection status of a server.
     /// </summary>
-    public async Task<ServerConnectionStatus> CheckConnectionAsync(string serverId)
+    /// <param name="serverId">The server ID to check.</param>
+    /// <param name="allowInteractiveAuth">Whether to allow interactive authentication (e.g., MFA). Set to false for background checks.</param>
+    public async Task<ServerConnectionStatus> CheckConnectionAsync(string serverId, bool allowInteractiveAuth = false)
     {
         var server = GetServerById(serverId);
         if (server == null)
@@ -243,6 +267,48 @@ public class ServerManager
 
         // Get previous status to detect status changes
         var previousStatus = GetConnectionStatus(serverId);
+
+        // Skip interactive authentication methods during background checks
+        if (!allowInteractiveAuth && server.AuthenticationType == AuthenticationTypes.EntraMFA)
+        {
+            // Determine appropriate message based on whether user cancelled
+            var errorMsg = previousStatus.UserCancelledMfa 
+                ? "Authentication cancelled by user" 
+                : "Skipped - requires interactive authentication";
+            
+            return new ServerConnectionStatus
+            {
+                ServerId = serverId,
+                IsOnline = previousStatus.UserCancelledMfa ? false : previousStatus.IsOnline,
+                LastChecked = DateTime.Now,
+                StatusChangedAt = previousStatus.StatusChangedAt,
+                ErrorMessage = errorMsg,
+                PreviousIsOnline = previousStatus.IsOnline,
+                UserCancelledMfa = previousStatus.UserCancelledMfa
+            };
+        }
+
+        // Clear cancellation flag when user explicitly tries to connect (allowInteractiveAuth = true)
+        // This gives them a fresh attempt at authentication
+        if (allowInteractiveAuth && previousStatus.UserCancelledMfa)
+        {
+            _logger?.LogDebug("Clearing MFA cancellation flag for server '{DisplayName}' - user is retrying", server.DisplayName);
+        }
+
+        // CRITICAL: Prevent connection checks while Add/Edit dialog is open
+        // This prevents MFA popups when user is just configuring the server
+        if (Windows.AddServerDialog.IsDialogOpen && server.AuthenticationType == AuthenticationTypes.EntraMFA)
+        {
+            return new ServerConnectionStatus
+            {
+                ServerId = serverId,
+                IsOnline = previousStatus.IsOnline,
+                LastChecked = DateTime.Now,
+                StatusChangedAt = previousStatus.StatusChangedAt,
+                ErrorMessage = "Skipped - dialog open",
+                PreviousIsOnline = previousStatus.IsOnline
+            };
+        }
 
         var status = new ServerConnectionStatus
         {
@@ -281,6 +347,7 @@ public class ServerManager
             {
                 status.IsOnline = true;
                 status.ErrorMessage = null;
+                status.UserCancelledMfa = false; // Clear cancellation flag on successful connection
 
                 if (!reader.IsDBNull(0))
                 {
@@ -314,13 +381,35 @@ public class ServerManager
         {
             status.IsOnline = false;
             status.ErrorMessage = ex.Message;
-            _logger?.LogWarning("Connectivity check failed for server '{DisplayName}': {Message}", server.DisplayName, ex.Message);
+            
+            // Detect MFA cancellation (error code 0 with specific message patterns)
+            if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+            {
+                status.UserCancelledMfa = true;
+                status.ErrorMessage = "Authentication cancelled by user";
+                _logger?.LogInformation("MFA authentication cancelled by user for server '{DisplayName}'", server.DisplayName);
+            }
+            else
+            {
+                _logger?.LogWarning("Connectivity check failed for server '{DisplayName}': {Message}", server.DisplayName, ex.Message);
+            }
         }
         catch (Exception ex)
         {
             status.IsOnline = false;
             status.ErrorMessage = ex.Message;
-            _logger?.LogWarning(ex, "Connectivity check error for server '{DisplayName}'", server.DisplayName);
+            
+            // Detect MFA cancellation from generic exceptions
+            if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+            {
+                status.UserCancelledMfa = true;
+                status.ErrorMessage = "Authentication cancelled by user";
+                _logger?.LogInformation("MFA authentication cancelled by user for server '{DisplayName}'", server.DisplayName);
+            }
+            else
+            {
+                _logger?.LogWarning(ex, "Connectivity check error for server '{DisplayName}'", server.DisplayName);
+            }
         }
 
         // Track when status changed (online to offline or vice versa)
@@ -343,11 +432,13 @@ public class ServerManager
 
     /// <summary>
     /// Checks the connection status of all servers.
+    /// Background operation - will skip servers requiring interactive authentication (e.g., MFA).
     /// </summary>
     public async Task CheckAllConnectionsAsync()
     {
         var servers = GetAllServers();
-        var tasks = servers.Select(s => CheckConnectionAsync(s.Id));
+        // Explicitly pass allowInteractiveAuth: false to prevent MFA popups during background checks
+        var tasks = servers.Select(s => CheckConnectionAsync(s.Id, allowInteractiveAuth: false));
         await Task.WhenAll(tasks);
     }
 
@@ -373,6 +464,10 @@ public class ServerManager
             try { File.Copy(_configFilePath, _configFilePath + ".bak", overwrite: true); }
             catch { /* best effort */ }
 
+            // MIGRATION: Backward compatibility for existing servers.json files
+            // Migration from old UseWindowsAuth property happens automatically during deserialization
+            MigrateServerAuthentication(_servers);
+
             // Initialize status tracking for all loaded servers
             foreach (var server in _servers)
             {
@@ -394,6 +489,10 @@ public class ServerManager
                     string bakJson = File.ReadAllText(bakPath);
                     var bakConfig = JsonSerializer.Deserialize<ServersConfig>(bakJson);
                     _servers = bakConfig?.Servers ?? new List<ServerConnection>();
+                    
+                    // MIGRATION: Backward compatibility
+                    MigrateServerAuthentication(_servers);
+                    
                     foreach (var server in _servers)
                     {
                         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
@@ -427,6 +526,22 @@ public class ServerManager
                 _logger?.LogError(ex, "Failed to save servers.json");
                 throw;
             }
+        }
+    }
+
+    /// <summary>
+    /// Migrates server authentication configuration for backward compatibility.
+    /// Note: Migration from old UseWindowsAuth property happens automatically via
+    /// the UseWindowsAuth setter during JSON deserialization.
+    /// </summary>
+    private void MigrateServerAuthentication(List<ServerConnection> servers)
+    {
+        // Migration is now automatic via UseWindowsAuth property setter
+        // Just log the loaded servers for debugging
+        foreach (var server in servers)
+        {
+            _logger?.LogDebug("Server '{DisplayName}' loaded with AuthenticationType={AuthType}", 
+                server.DisplayName, server.AuthenticationType);
         }
     }
 

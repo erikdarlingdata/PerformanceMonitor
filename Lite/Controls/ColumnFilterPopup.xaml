@@ -1,0 +1,54 @@
+<UserControl x:Class="PerformanceMonitorLite.Controls.ColumnFilterPopup"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Width="220"
+             FontFamily="Segoe UI">
+    <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" TextElement.FontFamily="Segoe UI">
+        <StackPanel Margin="12">
+            <!-- Header with column name -->
+            <TextBlock x:Name="HeaderText"
+                       Text="Filter Column"
+                       FontWeight="SemiBold"
+                       FontSize="13"
+                       Foreground="{DynamicResource ForegroundBrush}"
+                       Margin="0,0,0,12"/>
+
+            <!-- Operator dropdown -->
+            <TextBlock Text="Operator:"
+                       Foreground="{DynamicResource ForegroundDimBrush}"
+                       FontSize="11"
+                       Margin="0,0,0,4"/>
+            <ComboBox x:Name="OperatorComboBox"
+                      Height="28"
+                      Margin="0,0,0,12"
+                      SelectionChanged="OperatorComboBox_SelectionChanged"/>
+
+            <!-- Value input -->
+            <TextBlock x:Name="ValueLabel"
+                       Text="Value:"
+                       Foreground="{DynamicResource ForegroundDimBrush}"
+                       FontSize="11"
+                       Margin="0,0,0,4"/>
+            <TextBox x:Name="ValueTextBox"
+                     Height="28"
+                     Margin="0,0,0,16"
+                     Padding="6,0"
+                     VerticalContentAlignment="Center"
+                     KeyDown="ValueTextBox_KeyDown"/>
+
+            <!-- Buttons -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Clear"
+                        Width="65"
+                        Height="28"
+                        Margin="0,0,8,0"
+                        Click="ClearButton_Click"/>
+                <Button Content="Apply"
+                        Width="65"
+                        Height="28"
+                        Click="ApplyButton_Click"
+                        IsDefault="True"/>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</UserControl>

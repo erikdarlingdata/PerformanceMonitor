@@ -295,6 +295,7 @@ BEGIN
             DEFAULT SYSDATETIME(),
         event_time datetime2(7) NULL,
         deadlock_xml xml NOT NULL,
+        is_processed bit NOT NULL DEFAULT 0,
         CONSTRAINT
             PK_deadlock_xml
         PRIMARY KEY CLUSTERED
@@ -307,7 +308,7 @@ BEGIN
 END;
 
 /*
-8b. Blocked Process XML Storage  
+8b. Blocked Process XML Storage
 Raw blocked process XML for later analysis with sp_HumanEventsBlockViewer
 */
 IF OBJECT_ID(N'collect.blocked_process_xml', N'U') IS NULL
@@ -316,15 +317,16 @@ BEGIN
         collect.blocked_process_xml
     (
         id bigint IDENTITY NOT NULL,
-        collection_time datetime2(7) NOT NULL 
+        collection_time datetime2(7) NOT NULL
             DEFAULT SYSDATETIME(),
         event_time datetime2(7) NULL,
-        blocked_process_xml xml NOT NULL,     
-        CONSTRAINT 
-            PK_blocked_process_xml 
-        PRIMARY KEY CLUSTERED 
-            (collection_time, id) 
-        WITH 
+        blocked_process_xml xml NOT NULL,
+        is_processed bit NOT NULL DEFAULT 0,
+        CONSTRAINT
+            PK_blocked_process_xml
+        PRIMARY KEY CLUSTERED
+            (collection_time, id)
+        WITH
             (DATA_COMPRESSION = PAGE)
     );
     

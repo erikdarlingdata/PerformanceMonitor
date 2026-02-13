@@ -143,6 +143,7 @@ FROM query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   query_text NOT LIKE 'WAITFOR%'
 ORDER BY collection_time DESC, cpu_time_ms DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

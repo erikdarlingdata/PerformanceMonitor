@@ -138,13 +138,13 @@ namespace PerformanceMonitorDashboard.Helpers
             switch (expressionLower)
             {
                 case "today":
-                    return DateTime.Today;
+                    return ServerTimeHelper.ServerNow.Date;
                 case "yesterday":
-                    return DateTime.Today.AddDays(-1);
+                    return ServerTimeHelper.ServerNow.Date.AddDays(-1);
                 case "tomorrow":
-                    return DateTime.Today.AddDays(1);
+                    return ServerTimeHelper.ServerNow.Date.AddDays(1);
                 case "now":
-                    return DateTime.Now;
+                    return ServerTimeHelper.ServerNow;
             }
 
             // "last N hours/days/weeks" expressions
@@ -155,13 +155,13 @@ namespace PerformanceMonitorDashboard.Helpers
                 string unit = lastMatch.Groups[2].Value;
 
                 if (unit.StartsWith("hour", StringComparison.Ordinal))
-                    return DateTime.Now.AddHours(-count);
+                    return ServerTimeHelper.ServerNow.AddHours(-count);
                 else if (unit.StartsWith("day", StringComparison.Ordinal))
-                    return DateTime.Now.AddDays(-count);
+                    return ServerTimeHelper.ServerNow.AddDays(-count);
                 else if (unit.StartsWith("week", StringComparison.Ordinal))
-                    return DateTime.Now.AddDays(-count * 7);
+                    return ServerTimeHelper.ServerNow.AddDays(-count * 7);
                 else if (unit.StartsWith("month", StringComparison.Ordinal))
-                    return DateTime.Now.AddMonths(-count);
+                    return ServerTimeHelper.ServerNow.AddMonths(-count);
             }
 
             // Try to parse as absolute date (use original case for proper parsing)

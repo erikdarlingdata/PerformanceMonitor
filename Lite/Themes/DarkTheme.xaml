@@ -11,26 +11,26 @@
     <Color x:Key="AccentHoverColor">#5bc4f5</Color>
     <Color x:Key="AccentPressedColor">#1a9ae0</Color>
 
-    <!-- Background Colors -->
-    <Color x:Key="BackgroundDarkColor">#252525</Color>
-    <Color x:Key="AlternatingRowColor">#2d2d2d</Color>
-    <Color x:Key="BackgroundColor">#333333</Color>
-    <Color x:Key="BackgroundLightColor">#404040</Color>
-    <Color x:Key="BackgroundLighterColor">#4a4a4a</Color>
+    <!-- Background Colors (Grafana-inspired blue-gray tints) -->
+    <Color x:Key="BackgroundDarkColor">#111217</Color>
+    <Color x:Key="AlternatingRowColor">#1c1f25</Color>
+    <Color x:Key="BackgroundColor">#181b1f</Color>
+    <Color x:Key="BackgroundLightColor">#22252b</Color>
+    <Color x:Key="BackgroundLighterColor">#2a2d35</Color>
 
-    <!-- Text Colors -->
-    <Color x:Key="ForegroundColor">#FFFFFF</Color>
-    <Color x:Key="ForegroundDimColor">#D0D0D0</Color>
-    <Color x:Key="ForegroundMutedColor">#B0B0B0</Color>
+    <!-- Text Colors (off-white to reduce eye strain) -->
+    <Color x:Key="ForegroundColor">#E4E6EB</Color>
+    <Color x:Key="ForegroundDimColor">#9DA5B4</Color>
+    <Color x:Key="ForegroundMutedColor">#6B7280</Color>
 
-    <!-- Border Colors -->
-    <Color x:Key="BorderColor">#555555</Color>
-    <Color x:Key="BorderLightColor">#666666</Color>
+    <!-- Border Colors (subtle, low-contrast) -->
+    <Color x:Key="BorderColor">#2a2d35</Color>
+    <Color x:Key="BorderLightColor">#33363e</Color>
 
-    <!-- Status Colors -->
-    <Color x:Key="SuccessColor">#4CAF50</Color>
-    <Color x:Key="WarningColor">#FFC107</Color>
-    <Color x:Key="ErrorColor">#F44336</Color>
+    <!-- Status Colors (Material Design 300 — softer against dark backgrounds) -->
+    <Color x:Key="SuccessColor">#81C784</Color>
+    <Color x:Key="WarningColor">#FFD54F</Color>
+    <Color x:Key="ErrorColor">#E57373</Color>
     <Color x:Key="InfoColor">#2eaef1</Color>
 
     <!-- Brushes -->
@@ -83,7 +83,7 @@
     <!-- ============================================ -->
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
-        <Setter Property="Foreground" Value="#FFFFFF"/>
+        <Setter Property="Foreground" Value="#E4E6EB"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,6"/>
@@ -176,8 +176,8 @@
 
     <!-- ToggleButton Style (respects Background in all states) -->
     <Style TargetType="ToggleButton">
-        <Setter Property="Background" Value="#555555"/>
-        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="Background" Value="#2a2d35"/>
+        <Setter Property="Foreground" Value="#E4E6EB"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,5"/>
         <Setter Property="Template">
@@ -252,7 +252,7 @@
     <!-- Success Button Style (for Refresh) -->
     <Style x:Key="SuccessButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
         <Setter Property="Background" Value="{StaticResource SuccessBrush}"/>
-        <Setter Property="Foreground" Value="#FFFFFF"/>
+        <Setter Property="Foreground" Value="#E4E6EB"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -288,11 +288,11 @@
     <!-- Named style for filter TextBoxes in DataGrid column headers -->
     <Style x:Key="FilterTextBoxStyle" TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="Foreground" Value="#FFFFFF"/>
+        <Setter Property="Foreground" Value="#E4E6EB"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="4,2"/>
-        <Setter Property="CaretBrush" Value="#FFFFFF"/>
+        <Setter Property="CaretBrush" Value="#E4E6EB"/>
         <Setter Property="SelectionBrush" Value="{StaticResource AccentBrush}"/>
     </Style>
 
@@ -514,7 +514,7 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="border" Property="Background" Value="{StaticResource AccentBrush}"/>
-                            <Setter Property="Foreground" Value="#FFFFFF"/>
+                            <Setter Property="Foreground" Value="#E4E6EB"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
@@ -540,6 +540,8 @@
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="ClipToBounds" Value="True"/>
+        <Setter Property="Padding" Value="0"/>
         <Setter Property="RowBackground" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="AlternatingRowBackground" Value="{StaticResource AlternatingRowBrush}"/>
         <Setter Property="GridLinesVisibility" Value="Horizontal"/>
@@ -571,7 +573,7 @@
 
     <Style TargetType="DataGridCell">
         <Setter Property="BorderThickness" Value="0"/>
-        <Setter Property="Padding" Value="6,4"/>
+        <Setter Property="Padding" Value="8,6"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="DataGridCell">
@@ -587,7 +589,7 @@
         <Style.Triggers>
             <Trigger Property="IsSelected" Value="True">
                 <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
-                <Setter Property="Foreground" Value="#FFFFFF"/>
+                <Setter Property="Foreground" Value="#E4E6EB"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -999,9 +1001,22 @@
     <Style TargetType="ContextMenu">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BorderLightBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="2"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContextMenu">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            Padding="{TemplateBinding Padding}"
+                            CornerRadius="4">
+                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style TargetType="MenuItem">
@@ -1017,8 +1032,8 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="17"/>
                             </Grid.ColumnDefinitions>
-                            <!-- Icon column with dark background -->
-                            <Border x:Name="IconColumn" Grid.Column="0" Background="{StaticResource BackgroundDarkBrush}"/>
+                            <!-- Icon column -->
+                            <Border x:Name="IconColumn" Grid.Column="0" Background="Transparent"/>
                             <ContentPresenter x:Name="Icon" Grid.Column="0" Margin="4,0,6,0" VerticalAlignment="Center" ContentSource="Icon"/>
                             <ContentPresenter Grid.Column="1" Margin="8,4" VerticalAlignment="Center" ContentSource="Header" RecognizesAccessKey="True"/>
                         </Grid>
@@ -1048,12 +1063,13 @@
     <!-- ============================================ -->
     <!-- ToolTip Style                                -->
     <!-- ============================================ -->
-    <Style TargetType="ToolTip">
-        <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+    <Style x:Key="DarkToolTip" TargetType="ToolTip">
+        <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BorderLightBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="Padding" Value="8,6"/>
+        <Setter Property="Padding" Value="10,8"/>
     </Style>
+
 
 </ResourceDictionary>

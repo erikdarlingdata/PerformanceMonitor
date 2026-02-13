@@ -29,23 +29,118 @@ namespace PerformanceMonitorDashboard.Helpers
     public static class TabHelpers
     {
         /// <summary>
+        /// Material Design 300-level color palette for chart data series.
+        /// Soft pastels optimized for dark backgrounds, ordered to map 1:1
+        /// with common ScottPlot stock colors (Blue→[0], Green→[1], etc.).
+        /// </summary>
+        public static readonly ScottPlot.Color[] ChartColors = new[]
+        {
+            ScottPlot.Color.FromHex("#4FC3F7"), // [0]  Light Blue 300
+            ScottPlot.Color.FromHex("#81C784"), // [1]  Green 300
+            ScottPlot.Color.FromHex("#FFB74D"), // [2]  Orange 300
+            ScottPlot.Color.FromHex("#E57373"), // [3]  Red 300
+            ScottPlot.Color.FromHex("#BA68C8"), // [4]  Purple 300
+            ScottPlot.Color.FromHex("#4DD0E1"), // [5]  Cyan 300
+            ScottPlot.Color.FromHex("#FFF176"), // [6]  Yellow 300
+            ScottPlot.Color.FromHex("#F06292"), // [7]  Pink 300
+            ScottPlot.Color.FromHex("#AED581"), // [8]  Light Green 300
+            ScottPlot.Color.FromHex("#90A4AE"), // [9]  Blue Grey 300
+            ScottPlot.Color.FromHex("#A1887F"), // [10] Brown 300
+            ScottPlot.Color.FromHex("#7986CB"), // [11] Indigo 300
+            ScottPlot.Color.FromHex("#FF7043"), // [12] Deep Orange 300
+            ScottPlot.Color.FromHex("#80DEEA"), // [13] Cyan 200
+            ScottPlot.Color.FromHex("#FFE082"), // [14] Amber 200
+            ScottPlot.Color.FromHex("#CE93D8"), // [15] Purple 200
+            ScottPlot.Color.FromHex("#EF9A9A"), // [16] Red 200
+            ScottPlot.Color.FromHex("#C5E1A5"), // [17] Light Green 200
+            ScottPlot.Color.FromHex("#FFCC80"), // [18] Orange 200
+            ScottPlot.Color.FromHex("#B0BEC5"), // [19] Blue Grey 200
+        };
+
+        /// <summary>
+        /// Poison waits — always selected by default. These indicate critical resource exhaustion.
+        /// </summary>
+        public static readonly string[] PoisonWaits = new[]
+        {
+            "THREADPOOL",
+            "RESOURCE_SEMAPHORE",
+            "RESOURCE_SEMAPHORE_QUERY_COMPILE"
+        };
+
+        /// <summary>
+        /// Usual suspect waits — always selected by default. Common performance-relevant wait types.
+        /// </summary>
+        public static readonly string[] UsualSuspectWaits = new[]
+        {
+            "SOS_SCHEDULER_YIELD",
+            "CXPACKET",
+            "CXCONSUMER",
+            "PAGEIOLATCH_SH",
+            "PAGEIOLATCH_EX",
+            "WRITELOG"
+        };
+
+        /// <summary>
+        /// Prefix patterns for usual suspect waits (e.g. PAGELATCH_EX, PAGELATCH_SH, etc.)
+        /// </summary>
+        public static readonly string[] UsualSuspectPrefixes = new[] { "PAGELATCH_" };
+
+        /// <summary>
+        /// Returns the set of wait types that should be selected by default:
+        /// poison waits + usual suspects + top 10 by total wait time (deduped), capped at 20.
+        /// The availableWaitTypes list must be sorted by total wait time descending.
+        /// </summary>
+        public static HashSet<string> GetDefaultWaitTypes(IList<string> availableWaitTypes)
+        {
+            var defaults = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // 1. Poison waits that exist in data
+            foreach (var w in PoisonWaits)
+                if (availableWaitTypes.Contains(w)) defaults.Add(w);
+
+            // 2. Usual suspects — exact matches
+            foreach (var w in UsualSuspectWaits)
+                if (availableWaitTypes.Contains(w)) defaults.Add(w);
+
+            // 3. Usual suspects — prefix matches
+            foreach (var prefix in UsualSuspectPrefixes)
+                foreach (var w in availableWaitTypes)
+                    if (w.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                        defaults.Add(w);
+
+            // 4. Top 10 by total wait time (items not already in the set), hard cap at 20 total
+            int added = 0;
+            foreach (var w in availableWaitTypes)
+            {
+                if (defaults.Count >= 20) break;
+                if (added >= 10) break;
+                if (defaults.Add(w))
+                {
+                    added++;
+                }
+            }
+
+            return defaults;
+        }
+
+        /// <summary>
         /// Applies the Darling Data dark theme to a ScottPlot chart.
         /// </summary>
         public static void ApplyDarkModeToChart(WpfPlot chart)
         {
-            // Dark theme colors matching Darling Data brand
-            var darkBackground = ScottPlot.Color.FromHex("#333333");
-            var darkerBackground = ScottPlot.Color.FromHex("#252525");
-            var textColor = ScottPlot.Color.FromHex("#E0E0E0");
-            var gridColor = ScottPlot.Color.FromHex("#444444");
+            // Grafana-inspired dark theme colors
+            var darkBackground = ScottPlot.Color.FromHex("#22252b");
+            var darkerBackground = ScottPlot.Color.FromHex("#111217");
+            var textColor = ScottPlot.Color.FromHex("#9DA5B4");
+            var gridColor = ScottPlot.Colors.White.WithAlpha(20);
 
             chart.Plot.FigureBackground.Color = darkBackground;
             chart.Plot.DataBackground.Color = darkerBackground;
             chart.Plot.Axes.Color(textColor);
             chart.Plot.Grid.MajorLineColor = gridColor;
             chart.Plot.Legend.BackgroundColor = darkBackground;
-            chart.Plot.Legend.FontColor = textColor;
-            chart.Plot.Legend.OutlineColor = gridColor;
+            chart.Plot.Legend.FontColor = ScottPlot.Color.FromHex("#E4E6EB");
+            chart.Plot.Legend.OutlineColor = ScottPlot.Color.FromHex("#2a2d35");
             chart.Plot.Legend.Alignment = ScottPlot.Alignment.LowerCenter;
             chart.Plot.Legend.Orientation = ScottPlot.Orientation.Horizontal;
             chart.Plot.Axes.Margins(bottom: 0); // No bottom margin - SetChartYLimitsWithLegendPadding handles Y-axis
@@ -63,7 +158,7 @@ namespace PerformanceMonitorDashboard.Helpers
         /// </summary>
         public static void ReapplyAxisColors(WpfPlot chart)
         {
-            var textColor = ScottPlot.Color.FromHex("#E0E0E0");
+            var textColor = ScottPlot.Color.FromHex("#9DA5B4");
             chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
@@ -124,15 +219,15 @@ namespace PerformanceMonitorDashboard.Helpers
         /// </summary>
         public static void ApplyDarkThemeToCalendar(System.Windows.Controls.Calendar calendar)
         {
-            var darkBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#252525"));
-            var lightBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#404040"));
-            var whiteFg = new SolidColorBrush(Colors.White);
-            var mutedFg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#858585"));
+            var darkBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#111217"));
+            var lightBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b"));
+            var whiteFg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB"));
+            var mutedFg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#6B7280"));
             var accentBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2eaef1"));
 
             calendar.Background = darkBg;
             calendar.Foreground = whiteFg;
-            calendar.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#555555"));
+            calendar.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35"));
 
             // Apply to all child controls recursively
             ApplyDarkThemeRecursively(calendar, darkBg, lightBg, whiteFg, mutedFg);

@@ -9,6 +9,7 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
 
@@ -24,6 +25,7 @@ public class SystemTrayService : IDisposable
     private readonly CollectionBackgroundService? _backgroundService;
     private bool _disposed;
     private MenuItem? _pauseResumeItem;
+    private TextBlock? _tooltipText;
 
     public SystemTrayService(Window mainWindow, CollectionBackgroundService? backgroundService = null)
     {
@@ -38,9 +40,23 @@ public class SystemTrayService : IDisposable
     {
         _trayIcon?.Dispose();
 
-        _trayIcon = new TaskbarIcon
+        _trayIcon = new TaskbarIcon();
+
+        /* Custom dark tooltip (native ToolTipText uses Windows light theme) */
+        _tooltipText = new TextBlock
         {
-            ToolTipText = "Performance Monitor Lite"
+            Text = "Performance Monitor Lite",
+            Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+            FontSize = 12
+        };
+        _trayIcon.TrayToolTip = new Border
+        {
+            Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b")),
+            BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#33363e")),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(10, 8, 10, 8),
+            CornerRadius = new CornerRadius(4),
+            Child = _tooltipText
         };
 
         /* Load dark theme for context menu styling */
@@ -64,19 +80,19 @@ public class SystemTrayService : IDisposable
         var contextMenu = new ContextMenu();
         contextMenu.Resources.MergedDictionaries.Add(darkTheme);
 
-        var showItem = new MenuItem { Header = "Show Window" };
+        var showItem = new MenuItem { Header = "Show Window", Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent } };
         showItem.Click += (s, e) => ShowMainWindow();
         contextMenu.Items.Add(showItem);
 
         contextMenu.Items.Add(new Separator());
 
-        _pauseResumeItem = new MenuItem { Header = "Pause Collection" };
+        _pauseResumeItem = new MenuItem { Header = "Pause Collection", Icon = new TextBlock { Text = "⏸", Background = Brushes.Transparent } };
         _pauseResumeItem.Click += (s, e) => ToggleCollection();
         contextMenu.Items.Add(_pauseResumeItem);
 
         contextMenu.Items.Add(new Separator());
 
-        var exitItem = new MenuItem { Header = "Exit" };
+        var exitItem = new MenuItem { Header = "Exit", Icon = new TextBlock { Text = "✕", Background = Brushes.Transparent } };
         exitItem.Click += (s, e) => ExitApplication();
         contextMenu.Items.Add(exitItem);
 
@@ -114,11 +130,12 @@ public class SystemTrayService : IDisposable
         if (_pauseResumeItem != null)
         {
             _pauseResumeItem.Header = _backgroundService.IsPaused ? "Resume Collection" : "Pause Collection";
+            _pauseResumeItem.Icon = new TextBlock { Text = _backgroundService.IsPaused ? "▶" : "⏸", Background = Brushes.Transparent };
         }
 
-        if (_trayIcon != null)
+        if (_tooltipText != null)
         {
-            _trayIcon.ToolTipText = _backgroundService.IsPaused
+            _tooltipText.Text = _backgroundService.IsPaused
                 ? "Performance Monitor Lite (Paused)"
                 : "Performance Monitor Lite";
         }

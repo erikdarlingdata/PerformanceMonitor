@@ -79,7 +79,7 @@ namespace PerformanceMonitorDashboard.Models
                 if (!_status.LastChecked.HasValue)
                     return "#888888"; // Gray for not checked
 
-                return _status.IsOnline == true ? "#22C55E" : "#EF4444"; // Green or Red
+                return _status.IsOnline == true ? "#81C784" : "#E57373"; // Green or Red
             }
         }
 

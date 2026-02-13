@@ -246,7 +246,7 @@ namespace PerformanceMonitorDashboard
             {
                 AutoRefreshToggle.IsChecked = false;
                 AutoRefreshToggle.Content = "Auto-Refresh: Off";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#555555")); // Gray when inactive
+                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35")); // Gray when inactive
             }
         }
 
@@ -358,7 +358,7 @@ namespace PerformanceMonitorDashboard
                 _autoRefreshTimer?.Stop();
                 _autoRefreshTimer = null;
                 AutoRefreshToggle.Content = "Auto-Refresh: Off";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#555555")); // Gray when inactive
+                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35")); // Gray when inactive
             }
         }
 
@@ -1650,8 +1650,8 @@ namespace PerformanceMonitorDashboard
             {
                 var scatter = BlockingStatsBlockingEventsChart.Plot.Add.Scatter(blockingXs, blockingYs);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Blue;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[0];
             }
             else
             {
@@ -1678,8 +1678,8 @@ namespace PerformanceMonitorDashboard
             {
                 var scatter = BlockingStatsDurationChart.Plot.Add.Scatter(durationXs, durationYs);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Orange;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[2];
             }
             else
             {
@@ -1706,8 +1706,8 @@ namespace PerformanceMonitorDashboard
             {
                 var scatter = BlockingStatsDeadlocksChart.Plot.Add.Scatter(deadlockXs, deadlockYs);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Red;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[3];
             }
             else
             {
@@ -1734,8 +1734,8 @@ namespace PerformanceMonitorDashboard
             {
                 var scatter = BlockingStatsDeadlockWaitTimeChart.Plot.Add.Scatter(deadlockWaitXs, deadlockWaitYs);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-                scatter.Color = ScottPlot.Colors.Purple;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[4];
             }
             else
             {
@@ -1772,9 +1772,7 @@ namespace PerformanceMonitorDashboard
             // Get all unique time points across all wait types for gap filling
             // Group by wait type and plot each as a separate series
             var waitTypes = data.Select(d => d.WaitType).Distinct().OrderBy(w => w).ToList();
-            var colors = new[] { ScottPlot.Colors.Blue, ScottPlot.Colors.Green, ScottPlot.Colors.Orange,
-                                 ScottPlot.Colors.Red, ScottPlot.Colors.Purple, ScottPlot.Colors.Cyan,
-                                 ScottPlot.Colors.Magenta, ScottPlot.Colors.Yellow };
+            var colors = TabHelpers.ChartColors;
 
             int colorIndex = 0;
             foreach (var waitType in waitTypes)
@@ -1789,7 +1787,7 @@ namespace PerformanceMonitorDashboard
 
                     var scatter = LockWaitStatsChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 0;
+                    scatter.MarkerSize = 5;
                     scatter.Color = colors[colorIndex % colors.Length];
                     scatter.LegendText = waitType.Replace("LCK_M_", "").Replace("LCK_", "");
                     colorIndex++;
@@ -2216,8 +2214,8 @@ namespace PerformanceMonitorDashboard
             {
                 var scatter = ResourceOverviewCpuChart.Plot.Add.Scatter(xs, ys);
                 scatter.LineWidth = 2;
-                scatter.MarkerSize = 0;
-                scatter.Color = ScottPlot.Colors.Blue;
+                scatter.MarkerSize = 5;
+                scatter.Color = TabHelpers.ChartColors[0];
                 scatter.LegendText = "SQL CPU %";
 
                 _legendPanels[ResourceOverviewCpuChart] = ResourceOverviewCpuChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2271,14 +2269,14 @@ namespace PerformanceMonitorDashboard
             {
                 var bufferScatter = ResourceOverviewMemoryChart.Plot.Add.Scatter(bufferXs, bufferYs);
                 bufferScatter.LineWidth = 2;
-                bufferScatter.MarkerSize = 0;
-                bufferScatter.Color = ScottPlot.Colors.Purple;
+                bufferScatter.MarkerSize = 5;
+                bufferScatter.Color = TabHelpers.ChartColors[4];
                 bufferScatter.LegendText = "Buffer Pool";
 
                 var grantsScatter = ResourceOverviewMemoryChart.Plot.Add.Scatter(grantsXs, grantsYs);
                 grantsScatter.LineWidth = 2;
-                grantsScatter.MarkerSize = 0;
-                grantsScatter.Color = ScottPlot.Colors.Orange;
+                grantsScatter.MarkerSize = 5;
+                grantsScatter.Color = TabHelpers.ChartColors[2];
                 grantsScatter.LegendText = "Memory Grants";
 
                 _legendPanels[ResourceOverviewMemoryChart] = ResourceOverviewMemoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2347,14 +2345,14 @@ namespace PerformanceMonitorDashboard
             {
                 var readScatter = ResourceOverviewIoChart.Plot.Add.Scatter(readXs, readYs);
                 readScatter.LineWidth = 2;
-                readScatter.MarkerSize = 0;
-                readScatter.Color = ScottPlot.Colors.Green;
+                readScatter.MarkerSize = 5;
+                readScatter.Color = TabHelpers.ChartColors[1];
                 readScatter.LegendText = "Read ms";
 
                 var writeScatter = ResourceOverviewIoChart.Plot.Add.Scatter(writeXs, writeYs);
                 writeScatter.LineWidth = 2;
-                writeScatter.MarkerSize = 0;
-                writeScatter.Color = ScottPlot.Colors.Orange;
+                writeScatter.MarkerSize = 5;
+                writeScatter.Color = TabHelpers.ChartColors[2];
                 writeScatter.LegendText = "Write ms";
 
                 _legendPanels[ResourceOverviewIoChart] = ResourceOverviewIoChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2407,7 +2405,7 @@ namespace PerformanceMonitorDashboard
                     .Select(x => x.WaitType)
                     .ToList();
 
-                var colors = new[] { ScottPlot.Colors.Red, ScottPlot.Colors.Blue, ScottPlot.Colors.Green, ScottPlot.Colors.Orange, ScottPlot.Colors.Purple };
+                var colors = TabHelpers.ChartColors;
                 int colorIndex = 0;
 
                 foreach (var waitType in topWaitTypes)
@@ -2422,7 +2420,7 @@ namespace PerformanceMonitorDashboard
 
                     var scatter = ResourceOverviewWaitChart.Plot.Add.Scatter(xs, ys);
                     scatter.LineWidth = 2;
-                    scatter.MarkerSize = 0;
+                    scatter.MarkerSize = 5;
                     scatter.Color = colors[colorIndex % colors.Length];
                     scatter.LegendText = waitType.Length > 15 ? waitType.Substring(0, 15) + "..." : waitType;
                     colorIndex++;

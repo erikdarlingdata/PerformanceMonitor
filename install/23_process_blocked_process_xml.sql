@@ -48,11 +48,14 @@ BEGIN
 
     DECLARE
         @rows_available integer = 0,
+        @rows_deleted bigint = 0,
+        @rows_marked bigint = 0,
         @start_time datetime2(7) = SYSDATETIME(),
         @error_message nvarchar(4000),
         @error_number integer,
         @blockviewer_database sysname = NULL,
-        @sql nvarchar(max) = N'';
+        @sql nvarchar(max) = N'',
+        @debug_msg nvarchar(500) = N'';
 
     BEGIN TRY
         BEGIN TRANSACTION;
@@ -100,11 +103,14 @@ BEGIN
 
         /*
         Count unprocessed events
+        When no date range specified, only count unprocessed rows
+        When date range IS specified (manual re-processing), count all rows in range
         */
         SELECT
             @rows_available = COUNT_BIG(*)
         FROM collect.blocked_process_xml AS bx
-        WHERE (@start_date IS NULL OR bx.collection_time >= @start_date)
+        WHERE (@start_date IS NOT NULL OR bx.is_processed = 0)
+        AND   (@start_date IS NULL OR bx.collection_time >= @start_date)
         AND   (@end_date IS NULL OR bx.collection_time <= @end_date)
         OPTION(RECOMPILE);
 
@@ -116,18 +122,36 @@ BEGIN
         IF @rows_available > 0
         BEGIN
             /*
+            Derive date range from unprocessed rows when not explicitly provided
+            This ensures we only parse new data and pass proper bounds to sp_HumanEventsBlockViewer
+            */
+            IF @start_date IS NULL AND @end_date IS NULL
+            BEGIN
+                SELECT
+                    @start_date = MIN(bx.event_time),
+                    @end_date = MAX(bx.event_time)
+                FROM collect.blocked_process_xml AS bx
+                WHERE bx.is_processed = 0
+                AND   bx.event_time IS NOT NULL
+                OPTION(RECOMPILE);
+
+                IF @debug = 1
+                BEGIN
+                    SET @debug_msg = N'Derived date range from unprocessed rows: ' + ISNULL(CONVERT(nvarchar(30), @start_date, 121), N'NULL') + N' to ' + ISNULL(CONVERT(nvarchar(30), @end_date, 121), N'NULL');
+                    RAISERROR(@debug_msg, 0, 1) WITH NOWAIT;
+                END;
+            END;
+
+            /*
             Delete existing parsed blocking events for the time range to prevent duplicates
             sp_HumanEventsBlockViewer will re-insert fresh parsed data
             */
-            DECLARE
-                @rows_deleted bigint = 0;
-
-            IF @start_date IS NOT NULL OR @end_date IS NOT NULL
+            IF @start_date IS NOT NULL AND @end_date IS NOT NULL
             BEGIN
                 DELETE b
                 FROM collect.blocking_BlockedProcessReport AS b
-                WHERE (@start_date IS NULL OR b.event_time >= @start_date)
-                AND   (@end_date IS NULL OR b.event_time <= @end_date);
+                WHERE b.event_time >= @start_date
+                AND   b.event_time <= @end_date;
 
                 SELECT
                     @rows_deleted = ROWCOUNT_BIG();
@@ -135,16 +159,6 @@ BEGIN
                 IF @debug = 1
                 BEGIN
                     RAISERROR(N'Deleted %I64d existing parsed blocking events for time range', 0, 1, @rows_deleted) WITH NOWAIT;
-                END;
-            END;
-            ELSE
-            BEGIN
-                /*No date range specified - delete all and re-parse*/
-                TRUNCATE TABLE collect.blocking_BlockedProcessReport;
-
-                IF @debug = 1
-                BEGIN
-                    RAISERROR(N'Truncated collect.blocking_BlockedProcessReport table (no date range specified)', 0, 1) WITH NOWAIT;
                 END;
             END;
 
@@ -180,6 +194,25 @@ BEGIN
                 @start_date = @start_date,
                 @end_date = @end_date,
                 @debug = @debug;
+
+            /*
+            Mark raw XML rows as processed
+            Only mark the rows in the date range we just processed
+            */
+            UPDATE bx
+            SET    bx.is_processed = 1
+            FROM collect.blocked_process_xml AS bx
+            WHERE bx.is_processed = 0
+            AND   (@start_date IS NULL OR bx.event_time >= @start_date)
+            AND   (@end_date IS NULL OR bx.event_time <= @end_date);
+
+            SELECT
+                @rows_marked = ROWCOUNT_BIG();
+
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Marked %I64d raw XML rows as processed', 0, 1, @rows_marked) WITH NOWAIT;
+            END;
         END;
 
         /*

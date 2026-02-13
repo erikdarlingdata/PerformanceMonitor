@@ -89,6 +89,12 @@ public class ServerConnectionStatus
     public int? UtcOffsetMinutes { get; set; }
 
     /// <summary>
+    /// Indicates whether the user has cancelled MFA authentication for this server.
+    /// When true, MFA popups will not be shown until the user explicitly tries to connect again.
+    /// </summary>
+    public bool UserCancelledMfa { get; set; }
+
+    /// <summary>
     /// Gets the status display text for the UI.
     /// </summary>
     public string StatusText

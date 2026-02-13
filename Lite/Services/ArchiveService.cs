@@ -41,6 +41,7 @@ public class ArchiveService
         ("tempdb_stats", "collection_time"),
         ("perfmon_stats", "collection_time"),
         ("deadlocks", "collection_time"),
+        ("blocked_process_reports", "collection_time"),
         ("collection_log", "collection_time")
     ];
 

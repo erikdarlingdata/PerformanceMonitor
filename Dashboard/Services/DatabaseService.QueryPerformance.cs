@@ -568,6 +568,7 @@ namespace PerformanceMonitorDashboard.Services
                             FROM report.query_snapshots AS qs
                             WHERE qs.collection_time >= @from_date
                             AND   qs.collection_time <= @to_date
+                            AND   CONVERT(nvarchar(max), qs.sql_text) NOT LIKE N'WAITFOR%'
                             ORDER BY
                                 qs.collection_time DESC,
                                 qs.session_id;";
@@ -609,11 +610,12 @@ namespace PerformanceMonitorDashboard.Services
                                 /* query_plan fetched on-demand via GetQuerySnapshotPlanAsync */
                             FROM report.query_snapshots AS qs
                             WHERE qs.collection_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())
+                            AND   CONVERT(nvarchar(max), qs.sql_text) NOT LIKE N'WAITFOR%'
                             ORDER BY
                                 qs.collection_time DESC,
                                 qs.session_id;";
                     }
-        
+
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
                     command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
@@ -748,6 +750,7 @@ namespace PerformanceMonitorDashboard.Services
                 OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
                 OR (qs.first_execution_time <= @fromDate AND qs.last_execution_time >= @toDate)))
         )
+        AND qs.query_text NOT LIKE N'WAITFOR%'
         ORDER BY
             qs.avg_worker_time_ms DESC;";
 
@@ -989,6 +992,7 @@ namespace PerformanceMonitorDashboard.Services
                 OR (qss.last_execution_time >= @fromDate AND qss.last_execution_time <= @toDate)
                 OR (qss.first_execution_time <= @fromDate AND qss.last_execution_time >= @toDate)))
         )
+        AND qss.query_sql_text NOT LIKE N'WAITFOR%'
         ORDER BY
             qss.avg_cpu_time_ms DESC
         OPTION
@@ -1204,8 +1208,8 @@ namespace PerformanceMonitorDashboard.Services
                     }
                     else
                     {
-                        startDate = DateTime.Now.AddHours(-hoursBack);
-                        endDate = DateTime.Now;
+                        startDate = Helpers.ServerTimeHelper.ServerNow.AddHours(-hoursBack);
+                        endDate = Helpers.ServerTimeHelper.ServerNow;
                     }
 
                     command.Parameters.Add(new SqlParameter("@start_date", SqlDbType.DateTime2) { Value = startDate });

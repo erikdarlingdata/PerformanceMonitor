@@ -16,6 +16,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Database;
@@ -30,11 +31,33 @@ public partial class ServerTab : UserControl
     private readonly ServerConnection _server;
     private readonly LocalDataService _dataService;
     private readonly int _serverId;
+    public int ServerId => _serverId;
     private readonly CredentialService _credentialService;
     private readonly DispatcherTimer _refreshTimer;
     private readonly Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.Panels.LegendPanel?> _legendPanels = new();
     private List<SelectableItem> _waitTypeItems = new();
     private List<SelectableItem> _perfmonCounterItems = new();
+    private Helpers.ChartHoverHelper? _waitStatsHover;
+    private Helpers.ChartHoverHelper? _perfmonHover;
+    private Helpers.ChartHoverHelper? _tempDbFileIoHover;
+    private Helpers.ChartHoverHelper? _fileIoReadHover;
+    private Helpers.ChartHoverHelper? _fileIoWriteHover;
+
+    /* Column filtering */
+    private Popup? _filterPopup;
+    private ColumnFilterPopup? _filterPopupContent;
+    private readonly Dictionary<DataGrid, IDataGridFilterManager> _filterManagers = new();
+    private DataGridFilterManager<QuerySnapshotRow>? _querySnapshotsFilterMgr;
+    private DataGridFilterManager<QueryStatsRow>? _queryStatsFilterMgr;
+    private DataGridFilterManager<ProcedureStatsRow>? _procStatsFilterMgr;
+    private DataGridFilterManager<QueryStoreRow>? _queryStoreFilterMgr;
+    private DataGridFilterManager<BlockedProcessReportRow>? _blockedProcessFilterMgr;
+    private DataGridFilterManager<DeadlockProcessDetail>? _deadlockFilterMgr;
+    private DataGridFilterManager<RunningJobRow>? _runningJobsFilterMgr;
+    private DataGridFilterManager<ServerConfigRow>? _serverConfigFilterMgr;
+    private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
+    private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
+    private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
 
     private static readonly HashSet<string> _defaultPerfmonCounters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -47,9 +70,10 @@ public partial class ServerTab : UserControl
 
     private static readonly string[] SeriesColors = new[]
     {
-        "#2eaef1", "#F44336", "#4CAF50", "#FFC107", "#9C27B0",
-        "#FF9800", "#00BCD4", "#E91E63", "#8BC34A", "#3F51B5",
-        "#CDDC39", "#795548"
+        "#4FC3F7", "#E57373", "#81C784", "#FFD54F", "#BA68C8",
+        "#FFB74D", "#4DD0E1", "#F06292", "#AED581", "#7986CB",
+        "#FFF176", "#A1887F", "#FF7043", "#80DEEA", "#FFE082",
+        "#CE93D8", "#EF9A9A", "#C5E1A5", "#FFCC80", "#B0BEC5"
     };
 
     public int UtcOffsetMinutes { get; }
@@ -96,6 +120,16 @@ public partial class ServerTab : UserControl
 
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();
+
+        /* Initialize column filter managers */
+        InitializeFilterManagers();
+
+        /* Chart hover tooltips */
+        _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
+        _perfmonHover = new Helpers.ChartHoverHelper(PerfmonChart, "");
+        _tempDbFileIoHover = new Helpers.ChartHoverHelper(TempDbFileIoChart, "ms");
+        _fileIoReadHover = new Helpers.ChartHoverHelper(FileIoReadChart, "ms");
+        _fileIoWriteHover = new Helpers.ChartHoverHelper(FileIoWriteChart, "ms");
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -295,13 +329,13 @@ public partial class ServerTab : UserControl
 
     private void ApplyDarkThemeToCalendar(System.Windows.Controls.Calendar calendar)
     {
-        var darkBg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#252525")!);
-        var whiteFg = new SolidColorBrush(System.Windows.Media.Colors.White);
-        var mutedFg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#858585")!);
+        var darkBg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#111217")!);
+        var whiteFg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E4E6EB")!);
+        var mutedFg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#6B7280")!);
 
         calendar.Background = darkBg;
         calendar.Foreground = whiteFg;
-        calendar.BorderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#555555")!);
+        calendar.BorderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#2a2d35")!);
 
         ApplyDarkThemeRecursively(calendar, darkBg, whiteFg, mutedFg);
     }
@@ -442,18 +476,18 @@ public partial class ServerTab : UserControl
             AppLogger.DataDiag("ServerTab", $"  TempDb: {tempDbTask.Result.Count}, BlockedProcessReports: {blockedProcessTask.Result.Count}, Deadlocks: {deadlockTask.Result.Count}");
             AppLogger.DataDiag("ServerTab", $"  WaitTypes: {waitTypesTask.Result.Count}, PerfmonCounters: {perfmonCountersTask.Result.Count}, QueryStore: {queryStoreTask.Result.Count}");
 
-            /* Update grids */
-            QuerySnapshotsGrid.ItemsSource = snapshotsTask.Result;
-            QueryStatsGrid.ItemsSource = queryStatsTask.Result;
-            ProcedureStatsGrid.ItemsSource = procStatsTask.Result;
-            BlockedProcessReportGrid.ItemsSource = blockedProcessTask.Result;
-            DeadlockGrid.ItemsSource = DeadlockProcessDetail.ParseFromRows(deadlockTask.Result);
-            QueryStoreGrid.ItemsSource = queryStoreTask.Result;
-            ServerConfigGrid.ItemsSource = serverConfigTask.Result;
-            DatabaseConfigGrid.ItemsSource = databaseConfigTask.Result;
-            DatabaseScopedConfigGrid.ItemsSource = databaseScopedConfigTask.Result;
-            TraceFlagsGrid.ItemsSource = traceFlagsTask.Result;
-            RunningJobsGrid.ItemsSource = runningJobsTask.Result;
+            /* Update grids (via filter managers to preserve active filters) */
+            _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
+            _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
+            _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
+            _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(deadlockTask.Result));
+            _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
+            _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
+            _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
+            _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+            _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
+            _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
 
             /* Update memory summary */
             UpdateMemorySummary(memoryTask.Result);
@@ -549,11 +583,11 @@ public partial class ServerTab : UserControl
 
         var sqlPlot = CpuChart.Plot.Add.Scatter(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
-        sqlPlot.Color = ScottPlot.Color.FromHex("#2eaef1");
+        sqlPlot.Color = ScottPlot.Color.FromHex("#4FC3F7");
 
         var otherPlot = CpuChart.Plot.Add.Scatter(times, otherCpu);
         otherPlot.LegendText = "Other";
-        otherPlot.Color = ScottPlot.Color.FromHex("#F44336");
+        otherPlot.Color = ScottPlot.Color.FromHex("#E57373");
 
         CpuChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(CpuChart);
@@ -578,7 +612,7 @@ public partial class ServerTab : UserControl
 
         var totalPlot = MemoryChart.Plot.Add.Scatter(times, totalMem);
         totalPlot.LegendText = "Total Server Memory";
-        totalPlot.Color = ScottPlot.Color.FromHex("#2eaef1");
+        totalPlot.Color = ScottPlot.Color.FromHex("#4FC3F7");
 
         var targetPlot = MemoryChart.Plot.Add.Scatter(times, targetMem);
         targetPlot.LegendText = "Target Memory";
@@ -587,7 +621,7 @@ public partial class ServerTab : UserControl
 
         var bpPlot = MemoryChart.Plot.Add.Scatter(times, bufferPool);
         bpPlot.LegendText = "Buffer Pool";
-        bpPlot.Color = ScottPlot.Color.FromHex("#4CAF50");
+        bpPlot.Color = ScottPlot.Color.FromHex("#81C784");
 
         /* Memory grants trend line — show zero line when no grant data */
         double[] grantTimes, grantMb;
@@ -604,7 +638,7 @@ public partial class ServerTab : UserControl
 
         var grantPlot = MemoryChart.Plot.Add.Scatter(grantTimes, grantMb);
         grantPlot.LegendText = "Memory Grants";
-        grantPlot.Color = ScottPlot.Color.FromHex("#FF9800");
+        grantPlot.Color = ScottPlot.Color.FromHex("#FFB74D");
 
         MemoryChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(MemoryChart);
@@ -631,15 +665,15 @@ public partial class ServerTab : UserControl
 
         var userPlot = TempDbChart.Plot.Add.Scatter(times, userObj);
         userPlot.LegendText = "User Objects";
-        userPlot.Color = ScottPlot.Color.FromHex("#2eaef1");
+        userPlot.Color = ScottPlot.Color.FromHex("#4FC3F7");
 
         var internalPlot = TempDbChart.Plot.Add.Scatter(times, internalObj);
         internalPlot.LegendText = "Internal Objects";
-        internalPlot.Color = ScottPlot.Color.FromHex("#FFC107");
+        internalPlot.Color = ScottPlot.Color.FromHex("#FFD54F");
 
         var vsPlot = TempDbChart.Plot.Add.Scatter(times, versionStore);
         vsPlot.LegendText = "Version Store";
-        vsPlot.Color = ScottPlot.Color.FromHex("#4CAF50");
+        vsPlot.Color = ScottPlot.Color.FromHex("#81C784");
 
         TempDbChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(TempDbChart);
@@ -655,6 +689,7 @@ public partial class ServerTab : UserControl
     private void UpdateTempDbFileIoChart(List<FileIoTrendPoint> data)
     {
         ClearChart(TempDbFileIoChart);
+        _tempDbFileIoHover?.Clear();
         ApplyDarkTheme(TempDbFileIoChart);
 
         if (data.Count == 0) { TempDbFileIoChart.Refresh(); return; }
@@ -681,6 +716,7 @@ public partial class ServerTab : UserControl
                 var plot = TempDbFileIoChart.Plot.Add.Scatter(times, latency);
                 plot.LegendText = fileGroup.Key;
                 plot.Color = color;
+                _tempDbFileIoHover?.Add(plot, fileGroup.Key);
                 maxLatency = Math.Max(maxLatency, latency.Max());
             }
         }
@@ -697,6 +733,8 @@ public partial class ServerTab : UserControl
     {
         ClearChart(FileIoReadChart);
         ClearChart(FileIoWriteChart);
+        _fileIoReadHover?.Clear();
+        _fileIoWriteHover?.Clear();
         ApplyDarkTheme(FileIoReadChart);
         ApplyDarkTheme(FileIoWriteChart);
 
@@ -726,6 +764,7 @@ public partial class ServerTab : UserControl
                 var readPlot = FileIoReadChart.Plot.Add.Scatter(times, readLatency);
                 readPlot.LegendText = dbGroup.Key;
                 readPlot.Color = color;
+                _fileIoReadHover?.Add(readPlot, dbGroup.Key);
                 readMax = Math.Max(readMax, readLatency.Max());
             }
 
@@ -734,6 +773,7 @@ public partial class ServerTab : UserControl
                 var writePlot = FileIoWriteChart.Plot.Add.Scatter(times, writeLatency);
                 writePlot.LegendText = dbGroup.Key;
                 writePlot.Color = color;
+                _fileIoWriteHover?.Add(writePlot, dbGroup.Key);
                 writeMax = Math.Max(writeMax, writeLatency.Max());
             }
         }
@@ -813,7 +853,7 @@ public partial class ServerTab : UserControl
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray());
         plot.LegendText = "Blocking Incidents";
-        plot.Color = ScottPlot.Color.FromHex("#F44336");
+        plot.Color = ScottPlot.Color.FromHex("#E57373");
         plot.MarkerSize = 0; /* No markers, just lines */
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
@@ -883,7 +923,7 @@ public partial class ServerTab : UserControl
 
         var plot = DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray());
         plot.LegendText = "Deadlocks";
-        plot.Color = ScottPlot.Color.FromHex("#FF9800");
+        plot.Color = ScottPlot.Color.FromHex("#FFB74D");
         plot.MarkerSize = 0; /* No markers, just lines */
 
         DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
@@ -909,7 +949,7 @@ public partial class ServerTab : UserControl
 
         var plot = QueryDurationTrendChart.Plot.Add.Scatter(times, values);
         plot.LegendText = "Query Duration";
-        plot.Color = ScottPlot.Color.FromHex("#2eaef1");
+        plot.Color = ScottPlot.Color.FromHex("#4FC3F7");
 
         QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(QueryDurationTrendChart);
@@ -931,7 +971,7 @@ public partial class ServerTab : UserControl
 
         var plot = ProcDurationTrendChart.Plot.Add.Scatter(times, values);
         plot.LegendText = "Procedure Duration";
-        plot.Color = ScottPlot.Color.FromHex("#4CAF50");
+        plot.Color = ScottPlot.Color.FromHex("#81C784");
 
         ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(ProcDurationTrendChart);
@@ -953,7 +993,7 @@ public partial class ServerTab : UserControl
 
         var plot = QueryStoreDurationTrendChart.Plot.Add.Scatter(times, values);
         plot.LegendText = "Query Store Duration";
-        plot.Color = ScottPlot.Color.FromHex("#FF9800");
+        plot.Color = ScottPlot.Color.FromHex("#FFB74D");
 
         QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(QueryStoreDurationTrendChart);
@@ -975,7 +1015,7 @@ public partial class ServerTab : UserControl
 
         var plot = ExecutionCountTrendChart.Plot.Add.Scatter(times, values);
         plot.LegendText = "Executions";
-        plot.Color = ScottPlot.Color.FromHex("#9C27B0");
+        plot.Color = ScottPlot.Color.FromHex("#BA68C8");
 
         ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(ExecutionCountTrendChart);
@@ -987,15 +1027,41 @@ public partial class ServerTab : UserControl
 
     /* ========== Wait Stats Picker ========== */
 
+    private static readonly string[] PoisonWaits = { "THREADPOOL", "RESOURCE_SEMAPHORE", "RESOURCE_SEMAPHORE_QUERY_COMPILE" };
+    private static readonly string[] UsualSuspectWaits = { "SOS_SCHEDULER_YIELD", "CXPACKET", "CXCONSUMER", "PAGEIOLATCH_SH", "PAGEIOLATCH_EX", "WRITELOG" };
+    private static readonly string[] UsualSuspectPrefixes = { "PAGELATCH_" };
+
+    private static HashSet<string> GetDefaultWaitTypes(List<string> availableWaitTypes)
+    {
+        var defaults = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var w in PoisonWaits)
+            if (availableWaitTypes.Contains(w)) defaults.Add(w);
+        foreach (var w in UsualSuspectWaits)
+            if (availableWaitTypes.Contains(w)) defaults.Add(w);
+        foreach (var prefix in UsualSuspectPrefixes)
+            foreach (var w in availableWaitTypes)
+                if (w.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    defaults.Add(w);
+        int added = 0;
+        foreach (var w in availableWaitTypes)
+        {
+            if (defaults.Count >= 20) break;
+            if (added >= 10) break;
+            if (defaults.Add(w)) { added++; }
+        }
+        return defaults;
+    }
+
     private bool _isUpdatingWaitTypeSelection;
 
     private void PopulateWaitTypePicker(List<string> waitTypes)
     {
         var previouslySelected = new HashSet<string>(_waitTypeItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
+        var topWaits = previouslySelected.Count == 0 ? GetDefaultWaitTypes(waitTypes) : null;
         _waitTypeItems = waitTypes.Select(w => new SelectableItem
         {
             DisplayName = w,
-            IsSelected = previouslySelected.Contains(w) || (previouslySelected.Count == 0 && waitTypes.IndexOf(w) < 10)
+            IsSelected = previouslySelected.Contains(w) || (topWaits != null && topWaits.Contains(w))
         }).ToList();
         /* Sort checked items to top, then preserve original order (by total wait time desc) */
         RefreshWaitTypeListOrder();
@@ -1006,9 +1072,20 @@ public partial class ServerTab : UserControl
         if (_waitTypeItems == null) return;
         _waitTypeItems = _waitTypeItems
             .OrderByDescending(x => x.IsSelected)
-            .ThenBy(x => _waitTypeItems.IndexOf(x))
+            .ThenBy(x => x.DisplayName)
             .ToList();
         ApplyWaitTypeFilter();
+        UpdateWaitTypeCount();
+    }
+
+    private void UpdateWaitTypeCount()
+    {
+        if (_waitTypeItems == null || WaitTypeCountText == null) return;
+        int count = _waitTypeItems.Count(x => x.IsSelected);
+        WaitTypeCountText.Text = $"{count} / 20 selected";
+        WaitTypeCountText.Foreground = count >= 20
+            ? new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E57373")!)
+            : (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
     }
 
     private void ApplyWaitTypeFilter()
@@ -1026,15 +1103,10 @@ public partial class ServerTab : UserControl
     private void WaitTypeSelectAll_Click(object sender, RoutedEventArgs e)
     {
         _isUpdatingWaitTypeSelection = true;
-        var visible = (WaitTypesList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _waitTypeItems;
-        int count = visible.Count(i => i.IsSelected);
-        foreach (var item in visible)
+        var topWaits = GetDefaultWaitTypes(_waitTypeItems.Select(x => x.DisplayName).ToList());
+        foreach (var item in _waitTypeItems)
         {
-            if (!item.IsSelected && count < 12)
-            {
-                item.IsSelected = true;
-                count++;
-            }
+            item.IsSelected = topWaits.Contains(item.DisplayName);
         }
         _isUpdatingWaitTypeSelection = false;
         RefreshWaitTypeListOrder();
@@ -1062,10 +1134,11 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var selected = _waitTypeItems.Where(i => i.IsSelected).Take(12).ToList();
+            var selected = _waitTypeItems.Where(i => i.IsSelected).Take(20).ToList();
 
             ClearChart(WaitStatsChart);
             ApplyDarkTheme(WaitStatsChart);
+            _waitStatsHover?.Clear();
 
             if (selected.Count == 0) { WaitStatsChart.Refresh(); return; }
 
@@ -1095,6 +1168,7 @@ public partial class ServerTab : UserControl
                 var plot = WaitStatsChart.Plot.Add.Scatter(times, waitTime);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                _waitStatsHover?.Add(plot, selected[i].DisplayName);
 
                 if (waitTime.Length > 0) globalMax = Math.Max(globalMax, waitTime.Max());
             }
@@ -1204,6 +1278,7 @@ public partial class ServerTab : UserControl
             var selected = _perfmonCounterItems.Where(i => i.IsSelected).Take(12).ToList();
 
             ClearChart(PerfmonChart);
+            _perfmonHover?.Clear();
             ApplyDarkTheme(PerfmonChart);
 
             if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
@@ -1234,6 +1309,7 @@ public partial class ServerTab : UserControl
                 var plot = PerfmonChart.Plot.Add.Scatter(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                _perfmonHover?.Add(plot, selected[i].DisplayName);
 
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
@@ -1330,18 +1406,18 @@ public partial class ServerTab : UserControl
     /// </summary>
     private static void ApplyDarkTheme(ScottPlot.WPF.WpfPlot chart)
     {
-        var darkBackground = ScottPlot.Color.FromHex("#333333");
-        var darkerBackground = ScottPlot.Color.FromHex("#252525");
-        var textColor = ScottPlot.Color.FromHex("#E0E0E0");
-        var gridColor = ScottPlot.Color.FromHex("#444444");
+        var darkBackground = ScottPlot.Color.FromHex("#22252b");
+        var darkerBackground = ScottPlot.Color.FromHex("#111217");
+        var textColor = ScottPlot.Color.FromHex("#9DA5B4");
+        var gridColor = ScottPlot.Colors.White.WithAlpha(20);
 
         chart.Plot.FigureBackground.Color = darkBackground;
         chart.Plot.DataBackground.Color = darkerBackground;
         chart.Plot.Axes.Color(textColor);
         chart.Plot.Grid.MajorLineColor = gridColor;
         chart.Plot.Legend.BackgroundColor = darkBackground;
-        chart.Plot.Legend.FontColor = textColor;
-        chart.Plot.Legend.OutlineColor = gridColor;
+        chart.Plot.Legend.FontColor = ScottPlot.Color.FromHex("#E4E6EB");
+        chart.Plot.Legend.OutlineColor = ScottPlot.Color.FromHex("#2a2d35");
         chart.Plot.Legend.Alignment = ScottPlot.Alignment.LowerCenter;
         chart.Plot.Legend.Orientation = ScottPlot.Orientation.Horizontal;
         chart.Plot.Axes.Margins(bottom: 0); /* No bottom margin - SetChartYLimitsWithLegendPadding handles Y-axis */
@@ -1357,7 +1433,7 @@ public partial class ServerTab : UserControl
     /// </summary>
     private static void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
-        var textColor = ScottPlot.Color.FromHex("#E0E0E0");
+        var textColor = ScottPlot.Color.FromHex("#9DA5B4");
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
@@ -1771,5 +1847,106 @@ public partial class ServerTab : UserControl
     public void StopRefresh()
     {
         _refreshTimer.Stop();
+    }
+
+    /* ========== Column Filtering ========== */
+
+    private void InitializeFilterManagers()
+    {
+        _querySnapshotsFilterMgr = new DataGridFilterManager<QuerySnapshotRow>(QuerySnapshotsGrid);
+        _queryStatsFilterMgr = new DataGridFilterManager<QueryStatsRow>(QueryStatsGrid);
+        _procStatsFilterMgr = new DataGridFilterManager<ProcedureStatsRow>(ProcedureStatsGrid);
+        _queryStoreFilterMgr = new DataGridFilterManager<QueryStoreRow>(QueryStoreGrid);
+        _blockedProcessFilterMgr = new DataGridFilterManager<BlockedProcessReportRow>(BlockedProcessReportGrid);
+        _deadlockFilterMgr = new DataGridFilterManager<DeadlockProcessDetail>(DeadlockGrid);
+        _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
+        _serverConfigFilterMgr = new DataGridFilterManager<ServerConfigRow>(ServerConfigGrid);
+        _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
+        _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
+        _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
+
+        _filterManagers[QuerySnapshotsGrid] = _querySnapshotsFilterMgr;
+        _filterManagers[QueryStatsGrid] = _queryStatsFilterMgr;
+        _filterManagers[ProcedureStatsGrid] = _procStatsFilterMgr;
+        _filterManagers[QueryStoreGrid] = _queryStoreFilterMgr;
+        _filterManagers[BlockedProcessReportGrid] = _blockedProcessFilterMgr;
+        _filterManagers[DeadlockGrid] = _deadlockFilterMgr;
+        _filterManagers[RunningJobsGrid] = _runningJobsFilterMgr;
+        _filterManagers[ServerConfigGrid] = _serverConfigFilterMgr;
+        _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
+        _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
+        _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
+    }
+
+    private void EnsureFilterPopup()
+    {
+        if (_filterPopup == null)
+        {
+            _filterPopupContent = new ColumnFilterPopup();
+            _filterPopup = new Popup
+            {
+                Child = _filterPopupContent,
+                StaysOpen = false,
+                Placement = PlacementMode.Bottom,
+                AllowsTransparency = true
+            };
+        }
+    }
+
+    private DataGrid? _currentFilterGrid;
+
+    private void FilterButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.Tag is not string columnName) return;
+
+        /* Walk up visual tree to find the parent DataGrid */
+        var dataGrid = FindParentDataGridFromElement(button);
+        if (dataGrid == null || !_filterManagers.TryGetValue(dataGrid, out var manager)) return;
+
+        _currentFilterGrid = dataGrid;
+
+        EnsureFilterPopup();
+
+        /* Rewire events to the current grid */
+        _filterPopupContent!.FilterApplied -= FilterPopup_FilterApplied;
+        _filterPopupContent.FilterCleared -= FilterPopup_FilterCleared;
+        _filterPopupContent.FilterApplied += FilterPopup_FilterApplied;
+        _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
+
+        /* Initialize with existing filter state */
+        manager.Filters.TryGetValue(columnName, out var existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter);
+
+        _filterPopup!.PlacementTarget = button;
+        _filterPopup.IsOpen = true;
+    }
+
+    private void FilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
+    {
+        if (_filterPopup != null)
+            _filterPopup.IsOpen = false;
+
+        if (_currentFilterGrid != null && _filterManagers.TryGetValue(_currentFilterGrid, out var manager))
+        {
+            manager.SetFilter(e.FilterState);
+        }
+    }
+
+    private void FilterPopup_FilterCleared(object? sender, EventArgs e)
+    {
+        if (_filterPopup != null)
+            _filterPopup.IsOpen = false;
+    }
+
+    private static DataGrid? FindParentDataGridFromElement(DependencyObject element)
+    {
+        var current = element;
+        while (current != null)
+        {
+            if (current is DataGrid dg)
+                return dg;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return null;
     }
 }

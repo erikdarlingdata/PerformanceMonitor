@@ -12,6 +12,7 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Themes/DarkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+            <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
         </ResourceDictionary>
     </Window.Resources>
     <Grid>
@@ -190,37 +191,55 @@
                                         <Border Background="{DynamicResource BackgroundLightBrush}"
                                                 BorderBrush="{Binding CardBorderBrush}"
                                                 BorderThickness="2" CornerRadius="6"
-                                                Padding="16" Margin="6"
+                                                Margin="6"
                                                 Width="260" MinHeight="160"
                                                 Cursor="Hand"
                                                 MouseLeftButtonDown="OverviewCard_MouseLeftButtonDown">
-                                            <StackPanel>
-                                                <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,12"/>
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <Grid.RowDefinitions>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                    </Grid.RowDefinitions>
-                                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="CPU:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
-                                                    <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CpuDisplay}" Foreground="{Binding CpuBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
-                                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Memory:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
-                                                    <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding MemoryDisplay}" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
-                                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Blocking:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
-                                                    <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BlockingDisplay}" Foreground="{Binding BlockingBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
-                                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Deadlocks:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
-                                                    <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding DeadlockDisplay}" Foreground="{Binding DeadlockBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
-                                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Last Collect:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
-                                                    <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LastCollectionDisplay}" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
-                                                </Grid>
-                                            </StackPanel>
+                                            <Grid>
+                                                <StackPanel Margin="16">
+                                                    <DockPanel Margin="0,0,0,4">
+                                                        <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
+                                                                   Foreground="{DynamicResource ForegroundBrush}"/>
+                                                        <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
+                                                                 HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                                    </DockPanel>
+                                                    <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
+                                                               FontSize="11" Margin="0,0,0,10"/>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="CPU:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
+                                                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CpuDisplay}" Foreground="{Binding CpuBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Memory:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding MemoryDisplay}" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
+                                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Blocking:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
+                                                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BlockingDisplay}" Foreground="{Binding BlockingBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
+                                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Deadlocks:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
+                                                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding DeadlockDisplay}" Foreground="{Binding DeadlockBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
+                                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Last Collect:" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2"/>
+                                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LastCollectionDisplay}" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="8,2" HorizontalAlignment="Right"/>
+                                                    </Grid>
+                                                </StackPanel>
+                                                <!-- Offline overlay -->
+                                                <Border Background="#80000000" CornerRadius="6"
+                                                        Visibility="{Binding IsOffline, Converter={StaticResource BoolToVisibility}}">
+                                                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                                        <TextBlock Text="&#x2717;" FontSize="28" Foreground="#E57373"
+                                                                   HorizontalAlignment="Center"/>
+                                                        <TextBlock Text="Offline" FontSize="13" Foreground="#E57373"
+                                                                   FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
                                         </Border>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>

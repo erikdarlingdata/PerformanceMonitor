@@ -121,6 +121,8 @@ public partial class MainWindow : Window
 
             await RefreshOverviewAsync();
             StatusText.Text = "Ready - Collection active";
+
+            _ = CheckForUpdatesOnStartupAsync();
         }
         catch (Exception ex)
         {
@@ -130,6 +132,37 @@ public partial class MainWindow : Window
                 "Initialization Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
+        }
+    }
+
+    private async Task CheckForUpdatesOnStartupAsync()
+    {
+        try
+        {
+            if (!App.CheckForUpdatesOnStartup) return;
+
+            var result = await UpdateCheckService.CheckForUpdateAsync();
+            if (result?.IsUpdateAvailable == true)
+            {
+                var answer = MessageBox.Show(
+                    $"Performance Monitor {result.LatestVersion} is available (you have {result.CurrentVersion}).\n\nWould you like to open the download page?",
+                    "Update Available",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Information);
+
+                if (answer == MessageBoxResult.Yes)
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = result.ReleaseUrl,
+                        UseShellExecute = true
+                    });
+                }
+            }
+        }
+        catch
+        {
+            // Never crash on update check failure
         }
     }
 
@@ -186,6 +219,8 @@ public partial class MainWindow : Window
         {
             ServerTimeHelper.UtcOffsetMinutes = serverTab.UtcOffsetMinutes;
         }
+
+        UpdateCollectorHealth();
     }
 
     private void RefreshServerList()
@@ -257,7 +292,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        var health = _collectorService.GetHealthSummary();
+        int? selectedServerId = null;
+        if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
+        {
+            selectedServerId = serverTab.ServerId;
+        }
+
+        var health = _collectorService.GetHealthSummary(selectedServerId);
 
         if (health.TotalCollectors == 0)
         {
@@ -307,6 +348,8 @@ public partial class MainWindow : Window
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
+                        var connStatus = _serverManager.GetConnectionStatus(server.Id);
+                        summary.IsOnline = connStatus.IsOnline;
                         summaries.Add(summary);
                     }
                 }
@@ -359,13 +402,23 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Clear MFA cancellation flag when user explicitly connects
+        // This gives them a fresh attempt at authentication
+        var currentStatus = _serverManager.GetConnectionStatus(server.Id);
+        if (server.AuthenticationType == AuthenticationTypes.EntraMFA && currentStatus.UserCancelledMfa)
+        {
+            currentStatus.UserCancelledMfa = false;
+            StatusText.Text = "Retrying MFA authentication...";
+        }
+
         // Ensure connection status is populated with UTC offset before opening tab
         // This is critical for timezone-correct chart display
         var status = _serverManager.GetConnectionStatus(server.Id);
         if (!status.UtcOffsetMinutes.HasValue)
         {
             StatusText.Text = "Checking server connection...";
-            status = await _serverManager.CheckConnectionAsync(server.Id);
+            // Allow interactive auth (MFA) when user explicitly opens a server
+            status = await _serverManager.CheckConnectionAsync(server.Id, allowInteractiveAuth: true);
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;

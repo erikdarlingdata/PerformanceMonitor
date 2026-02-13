@@ -9,6 +9,7 @@
 using System;
 using System.Windows;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -17,6 +18,12 @@ namespace PerformanceMonitorLite.Windows;
 public partial class AddServerDialog : Window
 {
     private readonly ServerManager _serverManager;
+    private static bool _isDialogOpen = false;
+
+    /// <summary>
+    /// Indicates if any AddServerDialog is currently open. Used to prevent background connection checks.
+    /// </summary>
+    public static bool IsDialogOpen => _isDialogOpen;
 
     /// <summary>
     /// The server that was added, or null if the dialog was cancelled.
@@ -27,6 +34,8 @@ public partial class AddServerDialog : Window
     {
         InitializeComponent();
         _serverManager = serverManager;
+        _isDialogOpen = true;
+        Closed += (s, e) => _isDialogOpen = false;
     }
 
     /// <summary>
@@ -51,13 +60,35 @@ public partial class AddServerDialog : Window
         DescriptionTextBox.Text = existing.Description ?? "";
         DatabaseNameBox.Text = existing.DatabaseName ?? "";
 
-        if (existing.UseWindowsAuth)
+        // Set authentication mode
+        if (existing.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
-            WindowsAuthRadio.IsChecked = true;
+            EntraMfaAuthRadio.IsChecked = true;
+            
+            // Load username if stored
+            var credentialService = new CredentialService();
+            var cred = credentialService.GetCredential(existing.Id);
+            if (cred.HasValue)
+            {
+                EntraMfaUsernameBox.Text = cred.Value.Username;
+            }
+        }
+        else if (existing.AuthenticationType == AuthenticationTypes.SqlServer)
+        {
+            SqlAuthRadio.IsChecked = true;
+            
+            // Load credentials if stored
+            var credentialService = new CredentialService();
+            var cred = credentialService.GetCredential(existing.Id);
+            if (cred.HasValue)
+            {
+                UsernameBox.Text = cred.Value.Username;
+                PasswordBox.Password = cred.Value.Password;
+            }
         }
         else
         {
-            SqlAuthRadio.IsChecked = true;
+            WindowsAuthRadio.IsChecked = true;
         }
 
         AddedServer = existing;
@@ -65,9 +96,15 @@ public partial class AddServerDialog : Window
 
     private void AuthMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (SqlCredentialsPanel != null)
+        if (SqlCredentialsPanel != null && EntraMfaPanel != null)
         {
+            // Show credentials panel for SQL Server authentication
             SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            
+            // Show MFA panel for Microsoft Entra MFA
+            EntraMfaPanel.Visibility = EntraMfaAuthRadio.IsChecked == true
                 ? Visibility.Visible
                 : Visibility.Collapsed;
         }
@@ -122,11 +159,26 @@ public partial class AddServerDialog : Window
             {
                 builder.IntegratedSecurity = true;
             }
-            else
+            else if (SqlAuthRadio.IsChecked == true)
             {
                 builder.IntegratedSecurity = false;
                 builder.UserID = UsernameBox.Text.Trim();
                 builder.Password = PasswordBox.Password;
+            }
+            else if (EntraMfaAuthRadio.IsChecked == true)
+            {
+                // Microsoft Entra MFA (Azure AD Interactive)
+                builder.IntegratedSecurity = false;
+                builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
+                
+                // Optional: Use username if provided
+                var username = EntraMfaUsernameBox.Text.Trim();
+                if (!string.IsNullOrEmpty(username))
+                {
+                    builder.UserID = username;
+                }
+                
+                StatusText.Text = "Please complete authentication in the popup window...";
             }
 
             using var connection = new SqlConnection(builder.ConnectionString);
@@ -137,10 +189,25 @@ public partial class AddServerDialog : Window
             var shortVersion = version?.Split('\n')[0] ?? "Connected";
 
             StatusText.Text = $"Success: {shortVersion}";
+            
+            // Clear any previous MFA cancellation flag on successful connection
+            if (AddedServer != null && EntraMfaAuthRadio.IsChecked == true)
+            {
+                var status = _serverManager.GetConnectionStatus(AddedServer.Id);
+                status.UserCancelledMfa = false;
+            }
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Failed: {ex.Message}";
+            
+            // Mark MFA as cancelled if user cancelled the authentication popup
+            if (AddedServer != null && EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+            {
+                var status = _serverManager.GetConnectionStatus(AddedServer.Id);
+                status.UserCancelledMfa = true;
+                StatusText.Text = "Authentication cancelled by user. Click Test to try again.";
+            }
         }
         finally
         {
@@ -163,12 +230,24 @@ public partial class AddServerDialog : Window
             displayName = serverName;
         }
 
-        var useWindowsAuth = WindowsAuthRadio.IsChecked == true;
+        // Determine authentication type
+        string authenticationType;
         string? username = null;
         string? password = null;
 
-        if (!useWindowsAuth)
+        if (WindowsAuthRadio.IsChecked == true)
         {
+            authenticationType = AuthenticationTypes.Windows;
+        }
+        else if (EntraMfaAuthRadio.IsChecked == true)
+        {
+            authenticationType = AuthenticationTypes.EntraMFA;
+            // Optionally store username for MFA
+            username = EntraMfaUsernameBox.Text.Trim();
+        }
+        else // SQL Server Authentication
+        {
+            authenticationType = AuthenticationTypes.SqlServer;
             username = UsernameBox.Text.Trim();
             password = PasswordBox.Password;
 
@@ -186,7 +265,7 @@ public partial class AddServerDialog : Window
                 /* Editing existing server */
                 AddedServer.ServerName = serverName;
                 AddedServer.DisplayName = displayName;
-                AddedServer.UseWindowsAuth = useWindowsAuth;
+                AddedServer.AuthenticationType = authenticationType;
                 AddedServer.IsEnabled = EnabledCheckBox.IsChecked == true;
                 AddedServer.TrustServerCertificate = TrustCertCheckBox.IsChecked == true;
                 AddedServer.EncryptMode = GetSelectedEncryptMode();
@@ -203,7 +282,7 @@ public partial class AddServerDialog : Window
                 {
                     ServerName = serverName,
                     DisplayName = displayName,
-                    UseWindowsAuth = useWindowsAuth,
+                    AuthenticationType = authenticationType,
                     IsEnabled = EnabledCheckBox.IsChecked == true,
                     TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
                     EncryptMode = GetSelectedEncryptMode(),

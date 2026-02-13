@@ -1,0 +1,21 @@
+name: Check pull request target branch
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+jobs:
+  check-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branches
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$HEAD_REF" != "dev" ] && [ "$BASE_REF" == "main" ]; then
+            echo "::error::Pull requests to main are only allowed from dev. Please target the dev branch instead."
+            exit 1
+          fi

@@ -158,10 +158,10 @@ public partial class QueryStoreHistoryWindow : Window
 
     private static void ApplyDarkTheme(ScottPlot.WPF.WpfPlot chart)
     {
-        var darkBg = ScottPlot.Color.FromHex("#333333");
-        var darkerBg = ScottPlot.Color.FromHex("#252525");
-        var text = ScottPlot.Color.FromHex("#E0E0E0");
-        var grid = ScottPlot.Color.FromHex("#444444");
+        var darkBg = ScottPlot.Color.FromHex("#22252b");
+        var darkerBg = ScottPlot.Color.FromHex("#111217");
+        var text = ScottPlot.Color.FromHex("#9DA5B4");
+        var grid = ScottPlot.Colors.White.WithAlpha(20);
 
         chart.Plot.FigureBackground.Color = darkBg;
         chart.Plot.DataBackground.Color = darkerBg;

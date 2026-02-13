@@ -51,6 +51,7 @@
                     Check for Updates
                 </Hyperlink>
             </TextBlock>
+            <TextBlock x:Name="UpdateStatusText" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,5" Visibility="Collapsed"/>
             <TextBlock FontSize="12">
                 <Hyperlink x:Name="DarlingDataLink" Click="DarlingDataLink_Click">
                     www.erikdarling.com
