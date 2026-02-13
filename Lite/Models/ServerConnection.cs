@@ -128,7 +128,7 @@ public class ServerConnection
             // Microsoft Entra MFA (Azure AD Interactive)
             builder.IntegratedSecurity = false;
             builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
-            // Optionally set UserID for account hint (email/UPN)
+            // Optionally set UserID (email/UPN)
             if (!string.IsNullOrWhiteSpace(username))
             {
                 builder.UserID = username;

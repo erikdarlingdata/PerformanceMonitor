@@ -359,13 +359,23 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Clear MFA cancellation flag when user explicitly connects
+        // This gives them a fresh attempt at authentication
+        var currentStatus = _serverManager.GetConnectionStatus(server.Id);
+        if (server.AuthenticationType == "EntraMFA" && currentStatus.UserCancelledMfa)
+        {
+            currentStatus.UserCancelledMfa = false;
+            StatusText.Text = "Retrying MFA authentication...";
+        }
+
         // Ensure connection status is populated with UTC offset before opening tab
         // This is critical for timezone-correct chart display
         var status = _serverManager.GetConnectionStatus(server.Id);
         if (!status.UtcOffsetMinutes.HasValue)
         {
             StatusText.Text = "Checking server connection...";
-            status = await _serverManager.CheckConnectionAsync(server.Id);
+            // Allow interactive auth (MFA) when user explicitly opens a server
+            status = await _serverManager.CheckConnectionAsync(server.Id, allowInteractiveAuth: true);
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;

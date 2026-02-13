@@ -115,10 +115,10 @@ public class ServerManager
         }
         else if (server.AuthenticationType == "EntraMFA" && !string.IsNullOrEmpty(username))
         {
-            // For MFA auth, save username as account hint (password can be empty)
+            // For MFA auth, save username (password can be empty)
             if (!_credentialService.SaveCredential(server.Id, username, string.Empty))
             {
-                throw new InvalidOperationException("Failed to save account hint to Windows Credential Manager");
+                throw new InvalidOperationException("Failed to save username to Windows Credential Manager");
             }
         }
 
@@ -157,10 +157,10 @@ public class ServerManager
         }
         else if (server.AuthenticationType == "EntraMFA" && !string.IsNullOrEmpty(username))
         {
-            // For MFA auth, update username as account hint (password can be empty)
+            // For MFA auth, update username (password can be empty)
             if (!_credentialService.UpdateCredential(server.Id, username, string.Empty))
             {
-                throw new InvalidOperationException("Failed to update account hint in Windows Credential Manager");
+                throw new InvalidOperationException("Failed to update username in Windows Credential Manager");
             }
         }
         else if (server.AuthenticationType == "Windows")
@@ -247,7 +247,9 @@ public class ServerManager
     /// <summary>
     /// Checks the connection status of a server.
     /// </summary>
-    public async Task<ServerConnectionStatus> CheckConnectionAsync(string serverId)
+    /// <param name="serverId">The server ID to check.</param>
+    /// <param name="allowInteractiveAuth">Whether to allow interactive authentication (e.g., MFA). Set to false for background checks.</param>
+    public async Task<ServerConnectionStatus> CheckConnectionAsync(string serverId, bool allowInteractiveAuth = false)
     {
         var server = GetServerById(serverId);
         if (server == null)
@@ -264,6 +266,58 @@ public class ServerManager
 
         // Get previous status to detect status changes
         var previousStatus = GetConnectionStatus(serverId);
+
+        // Skip interactive authentication methods during background checks
+        if (!allowInteractiveAuth && server.AuthenticationType == "EntraMFA")
+        {
+            return new ServerConnectionStatus
+            {
+                ServerId = serverId,
+                IsOnline = previousStatus.IsOnline,
+                LastChecked = DateTime.Now,
+                StatusChangedAt = previousStatus.StatusChangedAt,
+                ErrorMessage = "Skipped - requires interactive authentication",
+                PreviousIsOnline = previousStatus.IsOnline,
+                UserCancelledMfa = previousStatus.UserCancelledMfa
+            };
+        }
+
+        // Don't retry MFA if user previously cancelled, unless this is an explicit connection attempt
+        if (server.AuthenticationType == "EntraMFA" && previousStatus.UserCancelledMfa && !allowInteractiveAuth)
+        {
+            return new ServerConnectionStatus
+            {
+                ServerId = serverId,
+                IsOnline = false,
+                LastChecked = DateTime.Now,
+                StatusChangedAt = previousStatus.StatusChangedAt,
+                ErrorMessage = "Authentication cancelled by user",
+                PreviousIsOnline = previousStatus.IsOnline,
+                UserCancelledMfa = true
+            };
+        }
+
+        // Clear cancellation flag when user explicitly tries to connect (allowInteractiveAuth = true)
+        // This gives them a fresh attempt at authentication
+        if (allowInteractiveAuth && previousStatus.UserCancelledMfa)
+        {
+            _logger?.LogDebug("Clearing MFA cancellation flag for server '{DisplayName}' - user is retrying", server.DisplayName);
+        }
+
+        // CRITICAL: Prevent connection checks while Add/Edit dialog is open
+        // This prevents MFA popups when user is just configuring the server
+        if (Windows.AddServerDialog.IsDialogOpen && server.AuthenticationType == "EntraMFA")
+        {
+            return new ServerConnectionStatus
+            {
+                ServerId = serverId,
+                IsOnline = previousStatus.IsOnline,
+                LastChecked = DateTime.Now,
+                StatusChangedAt = previousStatus.StatusChangedAt,
+                ErrorMessage = "Skipped - dialog open",
+                PreviousIsOnline = previousStatus.IsOnline
+            };
+        }
 
         var status = new ServerConnectionStatus
         {
@@ -302,6 +356,7 @@ public class ServerManager
             {
                 status.IsOnline = true;
                 status.ErrorMessage = null;
+                status.UserCancelledMfa = false; // Clear cancellation flag on successful connection
 
                 if (!reader.IsDBNull(0))
                 {
@@ -335,13 +390,35 @@ public class ServerManager
         {
             status.IsOnline = false;
             status.ErrorMessage = ex.Message;
-            _logger?.LogWarning("Connectivity check failed for server '{DisplayName}': {Message}", server.DisplayName, ex.Message);
+            
+            // Detect MFA cancellation (error code 0 with specific message patterns)
+            if (server.AuthenticationType == "EntraMFA" && IsMfaCancelledException(ex))
+            {
+                status.UserCancelledMfa = true;
+                status.ErrorMessage = "Authentication cancelled by user";
+                _logger?.LogInformation("MFA authentication cancelled by user for server '{DisplayName}'", server.DisplayName);
+            }
+            else
+            {
+                _logger?.LogWarning("Connectivity check failed for server '{DisplayName}': {Message}", server.DisplayName, ex.Message);
+            }
         }
         catch (Exception ex)
         {
             status.IsOnline = false;
             status.ErrorMessage = ex.Message;
-            _logger?.LogWarning(ex, "Connectivity check error for server '{DisplayName}'", server.DisplayName);
+            
+            // Detect MFA cancellation from generic exceptions
+            if (server.AuthenticationType == "EntraMFA" && IsMfaCancelledException(ex))
+            {
+                status.UserCancelledMfa = true;
+                status.ErrorMessage = "Authentication cancelled by user";
+                _logger?.LogInformation("MFA authentication cancelled by user for server '{DisplayName}'", server.DisplayName);
+            }
+            else
+            {
+                _logger?.LogWarning(ex, "Connectivity check error for server '{DisplayName}'", server.DisplayName);
+            }
         }
 
         // Track when status changed (online to offline or vice versa)
@@ -364,11 +441,13 @@ public class ServerManager
 
     /// <summary>
     /// Checks the connection status of all servers.
+    /// Background operation - will skip servers requiring interactive authentication (e.g., MFA).
     /// </summary>
     public async Task CheckAllConnectionsAsync()
     {
         var servers = GetAllServers();
-        var tasks = servers.Select(s => CheckConnectionAsync(s.Id));
+        // Explicitly pass allowInteractiveAuth: false to prevent MFA popups during background checks
+        var tasks = servers.Select(s => CheckConnectionAsync(s.Id, allowInteractiveAuth: false));
         await Task.WhenAll(tasks);
     }
 
@@ -449,6 +528,23 @@ public class ServerManager
                 throw;
             }
         }
+    }
+
+    /// <summary>
+    /// Checks if an exception indicates that the user cancelled MFA authentication.
+    /// </summary>
+    private static bool IsMfaCancelledException(Exception ex)
+    {
+        var message = ex.Message?.ToLowerInvariant() ?? string.Empty;
+        
+        // Common patterns when user cancels Azure AD authentication
+        return message.Contains("user canceled") ||
+               message.Contains("user cancelled") ||
+               message.Contains("authentication was cancelled") ||
+               message.Contains("authentication was canceled") ||
+               message.Contains("user intervention is required") ||
+               message.Contains("aadsts50058") || // Need to select account
+               message.Contains("aadsts50126"); // Invalid credentials or cancelled
     }
 
     /// <summary>

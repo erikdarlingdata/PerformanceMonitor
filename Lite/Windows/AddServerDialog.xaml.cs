@@ -17,6 +17,12 @@ namespace PerformanceMonitorLite.Windows;
 public partial class AddServerDialog : Window
 {
     private readonly ServerManager _serverManager;
+    private static bool _isDialogOpen = false;
+
+    /// <summary>
+    /// Indicates if any AddServerDialog is currently open. Used to prevent background connection checks.
+    /// </summary>
+    public static bool IsDialogOpen => _isDialogOpen;
 
     /// <summary>
     /// The server that was added, or null if the dialog was cancelled.
@@ -27,6 +33,8 @@ public partial class AddServerDialog : Window
     {
         InitializeComponent();
         _serverManager = serverManager;
+        _isDialogOpen = true;
+        Closing += (s, e) => _isDialogOpen = false;
     }
 
     /// <summary>
@@ -56,7 +64,7 @@ public partial class AddServerDialog : Window
         {
             EntraMfaAuthRadio.IsChecked = true;
             
-            // Load account hint if stored
+            // Load username if stored
             var credentialService = new CredentialService();
             var cred = credentialService.GetCredential(existing.Id);
             if (cred.HasValue)
@@ -162,7 +170,7 @@ public partial class AddServerDialog : Window
                 builder.IntegratedSecurity = false;
                 builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
                 
-                // Optional: Use username as account hint if provided
+                // Optional: Use username if provided
                 var username = EntraMfaUsernameBox.Text.Trim();
                 if (!string.IsNullOrEmpty(username))
                 {
@@ -180,10 +188,25 @@ public partial class AddServerDialog : Window
             var shortVersion = version?.Split('\n')[0] ?? "Connected";
 
             StatusText.Text = $"Success: {shortVersion}";
+            
+            // Clear any previous MFA cancellation flag on successful connection
+            if (AddedServer != null && EntraMfaAuthRadio.IsChecked == true)
+            {
+                var status = _serverManager.GetConnectionStatus(AddedServer.Id);
+                status.UserCancelledMfa = false;
+            }
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Failed: {ex.Message}";
+            
+            // Mark MFA as cancelled if user cancelled the authentication popup
+            if (AddedServer != null && EntraMfaAuthRadio.IsChecked == true && IsMfaCancelledException(ex))
+            {
+                var status = _serverManager.GetConnectionStatus(AddedServer.Id);
+                status.UserCancelledMfa = true;
+                StatusText.Text = "Authentication cancelled by user. Click Test to try again.";
+            }
         }
         finally
         {
@@ -221,7 +244,7 @@ public partial class AddServerDialog : Window
         {
             authenticationType = "EntraMFA";
             useWindowsAuth = false;
-            // Optionally store username as account hint for MFA
+            // Optionally store username for MFA
             username = EntraMfaUsernameBox.Text.Trim();
         }
         else // SQL Server Authentication
@@ -289,5 +312,22 @@ public partial class AddServerDialog : Window
     {
         DialogResult = false;
         Close();
+    }
+
+    /// <summary>
+    /// Checks if an exception indicates that the user cancelled MFA authentication.
+    /// </summary>
+    private static bool IsMfaCancelledException(Exception ex)
+    {
+        var message = ex.Message?.ToLowerInvariant() ?? string.Empty;
+        
+        // Common patterns when user cancels Azure AD authentication
+        return message.Contains("user canceled") ||
+               message.Contains("user cancelled") ||
+               message.Contains("authentication was cancelled") ||
+               message.Contains("authentication was canceled") ||
+               message.Contains("user intervention is required") ||
+               message.Contains("aadsts50058") || // Need to select account
+               message.Contains("aadsts50126"); // Invalid credentials or cancelled
     }
 }
