@@ -50,7 +50,8 @@ public partial class ServerTab : UserControl
     {
         "#2eaef1", "#F44336", "#4CAF50", "#FFC107", "#9C27B0",
         "#FF9800", "#00BCD4", "#E91E63", "#8BC34A", "#3F51B5",
-        "#CDDC39", "#795548"
+        "#CDDC39", "#795548", "#FF7F50", "#87CEEB", "#FFD700",
+        "#9370DB", "#FA8072", "#32CD32", "#F4A460", "#708090"
     };
 
     public int UtcOffsetMinutes { get; }
@@ -992,7 +993,7 @@ public partial class ServerTab : UserControl
     private static readonly string[] UsualSuspectWaits = { "SOS_SCHEDULER_YIELD", "CXPACKET", "CXCONSUMER", "PAGEIOLATCH_SH", "PAGEIOLATCH_EX", "WRITELOG" };
     private static readonly string[] UsualSuspectPrefixes = { "PAGELATCH_" };
 
-    private static HashSet<string> GetDefaultWaitTypes(IList<string> availableWaitTypes)
+    private static HashSet<string> GetDefaultWaitTypes(List<string> availableWaitTypes)
     {
         var defaults = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var w in PoisonWaits)
@@ -1006,7 +1007,7 @@ public partial class ServerTab : UserControl
         int added = 0;
         foreach (var w in availableWaitTypes)
         {
-            if (defaults.Count >= 12) break;
+            if (defaults.Count >= 20) break;
             if (added >= 10) break;
             if (!defaults.Contains(w)) { defaults.Add(w); added++; }
         }
@@ -1036,6 +1037,17 @@ public partial class ServerTab : UserControl
             .ThenBy(x => x.DisplayName)
             .ToList();
         ApplyWaitTypeFilter();
+        UpdateWaitTypeCount();
+    }
+
+    private void UpdateWaitTypeCount()
+    {
+        if (_waitTypeItems == null || WaitTypeCountText == null) return;
+        int count = _waitTypeItems.Count(x => x.IsSelected);
+        WaitTypeCountText.Text = $"{count} / 20 selected";
+        WaitTypeCountText.Foreground = count >= 20
+            ? new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E57373")!)
+            : (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
     }
 
     private void ApplyWaitTypeFilter()
@@ -1084,7 +1096,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var selected = _waitTypeItems.Where(i => i.IsSelected).Take(12).ToList();
+            var selected = _waitTypeItems.Where(i => i.IsSelected).Take(20).ToList();
 
             ClearChart(WaitStatsChart);
             ApplyDarkTheme(WaitStatsChart);

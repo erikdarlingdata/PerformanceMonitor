@@ -79,15 +79,14 @@ namespace PerformanceMonitorDashboard.Helpers
                     if (w.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                         defaults.Add(w);
 
-            // 4. Top 10 by total wait time (items not already in the set), hard cap at 12 total
+            // 4. Top 10 by total wait time (items not already in the set), hard cap at 20 total
             int added = 0;
             foreach (var w in availableWaitTypes)
             {
-                if (defaults.Count >= 12) break;
+                if (defaults.Count >= 20) break;
                 if (added >= 10) break;
-                if (!defaults.Contains(w))
+                if (defaults.Add(w))
                 {
-                    defaults.Add(w);
                     added++;
                 }
             }

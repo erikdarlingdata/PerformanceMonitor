@@ -127,6 +127,7 @@
                             <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
                                 <Button Content="Top Waits" Click="WaitTypeSelectAll_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
                                 <Button Content="Clear All" Click="WaitTypeClearAll_Click" Padding="6,2" FontSize="11"/>
+                                <TextBlock x:Name="WaitTypeCountText" Text="0 / 20 selected" FontSize="10" Foreground="{StaticResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                             </StackPanel>
                             <TextBox Grid.Row="2" x:Name="WaitTypeSearchBox" TextChanged="WaitTypeSearch_TextChanged"
                                      Margin="0,0,0,4" Padding="4,2"/>

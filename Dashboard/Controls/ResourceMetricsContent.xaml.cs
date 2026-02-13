@@ -1862,6 +1862,17 @@ namespace PerformanceMonitorDashboard.Controls
                 .ToList();
             _waitTypeItems = sorted;
             ApplyWaitTypeSearchFilter();
+            UpdateWaitTypeCount();
+        }
+
+        private void UpdateWaitTypeCount()
+        {
+            if (_waitTypeItems == null || WaitTypeCountText == null) return;
+            int count = _waitTypeItems.Count(x => x.IsSelected);
+            WaitTypeCountText.Text = $"{count} / 20 selected";
+            WaitTypeCountText.Foreground = count >= 20
+                ? new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#E57373")!)
+                : (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
         }
 
         private void WaitTypeSearch_TextChanged(object sender, TextChangedEventArgs e)
@@ -1916,6 +1927,7 @@ namespace PerformanceMonitorDashboard.Controls
                 item.IsSelected = false;
             }
             _isUpdatingWaitTypeSelection = false;
+            UpdateWaitTypeCount();
             await UpdateWaitStatsDetailChartAsync();
         }
 
@@ -2030,12 +2042,14 @@ namespace PerformanceMonitorDashboard.Controls
             var colors = new[] {
                 ScottPlot.Colors.Blue, ScottPlot.Colors.Green, ScottPlot.Colors.Orange, ScottPlot.Colors.Red,
                 ScottPlot.Colors.Purple, ScottPlot.Colors.Cyan, ScottPlot.Colors.Magenta, ScottPlot.Colors.DarkGreen,
-                ScottPlot.Colors.Navy, ScottPlot.Colors.Brown, ScottPlot.Colors.Teal, ScottPlot.Colors.Olive
+                ScottPlot.Colors.Navy, ScottPlot.Colors.Brown, ScottPlot.Colors.Teal, ScottPlot.Colors.Olive,
+                ScottPlot.Colors.Coral, ScottPlot.Colors.SkyBlue, ScottPlot.Colors.Gold, ScottPlot.Colors.MediumPurple,
+                ScottPlot.Colors.Salmon, ScottPlot.Colors.LimeGreen, ScottPlot.Colors.SandyBrown, ScottPlot.Colors.SlateGray
             };
 
             // Get all time points across all wait types for gap filling
             int colorIndex = 0;
-            foreach (var waitType in selectedWaitTypes.Take(12)) // Limit to 12 wait types
+            foreach (var waitType in selectedWaitTypes.Take(20)) // Limit to 20 wait types
             {
                 // Get data for this wait type
                 var waitTypeData = data
