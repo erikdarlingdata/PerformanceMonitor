@@ -271,30 +271,20 @@ public class ServerManager
         // Skip interactive authentication methods during background checks
         if (!allowInteractiveAuth && server.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
+            // Determine appropriate message based on whether user cancelled
+            var errorMsg = previousStatus.UserCancelledMfa 
+                ? "Authentication cancelled by user" 
+                : "Skipped - requires interactive authentication";
+            
             return new ServerConnectionStatus
             {
                 ServerId = serverId,
-                IsOnline = previousStatus.IsOnline,
+                IsOnline = previousStatus.UserCancelledMfa ? false : previousStatus.IsOnline,
                 LastChecked = DateTime.Now,
                 StatusChangedAt = previousStatus.StatusChangedAt,
-                ErrorMessage = "Skipped - requires interactive authentication",
+                ErrorMessage = errorMsg,
                 PreviousIsOnline = previousStatus.IsOnline,
                 UserCancelledMfa = previousStatus.UserCancelledMfa
-            };
-        }
-
-        // Don't retry MFA if user previously cancelled, unless this is an explicit connection attempt
-        if (server.AuthenticationType == AuthenticationTypes.EntraMFA && previousStatus.UserCancelledMfa && !allowInteractiveAuth)
-        {
-            return new ServerConnectionStatus
-            {
-                ServerId = serverId,
-                IsOnline = false,
-                LastChecked = DateTime.Now,
-                StatusChangedAt = previousStatus.StatusChangedAt,
-                ErrorMessage = "Authentication cancelled by user",
-                PreviousIsOnline = previousStatus.IsOnline,
-                UserCancelledMfa = true
             };
         }
 
