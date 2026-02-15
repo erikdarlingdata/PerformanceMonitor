@@ -83,7 +83,7 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
     /// </summary>
-    public event Action<int, int>? AlertCountsChanged; /* blockingCount, deadlockCount */
+    public event Action<int, int, DateTime?>? AlertCountsChanged; /* blockingCount, deadlockCount, latestEventTimeUtc */
     public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
     public event Func<Task>? ManualRefreshRequested;
 
@@ -522,10 +522,19 @@ public partial class ServerTab : UserControl
 
             ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss}";
 
-            /* Notify parent of alert counts for tab badge */
+            /* Notify parent of alert counts for tab badge.
+               Include the latest event timestamp so acknowledgement is only
+               cleared when genuinely new events arrive, not when the time range changes. */
             var blockingCount = blockedProcessTask.Result.Count;
             var deadlockCount = deadlockTask.Result.Count;
-            AlertCountsChanged?.Invoke(blockingCount, deadlockCount);
+            DateTime? latestEventTime = null;
+            if (blockingCount > 0 || deadlockCount > 0)
+            {
+                var latestBlocking = blockedProcessTask.Result.Max(r => (DateTime?)r.CollectionTime);
+                var latestDeadlock = deadlockTask.Result.Max(r => (DateTime?)r.CollectionTime);
+                latestEventTime = latestBlocking > latestDeadlock ? latestBlocking : latestDeadlock;
+            }
+            AlertCountsChanged?.Invoke(blockingCount, deadlockCount, latestEventTime);
         }
         catch (Exception ex)
         {

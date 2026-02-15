@@ -8,31 +8,36 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 
 namespace PerformanceMonitorLite.Services
 {
     /// <summary>
     /// Manages alert state including suppression and acknowledgement for server tab badges.
-    /// Thread-safe: All HashSet operations are protected by _lock.
+    /// State is persisted to a JSON file so it survives app restarts.
+    /// Thread-safe: All operations are protected by _lock.
     /// </summary>
     public class AlertStateService
     {
         private readonly object _lock = new object();
+        private readonly string _stateFilePath;
 
-        // Suppression state (session-only for Lite - not persisted)
         private readonly HashSet<string> _silencedServers;
 
-        // Acknowledged alerts (session-only, clears on next refresh with new data)
-        private readonly HashSet<string> _acknowledgedAlerts;
+        /* Acknowledged alerts: serverId → UTC time of acknowledgement.
+           Alerts older than the ack time stay suppressed; new events clear it. */
+        private readonly Dictionary<string, DateTime> _acknowledgedAlerts;
 
-        // Event for when suppression state changes
         public event EventHandler? SuppressionStateChanged;
 
         public AlertStateService()
         {
+            _stateFilePath = Path.Combine(AppContext.BaseDirectory, "alert_state.json");
             _silencedServers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            _acknowledgedAlerts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            _acknowledgedAlerts = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+            Load();
         }
 
         /// <summary>
@@ -42,12 +47,10 @@ namespace PerformanceMonitorLite.Services
         {
             lock (_lock)
             {
-                // Check if server is silenced
                 if (_silencedServers.Contains(serverId))
                     return false;
 
-                // Check if acknowledged this refresh cycle
-                if (_acknowledgedAlerts.Contains(serverId))
+                if (_acknowledgedAlerts.ContainsKey(serverId))
                     return false;
 
                 return true;
@@ -55,36 +58,51 @@ namespace PerformanceMonitorLite.Services
         }
 
         /// <summary>
-        /// Acknowledges alerts for a specific server (hides badge until next refresh with new data).
+        /// Updates alert counts and returns whether the badge should be shown.
+        /// Clears acknowledgement only if latestEventTime is newer than the ack timestamp,
+        /// meaning genuinely new events arrived (not just a time-range change).
+        /// </summary>
+        public bool UpdateAlertCounts(string serverId, int blockingCount, int deadlockCount, DateTime? latestEventTimeUtc)
+        {
+            lock (_lock)
+            {
+                if (latestEventTimeUtc.HasValue
+                    && _acknowledgedAlerts.TryGetValue(serverId, out var ackTime)
+                    && latestEventTimeUtc.Value > ackTime)
+                {
+                    /* Event newer than acknowledgement — clear it */
+                    _acknowledgedAlerts.Remove(serverId);
+                    Save();
+                }
+
+                int totalAlerts = blockingCount + deadlockCount;
+                return totalAlerts > 0 && ShouldShowAlertsInternal(serverId);
+            }
+        }
+
+        /// <summary>
+        /// Acknowledges alerts for a specific server. Persisted across restarts.
+        /// Alerts stay suppressed until new events arrive (counts increase).
         /// </summary>
         public void AcknowledgeAlert(string serverId)
         {
             lock (_lock)
             {
-                _acknowledgedAlerts.Add(serverId);
+                _acknowledgedAlerts[serverId] = DateTime.UtcNow;
+                Save();
             }
             SuppressionStateChanged?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
-        /// Clears acknowledgement for a server (called when new alert data arrives).
-        /// </summary>
-        public void ClearAcknowledgement(string serverId)
-        {
-            lock (_lock)
-            {
-                _acknowledgedAlerts.Remove(serverId);
-            }
-        }
-
-        /// <summary>
-        /// Silences a server entirely (no badges until unsilenced).
+        /// Silences a server entirely (no badges until unsilenced). Persisted across restarts.
         /// </summary>
         public void SilenceServer(string serverId)
         {
             lock (_lock)
             {
                 _silencedServers.Add(serverId);
+                Save();
             }
             SuppressionStateChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -97,6 +115,7 @@ namespace PerformanceMonitorLite.Services
             lock (_lock)
             {
                 _silencedServers.Remove(serverId);
+                Save();
             }
             SuppressionStateChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -121,7 +140,70 @@ namespace PerformanceMonitorLite.Services
             {
                 _silencedServers.Remove(serverId);
                 _acknowledgedAlerts.Remove(serverId);
+                Save();
             }
+        }
+
+        /* Internal check without re-acquiring lock */
+        private bool ShouldShowAlertsInternal(string serverId)
+        {
+            if (_silencedServers.Contains(serverId))
+                return false;
+            if (_acknowledgedAlerts.ContainsKey(serverId))
+                return false;
+            return true;
+        }
+
+        private void Save()
+        {
+            try
+            {
+                var state = new AlertStatePersisted
+                {
+                    SilencedServers = _silencedServers.ToList(),
+                    AcknowledgedAlerts = _acknowledgedAlerts.ToDictionary(kv => kv.Key, kv => kv.Value)
+                };
+                var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(_stateFilePath, json);
+            }
+            catch
+            {
+                /* Best effort — don't crash if file write fails */
+            }
+        }
+
+        private void Load()
+        {
+            try
+            {
+                if (!File.Exists(_stateFilePath)) return;
+
+                var json = File.ReadAllText(_stateFilePath);
+                var state = JsonSerializer.Deserialize<AlertStatePersisted>(json);
+                if (state == null) return;
+
+                if (state.SilencedServers != null)
+                {
+                    foreach (var s in state.SilencedServers)
+                        _silencedServers.Add(s);
+                }
+
+                if (state.AcknowledgedAlerts != null)
+                {
+                    foreach (var kv in state.AcknowledgedAlerts)
+                        _acknowledgedAlerts[kv.Key] = kv.Value;
+                }
+            }
+            catch
+            {
+                /* Best effort — start fresh if file is corrupted */
+            }
+        }
+
+        private class AlertStatePersisted
+        {
+            public List<string>? SilencedServers { get; set; }
+            public Dictionary<string, DateTime>? AcknowledgedAlerts { get; set; }
         }
     }
 }

@@ -50,9 +50,6 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, bool> _activeBlockingAlert = new();
     private readonly Dictionary<string, bool> _activeDeadlockAlert = new();
 
-    /* Track previous alert counts to detect new alerts (for clearing acknowledgements) */
-    private readonly Dictionary<string, (int Blocking, int Deadlock)> _previousAlertCounts = new();
-
     public MainWindow()
     {
         InitializeComponent();
@@ -432,9 +429,9 @@ public partial class MainWindow : Window
 
         /* Subscribe to alert counts for badge updates */
         var serverId = server.Id;
-        serverTab.AlertCountsChanged += (blockingCount, deadlockCount) =>
+        serverTab.AlertCountsChanged += (blockingCount, deadlockCount, latestEventTime) =>
         {
-            Dispatcher.Invoke(() => UpdateTabBadge(tabHeader, serverId, blockingCount, deadlockCount));
+            Dispatcher.Invoke(() => UpdateTabBadge(tabHeader, serverId, blockingCount, deadlockCount, latestEventTime));
         };
 
         /* Subscribe to "Apply to All" time range propagation */
@@ -599,23 +596,14 @@ public partial class MainWindow : Window
         return panel;
     }
 
-    private void UpdateTabBadge(StackPanel tabHeader, string serverId, int blockingCount, int deadlockCount)
+    private void UpdateTabBadge(StackPanel tabHeader, string serverId, int blockingCount, int deadlockCount, DateTime? latestEventTime)
     {
         var totalAlerts = blockingCount + deadlockCount;
 
-        /* Check if new alerts arrived - if so, clear any acknowledgement */
-        if (_previousAlertCounts.TryGetValue(serverId, out var previous))
-        {
-            if (blockingCount > previous.Blocking || deadlockCount > previous.Deadlock)
-            {
-                /* New alerts - clear acknowledgement so badge shows again */
-                _alertStateService.ClearAcknowledgement(serverId);
-            }
-        }
-        _previousAlertCounts[serverId] = (blockingCount, deadlockCount);
-
-        /* Check suppression state */
-        bool shouldShow = totalAlerts > 0 && _alertStateService.ShouldShowAlerts(serverId);
+        /* Delegate count tracking and acknowledgement clearing to AlertStateService.
+           Uses latestEventTime to only clear ack when genuinely new events arrive,
+           not when the user just switches time ranges. */
+        bool shouldShow = _alertStateService.UpdateAlertCounts(serverId, blockingCount, deadlockCount, latestEventTime);
 
         foreach (var child in tabHeader.Children)
         {
@@ -709,7 +697,6 @@ public partial class MainWindow : Window
 
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);
-            _previousAlertCounts.Remove(serverId);
 
             // Show empty state if no tabs open
             if (_openServerTabs.Count == 0)
