@@ -273,23 +273,37 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
             query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @PerformanceMonitor_BlockedProcess TABLE
+(
+    ring_buffer xml NOT NULL
+);
+
+INSERT
+    @PerformanceMonitor_BlockedProcess
+(
+    ring_buffer
+)
+SELECT
+    ring_xml = TRY_CAST(xet.target_data AS xml)
+FROM sys.dm_xe_database_session_targets AS xet
+JOIN sys.dm_xe_database_sessions AS xes
+  ON xes.address = xet.event_session_address
+WHERE xes.name = N'{BlockedProcessXeSessionName}'
+AND   xet.target_name = N'ring_buffer'
+OPTION(RECOMPILE);
+
 SELECT
     event_time = evt.value('(@timestamp)[1]', 'datetime2'),
     blocked_process_report_xml = CONVERT(nvarchar(max), evt.query('data[@name=""blocked_process""]/value/blocked-process-report'))
 FROM
 (
     SELECT
-        ring_xml = TRY_CAST(xet.target_data AS xml)
-    FROM sys.dm_xe_database_session_targets AS xet
-    JOIN sys.dm_xe_database_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{BlockedProcessXeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        pmd.ring_buffer
+    FROM @PerformanceMonitor_BlockedProcess AS pmd
 ) AS rb
-CROSS APPLY rb.ring_xml.nodes('RingBufferTarget/event[@name=""blocked_process_report""]') AS q(evt)
+CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""blocked_process_report""]') AS q(evt)
 WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
-ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2') DESC
 OPTION(RECOMPILE);";
         }
         else
@@ -299,23 +313,37 @@ OPTION(RECOMPILE);";
             query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @PerformanceMonitor_BlockedProcess TABLE
+(
+    ring_buffer xml NOT NULL
+);
+
+INSERT
+    @PerformanceMonitor_BlockedProcess
+(
+    ring_buffer
+)
+SELECT
+    ring_xml = TRY_CAST(xet.target_data AS xml)
+FROM sys.dm_xe_session_targets AS xet
+JOIN sys.dm_xe_sessions AS xes
+  ON xes.address = xet.event_session_address
+WHERE xes.name = N'{BlockedProcessXeSessionName}'
+AND   xet.target_name = N'ring_buffer'
+OPTION(RECOMPILE);
+
 SELECT
     event_time = evt.value('(@timestamp)[1]', 'datetime2'),
     blocked_process_report_xml = CONVERT(nvarchar(max), evt.query('data[@name=""blocked_process""]/value/blocked-process-report'))
 FROM
 (
     SELECT
-        ring_xml = TRY_CAST(xet.target_data AS xml)
-    FROM sys.dm_xe_session_targets AS xet
-    JOIN sys.dm_xe_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{BlockedProcessXeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        pmd.ring_buffer
+    FROM @PerformanceMonitor_BlockedProcess AS pmd
 ) AS rb
-CROSS APPLY rb.ring_xml.nodes('RingBufferTarget/event[@name=""blocked_process_report""]') AS q(evt)
+CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""blocked_process_report""]') AS q(evt)
 WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
-ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2') DESC
 OPTION(RECOMPILE);";
         }
 

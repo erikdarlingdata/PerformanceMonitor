@@ -271,6 +271,26 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON DATABASE STATE = START;", conne
             query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @PerformanceMonitor_Deadlock TABLE
+(
+    ring_buffer xml NOT NULL
+);
+
+INSERT
+    @PerformanceMonitor_Deadlock
+(
+    ring_buffer
+)
+SELECT
+    ring_xml = TRY_CAST(xet.target_data AS xml)
+FROM sys.dm_xe_database_session_targets AS xet
+JOIN sys.dm_xe_database_sessions AS xes
+  ON xes.address = xet.event_session_address
+WHERE xes.name = N'{DeadlockXeSessionName}'
+AND   xet.target_name = N'ring_buffer'
+OPTION(RECOMPILE);
+
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
     victim_process_id = evt.value('(data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
@@ -278,17 +298,11 @@ SELECT
 FROM
 (
     SELECT
-        ring_xml = TRY_CAST(xet.target_data AS xml)
-    FROM sys.dm_xe_database_session_targets AS xet
-    JOIN sys.dm_xe_database_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{DeadlockXeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        pmd.ring_buffer
+    FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
-CROSS APPLY rb.ring_xml.nodes('RingBufferTarget/event[@name=""database_xml_deadlock_report""]') AS q(evt)
+CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""database_xml_deadlock_report""]') AS q(evt)
 WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
-ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2') DESC
 OPTION(RECOMPILE);";
         }
         else
@@ -298,6 +312,26 @@ OPTION(RECOMPILE);";
             query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @PerformanceMonitor_Deadlock TABLE
+(
+    ring_buffer xml NOT NULL
+);
+
+INSERT
+    @PerformanceMonitor_Deadlock
+(
+    ring_buffer
+)
+SELECT
+    ring_xml = TRY_CAST(xet.target_data AS xml)
+FROM sys.dm_xe_session_targets AS xet
+JOIN sys.dm_xe_sessions AS xes
+  ON xes.address = xet.event_session_address
+WHERE xes.name = N'{DeadlockXeSessionName}'
+AND   xet.target_name = N'ring_buffer'
+OPTION(RECOMPILE);
+
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
     victim_process_id = evt.value('(data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
@@ -305,17 +339,11 @@ SELECT
 FROM
 (
     SELECT
-        ring_xml = TRY_CAST(xet.target_data AS xml)
-    FROM sys.dm_xe_session_targets AS xet
-    JOIN sys.dm_xe_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{DeadlockXeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        pmd.ring_buffer
+    FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
-CROSS APPLY rb.ring_xml.nodes('RingBufferTarget/event[@name=""xml_deadlock_report""]') AS q(evt)
+CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""xml_deadlock_report""]') AS q(evt)
 WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
-ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2') DESC
 OPTION(RECOMPILE);";
         }
 
