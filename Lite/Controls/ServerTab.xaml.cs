@@ -59,6 +59,7 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<CollectorHealthRow>? _collectionHealthFilterMgr;
+    private DataGridFilterManager<CollectionLogRow>? _collectionLogFilterMgr;
 
     private static readonly HashSet<string> _defaultPerfmonCounters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -446,6 +447,7 @@ public partial class ServerTab : UserControl
             var traceFlagsTask = SafeQueryAsync(() => _dataService.GetLatestTraceFlagsAsync(_serverId));
             var runningJobsTask = SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId));
             var collectionHealthTask = SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId));
+            var collectionLogTask = SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack));
             /* Core data tasks */
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
@@ -453,7 +455,7 @@ public partial class ServerTab : UserControl
                 deadlockTask, blockedProcessTask, waitTypesTask, perfmonCountersTask,
                 queryStoreTask, memoryGrantTrendTask,
                 serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
-                runningJobsTask, collectionHealthTask);
+                runningJobsTask, collectionHealthTask, collectionLogTask);
 
             /* Trend chart tasks - run separately so failures don't kill the whole refresh */
             var blockingTrendTask = SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
@@ -491,6 +493,8 @@ public partial class ServerTab : UserControl
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
+            _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
+            UpdateCollectorDurationChart(collectionLogTask.Result);
 
             /* Update memory summary */
             UpdateMemorySummary(memoryTask.Result);
@@ -1844,6 +1848,62 @@ public partial class ServerTab : UserControl
         return value;
     }
 
+    /* ========== Collection Health ========== */
+
+    private void UpdateCollectorDurationChart(List<CollectionLogRow> data)
+    {
+        ClearChart(CollectorDurationChart);
+        ApplyDarkTheme(CollectorDurationChart);
+
+        if (data.Count == 0) { CollectorDurationChart.Refresh(); return; }
+
+        /* Group by collector, plot each as a separate series */
+        var groups = data
+            .Where(d => d.DurationMs.HasValue && d.Status == "SUCCESS")
+            .GroupBy(d => d.CollectorName)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        int colorIdx = 0;
+        foreach (var group in groups)
+        {
+            var points = group.OrderBy(d => d.CollectionTime).ToList();
+            if (points.Count < 2) continue;
+
+            var times = points.Select(d => d.CollectionTime.ToLocalTime().ToOADate()).ToArray();
+            var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
+
+            var scatter = CollectorDurationChart.Plot.Add.Scatter(times, durations);
+            scatter.LegendText = group.Key;
+            scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
+            scatter.LineWidth = 2;
+            scatter.MarkerSize = 0;
+            colorIdx++;
+        }
+
+        CollectorDurationChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(CollectorDurationChart);
+        CollectorDurationChart.Plot.YLabel("Duration (ms)");
+        CollectorDurationChart.Plot.Axes.AutoScale();
+        ShowChartLegend(CollectorDurationChart);
+        CollectorDurationChart.Refresh();
+    }
+
+    private void OpenLogFile_Click(object sender, RoutedEventArgs e)
+    {
+        var logDir = System.IO.Path.Combine(AppContext.BaseDirectory, "logs");
+        var logFile = System.IO.Path.Combine(logDir, $"lite_{DateTime.Now:yyyyMMdd}.log");
+
+        if (File.Exists(logFile))
+        {
+            Process.Start(new ProcessStartInfo(logFile) { UseShellExecute = true });
+        }
+        else if (Directory.Exists(logDir))
+        {
+            Process.Start(new ProcessStartInfo(logDir) { UseShellExecute = true });
+        }
+    }
+
     /// <summary>
     /// Stops the refresh timer when the tab is removed.
     /// </summary>
@@ -1868,6 +1928,7 @@ public partial class ServerTab : UserControl
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
         _collectionHealthFilterMgr = new DataGridFilterManager<CollectorHealthRow>(CollectionHealthGrid);
+        _collectionLogFilterMgr = new DataGridFilterManager<CollectionLogRow>(CollectionLogGrid);
 
         _filterManagers[QuerySnapshotsGrid] = _querySnapshotsFilterMgr;
         _filterManagers[QueryStatsGrid] = _queryStatsFilterMgr;
@@ -1881,6 +1942,7 @@ public partial class ServerTab : UserControl
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
         _filterManagers[CollectionHealthGrid] = _collectionHealthFilterMgr;
+        _filterManagers[CollectionLogGrid] = _collectionLogFilterMgr;
     }
 
     private void EnsureFilterPopup()

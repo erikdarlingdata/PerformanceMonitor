@@ -61,6 +61,74 @@ ORDER BY collector_name";
         return items;
     }
 
+    /// <summary>
+    /// Gets recent collection log entries for a server, most recent first.
+    /// </summary>
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, int maxRows = 500)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT
+    collector_name,
+    collection_time,
+    duration_ms,
+    sql_duration_ms,
+    duckdb_duration_ms,
+    rows_collected,
+    status,
+    error_message
+FROM collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+ORDER BY collection_time DESC
+LIMIT $3";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+
+        var items = new List<CollectionLogRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectionLogRow
+            {
+                CollectorName = reader.GetString(0),
+                CollectionTime = reader.GetDateTime(1),
+                DurationMs = reader.IsDBNull(2) ? null : (int?)Convert.ToInt32(reader.GetValue(2)),
+                SqlDurationMs = reader.IsDBNull(3) ? null : (int?)Convert.ToInt32(reader.GetValue(3)),
+                DuckDbDurationMs = reader.IsDBNull(4) ? null : (int?)Convert.ToInt32(reader.GetValue(4)),
+                RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
+                Status = reader.GetString(6),
+                ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7)
+            });
+        }
+
+        return items;
+    }
+}
+
+public class CollectionLogRow
+{
+    public string CollectorName { get; set; } = "";
+    public DateTime CollectionTime { get; set; }
+    public int? DurationMs { get; set; }
+    public int? SqlDurationMs { get; set; }
+    public int? DuckDbDurationMs { get; set; }
+    public int? RowsCollected { get; set; }
+    public string Status { get; set; } = "";
+    public string? ErrorMessage { get; set; }
+
+    public string CollectionTimeFormatted => CollectionTime.ToLocalTime().ToString("MM/dd HH:mm:ss");
+
+    public string DurationFormatted => DurationMs.HasValue
+        ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
+        : "";
+
+    public string SqlDurationFormatted => SqlDurationMs.HasValue ? $"{SqlDurationMs.Value} ms" : "";
+
+    public string DuckDbDurationFormatted => DuckDbDurationMs.HasValue ? $"{DuckDbDurationMs.Value} ms" : "";
 }
 
 public class CollectorHealthRow
