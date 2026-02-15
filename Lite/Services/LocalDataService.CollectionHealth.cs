@@ -122,7 +122,7 @@ public class CollectionLogRow
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
 
-    public string CollectionTimeFormatted => CollectionTime.ToLocalTime().ToString("MM/dd HH:mm:ss");
+    public string CollectionTimeFormatted => CollectionTime.ToLocalTime().ToString("g");
 
     public string DurationFormatted => DurationMs.HasValue
         ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
@@ -167,15 +167,15 @@ public class CollectorHealthRow
         : $"{AvgDurationMs / 1000:F1} s";
 
     public string LastSuccessFormatted => LastSuccessTime.HasValue
-        ? LastSuccessTime.Value.ToLocalTime().ToString("MM/dd HH:mm:ss")
+        ? LastSuccessTime.Value.ToLocalTime().ToString("g")
         : "Never";
 
     public string LastRunFormatted => LastRunTime.HasValue
-        ? LastRunTime.Value.ToLocalTime().ToString("MM/dd HH:mm:ss")
+        ? LastRunTime.Value.ToLocalTime().ToString("g")
         : "Never";
 
     public string LastErrorFormatted => LastErrorTime.HasValue
-        ? LastErrorTime.Value.ToLocalTime().ToString("MM/dd HH:mm:ss")
+        ? LastErrorTime.Value.ToLocalTime().ToString("g")
         : "";
 }
 

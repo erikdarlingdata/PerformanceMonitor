@@ -172,7 +172,7 @@ namespace PerformanceMonitorDashboard
             for (int h = 0; h < 24; h++)
             {
                 var dt = DateTime.Today.AddHours(h);
-                hours.Add(dt.ToString("h tt")); // "12 AM", "1 AM", ..., "11 PM"
+                hours.Add(dt.ToString("HH:00")); // "00:00", "01:00", ..., "23:00"
             }
 
             GlobalFromHour.ItemsSource = hours;
