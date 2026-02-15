@@ -811,8 +811,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-            rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {
@@ -881,8 +881,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-            rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {
@@ -1184,8 +1184,8 @@ public partial class ServerTab : UserControl
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
-                rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-                rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+                rangeStart = fromDate.Value;
+                rangeEnd = toDate.Value;
             }
             else
             {
@@ -1325,8 +1325,8 @@ public partial class ServerTab : UserControl
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
-                rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-                rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+                rangeStart = fromDate.Value;
+                rangeEnd = toDate.Value;
             }
             else
             {
