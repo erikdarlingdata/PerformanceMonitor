@@ -94,5 +94,13 @@ public class CollectorHealthRow
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"
         : $"{AvgDurationMs / 1000:F1} s";
+
+    public string LastSuccessFormatted => LastSuccessTime.HasValue
+        ? LastSuccessTime.Value.ToLocalTime().ToString("MM/dd HH:mm:ss")
+        : "Never";
+
+    public string LastRunFormatted => LastRunTime.HasValue
+        ? LastRunTime.Value.ToLocalTime().ToString("MM/dd HH:mm:ss")
+        : "Never";
 }
 

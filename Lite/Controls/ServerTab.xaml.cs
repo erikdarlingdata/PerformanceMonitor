@@ -58,6 +58,7 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
+    private DataGridFilterManager<CollectorHealthRow>? _collectionHealthFilterMgr;
 
     private static readonly HashSet<string> _defaultPerfmonCounters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -444,6 +445,7 @@ public partial class ServerTab : UserControl
             var databaseScopedConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseScopedConfigAsync(_serverId));
             var traceFlagsTask = SafeQueryAsync(() => _dataService.GetLatestTraceFlagsAsync(_serverId));
             var runningJobsTask = SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId));
+            var collectionHealthTask = SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId));
             /* Core data tasks */
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
@@ -451,7 +453,7 @@ public partial class ServerTab : UserControl
                 deadlockTask, blockedProcessTask, waitTypesTask, perfmonCountersTask,
                 queryStoreTask, memoryGrantTrendTask,
                 serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
-                runningJobsTask);
+                runningJobsTask, collectionHealthTask);
 
             /* Trend chart tasks - run separately so failures don't kill the whole refresh */
             var blockingTrendTask = SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
@@ -488,6 +490,7 @@ public partial class ServerTab : UserControl
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
+            _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
 
             /* Update memory summary */
             UpdateMemorySummary(memoryTask.Result);
@@ -1864,6 +1867,7 @@ public partial class ServerTab : UserControl
         _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
+        _collectionHealthFilterMgr = new DataGridFilterManager<CollectorHealthRow>(CollectionHealthGrid);
 
         _filterManagers[QuerySnapshotsGrid] = _querySnapshotsFilterMgr;
         _filterManagers[QueryStatsGrid] = _queryStatsFilterMgr;
@@ -1876,6 +1880,7 @@ public partial class ServerTab : UserControl
         _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
+        _filterManagers[CollectionHealthGrid] = _collectionHealthFilterMgr;
     }
 
     private void EnsureFilterPopup()
