@@ -86,6 +86,9 @@ namespace PerformanceMonitorDashboard
                 DefaultTimeRangeComboBox.SelectedIndex = 2; // 24 hours
             }
 
+            // Navigation settings
+            FocusServerTabCheckBox.IsChecked = prefs.FocusServerTabOnClick;
+
             // Query logging settings
             LogSlowQueriesCheckBox.IsChecked = prefs.LogSlowQueries;
             QueryLogger.SetEnabled(prefs.LogSlowQueries);
@@ -419,6 +422,9 @@ namespace PerformanceMonitorDashboard
             {
                 prefs.DefaultHoursBack = int.Parse(rangeItem.Tag.ToString()!, CultureInfo.InvariantCulture);
             }
+
+            // Save navigation settings
+            prefs.FocusServerTabOnClick = FocusServerTabCheckBox.IsChecked == true;
 
             // Save query logging settings
             prefs.LogSlowQueries = LogSlowQueriesCheckBox.IsChecked == true;

@@ -533,7 +533,12 @@ namespace PerformanceMonitorDashboard
 
             ServerTabControl.Items.Add(tabItem);
             _openTabs[server.Id] = tabItem;
-            ServerTabControl.SelectedItem = tabItem;
+
+            var prefs = _preferencesService.GetPreferences();
+            if (prefs.FocusServerTabOnClick)
+            {
+                ServerTabControl.SelectedItem = tabItem;
+            }
 
             _serverManager.UpdateLastConnected(server.Id);
         }

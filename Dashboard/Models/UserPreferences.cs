@@ -100,6 +100,9 @@ namespace PerformanceMonitorDashboard.Models
         public bool McpEnabled { get; set; } = false;
         public int McpPort { get; set; } = 5150;
 
+        // Navigation settings
+        public bool FocusServerTabOnClick { get; set; } = true;
+
         // Update check settings
         public bool CheckForUpdatesOnStartup { get; set; } = true;
 
