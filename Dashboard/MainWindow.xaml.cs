@@ -902,7 +902,7 @@ namespace PerformanceMonitorDashboard
         /// Updates a server tab badge from AlertHealthResult (used by the alert engine).
         /// Constructs a minimal ServerHealthStatus for the badge evaluation.
         /// </summary>
-        private void UpdateTabBadgeFromAlertHealth(string serverId, AlertHealthResult health)
+        private void UpdateTabBadgeFromAlertHealth(string serverId, AlertHealthResult health, long prevDeadlockCount)
         {
             if (!_tabBadges.ContainsKey(serverId)) return;
 
@@ -920,14 +920,22 @@ namespace PerformanceMonitorDashboard
             };
 
             /* Set deadlock count twice to generate a delta.
-               First set establishes baseline (delta=0), second set creates actual delta. */
-            if (_previousDeadlockCounts.TryGetValue(serverId, out var prevDlCount))
-            {
-                status.DeadlockCount = prevDlCount;
-                status.DeadlockCount = health.DeadlockCount;
-            }
+               First set establishes baseline (delta=0), second set creates actual delta.
+               Uses the previous count captured BEFORE EvaluateAlertConditionsAsync updated it. */
+            status.DeadlockCount = prevDeadlockCount;
+            status.DeadlockCount = health.DeadlockCount;
 
             UpdateTabBadge(serverId, status);
+
+            /* Also update sub-tab badges (Locking, Memory, Resource Metrics) in open ServerTab instances */
+            foreach (var tabItem in ServerTabControl.Items.OfType<TabItem>())
+            {
+                if (tabItem.Content is ServerTab serverTab && serverTab.ServerId == serverId)
+                {
+                    serverTab.UpdateBadges(status, _alertStateService);
+                    break;
+                }
+            }
         }
 
         #region Independent Alert Engine
@@ -982,11 +990,15 @@ namespace PerformanceMonitorDashboard
 
                     if (health.IsOnline)
                     {
+                        /* Capture previous deadlock count BEFORE EvaluateAlertConditionsAsync updates it,
+                           so the badge delta calculation sees the correct baseline. */
+                        var prevDeadlockCount = _previousDeadlockCounts.TryGetValue(server.Id, out var pdc) ? pdc : 0;
+
                         await EvaluateAlertConditionsAsync(server.Id, server.DisplayName, health, databaseService);
 
                         /* Update tab badges from alert health data.
                            This ensures badges update even when the NOC view isn't active. */
-                        await Dispatcher.InvokeAsync(() => UpdateTabBadgeFromAlertHealth(server.Id, health));
+                        await Dispatcher.InvokeAsync(() => UpdateTabBadgeFromAlertHealth(server.Id, health, prevDeadlockCount));
                     }
                 }
                 catch (Exception ex)
