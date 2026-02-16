@@ -49,6 +49,7 @@ BEGIN
         @rows_available integer = 0,
         @rows_deleted bigint = 0,
         @rows_marked bigint = 0,
+        @rows_parsed bigint = 0,
         @start_time datetime2(7) = SYSDATETIME(),
         @error_message nvarchar(4000),
         @error_number integer,
@@ -189,27 +190,48 @@ BEGIN
                 @debug = @debug;
 
             /*
-            Mark raw XML rows as processed
-            Only mark the rows in the date range we just processed
+            Verify sp_BlitzLock produced parsed results before marking rows as processed
+            If no results were inserted, leave rows unprocessed so they are retried next run
             */
-            UPDATE dx
-            SET    dx.is_processed = 1
-            FROM collect.deadlock_xml AS dx
-            WHERE dx.is_processed = 0
-            AND   (@start_date IS NULL OR dx.event_time >= @start_date)
-            AND   (@end_date IS NULL OR dx.event_time <= @end_date);
-
             SELECT
-                @rows_marked = ROWCOUNT_BIG();
+                @rows_parsed = COUNT_BIG(*)
+            FROM collect.deadlocks AS d
+            WHERE d.event_date >= @start_date
+            AND   d.event_date <= @end_date
+            OPTION(RECOMPILE);
 
-            IF @debug = 1
+            IF @rows_parsed > 0
             BEGIN
-                RAISERROR(N'Marked %I64d raw XML rows as processed', 0, 1, @rows_marked) WITH NOWAIT;
+                /*
+                Mark raw XML rows as processed
+                Only mark the rows in the date range we just processed
+                */
+                UPDATE dx
+                SET    dx.is_processed = 1
+                FROM collect.deadlock_xml AS dx
+                WHERE dx.is_processed = 0
+                AND   (@start_date IS NULL OR dx.event_time >= @start_date)
+                AND   (@end_date IS NULL OR dx.event_time <= @end_date);
+
+                SELECT
+                    @rows_marked = ROWCOUNT_BIG();
+
+                IF @debug = 1
+                BEGIN
+                    RAISERROR(N'Marked %I64d raw XML rows as processed (%I64d parsed deadlocks)', 0, 1, @rows_marked, @rows_parsed) WITH NOWAIT;
+                END;
+            END;
+            ELSE
+            BEGIN
+                IF @debug = 1
+                BEGIN
+                    RAISERROR(N'sp_BlitzLock produced 0 parsed results for %d XML events - rows left unprocessed for retry', 0, 1, @rows_available) WITH NOWAIT;
+                END;
             END;
         END;
 
         /*
-        Log successful processing
+        Log processing result
         */
         INSERT INTO
             config.collection_log
@@ -217,19 +239,29 @@ BEGIN
             collector_name,
             collection_status,
             rows_collected,
-            duration_ms
+            duration_ms,
+            error_message
         )
         VALUES
         (
             N'process_deadlock_xml',
-            N'SUCCESS',
+            CASE WHEN @rows_available = 0 THEN N'SUCCESS'
+                 WHEN @rows_parsed > 0 THEN N'SUCCESS'
+                 ELSE N'NO_RESULTS'
+            END,
             @rows_available,
-            DATEDIFF(MILLISECOND, @start_time, SYSDATETIME())
+            DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
+            CASE WHEN @rows_available > 0 AND @rows_parsed = 0
+                 THEN N'sp_BlitzLock returned 0 parsed results for '
+                      + CAST(@rows_available AS nvarchar(20))
+                      + N' XML events - rows left unprocessed for retry'
+                 ELSE NULL
+            END
         );
 
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Processed %d deadlock XML events', 0, 1, @rows_available) WITH NOWAIT;
+            RAISERROR(N'Processed %d deadlock XML events (%I64d parsed results)', 0, 1, @rows_available, @rows_parsed) WITH NOWAIT;
         END;
 
         COMMIT TRANSACTION;
