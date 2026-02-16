@@ -1,0 +1,79 @@
+name: SQL Validation
+
+on:
+  push:
+    branches: [dev]
+    paths: ['install/**']
+  pull_request:
+    branches: [dev]
+    paths: ['install/**']
+
+jobs:
+  validate-sql:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '2017'
+            image: mcr.microsoft.com/mssql/server:2017-latest
+          - version: '2019'
+            image: mcr.microsoft.com/mssql/server:2019-latest
+          - version: '2022'
+            image: mcr.microsoft.com/mssql/server:2022-latest
+          - version: '2025'
+            image: mcr.microsoft.com/mssql/server:2025-latest
+
+    name: SQL Server ${{ matrix.version }}
+
+    services:
+      sqlserver:
+        image: ${{ matrix.image }}
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CI_Test#2026!
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "grep -q 'SQL Server is now ready for client connections' /var/opt/mssql/log/errorlog || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sqlcmd
+        run: |
+          # Ubuntu 24.04 runners have Microsoft repo pre-configured; avoid Signed-By conflicts
+          if ! grep -rql 'packages.microsoft.com' /etc/apt/sources.list.d/ 2>/dev/null; then
+            curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+            source /etc/os-release
+            echo "deb [arch=amd64,signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/${VERSION_ID}/prod ${VERSION_CODENAME} main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          fi
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18
+
+      - name: Run install scripts
+        env:
+          SA_PASSWORD: CI_Test#2026!
+        run: |
+          for script in $(ls install/[0-9]*.sql | sort); do
+            filename=$(basename "$script")
+
+            # Skip scripts that require SQL Agent or are test/troubleshooting
+            case "$filename" in
+              45_*) echo "Skipping $filename (requires SQL Agent)"; continue;;
+              97_*|98_*|99_*) echo "Skipping $filename (test/troubleshooting)"; continue;;
+            esac
+
+            echo "Running $filename..."
+            /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$SA_PASSWORD" -C -No -b -i "$script"
+            echo "  OK"
+          done
+
+      - name: Validate installation
+        env:
+          SA_PASSWORD: CI_Test#2026!
+        run: |
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$SA_PASSWORD" -C -No -b -i .github/sql/ci_validate_installation.sql

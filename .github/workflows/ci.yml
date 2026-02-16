@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore dependencies
+        run: |
+          dotnet restore Dashboard/Dashboard.csproj
+          dotnet restore Lite/PerformanceMonitorLite.csproj
+          dotnet restore Installer/PerformanceMonitorInstaller.csproj
+          dotnet restore InstallerGui/InstallerGui.csproj
+          dotnet restore Lite.Tests/Lite.Tests.csproj
+
+      - name: Build all projects
+        run: |
+          dotnet build Dashboard/Dashboard.csproj -c Release --no-restore
+          dotnet build Lite/PerformanceMonitorLite.csproj -c Release --no-restore
+          dotnet build Installer/PerformanceMonitorInstaller.csproj -c Release --no-restore
+          dotnet build InstallerGui/InstallerGui.csproj -c Release --no-restore
+          dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      - name: Run tests
+        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal
