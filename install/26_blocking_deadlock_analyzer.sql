@@ -102,7 +102,7 @@ BEGIN
 
             RAISERROR(N'Aggregating blocking and deadlock events from the last %d hour(s)', 0, 1, @lookback_hours) WITH NOWAIT;
             RAISERROR(N'Blocking: counting events from %s', 0, 1, @blocking_range) WITH NOWAIT;
-            RAISERROR(N'Deadlock: counting events from %s (interval-based)', 0, 1, @deadlock_range) WITH NOWAIT;
+            RAISERROR(N'Deadlock: counting events collected from %s (by collection_time)', 0, 1, @deadlock_range) WITH NOWAIT;
         END;
 
         /*
@@ -188,8 +188,8 @@ BEGIN
                     total_deadlock_wait_time_ms = SUM(bl.wait_time),
                     victim_count = SUM(CASE WHEN bl.deadlock_group LIKE N'%- VICTIM' THEN 1 ELSE 0 END)
                 FROM collect.deadlocks AS bl
-                WHERE bl.event_date >= @last_deadlock_collection
-                AND   bl.event_date < @start_time
+                WHERE bl.collection_time >= @last_deadlock_collection
+                AND   bl.collection_time < @start_time
                 GROUP BY
                     bl.database_name
             )

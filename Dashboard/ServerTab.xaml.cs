@@ -1661,13 +1661,13 @@ namespace PerformanceMonitorDashboard
             var orderedData = data?.OrderBy(d => d.CollectionTime).ToList() ?? new List<BlockingDeadlockStatsItem>();
 
             // Get all unique time points for consistent X-axis across all charts
-            // Blocking Events Delta Chart
+            // Blocking Events Chart (raw per-interval count, not delta)
             BlockingStatsBlockingEventsChart.Plot.Clear();
             _blockingEventsHover?.Clear();
             ApplyDarkModeToChart(BlockingStatsBlockingEventsChart);
             var (blockingXs, blockingYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
-                orderedData.Select(d => (double)d.BlockingEventCountDelta));
+                orderedData.Select(d => (double)d.BlockingEventCount));
             if (blockingXs.Length > 0)
             {
                 var scatter = BlockingStatsBlockingEventsChart.Plot.Add.Scatter(blockingXs, blockingYs);
@@ -1691,13 +1691,13 @@ namespace PerformanceMonitorDashboard
             LockChartVerticalAxis(BlockingStatsBlockingEventsChart);
             BlockingStatsBlockingEventsChart.Refresh();
 
-            // Blocking Duration Delta Chart
+            // Blocking Duration Chart (raw per-interval total, not delta)
             BlockingStatsDurationChart.Plot.Clear();
             _blockingDurationHover?.Clear();
             ApplyDarkModeToChart(BlockingStatsDurationChart);
             var (durationXs, durationYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
-                orderedData.Select(d => (double)d.TotalBlockingDurationMsDelta));
+                orderedData.Select(d => (double)d.TotalBlockingDurationMs));
             if (durationXs.Length > 0)
             {
                 var scatter = BlockingStatsDurationChart.Plot.Add.Scatter(durationXs, durationYs);
@@ -1721,13 +1721,13 @@ namespace PerformanceMonitorDashboard
             LockChartVerticalAxis(BlockingStatsDurationChart);
             BlockingStatsDurationChart.Refresh();
 
-            // Deadlock Count Delta Chart
+            // Deadlock Count Chart (raw per-interval count, not delta)
             BlockingStatsDeadlocksChart.Plot.Clear();
             _deadlocksHover?.Clear();
             ApplyDarkModeToChart(BlockingStatsDeadlocksChart);
             var (deadlockXs, deadlockYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
-                orderedData.Select(d => (double)d.DeadlockCountDelta));
+                orderedData.Select(d => (double)d.DeadlockCount));
             if (deadlockXs.Length > 0)
             {
                 var scatter = BlockingStatsDeadlocksChart.Plot.Add.Scatter(deadlockXs, deadlockYs);
@@ -1751,13 +1751,13 @@ namespace PerformanceMonitorDashboard
             LockChartVerticalAxis(BlockingStatsDeadlocksChart);
             BlockingStatsDeadlocksChart.Refresh();
 
-            // Deadlock Wait Time Chart
+            // Deadlock Wait Time Chart (raw per-interval total, not delta)
             BlockingStatsDeadlockWaitTimeChart.Plot.Clear();
             _deadlockWaitTimeHover?.Clear();
             ApplyDarkModeToChart(BlockingStatsDeadlockWaitTimeChart);
             var (deadlockWaitXs, deadlockWaitYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
-                orderedData.Select(d => (double)d.TotalDeadlockWaitTimeMsDelta));
+                orderedData.Select(d => (double)d.TotalDeadlockWaitTimeMs));
             if (deadlockWaitXs.Length > 0)
             {
                 var scatter = BlockingStatsDeadlockWaitTimeChart.Plot.Add.Scatter(deadlockWaitXs, deadlockWaitYs);

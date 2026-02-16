@@ -1122,7 +1122,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Blocking Events (Delta)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Blocking Events" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsBlockingEventsChart"/>
                                     </Grid>
                                 </Border>
@@ -1133,7 +1133,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Blocking Duration (Delta ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Blocking Duration (ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsDurationChart"/>
                                     </Grid>
                                 </Border>
@@ -1144,7 +1144,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Deadlock Count (Delta)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Deadlock Count" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsDeadlocksChart"/>
                                     </Grid>
                                 </Border>
@@ -1155,7 +1155,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Deadlock Wait Time (Delta ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Deadlock Wait Time (ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsDeadlockWaitTimeChart"/>
                                     </Grid>
                                 </Border>
