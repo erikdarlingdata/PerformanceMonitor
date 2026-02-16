@@ -25,16 +25,31 @@ Free, open-source SQL Server performance monitoring in two editions. Built for D
 
 ---
 
-### Support & Professional Services
+### Support, Licensing & Professional Services
 
-**This project is free and open source.** If you find it valuable, consider supporting continued development:
+**This project is free and open source under the MIT License.** The software is fully functional with no features withheld — every user gets the same tool, same collectors, same MCP integration.
+
+However, some organizations have procurement or compliance policies that require a formal vendor relationship, a support agreement, or an invoice on file before software can be deployed to production. If that sounds familiar, two commercial support tiers are available:
+
+| Tier | Annual Cost | What You Get |
+|------|-------------|--------------|
+| **Supported** | $500/year | Email support (2-business-day response), compatibility guarantees for new SQL Server versions, vendor agreement and invoices for compliance, unlimited instances |
+| **Priority** | $2,500/year | Next-business-day email response, quarterly live Q&A sessions, early access to new features, roadmap input, unlimited instances |
+
+Both tiers cover unlimited SQL Server instances. The software itself is identical — commercial support is about the relationship, not a feature gate.
+
+**[Read more about the free tool and commercial options](https://erikdarling.com/free-sql-server-performance-monitoring/)** | **[Purchase a support subscription](https://training.erikdarling.com/sql-monitoring)**
+
+---
+
+**Other ways to support this project:**
 
 | | |
 |---|---|
 | **Sponsor on GitHub** | [Become a sponsor](https://github.com/sponsors/erikdarlingdata) to fund new features, ongoing maintenance, and SQL Server version support. |
 | **Consulting Services** | Need help analyzing the data this tool collects? Want expert assistance fixing the issues it uncovers? [Hire me](https://training.erikdarling.com/sqlconsulting) for hands-on consulting. |
 
-Neither is required — use the tool freely. Sponsorship and consulting keep this project alive.
+None of this is required — use the tool freely. Sponsorship, support subscriptions, and consulting keep this project alive.
 
 ---
 
