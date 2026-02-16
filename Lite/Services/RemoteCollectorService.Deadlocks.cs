@@ -302,7 +302,7 @@ FROM
     FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""database_xml_deadlock_report""]') AS q(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
+WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
 OPTION(RECOMPILE);";
         }
         else
@@ -343,7 +343,7 @@ FROM
     FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""xml_deadlock_report""]') AS q(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
+WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
 OPTION(RECOMPILE);";
         }
 
@@ -353,10 +353,35 @@ OPTION(RECOMPILE);";
         _lastSqlMs = 0;
         _lastDuckDbMs = 0;
 
+        /* Query the most recent deadlock_time we already have for this server.
+           Pass it to SQL Server so we only fetch events newer than what we've collected.
+           This prevents the same deadlock from being inserted multiple times as it
+           lingers in the ring buffer across collection cycles. */
+        DateTime? lastCollectedTime = null;
+        try
+        {
+            using var duckConn = _duckDb.CreateConnection();
+            await duckConn.OpenAsync(cancellationToken);
+            using var cmd = duckConn.CreateCommand();
+            cmd.CommandText = "SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = $1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            if (result is DateTime dt)
+                lastCollectedTime = dt;
+        }
+        catch
+        {
+            /* If DuckDB query fails, fall back to default 10-minute window */
+        }
+
         var sqlSw = Stopwatch.StartNew();
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
         using var command = new SqlCommand(query, sqlConnection);
         command.CommandTimeout = CommandTimeoutSeconds;
+
+        /* Use the most recent timestamp from DuckDB as the cutoff, or fall back to 10-minute window */
+        command.Parameters.AddWithValue("@cutoff_time",
+            lastCollectedTime ?? DateTime.UtcNow.AddMinutes(-10));
 
         try
         {
