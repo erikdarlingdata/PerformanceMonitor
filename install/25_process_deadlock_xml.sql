@@ -129,7 +129,7 @@ BEGIN
             BEGIN
                 SELECT
                     @start_date = MIN(dx.event_time),
-                    @end_date = MAX(dx.event_time)
+                    @end_date = DATEADD(SECOND, 1, MAX(dx.event_time))
                 FROM collect.deadlock_xml AS dx
                 WHERE dx.is_processed = 0
                 AND   dx.event_time IS NOT NULL
