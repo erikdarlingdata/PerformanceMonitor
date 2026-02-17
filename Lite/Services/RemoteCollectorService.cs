@@ -80,7 +80,7 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Connection timeout for SQL Server connections in seconds.
     /// </summary>
-    private const int ConnectionTimeoutSeconds = 15;
+    private const int ConnectionTimeoutSeconds = 5;
 
     /// <summary>
     /// Per-call timing fields set by each collector method.
@@ -193,18 +193,27 @@ public partial class RemoteCollectorService
             return;
         }
 
-        _logger?.LogInformation("Running {CollectorCount} collectors for {ServerCount} servers",
-            dueCollectors.Count, enabledServers.Count);
-
         var tasks = new List<Task>();
+        int skippedOffline = 0;
 
         foreach (var server in enabledServers)
         {
+            var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+            if (serverStatus.IsOnline == false)
+            {
+                skippedOffline++;
+                _logger?.LogDebug("Skipping offline server '{Server}'", server.DisplayName);
+                continue;
+            }
+
             foreach (var collector in dueCollectors)
             {
                 tasks.Add(RunCollectorAsync(server, collector.Name, cancellationToken));
             }
         }
+
+        _logger?.LogInformation("Running {CollectorCount} collectors for {OnlineCount}/{TotalCount} servers ({SkippedCount} offline, skipped)",
+            dueCollectors.Count, enabledServers.Count - skippedOffline, enabledServers.Count, skippedOffline);
 
         await Task.WhenAll(tasks);
     }
