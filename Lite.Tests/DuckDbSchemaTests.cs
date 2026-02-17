@@ -96,7 +96,7 @@ public class DuckDbSchemaTests : IDisposable
         cmd.CommandText = "SELECT MAX(version) FROM schema_version";
         var version = Convert.ToInt32(await cmd.ExecuteScalarAsync());
 
-        Assert.Equal(9, version);
+        Assert.Equal(10, version);
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public class DuckDbSchemaTests : IDisposable
         cmd.CommandText = "SELECT MAX(version) FROM schema_version";
         var version = Convert.ToInt32(await cmd.ExecuteScalarAsync());
 
-        Assert.Equal(9, version);
+        Assert.Equal(10, version);
     }
 
     [Fact]
