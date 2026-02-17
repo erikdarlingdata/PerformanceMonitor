@@ -363,13 +363,13 @@ public partial class RemoteCollectorService
         RecordCollectorResult(GetServerId(server), collectorName, status == "SUCCESS", errorMessage);
 
         // Log the collection attempt
-        await LogCollectionAsync(GetServerId(server), collectorName, startTime, status, errorMessage, rowsCollected, _lastSqlMs, _lastDuckDbMs);
+        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, _lastSqlMs, _lastDuckDbMs);
     }
 
     /// <summary>
     /// Logs a collection attempt to the collection_log table.
     /// </summary>
-    private async Task LogCollectionAsync(int serverId, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0)
+    private async Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0)
     {
         try
         {
@@ -380,11 +380,12 @@ public partial class RemoteCollectorService
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-                INSERT INTO collection_log (log_id, server_id, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
             command.Parameters.Add(new DuckDBParameter { Value = GenerateCollectionId() });
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = serverName });
             command.Parameters.Add(new DuckDBParameter { Value = collectorName });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = durationMs });

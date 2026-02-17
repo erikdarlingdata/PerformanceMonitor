@@ -249,6 +249,10 @@ public partial class MainWindow : Window
     private void RefreshServerList()
     {
         var servers = _serverManager.GetAllServers();
+        foreach (var server in servers)
+        {
+            server.IsOnline = _serverManager.GetConnectionStatus(server.Id).IsOnline;
+        }
         ServerListView.ItemsSource = servers;
 
         // Update UI based on server count
@@ -883,9 +887,11 @@ public partial class MainWindow : Window
         try
         {
             var servers = _serverManager.GetAllServers();
+            bool needsRefresh = false;
             foreach (var server in servers)
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
+                server.IsOnline = status?.IsOnline;
                 if (status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;
@@ -912,11 +918,21 @@ public partial class MainWindow : Window
 
                     if (wasOnline != isOnline)
                     {
-                        RefreshServerList();
+                        needsRefresh = true;
                     }
+                }
+                else
+                {
+                    /* First time seeing this server's status — need to refresh */
+                    needsRefresh = true;
                 }
 
                 _previousConnectionStates[server.Id] = isOnline;
+            }
+
+            if (needsRefresh)
+            {
+                RefreshServerList();
             }
         }
         catch (Exception ex)

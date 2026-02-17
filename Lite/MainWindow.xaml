@@ -97,10 +97,10 @@
                                             <Style TargetType="Ellipse">
                                                 <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
                                                 <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding IsEnabled}" Value="True">
+                                                    <DataTrigger Binding="{Binding IsOnline}" Value="True">
                                                         <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
                                                     </DataTrigger>
-                                                    <DataTrigger Binding="{Binding IsEnabled}" Value="False">
+                                                    <DataTrigger Binding="{Binding IsOnline}" Value="False">
                                                         <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
                                                     </DataTrigger>
                                                 </Style.Triggers>

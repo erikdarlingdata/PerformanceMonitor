@@ -79,7 +79,8 @@ SELECT
     duckdb_duration_ms,
     rows_collected,
     status,
-    error_message
+    error_message,
+    server_name
 FROM collection_log
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -103,7 +104,8 @@ LIMIT $3";
                 DuckDbDurationMs = reader.IsDBNull(4) ? null : (int?)Convert.ToInt32(reader.GetValue(4)),
                 RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
                 Status = reader.GetString(6),
-                ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7)
+                ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
             });
         }
 
@@ -114,6 +116,7 @@ LIMIT $3";
 public class CollectionLogRow
 {
     public string CollectorName { get; set; } = "";
+    public string? ServerName { get; set; }
     public DateTime CollectionTime { get; set; }
     public int? DurationMs { get; set; }
     public int? SqlDurationMs { get; set; }

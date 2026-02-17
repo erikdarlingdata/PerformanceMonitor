@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS collection_schedule (
 CREATE TABLE IF NOT EXISTS collection_log (
     log_id BIGINT PRIMARY KEY,
     server_id INTEGER NOT NULL,
+    server_name VARCHAR,
     collector_name VARCHAR NOT NULL,
     collection_time TIMESTAMP NOT NULL,
     duration_ms INTEGER,

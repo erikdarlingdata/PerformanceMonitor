@@ -849,12 +849,19 @@ public partial class ServerTab : UserControl
 
         if (data.Count == 0)
         {
-            /* Show empty chart with correct time range */
+            /* No blocking events — show a flat line at zero so the chart looks active */
+            var zeroLine = BlockingTrendChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Blocking Incidents";
+            zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
+            zeroLine.MarkerSize = 0;
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
-            BlockingTrendChart.Plot.Axes.SetLimitsY(0, 1);
             ReapplyAxisColors(BlockingTrendChart);
             BlockingTrendChart.Plot.YLabel("Blocking Incidents");
+            SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
+            ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
             return;
         }
@@ -919,12 +926,19 @@ public partial class ServerTab : UserControl
 
         if (data.Count == 0)
         {
-            /* Show empty chart with correct time range */
+            /* No deadlocks — show a flat line at zero so the chart looks active */
+            var zeroLine = DeadlockTrendChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Deadlocks";
+            zeroLine.Color = ScottPlot.Color.FromHex("#FFB74D");
+            zeroLine.MarkerSize = 0;
             DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
             DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
-            DeadlockTrendChart.Plot.Axes.SetLimitsY(0, 1);
             ReapplyAxisColors(DeadlockTrendChart);
             DeadlockTrendChart.Plot.YLabel("Deadlocks");
+            SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, 1);
+            ShowChartLegend(DeadlockTrendChart);
             DeadlockTrendChart.Refresh();
             return;
         }
@@ -1495,13 +1509,13 @@ public partial class ServerTab : UserControl
             dataYMin = limits.Bottom;
             dataYMax = limits.Top;
         }
-        if (dataYMax <= dataYMin) dataYMax = dataYMin + 100;
+        if (dataYMax <= dataYMin) dataYMax = dataYMin + 1;
 
         double range = dataYMax - dataYMin;
         double topPadding = range * 0.05;
 
-        /* Only add bottom padding if dataYMin is above zero - don't go negative */
-        double yMin = dataYMin >= 0 ? 0 : dataYMin - (range * 0.10);
+        /* Add small bottom margin when dataYMin is zero so flat lines at Y=0 are visible above the axis */
+        double yMin = dataYMin > 0 ? 0 : dataYMin == 0 ? -(range * 0.05) : dataYMin - (range * 0.10);
         double yMax = dataYMax + topPadding;
 
         chart.Plot.Axes.SetLimitsY(yMin, yMax);

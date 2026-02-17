@@ -19,7 +19,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    private const int CurrentSchemaVersion = 9;
+    private const int CurrentSchemaVersion = 10;
 
     public DuckDbInitializer(string databasePath, ILogger<DuckDbInitializer>? logger = null)
     {
@@ -322,6 +322,21 @@ public class DuckDbInitializer
             {
                 /* DuckDB does not support ADD COLUMN with NOT NULL — use nullable with DEFAULT */
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS dismissed BOOLEAN DEFAULT false");
+            }
+            catch
+            {
+                /* Table doesn't exist yet — will be created with correct schema below */
+            }
+        }
+
+        if (fromVersion < 10)
+        {
+            /* v10: Added server_name column to collection_log so log entries
+                    can be identified by server without needing a lookup table. */
+            _logger?.LogInformation("Running migration to v10: adding server_name column to collection_log");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE collection_log ADD COLUMN IF NOT EXISTS server_name VARCHAR");
             }
             catch
             {
