@@ -21,7 +21,7 @@ namespace PerformanceMonitorLite.Services
     /// </summary>
     public class AlertStateService
     {
-        private readonly object _lock = new object();
+        private readonly object _lock = new();
         private readonly string _stateFilePath;
 
         private readonly HashSet<string> _silencedServers;
@@ -154,6 +154,11 @@ namespace PerformanceMonitorLite.Services
             return true;
         }
 
+        private static readonly JsonSerializerOptions s_writeOptions = new()
+        {
+            WriteIndented = true
+        };
+
         private void Save()
         {
             try
@@ -163,7 +168,7 @@ namespace PerformanceMonitorLite.Services
                     SilencedServers = _silencedServers.ToList(),
                     AcknowledgedAlerts = _acknowledgedAlerts.ToDictionary(kv => kv.Key, kv => kv.Value)
                 };
-                var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
+                var json = JsonSerializer.Serialize(state, s_writeOptions);
                 File.WriteAllText(_stateFilePath, json);
             }
             catch

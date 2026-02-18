@@ -32,7 +32,7 @@ namespace PerformanceMonitorDashboard
         {
             OperatorComboBox.Items.Clear();
 
-            foreach (FilterOperator op in Enum.GetValues(typeof(FilterOperator)))
+            foreach (FilterOperator op in Enum.GetValues<FilterOperator>())
             {
                 OperatorComboBox.Items.Add(new ComboBoxItem
                 {
