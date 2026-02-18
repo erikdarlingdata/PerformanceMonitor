@@ -93,6 +93,13 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
+                // Only show loading overlay on initial load (no existing data)
+                if (CriticalIssuesDataGrid.ItemsSource == null)
+                {
+                    CriticalIssuesLoading.IsLoading = true;
+                    CriticalIssuesNoDataMessage.Visibility = Visibility.Collapsed;
+                }
+
                 var data = await _databaseService.GetCriticalIssuesAsync(
                     _criticalIssuesHoursBack,
                     _criticalIssuesFromDate,
@@ -110,6 +117,10 @@ namespace PerformanceMonitorDashboard.Controls
             catch (Exception ex)
             {
                 Logger.Error($"Error loading critical issues: {ex.Message}");
+            }
+            finally
+            {
+                CriticalIssuesLoading.IsLoading = false;
             }
         }
 

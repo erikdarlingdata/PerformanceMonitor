@@ -649,7 +649,13 @@ public partial class MainWindow : Window
                     if (border.Child is TextBlock text)
                     {
                         text.Text = totalAlerts > 99 ? "99+" : totalAlerts.ToString();
-                        text.ToolTip = $"Blocking: {blockingCount}, Deadlocks: {deadlockCount}\nRight-click to dismiss";
+                        text.ToolTip = new System.Windows.Controls.ToolTip
+                        {
+                            Content = $"Blocking: {blockingCount}, Deadlocks: {deadlockCount}\nRight-click to dismiss",
+                            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x1E, 0x1E, 0x2E)),
+                            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE4, 0xE6, 0xEB)),
+                            BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x3A, 0x3D, 0x45))
+                        };
                     }
                 }
                 else
