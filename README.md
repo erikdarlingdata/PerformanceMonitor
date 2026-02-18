@@ -2,7 +2,9 @@
 
 Free, open-source SQL Server performance monitoring in two editions. Built for DBAs, consultants, and developers who want real insight without enterprise complexity.
 
-**Supported:** SQL Server 2016, 2017, 2019, 2022, 2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite only)
+**Supported SQL Servers:** SQL Server 2016, 2017, 2019, 2022, 2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite only)
+
+**Dashboard/Lite requires:** Windows 10 or later, Windows Server 2016 or later
 
 ---
 
@@ -61,7 +63,7 @@ Installs a `PerformanceMonitor` database with 30 collector stored procedures and
 
 **Best for:** Production 24/7 monitoring, long-term baselining, maximum data fidelity.
 
-**Requirements:** sysadmin on target server (or equivalent on managed platforms), SQL Server Agent running.
+**Requirements:** Windows 10+ / Server 2016+ (Dashboard), sysadmin on target server (or equivalent on managed platforms), SQL Server Agent running.
 
 ### Lite Edition (Desktop Application)
 
@@ -69,7 +71,7 @@ A single WPF desktop application that monitors SQL Server instances remotely. Qu
 
 **Best for:** Quick triage, Azure SQL Database, locked-down servers, consultants, firefighting.
 
-**Requirements:** `VIEW SERVER STATE` on target server (`VIEW DATABASE STATE` for Query Store).
+**Requirements:** Windows 10+ / Server 2016+, `VIEW SERVER STATE` on target server (`VIEW DATABASE STATE` for Query Store).
 
 ### Comparison
 
