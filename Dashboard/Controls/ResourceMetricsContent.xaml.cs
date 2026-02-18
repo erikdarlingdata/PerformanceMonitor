@@ -99,6 +99,12 @@ namespace PerformanceMonitorDashboard.Controls
         private Helpers.ChartHoverHelper? _fileIoWriteHover;
         private Helpers.ChartHoverHelper? _perfmonHover;
         private Helpers.ChartHoverHelper? _waitStatsHover;
+        private Helpers.ChartHoverHelper? _tempdbStatsHover;
+        private Helpers.ChartHoverHelper? _tempDbLatencyHover;
+        private Helpers.ChartHoverHelper? _serverTrendsCpuHover;
+        private Helpers.ChartHoverHelper? _serverTrendsTempdbHover;
+        private Helpers.ChartHoverHelper? _serverTrendsMemoryHover;
+        private Helpers.ChartHoverHelper? _serverTrendsPerfmonHover;
         // Column filter popup and state
         private Popup? _filterPopup;
         private ColumnFilterPopup? _filterPopupContent;
@@ -130,6 +136,12 @@ namespace PerformanceMonitorDashboard.Controls
             _fileIoWriteHover = new Helpers.ChartHoverHelper(UserDbWriteLatencyChart, "ms");
             _perfmonHover = new Helpers.ChartHoverHelper(PerfmonCountersChart, "");
             _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsDetailChart, "ms/sec");
+            _tempdbStatsHover = new Helpers.ChartHoverHelper(TempdbStatsChart, "MB");
+            _tempDbLatencyHover = new Helpers.ChartHoverHelper(TempDbLatencyChart, "ms");
+            _serverTrendsCpuHover = new Helpers.ChartHoverHelper(ServerUtilTrendsCpuChart, "%");
+            _serverTrendsTempdbHover = new Helpers.ChartHoverHelper(ServerUtilTrendsTempdbChart, "MB");
+            _serverTrendsMemoryHover = new Helpers.ChartHoverHelper(ServerUtilTrendsMemoryChart, "MB");
+            _serverTrendsPerfmonHover = new Helpers.ChartHoverHelper(ServerUtilTrendsPerfmonChart, "/sec");
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -491,6 +503,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[TempDbLatencyChart] = null;
             }
             TempDbLatencyChart.Plot.Clear();
+            _tempDbLatencyHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(TempDbLatencyChart);
 
             if (data != null && data.Count > 0)
@@ -516,6 +529,7 @@ namespace PerformanceMonitorDashboard.Controls
                 readScatter.MarkerSize = 5;
                 readScatter.Color = TabHelpers.ChartColors[0];
                 readScatter.LegendText = "Read Latency";
+                _tempDbLatencyHover?.Add(readScatter, "Read Latency");
 
                 // Write Latency series
                 var (writeXs, writeYs) = TabHelpers.FillTimeSeriesGaps(
@@ -526,6 +540,7 @@ namespace PerformanceMonitorDashboard.Controls
                 writeScatter.MarkerSize = 5;
                 writeScatter.Color = TabHelpers.ChartColors[2];
                 writeScatter.LegendText = "Write Latency";
+                _tempDbLatencyHover?.Add(writeScatter, "Write Latency");
 
                 // Store legend panel reference for removal on refresh (ScottPlot issue #4717)
                 _legendPanels[TempDbLatencyChart] = TempDbLatencyChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -562,6 +577,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[TempdbStatsChart] = null;
             }
             TempdbStatsChart.Plot.Clear();
+            _tempdbStatsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(TempdbStatsChart);
 
             var dataList = data?.OrderBy(d => d.CollectionTime).ToList() ?? new List<TempdbStatsItem>();
@@ -576,6 +592,7 @@ namespace PerformanceMonitorDashboard.Controls
                 userScatter.MarkerSize = 5;
                 userScatter.Color = TabHelpers.ChartColors[0];
                 userScatter.LegendText = "User Objects";
+                _tempdbStatsHover?.Add(userScatter, "User Objects");
 
                 // Version Store series
                 var (versionXs, versionYs) = TabHelpers.FillTimeSeriesGaps(
@@ -586,6 +603,7 @@ namespace PerformanceMonitorDashboard.Controls
                 versionScatter.MarkerSize = 5;
                 versionScatter.Color = TabHelpers.ChartColors[1];
                 versionScatter.LegendText = "Version Store";
+                _tempdbStatsHover?.Add(versionScatter, "Version Store");
 
                 // Internal Objects series
                 var (internalXs, internalYs) = TabHelpers.FillTimeSeriesGaps(
@@ -596,6 +614,7 @@ namespace PerformanceMonitorDashboard.Controls
                 internalScatter.MarkerSize = 5;
                 internalScatter.Color = TabHelpers.ChartColors[2];
                 internalScatter.LegendText = "Internal Objects";
+                _tempdbStatsHover?.Add(internalScatter, "Internal Objects");
 
                 // Unallocated (free space) series
                 var (unallocXs, unallocYs) = TabHelpers.FillTimeSeriesGaps(
@@ -608,6 +627,7 @@ namespace PerformanceMonitorDashboard.Controls
                     unallocScatter.MarkerSize = 5;
                     unallocScatter.Color = TabHelpers.ChartColors[9];
                     unallocScatter.LegendText = "Unallocated";
+                    _tempdbStatsHover?.Add(unallocScatter, "Unallocated");
                 }
 
                 // Top Task Total MB series (worst session's usage)
@@ -979,6 +999,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[ServerUtilTrendsCpuChart] = null;
             }
             ServerUtilTrendsCpuChart.Plot.Clear();
+            _serverTrendsCpuHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsCpuChart);
 
             var dataList = cpuData?.OrderBy(d => d.EventTime).ToList() ?? new List<CpuSpikeItem>();
@@ -993,6 +1014,7 @@ namespace PerformanceMonitorDashboard.Controls
                 sqlScatter.MarkerSize = 5;
                 sqlScatter.Color = TabHelpers.ChartColors[0];
                 sqlScatter.LegendText = "SQL CPU";
+                _serverTrendsCpuHover?.Add(sqlScatter, "SQL CPU");
 
                 // Other CPU series
                 var (otherXs, otherYs) = TabHelpers.FillTimeSeriesGaps(
@@ -1003,6 +1025,7 @@ namespace PerformanceMonitorDashboard.Controls
                 otherScatter.MarkerSize = 5;
                 otherScatter.Color = TabHelpers.ChartColors[2];
                 otherScatter.LegendText = "Other CPU";
+                _serverTrendsCpuHover?.Add(otherScatter, "Other CPU");
 
                 _legendPanels[ServerUtilTrendsCpuChart] = ServerUtilTrendsCpuChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                 ServerUtilTrendsCpuChart.Plot.Legend.FontSize = 12;
@@ -1038,6 +1061,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[ServerUtilTrendsTempdbChart] = null;
             }
             ServerUtilTrendsTempdbChart.Plot.Clear();
+            _serverTrendsTempdbHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsTempdbChart);
 
             var dataList = tempdbData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<TempdbStatsItem>();
@@ -1056,12 +1080,14 @@ namespace PerformanceMonitorDashboard.Controls
                 userScatter.MarkerSize = 5;
                 userScatter.Color = TabHelpers.ChartColors[1];
                 userScatter.LegendText = "User Objects";
+                _serverTrendsTempdbHover?.Add(userScatter, "User Objects");
 
                 var versionScatter = ServerUtilTrendsTempdbChart.Plot.Add.Scatter(versionXs, versionYs);
                 versionScatter.LineWidth = 2;
                 versionScatter.MarkerSize = 5;
                 versionScatter.Color = TabHelpers.ChartColors[2];
                 versionScatter.LegendText = "Version Store";
+                _serverTrendsTempdbHover?.Add(versionScatter, "Version Store");
 
                 _legendPanels[ServerUtilTrendsTempdbChart] = ServerUtilTrendsTempdbChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                 ServerUtilTrendsTempdbChart.Plot.Legend.FontSize = 12;
@@ -1097,6 +1123,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[ServerUtilTrendsMemoryChart] = null;
             }
             ServerUtilTrendsMemoryChart.Plot.Clear();
+            _serverTrendsMemoryHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsMemoryChart);
 
             var dataList = memoryData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<MemoryStatsItem>();
@@ -1151,12 +1178,14 @@ namespace PerformanceMonitorDashboard.Controls
                 bufferScatter.MarkerSize = 5;
                 bufferScatter.Color = TabHelpers.ChartColors[4];
                 bufferScatter.LegendText = "Buffer Pool";
+                _serverTrendsMemoryHover?.Add(bufferScatter, "Buffer Pool");
 
                 var cacheScatter = ServerUtilTrendsMemoryChart.Plot.Add.Scatter(cacheXs, cacheYs);
                 cacheScatter.LineWidth = 2;
                 cacheScatter.MarkerSize = 5;
                 cacheScatter.Color = TabHelpers.ChartColors[5];
                 cacheScatter.LegendText = "Plan Cache";
+                _serverTrendsMemoryHover?.Add(cacheScatter, "Plan Cache");
 
                 _legendPanels[ServerUtilTrendsMemoryChart] = ServerUtilTrendsMemoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                 ServerUtilTrendsMemoryChart.Plot.Legend.FontSize = 12;
@@ -1200,6 +1229,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[ServerUtilTrendsPerfmonChart] = null;
             }
             ServerUtilTrendsPerfmonChart.Plot.Clear();
+            _serverTrendsPerfmonHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsPerfmonChart);
 
             var allData = (perfmonData ?? Enumerable.Empty<PerfmonStatsItem>()).ToList();
@@ -1234,6 +1264,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = color;
                     scatter.LegendText = counterName.Replace("/sec", "", StringComparison.Ordinal);
+                    _serverTrendsPerfmonHover?.Add(scatter, counterName);
                     linesAdded++;
                 }
             }
@@ -1880,6 +1911,12 @@ namespace PerformanceMonitorDashboard.Controls
             await UpdateWaitStatsDetailChartAsync();
         }
 
+        private void WaitStatsMetric_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_allWaitStatsDetailData != null)
+                LoadWaitStatsDetailChart(_allWaitStatsDetailData, _waitStatsDetailHoursBack, _waitStatsDetailFromDate, _waitStatsDetailToDate);
+        }
+
         private void RefreshWaitTypeListOrder()
         {
             if (_waitTypeItems == null) return;
@@ -2050,9 +2087,12 @@ namespace PerformanceMonitorDashboard.Controls
                 WaitStatsDetailChart.Plot.Axes.Remove(existingWaitStatsPanel);
                 _legendPanels[WaitStatsDetailChart] = null;
             }
+            bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
+
             WaitStatsDetailChart.Plot.Clear();
             TabHelpers.ApplyDarkModeToChart(WaitStatsDetailChart);
             _waitStatsHover?.Clear();
+            if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
             if (data == null || data.Count == 0 || _waitTypeItems == null)
             {
@@ -2067,7 +2107,6 @@ namespace PerformanceMonitorDashboard.Controls
                 WaitStatsDetailChart.Refresh();
                 return;
             }
-
             var colors = TabHelpers.ChartColors;
 
             // Get all time points across all wait types for gap filling
@@ -2080,7 +2119,8 @@ namespace PerformanceMonitorDashboard.Controls
                     .GroupBy(d => d.CollectionTime)
                     .Select(g => new {
                         CollectionTime = g.Key,
-                        WaitTimeMsPerSecond = g.Sum(x => x.WaitTimeMsPerSecond)
+                        WaitTimeMsPerSecond = g.Sum(x => x.WaitTimeMsPerSecond),
+                        AvgMsPerWait = g.Average(x => x.AvgMsPerWait)
                     })
                     .OrderBy(d => d.CollectionTime)
                     .ToList();
@@ -2088,7 +2128,9 @@ namespace PerformanceMonitorDashboard.Controls
                 if (waitTypeData.Count >= 1)
                 {
                     var timePoints = waitTypeData.Select(d => d.CollectionTime);
-                    var values = waitTypeData.Select(d => (double)d.WaitTimeMsPerSecond);
+                    var values = useAvgPerWait
+                        ? waitTypeData.Select(d => (double)d.AvgMsPerWait)
+                        : waitTypeData.Select(d => (double)d.WaitTimeMsPerSecond);
                     var (xs, ys) = TabHelpers.FillTimeSeriesGaps(timePoints, values);
 
                     var scatter = WaitStatsDetailChart.Plot.Add.Scatter(xs, ys);
@@ -2124,7 +2166,7 @@ namespace PerformanceMonitorDashboard.Controls
             WaitStatsDetailChart.Plot.Axes.DateTimeTicksBottom();
             WaitStatsDetailChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(WaitStatsDetailChart);
-            WaitStatsDetailChart.Plot.YLabel("Wait Time (ms/sec)");
+            WaitStatsDetailChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");
             WaitStatsDetailChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(WaitStatsDetailChart);
             WaitStatsDetailChart.Refresh();

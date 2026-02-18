@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
@@ -198,7 +199,7 @@ OPTION(RECOMPILE);',
     @plan_id;";
 
         using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
-        command.Parameters.AddWithValue("@plan_id", planId);
+        command.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
         var result = await command.ExecuteScalarAsync();
         return result as string;
     }

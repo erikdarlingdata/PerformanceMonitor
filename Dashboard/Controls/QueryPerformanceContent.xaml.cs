@@ -93,12 +93,23 @@ namespace PerformanceMonitorDashboard.Controls
         // Legend panel references for edge-based legends (ScottPlot issue #4717 workaround)
         private Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
 
+        // Chart hover tooltips
+        private Helpers.ChartHoverHelper? _queryDurationHover;
+        private Helpers.ChartHoverHelper? _procDurationHover;
+        private Helpers.ChartHoverHelper? _qsDurationHover;
+        private Helpers.ChartHoverHelper? _execTrendsHover;
+
         public QueryPerformanceContent()
         {
             InitializeComponent();
             SetupChartSaveMenus();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
+
+            _queryDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsQueryChart, "ms/sec");
+            _procDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsProcChart, "ms/sec");
+            _qsDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsQsChart, "ms/sec");
+            _execTrendsHover = new Helpers.ChartHoverHelper(QueryPerfTrendsExecChart, "/sec");
         }
 
         private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -243,9 +254,9 @@ namespace PerformanceMonitorDashboard.Controls
                 QueryStoreNoDataMessage.Visibility = queryStore.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
                 // Populate charts from time-series data
-                LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0]);
-                LoadDurationChart(QueryPerfTrendsProcChart, await procDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[1]);
-                LoadDurationChart(QueryPerfTrendsQsChart, await qsDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[4]);
+                LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0], _queryDurationHover);
+                LoadDurationChart(QueryPerfTrendsProcChart, await procDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[1], _procDurationHover);
+                LoadDurationChart(QueryPerfTrendsQsChart, await qsDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[4], _qsDurationHover);
                 LoadExecChart(await execTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
             }
             catch (Exception ex)
@@ -890,7 +901,7 @@ namespace PerformanceMonitorDashboard.Controls
         /// Renders a duration trend chart from time-series data (per-collection_time aggregation).
         /// Replaces the old per-query-summary approach that produced too few data points.
         /// </summary>
-        private void LoadDurationChart(WpfPlot chart, IEnumerable<DurationTrendItem> trendData, int hoursBack, DateTime? fromDate, DateTime? toDate, string legendText, ScottPlot.Color color)
+        private void LoadDurationChart(WpfPlot chart, IEnumerable<DurationTrendItem> trendData, int hoursBack, DateTime? fromDate, DateTime? toDate, string legendText, ScottPlot.Color color, Helpers.ChartHoverHelper? hover = null)
         {
             try
             {
@@ -905,6 +916,7 @@ namespace PerformanceMonitorDashboard.Controls
                     _legendPanels[chart] = null;
                 }
                 chart.Plot.Clear();
+                hover?.Clear();
                 TabHelpers.ApplyDarkModeToChart(chart);
 
                 var dataList = (trendData ?? Enumerable.Empty<DurationTrendItem>())
@@ -920,6 +932,7 @@ namespace PerformanceMonitorDashboard.Controls
                 scatter.MarkerSize = 5;
                 scatter.Color = color;
                 scatter.LegendText = legendText;
+                hover?.Add(scatter, legendText);
 
                 if (xs.Length == 0)
                 {
@@ -959,6 +972,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[QueryPerfTrendsExecChart] = null;
             }
             QueryPerfTrendsExecChart.Plot.Clear();
+            _execTrendsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(QueryPerfTrendsExecChart);
 
             var dataList = (execTrends ?? Enumerable.Empty<ExecutionTrendItem>())
@@ -974,6 +988,7 @@ namespace PerformanceMonitorDashboard.Controls
             scatter.MarkerSize = 5;
             scatter.Color = TabHelpers.ChartColors[0];
             scatter.LegendText = "Executions/sec";
+            _execTrendsHover?.Add(scatter, "Executions/sec");
 
             if (xs.Length == 0)
             {

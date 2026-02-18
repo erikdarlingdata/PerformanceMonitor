@@ -13,6 +13,7 @@ using System.Net;
 using System.Net.Mail;
 using System.Net.Mime;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
@@ -20,7 +21,7 @@ using PerformanceMonitorDashboard.Models;
 namespace PerformanceMonitorDashboard.Services
 {
     /// <summary>
-    /// SMTP email sending service with per-metric cooldown and in-memory alert log.
+    /// SMTP email sending service with per-metric cooldown and persistent alert log.
     /// Uses System.Net.Mail.SmtpClient (no new NuGet packages needed).
     /// </summary>
     public class EmailAlertService
@@ -28,14 +29,16 @@ namespace PerformanceMonitorDashboard.Services
         private const string SmtpCredentialKey = "PerformanceMonitorDashboard_SMTP";
         private const int MaxAlertLogEntries = 1000;
         private static readonly CredentialService s_credentialService = new();
+        private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
 
         private readonly UserPreferencesService _preferencesService;
         private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
         private static readonly TimeSpan CooldownPeriod = TimeSpan.FromMinutes(15);
 
-        /* In-memory alert log — survives for the lifetime of the application */
+        /* Alert log — loaded from JSON on startup, saved on exit, new alerts added in-memory */
         private readonly List<AlertLogEntry> _alertLog = new();
         private readonly object _alertLogLock = new();
+        private readonly string _alertLogFilePath;
 
         /* Failure tracking for louder logging */
         private int _consecutiveFailures;
@@ -51,6 +54,14 @@ namespace PerformanceMonitorDashboard.Services
         {
             _preferencesService = preferencesService;
             Current = this;
+
+            var appDataPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "PerformanceMonitorDashboard");
+            Directory.CreateDirectory(appDataPath);
+            _alertLogFilePath = Path.Combine(appDataPath, "alert_history.json");
+
+            LoadAlertLog();
         }
 
         /// <summary>
@@ -166,7 +177,7 @@ namespace PerformanceMonitorDashboard.Services
         }
 
         /// <summary>
-        /// Gets alert history from the in-memory log.
+        /// Gets alert history from the log (excludes hidden alerts).
         /// </summary>
         public List<AlertLogEntry> GetAlertHistory(int hoursBack = 24, int limit = 50)
         {
@@ -175,10 +186,51 @@ namespace PerformanceMonitorDashboard.Services
             lock (_alertLogLock)
             {
                 return _alertLog
-                    .Where(a => a.AlertTime >= cutoff)
+                    .Where(a => a.AlertTime >= cutoff && !a.Hidden)
                     .OrderByDescending(a => a.AlertTime)
                     .Take(limit)
                     .ToList();
+            }
+        }
+
+        /// <summary>
+        /// Hides specific alerts matching the given keys.
+        /// Each key is (AlertTime, ServerName, MetricName).
+        /// </summary>
+        public void HideAlerts(List<(DateTime AlertTime, string ServerName, string MetricName)> keys)
+        {
+            if (keys.Count == 0) return;
+
+            var keySet = new HashSet<(DateTime, string, string)>(keys);
+
+            lock (_alertLogLock)
+            {
+                foreach (var alert in _alertLog)
+                {
+                    if (keySet.Contains((alert.AlertTime, alert.ServerName, alert.MetricName)))
+                        alert.Hidden = true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Hides all non-hidden alerts matching the time/server filter.
+        /// </summary>
+        public void HideAllAlerts(int hoursBack, string? serverName = null)
+        {
+            var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+            lock (_alertLogLock)
+            {
+                foreach (var alert in _alertLog)
+                {
+                    if (!alert.Hidden &&
+                        alert.AlertTime >= cutoff &&
+                        (serverName == null || alert.ServerName == serverName))
+                    {
+                        alert.Hidden = true;
+                    }
+                }
             }
         }
 
@@ -189,6 +241,55 @@ namespace PerformanceMonitorDashboard.Services
         {
             return (_consecutiveFailures, _lastFailureError);
         }
+
+        #region Alert Log Persistence
+
+        /// <summary>
+        /// Saves the alert log to a JSON file. Call on application exit.
+        /// </summary>
+        public void SaveAlertLog()
+        {
+            try
+            {
+                List<AlertLogEntry> snapshot;
+                lock (_alertLogLock)
+                {
+                    snapshot = new List<AlertLogEntry>(_alertLog);
+                }
+
+                var json = JsonSerializer.Serialize(snapshot, s_jsonOptions);
+                File.WriteAllText(_alertLogFilePath, json);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Failed to save alert log: {ex.Message}");
+            }
+        }
+
+        private void LoadAlertLog()
+        {
+            try
+            {
+                if (!File.Exists(_alertLogFilePath)) return;
+
+                var json = File.ReadAllText(_alertLogFilePath);
+                var entries = JsonSerializer.Deserialize<List<AlertLogEntry>>(json);
+
+                if (entries != null)
+                {
+                    lock (_alertLogLock)
+                    {
+                        _alertLog.AddRange(entries);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to load alert log, starting fresh: {ex.Message}");
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// Sends a test email to verify SMTP configuration.
@@ -296,7 +397,7 @@ namespace PerformanceMonitorDashboard.Services
     }
 
     /// <summary>
-    /// Represents a single alert event in the in-memory log.
+    /// Represents a single alert event in the log.
     /// </summary>
     public class AlertLogEntry
     {
@@ -309,5 +410,6 @@ namespace PerformanceMonitorDashboard.Services
         public bool AlertSent { get; set; }
         public string NotificationType { get; set; } = "";
         public string? SendError { get; set; }
+        public bool Hidden { get; set; }
     }
 }

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -302,10 +303,10 @@ namespace PerformanceMonitorDashboard.Services
 
             using var command = new SqlCommand(query, connection);
             command.CommandTimeout = 120;
-            command.Parameters.AddWithValue("@schedule_id", scheduleId);
-            command.Parameters.AddWithValue("@enabled", enabled);
-            command.Parameters.AddWithValue("@frequency_minutes", frequencyMinutes);
-            command.Parameters.AddWithValue("@retention_days", retentionDays);
+            command.Parameters.Add(new SqlParameter("@schedule_id", SqlDbType.Int) { Value = scheduleId });
+            command.Parameters.Add(new SqlParameter("@enabled", SqlDbType.Bit) { Value = enabled });
+            command.Parameters.Add(new SqlParameter("@frequency_minutes", SqlDbType.Int) { Value = frequencyMinutes });
+            command.Parameters.Add(new SqlParameter("@retention_days", SqlDbType.Int) { Value = retentionDays });
 
             await command.ExecuteNonQueryAsync();
         }

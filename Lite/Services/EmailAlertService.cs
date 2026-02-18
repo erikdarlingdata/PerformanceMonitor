@@ -52,68 +52,66 @@ public class EmailAlertService
     {
         try
         {
-            if (!App.SmtpEnabled) return;
-
-            if (string.IsNullOrWhiteSpace(App.SmtpServer) ||
-                string.IsNullOrWhiteSpace(App.SmtpFromAddress) ||
-                string.IsNullOrWhiteSpace(App.SmtpRecipients))
-            {
-                return;
-            }
-
-            /* Check cooldown */
-            var cooldownKey = $"{serverId}:{metricName}";
-            if (_cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
-                DateTime.UtcNow - lastSent < CooldownPeriod)
-            {
-                return;
-            }
-
-            var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
-            var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                metricName, serverName, currentValue, thresholdValue, context);
-
             string? sendError = null;
             bool sent = false;
+            var notificationType = "tray";
 
-            try
+            /* Attempt email delivery if SMTP is fully configured */
+            if (App.SmtpEnabled &&
+                !string.IsNullOrWhiteSpace(App.SmtpServer) &&
+                !string.IsNullOrWhiteSpace(App.SmtpFromAddress) &&
+                !string.IsNullOrWhiteSpace(App.SmtpRecipients))
             {
-                await SendEmailAsync(subject, htmlBody, plainTextBody, context);
-                sent = true;
-                _cooldowns[cooldownKey] = DateTime.UtcNow;
+                var cooldownKey = $"{serverId}:{metricName}";
+                var withinCooldown = _cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
+                    DateTime.UtcNow - lastSent < CooldownPeriod;
 
-                /* Log recovery if we had previous failures */
-                if (_consecutiveSmtpFailures > 0)
+                if (!withinCooldown)
                 {
-                    AppLogger.Info("EmailAlert", $"Email delivery recovered after {_consecutiveSmtpFailures} failure(s)");
-                }
-                _consecutiveSmtpFailures = 0;
-                _lastSmtpError = null;
+                    notificationType = "email";
 
-                AppLogger.Info("EmailAlert", $"Alert email sent for {metricName} on {serverName}");
+                    var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
+                    var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
+                        metricName, serverName, currentValue, thresholdValue, context);
+
+                    try
+                    {
+                        await SendEmailAsync(subject, htmlBody, plainTextBody, context);
+                        sent = true;
+                        _cooldowns[cooldownKey] = DateTime.UtcNow;
+
+                        if (_consecutiveSmtpFailures > 0)
+                        {
+                            AppLogger.Info("EmailAlert", $"Email delivery recovered after {_consecutiveSmtpFailures} failure(s)");
+                        }
+                        _consecutiveSmtpFailures = 0;
+                        _lastSmtpError = null;
+
+                        AppLogger.Info("EmailAlert", $"Alert email sent for {metricName} on {serverName}");
+                    }
+                    catch (Exception ex)
+                    {
+                        sendError = ex.Message;
+                        _consecutiveSmtpFailures++;
+                        _lastSmtpError = ex.Message;
+
+                        if (_consecutiveSmtpFailures <= 3)
+                        {
+                            AppLogger.Error("EmailAlert", $"ALERT EMAIL FAILED ({_consecutiveSmtpFailures}x): {ex.GetType().Name}: {ex.Message}");
+                        }
+                        else if (_consecutiveSmtpFailures % 50 == 0)
+                        {
+                            AppLogger.Error("EmailAlert", $"ALERT EMAIL STILL FAILING: {_consecutiveSmtpFailures} consecutive failures. Last error: {ex.Message}");
+                        }
+                    }
+                }
             }
-            catch (Exception ex)
-            {
-                sendError = ex.Message;
-                _consecutiveSmtpFailures++;
-                _lastSmtpError = ex.Message;
 
-                /* Loud on first 3 failures, then periodic reminders */
-                if (_consecutiveSmtpFailures <= 3)
-                {
-                    AppLogger.Error("EmailAlert", $"ALERT EMAIL FAILED ({_consecutiveSmtpFailures}x): {ex.GetType().Name}: {ex.Message}");
-                }
-                else if (_consecutiveSmtpFailures % 50 == 0)
-                {
-                    AppLogger.Error("EmailAlert", $"ALERT EMAIL STILL FAILING: {_consecutiveSmtpFailures} consecutive failures. Last error: {ex.Message}");
-                }
-            }
-
-            /* Log the alert attempt to DuckDB */
+            /* Always log the alert to DuckDB, regardless of email status */
             await LogAlertAsync(serverId, serverName, metricName,
                 double.TryParse(currentValue.TrimEnd('%'), out var cv) ? cv : 0,
                 double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0,
-                sent, "email", sendError);
+                sent, notificationType, sendError);
         }
         catch (Exception ex)
         {

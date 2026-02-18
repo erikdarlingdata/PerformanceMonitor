@@ -102,12 +102,53 @@ namespace PerformanceMonitorDashboard.Controls
         // Legend panel references for edge-based legends (ScottPlot issue #4717 workaround)
         private Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
 
+        // Chart hover tooltips
+        private Helpers.ChartHoverHelper? _badPagesHover;
+        private Helpers.ChartHoverHelper? _dumpRequestsHover;
+        private Helpers.ChartHoverHelper? _accessViolationsHover;
+        private Helpers.ChartHoverHelper? _writeAccessViolationsHover;
+        private Helpers.ChartHoverHelper? _nonYieldingTasksHover;
+        private Helpers.ChartHoverHelper? _latchWarningsHover;
+        private Helpers.ChartHoverHelper? _sickSpinlocksHover;
+        private Helpers.ChartHoverHelper? _cpuComparisonHover;
+        private Helpers.ChartHoverHelper? _severeErrorsHover;
+        private Helpers.ChartHoverHelper? _ioIssuesHover;
+        private Helpers.ChartHoverHelper? _longestPendingIoHover;
+        private Helpers.ChartHoverHelper? _schedulerIssuesHover;
+        private Helpers.ChartHoverHelper? _memoryConditionsHover;
+        private Helpers.ChartHoverHelper? _cpuTasksHover;
+        private Helpers.ChartHoverHelper? _memoryBrokerHover;
+        private Helpers.ChartHoverHelper? _memoryBrokerRatioHover;
+        private Helpers.ChartHoverHelper? _memoryNodeOomHover;
+        private Helpers.ChartHoverHelper? _memoryNodeOomUtilHover;
+        private Helpers.ChartHoverHelper? _memoryNodeOomMemoryHover;
+
         public SystemEventsContent()
         {
             InitializeComponent();
             SetupChartContextMenus();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
+
+            _badPagesHover = new Helpers.ChartHoverHelper(BadPagesChart, "events");
+            _dumpRequestsHover = new Helpers.ChartHoverHelper(DumpRequestsChart, "events");
+            _accessViolationsHover = new Helpers.ChartHoverHelper(AccessViolationsChart, "events");
+            _writeAccessViolationsHover = new Helpers.ChartHoverHelper(WriteAccessViolationsChart, "events");
+            _nonYieldingTasksHover = new Helpers.ChartHoverHelper(NonYieldingTasksChart, "events");
+            _latchWarningsHover = new Helpers.ChartHoverHelper(LatchWarningsChart, "events");
+            _sickSpinlocksHover = new Helpers.ChartHoverHelper(SickSpinlocksChart, "backoffs");
+            _cpuComparisonHover = new Helpers.ChartHoverHelper(CpuComparisonChart, "%");
+            _severeErrorsHover = new Helpers.ChartHoverHelper(SevereErrorsChart, "events");
+            _ioIssuesHover = new Helpers.ChartHoverHelper(IOIssuesChart, "events");
+            _longestPendingIoHover = new Helpers.ChartHoverHelper(LongestPendingIOChart, "ms");
+            _schedulerIssuesHover = new Helpers.ChartHoverHelper(SchedulerIssuesChart, "ms");
+            _memoryConditionsHover = new Helpers.ChartHoverHelper(MemoryConditionsChart, "events");
+            _cpuTasksHover = new Helpers.ChartHoverHelper(CPUTasksChart, "workers");
+            _memoryBrokerHover = new Helpers.ChartHoverHelper(MemoryBrokerChart, "");
+            _memoryBrokerRatioHover = new Helpers.ChartHoverHelper(MemoryBrokerRatioChart, "");
+            _memoryNodeOomHover = new Helpers.ChartHoverHelper(MemoryNodeOOMChart, "events");
+            _memoryNodeOomUtilHover = new Helpers.ChartHoverHelper(MemoryNodeOOMUtilChart, "%");
+            _memoryNodeOomMemoryHover = new Helpers.ChartHoverHelper(MemoryNodeOOMMemoryChart, "MB");
         }
 
         private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -409,6 +450,7 @@ namespace PerformanceMonitorDashboard.Controls
             bool hasData = orderedData.Count > 0;
             // Bad Pages Detected Chart
             BadPagesChart.Plot.Clear();
+            _badPagesHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(BadPagesChart);
             if (hasData)
             {
@@ -419,6 +461,7 @@ namespace PerformanceMonitorDashboard.Controls
                 scatter.LineWidth = 2;
                 scatter.MarkerSize = 5;
                 scatter.Color = TabHelpers.ChartColors[3];
+                _badPagesHover?.Add(scatter, "Bad Pages");
             }
             else
             {
@@ -437,6 +480,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Interval Dump Requests Chart
             DumpRequestsChart.Plot.Clear();
+            _dumpRequestsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(DumpRequestsChart);
             if (hasData)
             {
@@ -447,6 +491,7 @@ namespace PerformanceMonitorDashboard.Controls
                 scatter.LineWidth = 2;
                 scatter.MarkerSize = 5;
                 scatter.Color = TabHelpers.ChartColors[2];
+                _dumpRequestsHover?.Add(scatter, "Dump Requests");
             }
             else
             {
@@ -465,6 +510,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Access Violations Chart
             AccessViolationsChart.Plot.Clear();
+            _accessViolationsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(AccessViolationsChart);
             if (hasData)
             {
@@ -475,6 +521,7 @@ namespace PerformanceMonitorDashboard.Controls
                 scatter.LineWidth = 2;
                 scatter.MarkerSize = 5;
                 scatter.Color = TabHelpers.ChartColors[4];
+                _accessViolationsHover?.Add(scatter, "Access Violations");
             }
             else
             {
@@ -493,6 +540,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Write Access Violations Chart
             WriteAccessViolationsChart.Plot.Clear();
+            _writeAccessViolationsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(WriteAccessViolationsChart);
             if (hasData)
             {
@@ -503,6 +551,7 @@ namespace PerformanceMonitorDashboard.Controls
                 scatter.LineWidth = 2;
                 scatter.MarkerSize = 5;
                 scatter.Color = TabHelpers.ChartColors[0];
+                _writeAccessViolationsHover?.Add(scatter, "Write Access Violations");
             }
             else
             {
@@ -533,6 +582,7 @@ namespace PerformanceMonitorDashboard.Controls
             bool hasData = orderedData.Count > 0;
             // Non-Yielding Tasks Chart
             NonYieldingTasksChart.Plot.Clear();
+            _nonYieldingTasksHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(NonYieldingTasksChart);
             if (hasData)
             {
@@ -543,6 +593,7 @@ namespace PerformanceMonitorDashboard.Controls
                 scatter.LineWidth = 2;
                 scatter.MarkerSize = 5;
                 scatter.Color = TabHelpers.ChartColors[3];
+                _nonYieldingTasksHover?.Add(scatter, "Non-Yielding Tasks");
             }
             else
             {
@@ -561,6 +612,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Latch Warnings Chart
             LatchWarningsChart.Plot.Clear();
+            _latchWarningsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(LatchWarningsChart);
             if (hasData)
             {
@@ -571,6 +623,7 @@ namespace PerformanceMonitorDashboard.Controls
                 scatter.LineWidth = 2;
                 scatter.MarkerSize = 5;
                 scatter.Color = TabHelpers.ChartColors[2];
+                _latchWarningsHover?.Add(scatter, "Latch Warnings");
             }
             else
             {
@@ -594,6 +647,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[SickSpinlocksChart] = null;
             }
             SickSpinlocksChart.Plot.Clear();
+            _sickSpinlocksHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(SickSpinlocksChart);
             if (hasData)
             {
@@ -624,6 +678,7 @@ namespace PerformanceMonitorDashboard.Controls
                         scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
                         scatter.LegendText = spinlockType ?? "Unknown";
+                        _sickSpinlocksHover?.Add(scatter, spinlockType ?? "Unknown");
                         colorIndex++;
                     }
                 }
@@ -656,6 +711,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[CpuComparisonChart] = null;
             }
             CpuComparisonChart.Plot.Clear();
+            _cpuComparisonHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(CpuComparisonChart);
             if (hasData)
             {
@@ -668,6 +724,7 @@ namespace PerformanceMonitorDashboard.Controls
                 sysScatter.MarkerSize = 5;
                 sysScatter.Color = TabHelpers.ChartColors[0];
                 sysScatter.LegendText = "System CPU %";
+                _cpuComparisonHover?.Add(sysScatter, "System CPU %");
 
                 // SQL CPU series
                 var (sqlXs, sqlYs) = TabHelpers.FillTimeSeriesGaps(
@@ -678,6 +735,7 @@ namespace PerformanceMonitorDashboard.Controls
                 sqlScatter.MarkerSize = 5;
                 sqlScatter.Color = TabHelpers.ChartColors[1];
                 sqlScatter.LegendText = "SQL CPU %";
+                _cpuComparisonHover?.Add(sqlScatter, "SQL CPU %");
 
                 _legendPanels[CpuComparisonChart] = CpuComparisonChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                 CpuComparisonChart.Plot.Legend.FontSize = 12;
@@ -750,6 +808,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[SevereErrorsChart] = null;
             }
             SevereErrorsChart.Plot.Clear();
+            _severeErrorsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(SevereErrorsChart);
 
             var dataList = data?.ToList() ?? new List<HealthParserSevereErrorItem>();
@@ -775,6 +834,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[3];
                     scatter.LegendText = "Error Count";
+                    _severeErrorsHover?.Add(scatter, "Error Count");
 
                     _legendPanels[SevereErrorsChart] = SevereErrorsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                     SevereErrorsChart.Plot.Legend.FontSize = 12;
@@ -894,6 +954,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[IOIssuesChart] = null;
             }
             IOIssuesChart.Plot.Clear();
+            _ioIssuesHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(IOIssuesChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).OrderBy(d => d.EventTime).ToList() ?? new List<HealthParserIOIssueItem>();
@@ -921,6 +982,7 @@ namespace PerformanceMonitorDashboard.Controls
                         scatter.MarkerSize = 5;
                         scatter.Color = TabHelpers.ChartColors[3];
                         scatter.LegendText = "Latch Timeouts";
+                        _ioIssuesHover?.Add(scatter, "Latch Timeouts");
                     }
 
                     if (longIos.Any(c => c > 0))
@@ -931,6 +993,7 @@ namespace PerformanceMonitorDashboard.Controls
                         scatter.MarkerSize = 5;
                         scatter.Color = TabHelpers.ChartColors[2];
                         scatter.LegendText = "Long IOs";
+                        _ioIssuesHover?.Add(scatter, "Long IOs");
                     }
 
                     _legendPanels[IOIssuesChart] = IOIssuesChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -969,6 +1032,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[LongestPendingIOChart] = null;
             }
             LongestPendingIOChart.Plot.Clear();
+            _longestPendingIoHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(LongestPendingIOChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue && !string.IsNullOrEmpty(d.LongestPendingRequestsFilePath)).ToList() ?? new List<HealthParserIOIssueItem>();
@@ -1022,6 +1086,7 @@ namespace PerformanceMonitorDashboard.Controls
                             scatter.MarkerSize = 5;
                             scatter.Color = colors[colorIndex % colors.Length];
                             scatter.LegendText = fileName;
+                            _longestPendingIoHover?.Add(scatter, fileName);
                             colorIndex++;
                         }
                     }
@@ -1091,6 +1156,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[SchedulerIssuesChart] = null;
             }
             SchedulerIssuesChart.Plot.Clear();
+            _schedulerIssuesHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(SchedulerIssuesChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserSchedulerIssueItem>();
@@ -1123,6 +1189,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[2];
                     scatter.LegendText = "Total Non-Yield Time";
+                    _schedulerIssuesHover?.Add(scatter, "Total Non-Yield Time");
 
                     _legendPanels[SchedulerIssuesChart] = SchedulerIssuesChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                     SchedulerIssuesChart.Plot.Legend.FontSize = 12;
@@ -1244,6 +1311,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryConditionsChart] = null;
             }
             MemoryConditionsChart.Plot.Clear();
+            _memoryConditionsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryConditionsChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserMemoryConditionItem>();
@@ -1270,6 +1338,7 @@ namespace PerformanceMonitorDashboard.Controls
                         scatter.MarkerSize = 5;
                         scatter.Color = TabHelpers.ChartColors[3];
                         scatter.LegendText = "OOM Exceptions";
+                        _memoryConditionsHover?.Add(scatter, "OOM Exceptions");
                         hasData = true;
 
                         _legendPanels[MemoryConditionsChart] = MemoryConditionsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -1343,6 +1412,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[CPUTasksChart] = null;
             }
             CPUTasksChart.Plot.Clear();
+            _cpuTasksHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(CPUTasksChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserCPUTasksItem>();
@@ -1368,6 +1438,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[0];
                     scatter.LegendText = "Workers Created";
+                    _cpuTasksHover?.Add(scatter, "Workers Created");
 
                     // Max Workers threshold line (horizontal)
                     var maxWorkersValue = dataList.Max(d => d.MaxWorkers ?? 0);
@@ -1549,6 +1620,8 @@ namespace PerformanceMonitorDashboard.Controls
             double xMax = rangeEnd.ToOADate();
 
             /* Clear both charts */
+            _memoryBrokerHover?.Clear();
+            _memoryBrokerRatioHover?.Clear();
             foreach (var chart in new[] { MemoryBrokerChart, MemoryBrokerRatioChart })
             {
                 if (_legendPanels.TryGetValue(chart, out var existingPanel) && existingPanel != null)
@@ -1589,7 +1662,9 @@ namespace PerformanceMonitorDashboard.Controls
                         scatter.LineWidth = 2;
                         scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
-                        scatter.LegendText = brokerGroup.Key.Length > 25 ? brokerGroup.Key.Substring(0, 25) + "..." : brokerGroup.Key;
+                        var brokerLabel = brokerGroup.Key.Length > 25 ? brokerGroup.Key.Substring(0, 25) + "..." : brokerGroup.Key;
+                        scatter.LegendText = brokerLabel;
+                        _memoryBrokerHover?.Add(scatter, brokerLabel);
                         colorIndex++;
                     }
                 }
@@ -1616,6 +1691,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[0];
                     scatter.LegendText = "Memory Ratio";
+                    _memoryBrokerRatioHover?.Add(scatter, "Memory Ratio");
                 }
 
                 if (overallData.Count >= 1)
@@ -1630,6 +1706,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[2];
                     scatter.LegendText = "Overall";
+                    _memoryBrokerRatioHover?.Add(scatter, "Overall");
                 }
 
                 if (hasRatioData)
@@ -1773,6 +1850,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryNodeOOMChart] = null;
             }
             MemoryNodeOOMChart.Plot.Clear();
+            _memoryNodeOomHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserMemoryNodeOOMItem>();
@@ -1797,6 +1875,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[3];
                     scatter.LegendText = "OOM Event Count";
+                    _memoryNodeOomHover?.Add(scatter, "OOM Event Count");
 
                     _legendPanels[MemoryNodeOOMChart] = MemoryNodeOOMChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                     MemoryNodeOOMChart.Plot.Legend.FontSize = 12;
@@ -1833,6 +1912,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryNodeOOMUtilChart] = null;
             }
             MemoryNodeOOMUtilChart.Plot.Clear();
+            _memoryNodeOomUtilHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMUtilChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue && d.MemoryUtilizationPct.HasValue).ToList() ?? new List<HealthParserMemoryNodeOOMItem>();
@@ -1849,6 +1929,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.LineWidth = 2;
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[0];
+                    _memoryNodeOomUtilHover?.Add(scatter, "Memory Utilization %");
                 }
             }
 
@@ -1881,6 +1962,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryNodeOOMMemoryChart] = null;
             }
             MemoryNodeOOMMemoryChart.Plot.Clear();
+            _memoryNodeOomMemoryHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMMemoryChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserMemoryNodeOOMItem>();
@@ -1900,6 +1982,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[1];
                     scatter.LegendText = "Target";
+                    _memoryNodeOomMemoryHover?.Add(scatter, "Target");
                 }
 
                 // Committed Memory (Orange)
@@ -1914,6 +1997,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[2];
                     scatter.LegendText = "Committed";
+                    _memoryNodeOomMemoryHover?.Add(scatter, "Committed");
                 }
 
                 // Total Page File (Purple)
@@ -1928,6 +2012,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[4];
                     scatter.LegendText = "Total Page File";
+                    _memoryNodeOomMemoryHover?.Add(scatter, "Total Page File");
                 }
 
                 // Available Page File (Cyan)
@@ -1942,6 +2027,7 @@ namespace PerformanceMonitorDashboard.Controls
                     scatter.MarkerSize = 5;
                     scatter.Color = TabHelpers.ChartColors[5];
                     scatter.LegendText = "Avail Page File";
+                    _memoryNodeOomMemoryHover?.Add(scatter, "Avail Page File");
                 }
 
                 if (hasData)

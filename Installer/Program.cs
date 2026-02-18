@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -83,6 +84,7 @@ namespace PerformanceMonitorInstaller
             */
             bool automatedMode = args.Length > 0;
             bool reinstallMode = args.Any(a => a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase));
+            bool resetSchedule = args.Any(a => a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase));
             bool trustCert = args.Any(a => a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase));
 
             /*Parse encryption option (default: Mandatory)*/
@@ -102,6 +104,7 @@ namespace PerformanceMonitorInstaller
             /*Filter out option flags to get positional arguments*/
             var filteredArgs = args
                 .Where(a => !a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase))
+                .Where(a => !a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase))
                 .ToArray();
@@ -166,6 +169,7 @@ namespace PerformanceMonitorInstaller
                     Console.WriteLine();
                     Console.WriteLine("Options:");
                     Console.WriteLine("  --reinstall          Drop existing database and perform clean install");
+                    Console.WriteLine("  --reset-schedule     Reset collection schedule to recommended defaults");
                     Console.WriteLine("  --encrypt=<level>    Connection encryption: optional (default), mandatory, strict");
                     Console.WriteLine("  --trust-cert         Trust server certificate without validation (default: require valid cert)");
                     return ExitCodes.InvalidArguments;
@@ -608,6 +612,16 @@ END";
                     try
                     {
                         string sqlContent = await File.ReadAllTextAsync(sqlFile);
+
+                        /*
+                        Reset schedule to defaults if requested — truncate before the
+                        INSERT...WHERE NOT EXISTS re-populates with current recommended values
+                        */
+                        if (resetSchedule && fileName.StartsWith("04_", StringComparison.Ordinal))
+                        {
+                            sqlContent = "TRUNCATE TABLE config.collection_schedule;\nGO\n" + sqlContent;
+                            Console.Write("(resetting schedule) ");
+                        }
 
                         /*
                         Remove SQLCMD directives (:r includes) as we're executing files directly
@@ -1341,16 +1355,16 @@ END";
 
                     using (var insertCmd = new SqlCommand(insertSql, connection))
                     {
-                        insertCmd.Parameters.AddWithValue("@installer_version", assemblyVersion);
-                        insertCmd.Parameters.AddWithValue("@installer_info_version", (object?)infoVersion ?? DBNull.Value);
-                        insertCmd.Parameters.AddWithValue("@sql_server_version", sqlVersion);
-                        insertCmd.Parameters.AddWithValue("@sql_server_edition", sqlEdition);
-                        insertCmd.Parameters.AddWithValue("@installation_type", installationType);
-                        insertCmd.Parameters.AddWithValue("@previous_version", (object?)previousVersion ?? DBNull.Value);
-                        insertCmd.Parameters.AddWithValue("@installation_status", status);
-                        insertCmd.Parameters.AddWithValue("@files_executed", filesExecuted);
-                        insertCmd.Parameters.AddWithValue("@files_failed", filesFailed);
-                        insertCmd.Parameters.AddWithValue("@installation_duration_ms", durationMs);
+                        insertCmd.Parameters.Add(new SqlParameter("@installer_version", SqlDbType.NVarChar, 50) { Value = assemblyVersion });
+                        insertCmd.Parameters.Add(new SqlParameter("@installer_info_version", SqlDbType.NVarChar, 100) { Value = (object?)infoVersion ?? DBNull.Value });
+                        insertCmd.Parameters.Add(new SqlParameter("@sql_server_version", SqlDbType.NVarChar, 500) { Value = sqlVersion });
+                        insertCmd.Parameters.Add(new SqlParameter("@sql_server_edition", SqlDbType.NVarChar, 128) { Value = sqlEdition });
+                        insertCmd.Parameters.Add(new SqlParameter("@installation_type", SqlDbType.VarChar, 20) { Value = installationType });
+                        insertCmd.Parameters.Add(new SqlParameter("@previous_version", SqlDbType.NVarChar, 50) { Value = (object?)previousVersion ?? DBNull.Value });
+                        insertCmd.Parameters.Add(new SqlParameter("@installation_status", SqlDbType.VarChar, 20) { Value = status });
+                        insertCmd.Parameters.Add(new SqlParameter("@files_executed", SqlDbType.Int) { Value = filesExecuted });
+                        insertCmd.Parameters.Add(new SqlParameter("@files_failed", SqlDbType.Int) { Value = filesFailed });
+                        insertCmd.Parameters.Add(new SqlParameter("@installation_duration_ms", SqlDbType.BigInt) { Value = durationMs });
 
                         await insertCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
                     }

@@ -50,7 +50,7 @@
                     <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayName}" Width="150"/>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="180"/>
                     <DataGridTextColumn Header="Authentication" Binding="{Binding AuthenticationDisplay}" Width="120"/>
-                    <DataGridTextColumn Header="Last Connected" Binding="{Binding LastConnected, StringFormat='{}{0:MM/dd/yyyy HH:mm}'}" Width="130"/>
+                    <DataGridTextColumn Header="Last Connected" Binding="{Binding LastConnected, StringFormat='{}{0:g}'}" Width="130"/>
                 </DataGrid.Columns>
             </DataGrid>
         </Border>

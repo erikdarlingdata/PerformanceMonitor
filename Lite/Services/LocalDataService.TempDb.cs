@@ -66,6 +66,63 @@ ORDER BY collection_time";
 
         return items;
     }
+
+    /// <summary>
+    /// Gets the latest TempDB space snapshot for alert checking.
+    /// </summary>
+    public async Task<TempDbSpaceInfo?> GetLatestTempDbSpaceAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT
+    total_reserved_mb,
+    unallocated_mb,
+    user_object_reserved_mb,
+    internal_object_reserved_mb,
+    version_store_reserved_mb,
+    top_session_tempdb_mb,
+    top_session_id
+FROM tempdb_stats
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            return new TempDbSpaceInfo
+            {
+                TotalReservedMb = reader.IsDBNull(0) ? 0 : ToDouble(reader.GetValue(0)),
+                UnallocatedMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                UserObjectReservedMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                InternalObjectReservedMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                VersionStoreReservedMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TopConsumerMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                TopConsumerSessionId = reader.IsDBNull(6) ? 0 : reader.GetInt32(6)
+            };
+        }
+
+        return null;
+    }
+}
+
+public class TempDbSpaceInfo
+{
+    public double TotalReservedMb { get; set; }
+    public double UnallocatedMb { get; set; }
+    public double UserObjectReservedMb { get; set; }
+    public double InternalObjectReservedMb { get; set; }
+    public double VersionStoreReservedMb { get; set; }
+    public int TopConsumerSessionId { get; set; }
+    public double TopConsumerMb { get; set; }
+
+    public double UsedPercent => TotalReservedMb + UnallocatedMb > 0
+        ? TotalReservedMb / (TotalReservedMb + UnallocatedMb) * 100
+        : 0;
 }
 
 public class TempDbRow

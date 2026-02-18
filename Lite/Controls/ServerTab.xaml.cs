@@ -39,6 +39,9 @@ public partial class ServerTab : UserControl
     private List<SelectableItem> _perfmonCounterItems = new();
     private Helpers.ChartHoverHelper? _waitStatsHover;
     private Helpers.ChartHoverHelper? _perfmonHover;
+    private Helpers.ChartHoverHelper? _cpuHover;
+    private Helpers.ChartHoverHelper? _memoryHover;
+    private Helpers.ChartHoverHelper? _tempDbHover;
     private Helpers.ChartHoverHelper? _tempDbFileIoHover;
     private Helpers.ChartHoverHelper? _fileIoReadHover;
     private Helpers.ChartHoverHelper? _fileIoWriteHover;
@@ -58,6 +61,8 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
+    private DataGridFilterManager<CollectorHealthRow>? _collectionHealthFilterMgr;
+    private DataGridFilterManager<CollectionLogRow>? _collectionLogFilterMgr;
 
     private static readonly HashSet<string> _defaultPerfmonCounters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -81,7 +86,7 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
     /// </summary>
-    public event Action<int, int>? AlertCountsChanged; /* blockingCount, deadlockCount */
+    public event Action<int, int, DateTime?>? AlertCountsChanged; /* blockingCount, deadlockCount, latestEventTimeUtc */
     public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
     public event Func<Task>? ManualRefreshRequested;
 
@@ -127,6 +132,9 @@ public partial class ServerTab : UserControl
         /* Chart hover tooltips */
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
         _perfmonHover = new Helpers.ChartHoverHelper(PerfmonChart, "");
+        _cpuHover = new Helpers.ChartHoverHelper(CpuChart, "%");
+        _memoryHover = new Helpers.ChartHoverHelper(MemoryChart, "GB");
+        _tempDbHover = new Helpers.ChartHoverHelper(TempDbChart, "MB");
         _tempDbFileIoHover = new Helpers.ChartHoverHelper(TempDbFileIoChart, "ms");
         _fileIoReadHover = new Helpers.ChartHoverHelper(FileIoReadChart, "ms");
         _fileIoWriteHover = new Helpers.ChartHoverHelper(FileIoWriteChart, "ms");
@@ -142,7 +150,7 @@ public partial class ServerTab : UserControl
         for (int h = 0; h < 24; h++)
         {
             var dt = DateTime.Today.AddHours(h);
-            hours.Add(dt.ToString("h tt")); // "12 AM", "1 AM", ..., "11 PM"
+            hours.Add(dt.ToString("HH:00")); // "00:00", "01:00", ..., "23:00"
         }
 
         FromHourCombo.ItemsSource = hours;
@@ -444,6 +452,8 @@ public partial class ServerTab : UserControl
             var databaseScopedConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseScopedConfigAsync(_serverId));
             var traceFlagsTask = SafeQueryAsync(() => _dataService.GetLatestTraceFlagsAsync(_serverId));
             var runningJobsTask = SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId));
+            var collectionHealthTask = SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId));
+            var collectionLogTask = SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack));
             /* Core data tasks */
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
@@ -451,7 +461,7 @@ public partial class ServerTab : UserControl
                 deadlockTask, blockedProcessTask, waitTypesTask, perfmonCountersTask,
                 queryStoreTask, memoryGrantTrendTask,
                 serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
-                runningJobsTask);
+                runningJobsTask, collectionHealthTask, collectionLogTask);
 
             /* Trend chart tasks - run separately so failures don't kill the whole refresh */
             var blockingTrendTask = SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
@@ -488,6 +498,9 @@ public partial class ServerTab : UserControl
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
+            _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
+            _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
+            UpdateCollectorDurationChart(collectionLogTask.Result);
 
             /* Update memory summary */
             UpdateMemorySummary(memoryTask.Result);
@@ -515,10 +528,19 @@ public partial class ServerTab : UserControl
 
             ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss}";
 
-            /* Notify parent of alert counts for tab badge */
+            /* Notify parent of alert counts for tab badge.
+               Include the latest event timestamp so acknowledgement is only
+               cleared when genuinely new events arrive, not when the time range changes. */
             var blockingCount = blockedProcessTask.Result.Count;
             var deadlockCount = deadlockTask.Result.Count;
-            AlertCountsChanged?.Invoke(blockingCount, deadlockCount);
+            DateTime? latestEventTime = null;
+            if (blockingCount > 0 || deadlockCount > 0)
+            {
+                var latestBlocking = blockedProcessTask.Result.Max(r => (DateTime?)r.EventTime);
+                var latestDeadlock = deadlockTask.Result.Max(r => (DateTime?)r.DeadlockTime);
+                latestEventTime = latestBlocking > latestDeadlock ? latestBlocking : latestDeadlock;
+            }
+            AlertCountsChanged?.Invoke(blockingCount, deadlockCount, latestEventTime);
         }
         catch (Exception ex)
         {
@@ -573,6 +595,7 @@ public partial class ServerTab : UserControl
     private void UpdateCpuChart(List<CpuUtilizationRow> data)
     {
         ClearChart(CpuChart);
+        _cpuHover?.Clear();
         ApplyDarkTheme(CpuChart);
 
         if (data.Count == 0) { CpuChart.Refresh(); return; }
@@ -584,10 +607,12 @@ public partial class ServerTab : UserControl
         var sqlPlot = CpuChart.Plot.Add.Scatter(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
         sqlPlot.Color = ScottPlot.Color.FromHex("#4FC3F7");
+        _cpuHover?.Add(sqlPlot, "SQL Server");
 
         var otherPlot = CpuChart.Plot.Add.Scatter(times, otherCpu);
         otherPlot.LegendText = "Other";
         otherPlot.Color = ScottPlot.Color.FromHex("#E57373");
+        _cpuHover?.Add(otherPlot, "Other");
 
         CpuChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(CpuChart);
@@ -601,6 +626,7 @@ public partial class ServerTab : UserControl
     private void UpdateMemoryChart(List<MemoryTrendPoint> data, List<MemoryTrendPoint> grantData)
     {
         ClearChart(MemoryChart);
+        _memoryHover?.Clear();
         ApplyDarkTheme(MemoryChart);
 
         if (data.Count == 0) { MemoryChart.Refresh(); return; }
@@ -613,15 +639,18 @@ public partial class ServerTab : UserControl
         var totalPlot = MemoryChart.Plot.Add.Scatter(times, totalMem);
         totalPlot.LegendText = "Total Server Memory";
         totalPlot.Color = ScottPlot.Color.FromHex("#4FC3F7");
+        _memoryHover?.Add(totalPlot, "Total Server Memory");
 
         var targetPlot = MemoryChart.Plot.Add.Scatter(times, targetMem);
         targetPlot.LegendText = "Target Memory";
         targetPlot.Color = ScottPlot.Colors.Gray;
         targetPlot.LineStyle.Pattern = LinePattern.Dashed;
+        _memoryHover?.Add(targetPlot, "Target Memory");
 
         var bpPlot = MemoryChart.Plot.Add.Scatter(times, bufferPool);
         bpPlot.LegendText = "Buffer Pool";
         bpPlot.Color = ScottPlot.Color.FromHex("#81C784");
+        _memoryHover?.Add(bpPlot, "Buffer Pool");
 
         /* Memory grants trend line — show zero line when no grant data */
         double[] grantTimes, grantMb;
@@ -639,6 +668,7 @@ public partial class ServerTab : UserControl
         var grantPlot = MemoryChart.Plot.Add.Scatter(grantTimes, grantMb);
         grantPlot.LegendText = "Memory Grants";
         grantPlot.Color = ScottPlot.Color.FromHex("#FFB74D");
+        _memoryHover?.Add(grantPlot, "Memory Grants");
 
         MemoryChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(MemoryChart);
@@ -654,6 +684,7 @@ public partial class ServerTab : UserControl
     private void UpdateTempDbChart(List<TempDbRow> data)
     {
         ClearChart(TempDbChart);
+        _tempDbHover?.Clear();
         ApplyDarkTheme(TempDbChart);
 
         if (data.Count == 0) { TempDbChart.Refresh(); return; }
@@ -666,14 +697,17 @@ public partial class ServerTab : UserControl
         var userPlot = TempDbChart.Plot.Add.Scatter(times, userObj);
         userPlot.LegendText = "User Objects";
         userPlot.Color = ScottPlot.Color.FromHex("#4FC3F7");
+        _tempDbHover?.Add(userPlot, "User Objects");
 
         var internalPlot = TempDbChart.Plot.Add.Scatter(times, internalObj);
         internalPlot.LegendText = "Internal Objects";
         internalPlot.Color = ScottPlot.Color.FromHex("#FFD54F");
+        _tempDbHover?.Add(internalPlot, "Internal Objects");
 
         var vsPlot = TempDbChart.Plot.Add.Scatter(times, versionStore);
         vsPlot.LegendText = "Version Store";
         vsPlot.Color = ScottPlot.Color.FromHex("#81C784");
+        _tempDbHover?.Add(vsPlot, "Version Store");
 
         TempDbChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(TempDbChart);
@@ -804,8 +838,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-            rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {
@@ -815,12 +849,19 @@ public partial class ServerTab : UserControl
 
         if (data.Count == 0)
         {
-            /* Show empty chart with correct time range */
+            /* No blocking events — show a flat line at zero so the chart looks active */
+            var zeroLine = BlockingTrendChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Blocking Incidents";
+            zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
+            zeroLine.MarkerSize = 0;
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
-            BlockingTrendChart.Plot.Axes.SetLimitsY(0, 1);
             ReapplyAxisColors(BlockingTrendChart);
             BlockingTrendChart.Plot.YLabel("Blocking Incidents");
+            SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
+            ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
             return;
         }
@@ -874,8 +915,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-            rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {
@@ -885,12 +926,19 @@ public partial class ServerTab : UserControl
 
         if (data.Count == 0)
         {
-            /* Show empty chart with correct time range */
+            /* No deadlocks — show a flat line at zero so the chart looks active */
+            var zeroLine = DeadlockTrendChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Deadlocks";
+            zeroLine.Color = ScottPlot.Color.FromHex("#FFB74D");
+            zeroLine.MarkerSize = 0;
             DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
             DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
-            DeadlockTrendChart.Plot.Axes.SetLimitsY(0, 1);
             ReapplyAxisColors(DeadlockTrendChart);
             DeadlockTrendChart.Plot.YLabel("Deadlocks");
+            SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, 1);
+            ShowChartLegend(DeadlockTrendChart);
             DeadlockTrendChart.Refresh();
             return;
         }
@@ -1123,6 +1171,11 @@ public partial class ServerTab : UserControl
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
 
+    private void WaitStatsMetric_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _ = UpdateWaitStatsChartFromPickerAsync();
+    }
+
     private void WaitType_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingWaitTypeSelection) return;
@@ -1141,6 +1194,9 @@ public partial class ServerTab : UserControl
             _waitStatsHover?.Clear();
 
             if (selected.Count == 0) { WaitStatsChart.Refresh(); return; }
+
+            bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
+            if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
             var hoursBack = GetHoursBack();
             DateTime? fromDate = null;
@@ -1163,22 +1219,24 @@ public partial class ServerTab : UserControl
                 if (trend.Count == 0) continue;
 
                 var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
-                var waitTime = trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
+                var values = useAvgPerWait
+                    ? trend.Select(t => t.AvgMsPerWait).ToArray()
+                    : trend.Select(t => t.WaitTimeMsPerSecond).ToArray();
 
-                var plot = WaitStatsChart.Plot.Add.Scatter(times, waitTime);
+                var plot = WaitStatsChart.Plot.Add.Scatter(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 _waitStatsHover?.Add(plot, selected[i].DisplayName);
 
-                if (waitTime.Length > 0) globalMax = Math.Max(globalMax, waitTime.Max());
+                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
             WaitStatsChart.Plot.Axes.DateTimeTicksBottom();
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
-                rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-                rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+                rangeStart = fromDate.Value;
+                rangeEnd = toDate.Value;
             }
             else
             {
@@ -1187,7 +1245,7 @@ public partial class ServerTab : UserControl
             }
             WaitStatsChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
-            WaitStatsChart.Plot.YLabel("Wait Time (ms/sec)");
+            WaitStatsChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");
             SetChartYLimitsWithLegendPadding(WaitStatsChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(WaitStatsChart);
             WaitStatsChart.Refresh();
@@ -1318,8 +1376,8 @@ public partial class ServerTab : UserControl
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
-                rangeStart = fromDate.Value.AddMinutes(UtcOffsetMinutes);
-                rangeEnd = toDate.Value.AddMinutes(UtcOffsetMinutes);
+                rangeStart = fromDate.Value;
+                rangeEnd = toDate.Value;
             }
             else
             {
@@ -1451,13 +1509,13 @@ public partial class ServerTab : UserControl
             dataYMin = limits.Bottom;
             dataYMax = limits.Top;
         }
-        if (dataYMax <= dataYMin) dataYMax = dataYMin + 100;
+        if (dataYMax <= dataYMin) dataYMax = dataYMin + 1;
 
         double range = dataYMax - dataYMin;
         double topPadding = range * 0.05;
 
-        /* Only add bottom padding if dataYMin is above zero - don't go negative */
-        double yMin = dataYMin >= 0 ? 0 : dataYMin - (range * 0.10);
+        /* Add small bottom margin when dataYMin is zero so flat lines at Y=0 are visible above the axis */
+        double yMin = dataYMin > 0 ? 0 : dataYMin == 0 ? -(range * 0.05) : dataYMin - (range * 0.10);
         double yMax = dataYMax + topPadding;
 
         chart.Plot.Axes.SetLimitsY(yMin, yMax);
@@ -1841,6 +1899,62 @@ public partial class ServerTab : UserControl
         return value;
     }
 
+    /* ========== Collection Health ========== */
+
+    private void UpdateCollectorDurationChart(List<CollectionLogRow> data)
+    {
+        ClearChart(CollectorDurationChart);
+        ApplyDarkTheme(CollectorDurationChart);
+
+        if (data.Count == 0) { CollectorDurationChart.Refresh(); return; }
+
+        /* Group by collector, plot each as a separate series */
+        var groups = data
+            .Where(d => d.DurationMs.HasValue && d.Status == "SUCCESS")
+            .GroupBy(d => d.CollectorName)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        int colorIdx = 0;
+        foreach (var group in groups)
+        {
+            var points = group.OrderBy(d => d.CollectionTime).ToList();
+            if (points.Count < 2) continue;
+
+            var times = points.Select(d => d.CollectionTime.ToLocalTime().ToOADate()).ToArray();
+            var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
+
+            var scatter = CollectorDurationChart.Plot.Add.Scatter(times, durations);
+            scatter.LegendText = group.Key;
+            scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
+            scatter.LineWidth = 2;
+            scatter.MarkerSize = 0;
+            colorIdx++;
+        }
+
+        CollectorDurationChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(CollectorDurationChart);
+        CollectorDurationChart.Plot.YLabel("Duration (ms)");
+        CollectorDurationChart.Plot.Axes.AutoScale();
+        ShowChartLegend(CollectorDurationChart);
+        CollectorDurationChart.Refresh();
+    }
+
+    private void OpenLogFile_Click(object sender, RoutedEventArgs e)
+    {
+        var logDir = System.IO.Path.Combine(AppContext.BaseDirectory, "logs");
+        var logFile = System.IO.Path.Combine(logDir, $"lite_{DateTime.Now:yyyyMMdd}.log");
+
+        if (File.Exists(logFile))
+        {
+            Process.Start(new ProcessStartInfo(logFile) { UseShellExecute = true });
+        }
+        else if (Directory.Exists(logDir))
+        {
+            Process.Start(new ProcessStartInfo(logDir) { UseShellExecute = true });
+        }
+    }
+
     /// <summary>
     /// Stops the refresh timer when the tab is removed.
     /// </summary>
@@ -1864,6 +1978,8 @@ public partial class ServerTab : UserControl
         _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
+        _collectionHealthFilterMgr = new DataGridFilterManager<CollectorHealthRow>(CollectionHealthGrid);
+        _collectionLogFilterMgr = new DataGridFilterManager<CollectionLogRow>(CollectionLogGrid);
 
         _filterManagers[QuerySnapshotsGrid] = _querySnapshotsFilterMgr;
         _filterManagers[QueryStatsGrid] = _queryStatsFilterMgr;
@@ -1876,6 +1992,8 @@ public partial class ServerTab : UserControl
         _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
+        _filterManagers[CollectionHealthGrid] = _collectionHealthFilterMgr;
+        _filterManagers[CollectionLogGrid] = _collectionLogFilterMgr;
     }
 
     private void EnsureFilterPopup()

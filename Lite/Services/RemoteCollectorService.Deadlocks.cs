@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Data;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -80,7 +81,7 @@ LEFT JOIN sys.dm_xe_sessions AS dxs
 WHERE ses.name = @session_name;", connection))
         {
             cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.AddWithValue("@session_name", DeadlockXeSessionName);
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = DeadlockXeSessionName });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
 
             if (result != null)
@@ -179,7 +180,7 @@ SELECT
     END;", connection))
         {
             cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.AddWithValue("@session_name", DeadlockXeSessionName);
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = DeadlockXeSessionName });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
 
             if (result is int hasCorrectEvent)
@@ -271,6 +272,26 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON DATABASE STATE = START;", conne
             query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @PerformanceMonitor_Deadlock TABLE
+(
+    ring_buffer xml NOT NULL
+);
+
+INSERT
+    @PerformanceMonitor_Deadlock
+(
+    ring_buffer
+)
+SELECT
+    ring_xml = TRY_CAST(xet.target_data AS xml)
+FROM sys.dm_xe_database_session_targets AS xet
+JOIN sys.dm_xe_database_sessions AS xes
+  ON xes.address = xet.event_session_address
+WHERE xes.name = N'{DeadlockXeSessionName}'
+AND   xet.target_name = N'ring_buffer'
+OPTION(RECOMPILE);
+
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
     victim_process_id = evt.value('(data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
@@ -278,17 +299,11 @@ SELECT
 FROM
 (
     SELECT
-        ring_xml = TRY_CAST(xet.target_data AS xml)
-    FROM sys.dm_xe_database_session_targets AS xet
-    JOIN sys.dm_xe_database_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{DeadlockXeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        pmd.ring_buffer
+    FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
-CROSS APPLY rb.ring_xml.nodes('RingBufferTarget/event[@name=""database_xml_deadlock_report""]') AS q(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
-ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2') DESC
+CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""database_xml_deadlock_report""]') AS q(evt)
+WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
 OPTION(RECOMPILE);";
         }
         else
@@ -298,6 +313,26 @@ OPTION(RECOMPILE);";
             query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @PerformanceMonitor_Deadlock TABLE
+(
+    ring_buffer xml NOT NULL
+);
+
+INSERT
+    @PerformanceMonitor_Deadlock
+(
+    ring_buffer
+)
+SELECT
+    ring_xml = TRY_CAST(xet.target_data AS xml)
+FROM sys.dm_xe_session_targets AS xet
+JOIN sys.dm_xe_sessions AS xes
+  ON xes.address = xet.event_session_address
+WHERE xes.name = N'{DeadlockXeSessionName}'
+AND   xet.target_name = N'ring_buffer'
+OPTION(RECOMPILE);
+
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
     victim_process_id = evt.value('(data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
@@ -305,17 +340,11 @@ SELECT
 FROM
 (
     SELECT
-        ring_xml = TRY_CAST(xet.target_data AS xml)
-    FROM sys.dm_xe_session_targets AS xet
-    JOIN sys.dm_xe_sessions AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{DeadlockXeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        pmd.ring_buffer
+    FROM @PerformanceMonitor_Deadlock AS pmd
 ) AS rb
-CROSS APPLY rb.ring_xml.nodes('RingBufferTarget/event[@name=""xml_deadlock_report""]') AS q(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > DATEADD(MINUTE, -10, SYSUTCDATETIME())
-ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2') DESC
+CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""xml_deadlock_report""]') AS q(evt)
+WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
 OPTION(RECOMPILE);";
         }
 
@@ -325,10 +354,34 @@ OPTION(RECOMPILE);";
         _lastSqlMs = 0;
         _lastDuckDbMs = 0;
 
+        /* Query the most recent deadlock_time we already have for this server.
+           Pass it to SQL Server so we only fetch events newer than what we've collected.
+           This prevents the same deadlock from being inserted multiple times as it
+           lingers in the ring buffer across collection cycles. */
+        DateTime? lastCollectedTime = null;
+        try
+        {
+            using var duckConn = _duckDb.CreateConnection();
+            await duckConn.OpenAsync(cancellationToken);
+            using var cmd = duckConn.CreateCommand();
+            cmd.CommandText = "SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = $1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            if (result is DateTime dt)
+                lastCollectedTime = dt;
+        }
+        catch
+        {
+            /* If DuckDB query fails, fall back to default 10-minute window */
+        }
+
         var sqlSw = Stopwatch.StartNew();
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
         using var command = new SqlCommand(query, sqlConnection);
         command.CommandTimeout = CommandTimeoutSeconds;
+
+        /* Use the most recent timestamp from DuckDB as the cutoff, or fall back to 10-minute window */
+        command.Parameters.Add(new SqlParameter("@cutoff_time", SqlDbType.DateTime2) { Value = lastCollectedTime ?? DateTime.UtcNow.AddMinutes(-10) });
 
         try
         {

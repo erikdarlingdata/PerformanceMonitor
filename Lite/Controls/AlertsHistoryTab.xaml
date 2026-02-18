@@ -1,0 +1,156 @@
+<UserControl x:Class="PerformanceMonitorLite.Controls.AlertsHistoryTab"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="450" d:DesignWidth="800">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="pack://application:,,,/Themes/DarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
+            <ContextMenu x:Key="DataGridContextMenu">
+                <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
+                <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
+                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+                <Separator/>
+                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+            </ContextMenu>
+
+            <Style x:Key="DefaultRowStyle" TargetType="DataGridRow">
+                <Setter Property="ContextMenu" Value="{StaticResource DataGridContextMenu}"/>
+            </Style>
+
+            <Style x:Key="AlertRowStyle" TargetType="DataGridRow" BasedOn="{StaticResource DefaultRowStyle}">
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsCritical}" Value="True">
+                        <Setter Property="Background" Value="#33DC2626"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding IsWarning}" Value="True">
+                        <Setter Property="Background" Value="#33D97706"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding IsResolved}" Value="True">
+                        <Setter Property="Background" Value="#3322C55E"/>
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header Controls -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+            <TextBlock Text="Alert History" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <ComboBox x:Name="TimeRangeComboBox" Width="100" VerticalAlignment="Center"
+                      SelectionChanged="TimeRangeComboBox_SelectionChanged">
+                <ComboBoxItem Content="Last 1 Hour" Tag="1"/>
+                <ComboBoxItem Content="Last 4 Hours" Tag="4"/>
+                <ComboBoxItem Content="Last 24 Hours" Tag="24" IsSelected="True"/>
+                <ComboBoxItem Content="Last 7 Days" Tag="168"/>
+                <ComboBoxItem Content="All" Tag="8760"/>
+            </ComboBox>
+            <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <ComboBox x:Name="ServerFilterComboBox" Width="160" VerticalAlignment="Center"
+                      SelectionChanged="ServerFilterComboBox_SelectionChanged">
+                <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
+            </ComboBox>
+            <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+            <Button x:Name="DismissSelectedButton" Content="Dismiss Selected" Click="DismissSelected_Click"
+                    Margin="8,0,0,0" Padding="10,4" MinWidth="90" IsEnabled="False"/>
+            <Button Content="Dismiss All" Click="DismissAll_Click"
+                    Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
+            <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
+                       FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+        </StackPanel>
+
+        <!-- DataGrid -->
+        <Grid Grid.Row="1" Margin="10,0,10,10">
+            <DataGrid x:Name="AlertsDataGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      CanUserSortColumns="True"
+                      GridLinesVisibility="Horizontal"
+                      CanUserResizeColumns="True"
+                      HeadersVisibility="Column"
+                      SelectionMode="Extended"
+                      SelectionChanged="AlertsDataGrid_SelectionChanged"
+                      RowStyle="{StaticResource AlertRowStyle}">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding TimeLocal}" Width="150">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Time" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ServerName}" Width="140">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Server" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MetricName}" Width="160">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MetricName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Alert Type" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding CurrentValueDisplay}" Width="160">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentValueDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Value" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ThresholdValueDisplay}" Width="120">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ThresholdValueDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Threshold" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding NotificationType}" Width="80">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NotificationType" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Channel" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding StatusDisplay}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StatusDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <!-- Empty State -->
+            <TextBlock x:Name="NoAlertsMessage"
+                       Text="No alerts recorded in the selected time range"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Visibility="Collapsed"/>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -3,7 +3,7 @@
   "archive_retention_days": 90,
   "default_time_range_hours": 24,
   "theme": "light",
-  "minimize_to_tray": false,
+  "minimize_to_tray": true,
   "start_collection_on_launch": true,
   "mcp_enabled": false,
   "mcp_port": 5151

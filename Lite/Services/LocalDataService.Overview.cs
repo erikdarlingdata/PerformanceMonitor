@@ -85,7 +85,7 @@ AND   event_time >= $2";
 SELECT COUNT(*)
 FROM deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2";
+AND   deadlock_time >= $2";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
             var result = await cmd.ExecuteScalarAsync();

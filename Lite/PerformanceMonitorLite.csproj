@@ -28,6 +28,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Lite.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- DuckDB for local data storage -->
     <PackageReference Include="DuckDB.NET.Data" Version="1.4.4" />
     <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.4.4" />

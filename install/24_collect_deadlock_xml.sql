@@ -123,89 +123,103 @@ BEGIN
         IF @is_azure_sql_db = 1
         BEGIN
             SET @sql = N'
-            WITH
-                ring_buffer_xml AS
+            DECLARE
+                @ring_buffer TABLE
             (
-                SELECT
-                    target_data = TRY_CAST(xet.target_data AS xml)
-                FROM sys.dm_xe_database_session_targets AS xet
-                JOIN sys.dm_xe_database_sessions AS xes
-                  ON xes.address = xet.event_session_address
-                WHERE xes.name = @session_name
-                AND   xet.target_name = N''ring_buffer''
-            ),
-                recent_events AS
+                ring_buffer xml NOT NULL
+            );
+
+            INSERT
+                @ring_buffer
             (
-                SELECT TOP (1000)
-                    event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
-                    deadlock_xml = evt.query(''.'')
-                FROM ring_buffer_xml AS rb
-                CROSS APPLY rb.target_data.nodes(''RingBufferTarget/event[@name="xml_deadlock_report"]'') AS q(evt)
-                WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
-                ORDER BY
-                    evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
+                ring_buffer
             )
+            SELECT
+                ring_xml = TRY_CAST(xet.target_data AS xml)
+            FROM sys.dm_xe_database_session_targets AS xet
+            JOIN sys.dm_xe_database_sessions AS xes
+              ON xes.address = xet.event_session_address
+            WHERE xes.name = @session_name
+            AND   xet.target_name = N''ring_buffer''
+            OPTION(RECOMPILE);
+
             INSERT INTO
                 collect.deadlock_xml
             (
                 event_time,
                 deadlock_xml
             )
-            SELECT
-                re.event_time,
-                re.deadlock_xml
-            FROM recent_events AS re
-            WHERE NOT EXISTS
+            SELECT TOP (1000)
+                event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
+                deadlock_xml = evt.query(''.'')
+            FROM
+            (
+                SELECT
+                    rb.ring_buffer
+                FROM @ring_buffer AS rb
+            ) AS rb
+            CROSS APPLY rb.ring_buffer.nodes(''RingBufferTarget/event[@name="xml_deadlock_report"]'') AS q(evt)
+            WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
+            AND NOT EXISTS
             (
                 SELECT
                     1/0
                 FROM collect.deadlock_xml AS dx
-                WHERE dx.event_time = re.event_time
+                WHERE dx.event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)'')
             )
+            ORDER BY
+                evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
             OPTION(RECOMPILE);';
         END;
         ELSE
         BEGIN
             SET @sql = N'
-            WITH
-                ring_buffer_xml AS
+            DECLARE
+                @ring_buffer TABLE
             (
-                SELECT
-                    target_data = TRY_CAST(xet.target_data AS xml)
-                FROM sys.dm_xe_session_targets AS xet
-                JOIN sys.dm_xe_sessions AS xes
-                  ON xes.address = xet.event_session_address
-                WHERE xes.name = @session_name
-                AND   xet.target_name = N''ring_buffer''
-            ),
-                recent_events AS
+                ring_buffer xml NOT NULL
+            );
+
+            INSERT
+                @ring_buffer
             (
-                SELECT TOP (1000)
-                    event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
-                    deadlock_xml = evt.query(''.'')
-                FROM ring_buffer_xml AS rb
-                CROSS APPLY rb.target_data.nodes(''RingBufferTarget/event[@name="xml_deadlock_report"]'') AS q(evt)
-                WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
-                ORDER BY
-                    evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
+                ring_buffer
             )
+            SELECT
+                ring_xml = TRY_CAST(xet.target_data AS xml)
+            FROM sys.dm_xe_session_targets AS xet
+            JOIN sys.dm_xe_sessions AS xes
+              ON xes.address = xet.event_session_address
+            WHERE xes.name = @session_name
+            AND   xet.target_name = N''ring_buffer''
+            OPTION(RECOMPILE);
+
             INSERT INTO
                 collect.deadlock_xml
             (
                 event_time,
                 deadlock_xml
             )
-            SELECT
-                re.event_time,
-                re.deadlock_xml
-            FROM recent_events AS re
-            WHERE NOT EXISTS
+            SELECT TOP (1000)
+                event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
+                deadlock_xml = evt.query(''.'')
+            FROM
+            (
+                SELECT
+                    rb.ring_buffer
+                FROM @ring_buffer AS rb
+            ) AS rb
+            CROSS APPLY rb.ring_buffer.nodes(''RingBufferTarget/event[@name="xml_deadlock_report"]'') AS q(evt)
+            WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
+            AND NOT EXISTS
             (
                 SELECT
                     1/0
                 FROM collect.deadlock_xml AS dx
-                WHERE dx.event_time = re.event_time
+                WHERE dx.event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)'')
             )
+            ORDER BY
+                evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
             OPTION(RECOMPILE);';
         END;
 
@@ -263,6 +277,64 @@ BEGIN
         END;
 
         COMMIT TRANSACTION;
+
+        /*
+        Chain-trigger: when new deadlock XML is found, immediately
+        parse it and run the analyzer instead of waiting for their next
+        scheduled runs. This eliminates up to 10 minutes of pipeline latency.
+        Parser/analyzer errors are logged but do not fail this collector.
+        */
+        IF @rows_collected > 0
+        BEGIN
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Chain-triggering deadlock parser and analyzer', 0, 1) WITH NOWAIT;
+            END;
+
+            BEGIN TRY
+                EXECUTE collect.process_deadlock_xml
+                    @debug = @debug;
+            END TRY
+            BEGIN CATCH
+                INSERT INTO
+                    config.collection_log
+                (
+                    collector_name,
+                    collection_status,
+                    duration_ms,
+                    error_message
+                )
+                VALUES
+                (
+                    N'deadlock_xml_collector',
+                    N'CHAIN_ERROR',
+                    DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
+                    N'Chain-triggered parser failed: ' + ERROR_MESSAGE()
+                );
+            END CATCH;
+
+            BEGIN TRY
+                EXECUTE collect.blocking_deadlock_analyzer
+                    @debug = @debug;
+            END TRY
+            BEGIN CATCH
+                INSERT INTO
+                    config.collection_log
+                (
+                    collector_name,
+                    collection_status,
+                    duration_ms,
+                    error_message
+                )
+                VALUES
+                (
+                    N'deadlock_xml_collector',
+                    N'CHAIN_ERROR',
+                    DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
+                    N'Chain-triggered analyzer failed: ' + ERROR_MESSAGE()
+                );
+            END CATCH;
+        END;
 
     END TRY
     BEGIN CATCH

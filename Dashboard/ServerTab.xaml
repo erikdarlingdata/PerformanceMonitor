@@ -228,7 +228,7 @@
                     <TabItem Header="Server Config Changes">
                         <Grid>
                         <DataGrid x:Name="ServerConfigChangesDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -345,7 +345,7 @@
                     <TabItem Header="Database Config Changes">
                         <Grid>
                         <DataGrid x:Name="DatabaseConfigChangesDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -415,7 +415,7 @@
                     <TabItem Header="Trace Flag Changes">
                         <Grid>
                         <DataGrid x:Name="TraceFlagChangesDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -593,7 +593,7 @@
                     <TabItem Header="Running Jobs">
                         <Grid>
                             <DataGrid x:Name="RunningJobsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Resources>
                                     <Style TargetType="DataGridRow">
@@ -705,7 +705,7 @@
                     <TabItem Header="Blocking">
                         <Grid>
                         <DataGrid x:Name="BlockingEventsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -889,7 +889,7 @@
                     <TabItem Header="Deadlocks">
                         <Grid>
                         <DataGrid x:Name="DeadlocksDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -1122,7 +1122,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Blocking Events (Delta)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Blocking Events" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsBlockingEventsChart"/>
                                     </Grid>
                                 </Border>
@@ -1133,7 +1133,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Blocking Duration (Delta ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Blocking Duration (ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsDurationChart"/>
                                     </Grid>
                                 </Border>
@@ -1144,7 +1144,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Deadlock Count (Delta)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Deadlock Count" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsDeadlocksChart"/>
                                     </Grid>
                                 </Border>
@@ -1155,7 +1155,7 @@
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
-                                        <TextBlock Grid.Row="0" Text="Deadlock Wait Time (Delta ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                        <TextBlock Grid.Row="0" Text="Deadlock Wait Time (ms)" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
                                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingStatsDeadlockWaitTimeChart"/>
                                     </Grid>
                                 </Border>

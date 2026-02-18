@@ -1723,6 +1723,14 @@ WITH
                 ORDER BY
                     ws.collection_time
             ),
+        waiting_tasks_delta =
+            ws.waiting_tasks_count - LAG(ws.waiting_tasks_count, 1, ws.waiting_tasks_count) OVER
+            (
+                PARTITION BY
+                    ws.wait_type
+                ORDER BY
+                    ws.collection_time
+            ),
         interval_seconds =
             DATEDIFF
             (
@@ -1754,6 +1762,12 @@ SELECT
             WHEN wd.interval_seconds > 0
             THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
             ELSE 0
+        END,
+    avg_ms_per_wait =
+        CASE
+            WHEN wd.waiting_tasks_delta > 0
+            THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
+            ELSE 0
         END
 FROM wait_deltas AS wd
 WHERE wd.wait_time_ms_delta > 0
@@ -1782,6 +1796,14 @@ WITH
             ),
         signal_wait_time_ms_delta =
             ws.signal_wait_time_ms - LAG(ws.signal_wait_time_ms, 1, ws.signal_wait_time_ms) OVER
+            (
+                PARTITION BY
+                    ws.wait_type
+                ORDER BY
+                    ws.collection_time
+            ),
+        waiting_tasks_delta =
+            ws.waiting_tasks_count - LAG(ws.waiting_tasks_count, 1, ws.waiting_tasks_count) OVER
             (
                 PARTITION BY
                     ws.wait_type
@@ -1818,6 +1840,12 @@ SELECT
             WHEN wd.interval_seconds > 0
             THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
             ELSE 0
+        END,
+    avg_ms_per_wait =
+        CASE
+            WHEN wd.waiting_tasks_delta > 0
+            THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
+            ELSE 0
         END
 FROM wait_deltas AS wd
 WHERE wd.wait_time_ms_delta > 0
@@ -1840,7 +1868,8 @@ ORDER BY
                     CollectionTime = reader.GetDateTime(0),
                     WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
                     WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2), CultureInfo.InvariantCulture),
-                    SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3), CultureInfo.InvariantCulture)
+                    SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3), CultureInfo.InvariantCulture),
+                    AvgMsPerWait = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4), CultureInfo.InvariantCulture)
                 });
             }
 
@@ -1890,6 +1919,12 @@ WITH
                 PARTITION BY ws.wait_type
                 ORDER BY ws.collection_time
             ),
+        waiting_tasks_delta =
+            ws.waiting_tasks_count - LAG(ws.waiting_tasks_count, 1, ws.waiting_tasks_count) OVER
+            (
+                PARTITION BY ws.wait_type
+                ORDER BY ws.collection_time
+            ),
         interval_seconds =
             DATEDIFF(SECOND, LAG(ws.collection_time, 1, ws.collection_time) OVER
             (
@@ -1911,6 +1946,10 @@ SELECT
     signal_wait_time_ms_per_second =
         CASE WHEN wd.interval_seconds > 0
         THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+        ELSE 0 END,
+    avg_ms_per_wait =
+        CASE WHEN wd.waiting_tasks_delta > 0
+        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
         ELSE 0 END
 FROM wait_deltas AS wd
 WHERE wd.wait_time_ms_delta > 0
@@ -1939,6 +1978,12 @@ WITH
                 PARTITION BY ws.wait_type
                 ORDER BY ws.collection_time
             ),
+        waiting_tasks_delta =
+            ws.waiting_tasks_count - LAG(ws.waiting_tasks_count, 1, ws.waiting_tasks_count) OVER
+            (
+                PARTITION BY ws.wait_type
+                ORDER BY ws.collection_time
+            ),
         interval_seconds =
             DATEDIFF(SECOND, LAG(ws.collection_time, 1, ws.collection_time) OVER
             (
@@ -1959,6 +2004,10 @@ SELECT
     signal_wait_time_ms_per_second =
         CASE WHEN wd.interval_seconds > 0
         THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+        ELSE 0 END,
+    avg_ms_per_wait =
+        CASE WHEN wd.waiting_tasks_delta > 0
+        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
         ELSE 0 END
 FROM wait_deltas AS wd
 WHERE wd.wait_time_ms_delta > 0
@@ -1982,7 +2031,8 @@ ORDER BY wd.collection_time, wd.wait_type;";
                     CollectionTime = reader.GetDateTime(0),
                     WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
                     WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2), CultureInfo.InvariantCulture),
-                    SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3), CultureInfo.InvariantCulture)
+                    SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3), CultureInfo.InvariantCulture),
+                    AvgMsPerWait = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4), CultureInfo.InvariantCulture)
                 });
             }
 

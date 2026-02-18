@@ -82,6 +82,13 @@ public class ServerConnection
     };
 
     /// <summary>
+    /// Actual connection status from the most recent connection check.
+    /// null = not checked yet, true = online, false = offline.
+    /// </summary>
+    [JsonIgnore]
+    public bool? IsOnline { get; set; }
+
+    /// <summary>
     /// Display-only property for showing status in UI.
     /// </summary>
     [JsonIgnore]

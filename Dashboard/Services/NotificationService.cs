@@ -195,6 +195,51 @@ namespace PerformanceMonitorDashboard.Services
                 NotificationType.Warning);
         }
 
+        public void ShowPoisonWaitNotification(string serverName, string waitType, double avgMs)
+        {
+            var prefs = _preferencesService.GetPreferences();
+            if (!prefs.NotifyOnPoisonWaits) return;
+
+            ShowNotification(
+                "Poison Wait",
+                $"{serverName}: {waitType} avg {avgMs:F0}ms/wait",
+                NotificationType.Error);
+        }
+
+        public void ShowLongRunningQueryNotification(string serverName, int sessionId, long elapsedMinutes, string queryPreview)
+        {
+            var prefs = _preferencesService.GetPreferences();
+            if (!prefs.NotifyOnLongRunningQueries) return;
+
+            var preview = string.IsNullOrEmpty(queryPreview) ? "" : $" — {queryPreview}";
+            ShowNotification(
+                "Long-Running Query",
+                $"{serverName}: Session #{sessionId} running {elapsedMinutes}m{preview}",
+                NotificationType.Warning);
+        }
+
+        public void ShowTempDbSpaceNotification(string serverName, double usedPercent)
+        {
+            var prefs = _preferencesService.GetPreferences();
+            if (!prefs.NotifyOnTempDbSpace) return;
+
+            ShowNotification(
+                "TempDB Space",
+                $"{serverName}: TempDB {usedPercent:F0}% used",
+                NotificationType.Warning);
+        }
+
+        public void ShowLongRunningJobNotification(string serverName, string jobName, long currentMinutes, decimal percentOfAvg)
+        {
+            var prefs = _preferencesService.GetPreferences();
+            if (!prefs.NotifyOnLongRunningJobs) return;
+
+            ShowNotification(
+                "Long-Running Job",
+                $"{serverName}: {jobName} at {percentOfAvg:F0}% of avg ({currentMinutes}m)",
+                NotificationType.Warning);
+        }
+
         private void ShowMainWindow()
         {
             _mainWindow.Show();
@@ -208,7 +253,7 @@ namespace PerformanceMonitorDashboard.Services
             // Trigger settings via the main window
             if (_mainWindow is MainWindow mainWin)
             {
-                var settingsWindow = new SettingsWindow { Owner = mainWin };
+                var settingsWindow = new SettingsWindow(_preferencesService) { Owner = mainWin };
                 settingsWindow.ShowDialog();
             }
         }

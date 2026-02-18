@@ -69,6 +69,10 @@ namespace PerformanceMonitorDashboard.Services
                 "Blocking Detected" => ("#D97706", "ALERT"),
                 "Deadlocks Detected" => ("#DC2626", "ALERT"),
                 "High CPU" => ("#F59E0B", "WARNING"),
+                "Poison Wait" => ("#DC2626", "CRITICAL"),
+                "Long-Running Query" => ("#D97706", "WARNING"),
+                "TempDB Space" => ("#D97706", "WARNING"),
+                "Long-Running Job" => ("#D97706", "WARNING"),
                 _ => ("#2eaef1", "INFO")
             };
         }

@@ -62,6 +62,13 @@ namespace PerformanceMonitorDashboard.Controls
         // Legend panel references for edge-based legends (ScottPlot issue #4717 workaround)
         private Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
 
+        // Chart hover tooltips
+        private Helpers.ChartHoverHelper? _memoryStatsOverviewHover;
+        private Helpers.ChartHoverHelper? _memoryGrantsHover;
+        private Helpers.ChartHoverHelper? _memoryClerksHover;
+        private Helpers.ChartHoverHelper? _planCacheHover;
+        private Helpers.ChartHoverHelper? _memoryPressureEventsHover;
+
         // No DataGrids with filters - all tabs are chart-only
 
         public MemoryContent()
@@ -69,6 +76,12 @@ namespace PerformanceMonitorDashboard.Controls
             InitializeComponent();
             SetupChartContextMenus();
             Loaded += OnLoaded;
+
+            _memoryStatsOverviewHover = new Helpers.ChartHoverHelper(MemoryStatsOverviewChart, "MB");
+            _memoryGrantsHover = new Helpers.ChartHoverHelper(MemoryGrantsChart, "MB");
+            _memoryClerksHover = new Helpers.ChartHoverHelper(MemoryClerksChart, "MB");
+            _planCacheHover = new Helpers.ChartHoverHelper(PlanCacheChart, "MB");
+            _memoryPressureEventsHover = new Helpers.ChartHoverHelper(MemoryPressureEventsChart, "events");
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -183,6 +196,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryStatsOverviewChart] = null;
             }
             MemoryStatsOverviewChart.Plot.Clear();
+            _memoryStatsOverviewHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryStatsOverviewChart);
 
             var dataList = memoryData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<MemoryStatsItem>();
@@ -216,24 +230,28 @@ namespace PerformanceMonitorDashboard.Controls
                 totalScatter.MarkerSize = 5;
                 totalScatter.Color = TabHelpers.ChartColors[9];
                 totalScatter.LegendText = "Total Memory";
+                _memoryStatsOverviewHover?.Add(totalScatter, "Total Memory");
 
                 var bufferScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(bufferXs, bufferYs);
                 bufferScatter.LineWidth = 2;
                 bufferScatter.MarkerSize = 5;
                 bufferScatter.Color = TabHelpers.ChartColors[0];
                 bufferScatter.LegendText = "Buffer Pool";
+                _memoryStatsOverviewHover?.Add(bufferScatter, "Buffer Pool");
 
                 var cacheScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(cacheXs, cacheYs);
                 cacheScatter.LineWidth = 2;
                 cacheScatter.MarkerSize = 5;
                 cacheScatter.Color = TabHelpers.ChartColors[1];
                 cacheScatter.LegendText = "Plan Cache";
+                _memoryStatsOverviewHover?.Add(cacheScatter, "Plan Cache");
 
                 var availScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(availXs, availYs);
                 availScatter.LineWidth = 2;
                 availScatter.MarkerSize = 5;
                 availScatter.Color = TabHelpers.ChartColors[2];
                 availScatter.LegendText = "Available Physical";
+                _memoryStatsOverviewHover?.Add(availScatter, "Available Physical");
 
                 _legendPanels[MemoryStatsOverviewChart] = MemoryStatsOverviewChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                 MemoryStatsOverviewChart.Plot.Legend.FontSize = 12;
@@ -389,6 +407,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryGrantsChart] = null;
             }
             MemoryGrantsChart.Plot.Clear();
+            _memoryGrantsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryGrantsChart);
 
             var dataList = data?.OrderBy(d => d.CollectionTime).ToList() ?? new List<MemoryGrantStatsItem>();
@@ -422,12 +441,14 @@ namespace PerformanceMonitorDashboard.Controls
                 grantedScatter.MarkerSize = 5;
                 grantedScatter.Color = TabHelpers.ChartColors[0];
                 grantedScatter.LegendText = "Granted MB";
+                _memoryGrantsHover?.Add(grantedScatter, "Granted MB");
 
                 var targetScatter = MemoryGrantsChart.Plot.Add.Scatter(targetXs, targetYs);
                 targetScatter.LineWidth = 2;
                 targetScatter.MarkerSize = 5;
                 targetScatter.Color = TabHelpers.ChartColors[2];
                 targetScatter.LegendText = "Target MB";
+                _memoryGrantsHover?.Add(targetScatter, "Target MB");
 
                 _legendPanels[MemoryGrantsChart] = MemoryGrantsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                 MemoryGrantsChart.Plot.Legend.FontSize = 12;
@@ -488,6 +509,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryClerksChart] = null;
             }
             MemoryClerksChart.Plot.Clear();
+            _memoryClerksHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryClerksChart);
 
             var dataList = data ?? new List<MemoryClerksItem>();
@@ -521,7 +543,9 @@ namespace PerformanceMonitorDashboard.Controls
                         scatter.LineWidth = 2;
                         scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
-                        scatter.LegendText = clerkType.Length > 20 ? clerkType.Substring(0, 20) + "..." : clerkType;
+                        var label = clerkType.Length > 20 ? clerkType.Substring(0, 20) + "..." : clerkType;
+                        scatter.LegendText = label;
+                        _memoryClerksHover?.Add(scatter, label);
                         colorIndex++;
                     }
                 }
@@ -623,6 +647,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[PlanCacheChart] = null;
             }
             PlanCacheChart.Plot.Clear();
+            _planCacheHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(PlanCacheChart);
 
             var dataList = data?.ToList() ?? new List<PlanCacheStatsItem>();
@@ -650,6 +675,7 @@ namespace PerformanceMonitorDashboard.Controls
                     singleScatter.MarkerSize = 5;
                     singleScatter.Color = TabHelpers.ChartColors[3];
                     singleScatter.LegendText = "Single-Use";
+                    _planCacheHover?.Add(singleScatter, "Single-Use");
 
                     // Multi-Use series with gap filling
                     var (multiXs, multiYs) = TabHelpers.FillTimeSeriesGaps(
@@ -661,6 +687,7 @@ namespace PerformanceMonitorDashboard.Controls
                     multiScatter.MarkerSize = 5;
                     multiScatter.Color = TabHelpers.ChartColors[1];
                     multiScatter.LegendText = "Multi-Use";
+                    _planCacheHover?.Add(multiScatter, "Multi-Use");
 
                     _legendPanels[PlanCacheChart] = PlanCacheChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                     PlanCacheChart.Plot.Legend.FontSize = 12;
@@ -762,6 +789,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[MemoryPressureEventsChart] = null;
             }
             MemoryPressureEventsChart.Plot.Clear();
+            _memoryPressureEventsHover?.Clear();
             TabHelpers.ApplyDarkModeToChart(MemoryPressureEventsChart);
 
             // Only chart HIGH severity events
@@ -788,6 +816,7 @@ namespace PerformanceMonitorDashboard.Controls
                     highScatter.MarkerSize = 5;
                     highScatter.Color = TabHelpers.ChartColors[3];
                     highScatter.LegendText = "High Pressure Events";
+                    _memoryPressureEventsHover?.Add(highScatter, "High Pressure Events");
 
                     _legendPanels[MemoryPressureEventsChart] = MemoryPressureEventsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                     MemoryPressureEventsChart.Plot.Legend.FontSize = 12;

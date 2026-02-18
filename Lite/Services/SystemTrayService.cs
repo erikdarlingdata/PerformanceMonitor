@@ -107,7 +107,7 @@ public class SystemTrayService : IDisposable
 
     private void MainWindow_StateChanged(object? sender, EventArgs e)
     {
-        if (_mainWindow.WindowState == WindowState.Minimized)
+        if (_mainWindow.WindowState == WindowState.Minimized && App.MinimizeToTray)
         {
             _mainWindow.Hide();
         }

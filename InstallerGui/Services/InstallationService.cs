@@ -324,6 +324,7 @@ END;";
             string connectionString,
             List<string> sqlFiles,
             bool cleanInstall,
+            bool resetSchedule = false,
             IProgress<InstallationProgress>? progress = null,
             Func<Task>? preValidationAction = null,
             CancellationToken cancellationToken = default)
@@ -409,6 +410,17 @@ END;";
                 try
                 {
                     string sqlContent = await File.ReadAllTextAsync(sqlFile, cancellationToken).ConfigureAwait(false);
+
+                    /*Reset schedule to defaults if requested*/
+                    if (resetSchedule && fileName.StartsWith("04_", StringComparison.Ordinal))
+                    {
+                        sqlContent = "TRUNCATE TABLE config.collection_schedule;\nGO\n" + sqlContent;
+                        progress?.Report(new InstallationProgress
+                        {
+                            Message = "Resetting schedule to recommended defaults...",
+                            Status = "Info"
+                        });
+                    }
 
                     /*Remove SQLCMD directives*/
                     sqlContent = SqlCmdDirectivePattern.Replace(sqlContent, "");

@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Globalization;
 
 namespace PerformanceMonitorDashboard.Models
 {
@@ -127,7 +126,7 @@ namespace PerformanceMonitorDashboard.Models
                 if (elapsed.TotalHours < 24)
                     return $"Checked {(int)elapsed.TotalHours}h ago";
 
-                return $"Checked {LastChecked.Value.ToString("MMM d, h:mm tt", CultureInfo.CurrentCulture)}";
+                return $"Checked {LastChecked.Value.ToString("g")}";
             }
         }
 
@@ -147,7 +146,7 @@ namespace PerformanceMonitorDashboard.Models
                 {
                     if (ServerStartTime.HasValue)
                     {
-                        return $"Online since {ServerStartTime.Value.ToString("MMM d, h:mm tt", CultureInfo.CurrentCulture)}";
+                        return $"Online since {ServerStartTime.Value.ToString("g")}";
                     }
                     return "Online";
                 }

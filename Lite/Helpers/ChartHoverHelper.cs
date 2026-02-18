@@ -18,7 +18,7 @@ internal sealed class ChartHoverHelper
     private readonly List<(ScottPlot.Plottables.Scatter Scatter, string Label)> _scatters = new();
     private readonly Popup _popup;
     private readonly TextBlock _text;
-    private readonly string _unit;
+    private string _unit;
     private DateTime _lastUpdate;
 
     public ChartHoverHelper(ScottPlot.WPF.WpfPlot chart, string unit)
@@ -52,6 +52,8 @@ internal sealed class ChartHoverHelper
         chart.MouseMove += OnMouseMove;
         chart.MouseLeave += OnMouseLeave;
     }
+
+    public string Unit { get => _unit; set => _unit = value; }
 
     public void Clear() => _scatters.Clear();
 

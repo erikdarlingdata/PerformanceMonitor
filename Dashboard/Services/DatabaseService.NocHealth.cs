@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Data;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorDashboard.Helpers;
@@ -119,7 +121,7 @@ namespace PerformanceMonitorDashboard.Services
         /// Lightweight alert-only health check. Runs 3 queries instead of 9.
         /// Used by MainWindow's independent alert timer.
         /// </summary>
-        public async Task<AlertHealthResult> GetAlertHealthAsync(int engineEdition = 0)
+        public async Task<AlertHealthResult> GetAlertHealthAsync(int engineEdition = 0, int longRunningQueryThresholdMinutes = 30, int longRunningJobMultiplier = 3)
         {
             var result = new AlertHealthResult();
 
@@ -133,8 +135,12 @@ namespace PerformanceMonitorDashboard.Services
                 var cpuTask = GetCpuPercentAsync(connection, engineEdition);
                 var blockingTask = GetBlockingValuesAsync(connection);
                 var deadlockTask = GetDeadlockCountAsync(connection);
+                var poisonWaitTask = GetPoisonWaitDeltasAsync(connection);
+                var longRunningTask = GetLongRunningQueriesAsync(connection, longRunningQueryThresholdMinutes);
+                var tempDbTask = GetTempDbSpaceAsync(connection);
+                var anomalousJobTask = GetAnomalousJobsAsync(connection, longRunningJobMultiplier);
 
-                await Task.WhenAll(cpuTask, blockingTask, deadlockTask);
+                await Task.WhenAll(cpuTask, blockingTask, deadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask);
 
                 var cpuResult = await cpuTask;
                 result.CpuPercent = cpuResult.SqlCpu;
@@ -145,6 +151,10 @@ namespace PerformanceMonitorDashboard.Services
                 result.LongestBlockedSeconds = blockingResult.LongestBlockedSeconds;
 
                 result.DeadlockCount = await deadlockTask;
+                result.PoisonWaits = await poisonWaitTask;
+                result.LongRunningQueries = await longRunningTask;
+                result.TempDbSpace = await tempDbTask;
+                result.AnomalousJobs = await anomalousJobTask;
             }
             catch (Exception ex)
             {
@@ -537,6 +547,212 @@ namespace PerformanceMonitorDashboard.Services
             {
                 Logger.Warning($"Failed to get last deadlock event time: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Gets recent poison wait deltas (THREADPOOL, RESOURCE_SEMAPHORE, RESOURCE_SEMAPHORE_QUERY_COMPILE)
+        /// from collected wait stats. Returns entries where avg ms per wait exceeds zero.
+        /// </summary>
+        private async Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(SqlConnection connection)
+        {
+            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT TOP (3)
+                    wait_type,
+                    wait_time_ms_delta,
+                    waiting_tasks_count_delta,
+                    avg_ms_per_wait =
+                        CASE WHEN waiting_tasks_count_delta > 0
+                        THEN CAST(wait_time_ms_delta AS decimal(19, 2)) / waiting_tasks_count_delta
+                        ELSE 0 END
+                FROM collect.wait_stats
+                WHERE wait_type IN (N'THREADPOOL', N'RESOURCE_SEMAPHORE', N'RESOURCE_SEMAPHORE_QUERY_COMPILE')
+                AND waiting_tasks_count_delta > 0
+                AND collection_time >= DATEADD(MINUTE, -10, SYSDATETIME())
+                ORDER BY collection_time DESC
+                OPTION(MAXDOP 1, RECOMPILE);";
+
+            var results = new List<PoisonWaitDelta>();
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    results.Add(new PoisonWaitDelta
+                    {
+                        WaitType = reader.GetString(0),
+                        DeltaMs = Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture),
+                        DeltaTasks = Convert.ToInt64(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture),
+                        AvgMsPerWait = Convert.ToDouble(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture)
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to get poison wait deltas: {ex.Message}");
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Gets currently running queries that exceed the duration threshold.
+        /// Uses live DMV data (sys.dm_exec_requests) for immediate detection.
+        /// </summary>
+        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes)
+        {
+            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT TOP (5)
+                    r.session_id,
+                    DB_NAME(r.database_id) AS database_name,
+                    SUBSTRING(t.text, 1, 300) AS query_text,
+                    s.program_name,
+                    r.total_elapsed_time / 1000 AS elapsed_seconds,
+                    r.cpu_time AS cpu_time_ms,
+                    r.reads,
+                    r.writes,
+                    r.wait_type,
+                    r.blocking_session_id
+                FROM sys.dm_exec_requests AS r
+                CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
+                JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
+                WHERE r.session_id > 50
+                AND r.total_elapsed_time >= @thresholdMs
+                ORDER BY r.total_elapsed_time DESC
+                OPTION(MAXDOP 1, RECOMPILE);";
+
+            var results = new List<LongRunningQueryInfo>();
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                cmd.Parameters.Add(new SqlParameter("@thresholdMs", SqlDbType.BigInt) { Value = (long)thresholdMinutes * 60 * 1000 });
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    results.Add(new LongRunningQueryInfo
+                    {
+                        SessionId = reader.GetInt32(0),
+                        DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                        ProgramName = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                        ElapsedSeconds = Convert.ToInt64(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+                        CpuTimeMs = Convert.ToInt64(reader.GetValue(5), System.Globalization.CultureInfo.InvariantCulture),
+                        Reads = Convert.ToInt64(reader.GetValue(6), System.Globalization.CultureInfo.InvariantCulture),
+                        Writes = Convert.ToInt64(reader.GetValue(7), System.Globalization.CultureInfo.InvariantCulture),
+                        WaitType = reader.IsDBNull(8) ? null : reader.GetString(8),
+                        BlockingSessionId = reader.IsDBNull(9) ? null : (int?)Convert.ToInt32(reader.GetValue(9), System.Globalization.CultureInfo.InvariantCulture)
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to get long-running queries: {ex.Message}");
+            }
+
+            return results;
+        }
+
+        private async Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(SqlConnection connection, int multiplier)
+        {
+            var results = new List<AnomalousJobInfo>();
+            var thresholdPercent = multiplier * 100;
+
+            var query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT TOP (5)
+                    job_name,
+                    CAST(job_id AS VARCHAR(36)),
+                    current_duration_seconds,
+                    avg_duration_seconds,
+                    p95_duration_seconds,
+                    percent_of_average,
+                    start_time
+                FROM collect.running_jobs
+                WHERE collection_time = (SELECT MAX(collection_time) FROM collect.running_jobs)
+                AND avg_duration_seconds >= 60
+                AND percent_of_average >= @thresholdPercent
+                ORDER BY percent_of_average DESC
+                OPTION(MAXDOP 1);";
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                cmd.Parameters.Add(new SqlParameter("@thresholdPercent", SqlDbType.Int) { Value = thresholdPercent });
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    results.Add(new AnomalousJobInfo
+                    {
+                        JobName = reader.GetString(0),
+                        JobId = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        CurrentDurationSeconds = Convert.ToInt64(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture),
+                        AvgDurationSeconds = Convert.ToInt64(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture),
+                        P95DurationSeconds = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+                        PercentOfAverage = reader.IsDBNull(5) ? null : Convert.ToDecimal(reader.GetValue(5), System.Globalization.CultureInfo.InvariantCulture),
+                        StartTime = reader.GetDateTime(6)
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to get anomalous jobs: {ex.Message}");
+            }
+
+            return results;
+        }
+
+        private async Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(SqlConnection connection)
+        {
+            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT TOP (1)
+                    total_reserved_mb,
+                    unallocated_mb,
+                    user_object_reserved_mb,
+                    internal_object_reserved_mb,
+                    version_store_reserved_mb,
+                    top_task_total_mb,
+                    top_task_session_id
+                FROM collect.tempdb_stats
+                ORDER BY collection_time DESC
+                OPTION(MAXDOP 1);";
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                if (await reader.ReadAsync())
+                {
+                    return new TempDbSpaceInfo
+                    {
+                        TotalReservedMb = reader.IsDBNull(0) ? 0 : Convert.ToDouble(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture),
+                        UnallocatedMb = reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture),
+                        UserObjectReservedMb = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture),
+                        InternalObjectReservedMb = reader.IsDBNull(3) ? 0 : Convert.ToDouble(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture),
+                        VersionStoreReservedMb = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+                        TopConsumerMb = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5), System.Globalization.CultureInfo.InvariantCulture),
+                        TopConsumerSessionId = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6), System.Globalization.CultureInfo.InvariantCulture)
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to get TempDB space: {ex.Message}");
+            }
+
+            return null;
         }
     }
 }

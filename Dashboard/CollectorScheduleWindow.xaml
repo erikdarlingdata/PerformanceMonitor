@@ -40,8 +40,8 @@
                     <DataGridTextColumn Header="Collector" Binding="{Binding DisplayName}" Width="180" IsReadOnly="True"/>
                     <DataGridTextColumn Header="Frequency (min)" Binding="{Binding FrequencyMinutes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="110"/>
                     <DataGridTextColumn Header="Retention (days)" Binding="{Binding RetentionDays, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="110"/>
-                    <DataGridTextColumn Header="Last Run" Binding="{Binding LastRunTime, StringFormat='{}{0:MM/dd HH:mm}'}" Width="100" IsReadOnly="True"/>
-                    <DataGridTextColumn Header="Next Run" Binding="{Binding NextRunTime, StringFormat='{}{0:MM/dd HH:mm}'}" Width="100" IsReadOnly="True"/>
+                    <DataGridTextColumn Header="Last Run" Binding="{Binding LastRunTime, StringFormat='{}{0:g}'}" Width="100" IsReadOnly="True"/>
+                    <DataGridTextColumn Header="Next Run" Binding="{Binding NextRunTime, StringFormat='{}{0:g}'}" Width="100" IsReadOnly="True"/>
                     <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="*" IsReadOnly="True"/>
                 </DataGrid.Columns>
             </DataGrid>

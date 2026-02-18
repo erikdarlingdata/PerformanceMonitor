@@ -78,6 +78,14 @@ namespace PerformanceMonitorDashboard.Models
         public int DeadlockThreshold { get; set; } = 1; // Alert when deadlocks >= X since last check
         public bool NotifyOnHighCpu { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 90; // Alert when CPU > X%
+        public bool NotifyOnPoisonWaits { get; set; } = true;
+        public int PoisonWaitThresholdMs { get; set; } = 500; // Alert when avg ms per wait > X
+        public bool NotifyOnLongRunningQueries { get; set; } = true;
+        public int LongRunningQueryThresholdMinutes { get; set; } = 30; // Alert when query runs > X minutes
+        public bool NotifyOnTempDbSpace { get; set; } = true;
+        public int TempDbSpaceThresholdPercent { get; set; } = 80; // Alert when TempDB used > X%
+        public bool NotifyOnLongRunningJobs { get; set; } = true;
+        public int LongRunningJobMultiplier { get; set; } = 3; // Alert when job runs > Nx historical average
 
         // SMTP email alert settings
         public bool SmtpEnabled { get; set; } = false;
@@ -91,6 +99,9 @@ namespace PerformanceMonitorDashboard.Models
         // MCP server settings
         public bool McpEnabled { get; set; } = false;
         public int McpPort { get; set; } = 5150;
+
+        // Navigation settings
+        public bool FocusServerTabOnClick { get; set; } = true;
 
         // Update check settings
         public bool CheckForUpdatesOnStartup { get; set; } = true;

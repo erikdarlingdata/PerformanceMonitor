@@ -1,4 +1,4 @@
-/*
+﻿/*
 Copyright 2026 Darling Data, LLC
 https://www.erikdarling.com/
 
@@ -258,17 +258,107 @@ BEGIN
             object_id = ts.object_id,
             object_name = COALESCE(
                 OBJECT_NAME(ts.object_id, ts.database_id),
-                /*Parse trigger name from CREATE TRIGGER [name] or CREATE TRIGGER name*/
-                CASE
-                    WHEN CHARINDEX(N'CREATE TRIGGER', st.text) > 0
-                    THEN LTRIM(RTRIM(REPLACE(REPLACE(
-                        SUBSTRING(
-                            st.text,
-                            CHARINDEX(N'CREATE TRIGGER', st.text) + 15,
-                            CHARINDEX(N' ON ', st.text + N' ON ') - CHARINDEX(N'CREATE TRIGGER', st.text) - 15
-                        ), N'[', N''), N']', N'')))
-                    ELSE N'trigger_' + CONVERT(nvarchar(20), ts.object_id)
-                END
+                /*Parse trigger name from trigger definition text.
+                  Handles: CREATE TRIGGER, CREATE OR ALTER TRIGGER,
+                  DML triggers (ON table), DDL triggers (ON DATABASE/ALL SERVER),
+                  and newlines between trigger name and ON clause.*/
+                CONVERT
+                (
+                    sysname,
+                    CASE
+                        WHEN st.text LIKE N'%CREATE OR ALTER TRIGGER%'
+                        THEN LTRIM(RTRIM(REPLACE(REPLACE(
+                            SUBSTRING
+                            (
+                                st.text,
+                                CHARINDEX(N'CREATE OR ALTER TRIGGER', st.text) + 23,
+                                /*Find the earliest delimiter after the trigger name:
+                                  newline (CR/LF) or ON keyword on same line*/
+                                ISNULL
+                                (
+                                    NULLIF
+                                    (
+                                        CHARINDEX
+                                        (
+                                            CHAR(13),
+                                            SUBSTRING(st.text, CHARINDEX(N'CREATE OR ALTER TRIGGER', st.text) + 23, 256)
+                                        ),
+                                        0
+                                    ),
+                                    ISNULL
+                                    (
+                                        NULLIF
+                                        (
+                                            CHARINDEX
+                                            (
+                                                CHAR(10),
+                                                SUBSTRING(st.text, CHARINDEX(N'CREATE OR ALTER TRIGGER', st.text) + 23, 256)
+                                            ),
+                                            0
+                                        ),
+                                        ISNULL
+                                        (
+                                            NULLIF
+                                            (
+                                                CHARINDEX
+                                                (
+                                                    N' ON ',
+                                                    SUBSTRING(st.text, CHARINDEX(N'CREATE OR ALTER TRIGGER', st.text) + 23, 256)
+                                                ),
+                                                0
+                                            ),
+                                            128
+                                        )
+                                    )
+                                ) - 1
+                            ), N'[', N''), N']', N'')))
+                        WHEN st.text LIKE N'%CREATE TRIGGER%'
+                        THEN LTRIM(RTRIM(REPLACE(REPLACE(
+                            SUBSTRING
+                            (
+                                st.text,
+                                CHARINDEX(N'CREATE TRIGGER', st.text) + 15,
+                                ISNULL
+                                (
+                                    NULLIF
+                                    (
+                                        CHARINDEX
+                                        (
+                                            CHAR(13),
+                                            SUBSTRING(st.text, CHARINDEX(N'CREATE TRIGGER', st.text) + 15, 256)
+                                        ),
+                                        0
+                                    ),
+                                    ISNULL
+                                    (
+                                        NULLIF
+                                        (
+                                            CHARINDEX
+                                            (
+                                                CHAR(10),
+                                                SUBSTRING(st.text, CHARINDEX(N'CREATE TRIGGER', st.text) + 15, 256)
+                                            ),
+                                            0
+                                        ),
+                                        ISNULL
+                                        (
+                                            NULLIF
+                                            (
+                                                CHARINDEX
+                                                (
+                                                    N' ON ',
+                                                    SUBSTRING(st.text, CHARINDEX(N'CREATE TRIGGER', st.text) + 15, 256)
+                                                ),
+                                                0
+                                            ),
+                                            128
+                                        )
+                                    )
+                                ) - 1
+                            ), N'[', N''), N']', N'')))
+                        ELSE N'trigger_' + CONVERT(nvarchar(20), ts.object_id)
+                    END
+                )
             ),
             schema_name = ISNULL(OBJECT_SCHEMA_NAME(ts.object_id, ts.database_id), N'dbo'),
             type_desc = N'TRIGGER',

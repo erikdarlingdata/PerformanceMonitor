@@ -80,7 +80,7 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Connection timeout for SQL Server connections in seconds.
     /// </summary>
-    private const int ConnectionTimeoutSeconds = 15;
+    private const int ConnectionTimeoutSeconds = 5;
 
     /// <summary>
     /// Per-call timing fields set by each collector method.
@@ -193,18 +193,27 @@ public partial class RemoteCollectorService
             return;
         }
 
-        _logger?.LogInformation("Running {CollectorCount} collectors for {ServerCount} servers",
-            dueCollectors.Count, enabledServers.Count);
-
         var tasks = new List<Task>();
+        int skippedOffline = 0;
 
         foreach (var server in enabledServers)
         {
+            var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+            if (serverStatus.IsOnline == false)
+            {
+                skippedOffline++;
+                _logger?.LogDebug("Skipping offline server '{Server}'", server.DisplayName);
+                continue;
+            }
+
             foreach (var collector in dueCollectors)
             {
                 tasks.Add(RunCollectorAsync(server, collector.Name, cancellationToken));
             }
         }
+
+        _logger?.LogInformation("Running {CollectorCount} collectors for {OnlineCount}/{TotalCount} servers ({SkippedCount} offline, skipped)",
+            dueCollectors.Count, enabledServers.Count - skippedOffline, enabledServers.Count, skippedOffline);
 
         await Task.WhenAll(tasks);
     }
@@ -363,13 +372,13 @@ public partial class RemoteCollectorService
         RecordCollectorResult(GetServerId(server), collectorName, status == "SUCCESS", errorMessage);
 
         // Log the collection attempt
-        await LogCollectionAsync(GetServerId(server), collectorName, startTime, status, errorMessage, rowsCollected, _lastSqlMs, _lastDuckDbMs);
+        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, _lastSqlMs, _lastDuckDbMs);
     }
 
     /// <summary>
     /// Logs a collection attempt to the collection_log table.
     /// </summary>
-    private async Task LogCollectionAsync(int serverId, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0)
+    private async Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0)
     {
         try
         {
@@ -380,11 +389,12 @@ public partial class RemoteCollectorService
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-                INSERT INTO collection_log (log_id, server_id, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
             command.Parameters.Add(new DuckDBParameter { Value = GenerateCollectionId() });
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = serverName });
             command.Parameters.Add(new DuckDBParameter { Value = collectorName });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = durationMs });
@@ -515,6 +525,32 @@ public partial class RemoteCollectorService
     protected static int GetServerId(ServerConnection server)
     {
         return GetDeterministicHashCode(server.ServerName);
+    }
+
+    /// <summary>
+    /// Safely converts a SQL Server float/real value to decimal.
+    /// Returns 0 for Infinity, NaN, or values outside decimal range.
+    /// </summary>
+    protected static decimal SafeToDecimal(object value)
+    {
+        try
+        {
+            if (value is double d)
+            {
+                if (double.IsInfinity(d) || double.IsNaN(d))
+                    return 0m;
+            }
+            else if (value is float f)
+            {
+                if (float.IsInfinity(f) || float.IsNaN(f))
+                    return 0m;
+            }
+            return Convert.ToDecimal(value);
+        }
+        catch (OverflowException)
+        {
+            return 0m;
+        }
     }
 
     /// <summary>

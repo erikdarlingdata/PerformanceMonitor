@@ -53,6 +53,7 @@ BEGIN
         @schedule_id integer,
         @frequency_minutes integer,
         @max_duration_minutes integer,
+        @minutes_back integer,
         @error_message nvarchar(4000);
     
     BEGIN TRY
@@ -175,7 +176,8 @@ BEGIN
         WHILE @@FETCH_STATUS = 0
         BEGIN
             SET @collector_start_time = SYSDATETIME();
-            
+            SET @minutes_back = @frequency_minutes * 2;
+
             IF @debug = 1
             BEGIN
                 RAISERROR(N'Running collector: %s (frequency: %d minutes)', 0, 1, @collector_name, @frequency_minutes) WITH NOWAIT;
@@ -207,7 +209,7 @@ BEGIN
                 END;
                 ELSE IF @collector_name = N'blocked_process_xml_collector'
                 BEGIN
-                    EXECUTE collect.blocked_process_xml_collector @debug = @debug;
+                    EXECUTE collect.blocked_process_xml_collector @minutes_back = @minutes_back, @debug = @debug;
                 END;
                 ELSE IF @collector_name = N'process_blocked_process_xml'
                 BEGIN
@@ -215,7 +217,7 @@ BEGIN
                 END;
                 ELSE IF @collector_name = N'deadlock_xml_collector'
                 BEGIN
-                    EXECUTE collect.deadlock_xml_collector @debug = @debug;
+                    EXECUTE collect.deadlock_xml_collector @minutes_back = @minutes_back, @debug = @debug;
                 END;
                 ELSE IF @collector_name = N'process_deadlock_xml'
                 BEGIN

@@ -180,6 +180,12 @@
                           Margin="0,0,0,10"
                           Foreground="{DynamicResource ForegroundBrush}"/>
 
+                <!-- Reset Schedule Checkbox -->
+                <CheckBox x:Name="ResetScheduleCheckBox"
+                          Content="Reset collection schedule to recommended defaults"
+                          Margin="0,0,0,10"
+                          Foreground="{DynamicResource ForegroundBrush}"/>
+
                 <!-- Validation Checkbox -->
                 <CheckBox x:Name="ValidationCheckBox"
                           Content="Run validation after install (recommended)"

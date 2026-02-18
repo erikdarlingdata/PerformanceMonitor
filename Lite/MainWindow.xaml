@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitorLite.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls"
         Title="Performance Monitor Lite"
         Height="700" Width="1200"
         WindowStartupLocation="CenterScreen"
@@ -96,10 +97,10 @@
                                             <Style TargetType="Ellipse">
                                                 <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
                                                 <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding IsEnabled}" Value="True">
+                                                    <DataTrigger Binding="{Binding IsOnline}" Value="True">
                                                         <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
                                                     </DataTrigger>
-                                                    <DataTrigger Binding="{Binding IsEnabled}" Value="False">
+                                                    <DataTrigger Binding="{Binding IsOnline}" Value="False">
                                                         <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
                                                     </DataTrigger>
                                                 </Style.Triggers>
@@ -245,6 +246,9 @@
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
                         </ScrollViewer>
+                    </TabItem>
+                    <TabItem Header="Alert History" x:Name="AlertsTab">
+                        <controls:AlertsHistoryTab x:Name="AlertsHistoryContent"/>
                     </TabItem>
                 </TabControl>
             </Grid>

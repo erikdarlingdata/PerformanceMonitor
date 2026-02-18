@@ -16,5 +16,6 @@ namespace PerformanceMonitorDashboard.Models
         public string WaitType { get; set; } = string.Empty;
         public decimal WaitTimeMsPerSecond { get; set; }
         public decimal SignalWaitTimeMsPerSecond { get; set; }
+        public decimal AvgMsPerWait { get; set; }
     }
 }

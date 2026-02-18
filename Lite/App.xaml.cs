@@ -55,6 +55,17 @@ public partial class App : Application
     public static int AlertBlockingThreshold { get; set; } = 1;
     public static bool AlertDeadlockEnabled { get; set; } = true;
     public static int AlertDeadlockThreshold { get; set; } = 1;
+    public static bool AlertPoisonWaitEnabled { get; set; } = true;
+    public static int AlertPoisonWaitThresholdMs { get; set; } = 500;
+    public static bool AlertLongRunningQueryEnabled { get; set; } = true;
+    public static int AlertLongRunningQueryThresholdMinutes { get; set; } = 30;
+    public static bool AlertTempDbSpaceEnabled { get; set; } = true;
+    public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
+    public static bool AlertLongRunningJobEnabled { get; set; } = true;
+    public static int AlertLongRunningJobMultiplier { get; set; } = 3;
+
+    /* System tray settings */
+    public static bool MinimizeToTray { get; set; } = true;
 
     /* Update check settings */
     public static bool CheckForUpdatesOnStartup { get; set; } = true;
@@ -198,6 +209,17 @@ public partial class App : Application
             if (root.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.GetInt32();
+            if (root.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.GetBoolean();
+            if (root.TryGetProperty("alert_poison_wait_threshold_ms", out v)) AlertPoisonWaitThresholdMs = v.GetInt32();
+            if (root.TryGetProperty("alert_long_running_query_enabled", out v)) AlertLongRunningQueryEnabled = v.GetBoolean();
+            if (root.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.GetInt32();
+            if (root.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.GetBoolean();
+            if (root.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.GetInt32();
+            if (root.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.GetBoolean();
+            if (root.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.GetInt32();
+
+            /* System tray settings */
+            if (root.TryGetProperty("minimize_to_tray", out v)) MinimizeToTray = v.GetBoolean();
 
             /* Update check settings */
             if (root.TryGetProperty("check_for_updates_on_startup", out v)) CheckForUpdatesOnStartup = v.GetBoolean();

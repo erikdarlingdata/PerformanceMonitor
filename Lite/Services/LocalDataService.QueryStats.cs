@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
@@ -27,7 +28,7 @@ SELECT
     quoted_name = QUOTENAME(d.name)
 FROM sys.databases AS d
 WHERE d.name = @database_name;", connection);
-        command.Parameters.AddWithValue("@database_name", databaseName);
+        command.Parameters.Add(new SqlParameter("@database_name", SqlDbType.NVarChar, 128) { Value = databaseName });
         var result = await command.ExecuteScalarAsync();
         return result as string;
     }
@@ -247,7 +248,7 @@ OPTION(RECOMPILE);";
         using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync();
         using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
-        command.Parameters.AddWithValue("@query_hash", queryHash);
+        command.Parameters.Add(new SqlParameter("@query_hash", SqlDbType.VarChar, 64) { Value = queryHash });
         var result = await command.ExecuteScalarAsync();
         return result as string;
     }
@@ -294,8 +295,8 @@ OPTION(RECOMPILE);',
     @schema_name;";
 
         using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
-        command.Parameters.AddWithValue("@object_name", objectName);
-        command.Parameters.AddWithValue("@schema_name", schemaName);
+        command.Parameters.Add(new SqlParameter("@object_name", SqlDbType.NVarChar, 128) { Value = objectName });
+        command.Parameters.Add(new SqlParameter("@schema_name", SqlDbType.NVarChar, 128) { Value = schemaName });
         var result = await command.ExecuteScalarAsync();
         return result as string;
     }

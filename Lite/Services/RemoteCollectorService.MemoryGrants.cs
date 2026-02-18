@@ -79,7 +79,7 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
                 reader.IsDBNull(10) ? false : Convert.ToBoolean(reader.GetValue(10)),
                 reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
-                reader.IsDBNull(12) ? 0m : Convert.ToDecimal(reader.GetValue(12))));
+                reader.IsDBNull(12) ? 0m : SafeToDecimal(reader.GetValue(12))));
         }
         sqlSw.Stop();
 

@@ -97,6 +97,8 @@
         <Border Grid.Row="4" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
             <StackPanel>
                 <TextBlock Text="Notifications" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
+                <CheckBox x:Name="MinimizeToTrayCheckBox" Content="Minimize to system tray" Margin="0,8,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}"/>
                 <CheckBox x:Name="AlertsEnabledCheckBox" Content="Enable notifications" Margin="0,8,0,0"
                           Foreground="{DynamicResource ForegroundBrush}" Checked="AlertsEnabledCheckBox_Changed" Unchecked="AlertsEnabledCheckBox_Changed"/>
                 <CheckBox x:Name="NotifyConnectionCheckBox" Content="Connection lost / restored" Margin="20,6,0,0"
@@ -117,6 +119,34 @@
                     <CheckBox x:Name="AlertDeadlockCheckBox" Content="Deadlocks &#x2265;" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertDeadlockThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) avg wait &#x2265;" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="ms" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertLongRunningQueryThresholdBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertTempDbSpaceCheckBox" Content="TempDB space usage over" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertTempDbSpaceThresholdBox" Width="45" Text="80" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
             </StackPanel>
         </Border>

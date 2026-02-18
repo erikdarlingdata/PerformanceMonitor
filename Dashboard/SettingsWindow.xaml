@@ -54,7 +54,7 @@
 
                         <!-- Default Time Range Section -->
                         <TextBlock Text="Default Time Range" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
-                        <StackPanel Orientation="Horizontal">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
                             <TextBlock Text="Show data from last:" VerticalAlignment="Center" Margin="0,0,10,0"/>
                             <ComboBox x:Name="DefaultTimeRangeComboBox" Width="120" SelectionChanged="DefaultTimeRangeComboBox_Changed">
                                 <ComboBoxItem Content="1 hour" Tag="1"/>
@@ -63,6 +63,12 @@
                                 <ComboBoxItem Content="7 days" Tag="168"/>
                             </ComboBox>
                         </StackPanel>
+
+                        <!-- Navigation Section -->
+                        <TextBlock Text="Navigation" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
+                        <CheckBox x:Name="FocusServerTabCheckBox"
+                                  Content="Focus server tab when clicking a server card"
+                                  Margin="0,0,0,0"/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -142,6 +148,58 @@
                                          VerticalAlignment="Center"
                                          TextAlignment="Center"/>
                                 <TextBlock Text="%" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <CheckBox x:Name="NotifyOnPoisonWaitsCheckBox"
+                                          Content="Poison waits (THREADPOOL, etc.) avg wait &#x2265;"
+                                          VerticalAlignment="Center"
+                                          Checked="NotifyOnPoisonWaitsCheckBox_Changed"
+                                          Unchecked="NotifyOnPoisonWaitsCheckBox_Changed"/>
+                                <TextBox x:Name="PoisonWaitThresholdTextBox"
+                                         Width="50"
+                                         Margin="8,0,8,0"
+                                         VerticalAlignment="Center"
+                                         TextAlignment="Center"/>
+                                <TextBlock Text="ms" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <CheckBox x:Name="NotifyOnLongRunningQueriesCheckBox"
+                                          Content="Long-running queries over"
+                                          VerticalAlignment="Center"
+                                          Checked="NotifyOnLongRunningQueriesCheckBox_Changed"
+                                          Unchecked="NotifyOnLongRunningQueriesCheckBox_Changed"/>
+                                <TextBox x:Name="LongRunningQueryThresholdTextBox"
+                                         Width="50"
+                                         Margin="8,0,8,0"
+                                         VerticalAlignment="Center"
+                                         TextAlignment="Center"/>
+                                <TextBlock Text="minutes" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <CheckBox x:Name="NotifyOnTempDbSpaceCheckBox"
+                                          Content="TempDB space usage over"
+                                          VerticalAlignment="Center"
+                                          Checked="NotifyOnTempDbSpaceCheckBox_Changed"
+                                          Unchecked="NotifyOnTempDbSpaceCheckBox_Changed"/>
+                                <TextBox x:Name="TempDbSpaceThresholdTextBox"
+                                         Width="50"
+                                         Margin="8,0,8,0"
+                                         VerticalAlignment="Center"
+                                         TextAlignment="Center"/>
+                                <TextBlock Text="%" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <CheckBox x:Name="NotifyOnLongRunningJobsCheckBox"
+                                          Content="Agent jobs running over"
+                                          VerticalAlignment="Center"
+                                          Checked="NotifyOnLongRunningJobsCheckBox_Changed"
+                                          Unchecked="NotifyOnLongRunningJobsCheckBox_Changed"/>
+                                <TextBox x:Name="LongRunningJobMultiplierTextBox"
+                                         Width="50"
+                                         Margin="8,0,8,0"
+                                         VerticalAlignment="Center"
+                                         TextAlignment="Center"/>
+                                <TextBlock Text="x historical average" VerticalAlignment="Center"/>
                             </StackPanel>
                         </StackPanel>
                     </StackPanel>
