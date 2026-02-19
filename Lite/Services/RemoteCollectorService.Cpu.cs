@@ -78,18 +78,49 @@ FROM
 ORDER BY t.timestamp DESC
 OPTION(RECOMPILE);";
 
-        string query = isAzureSqlDb ? azureSqlDbQuery : ringBufferQuery;
-
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
         var rowsCollected = 0;
         _lastSqlMs = 0;
         _lastDuckDbMs = 0;
 
+        /* Get the most recent sample_time we already have, to skip duplicates.
+           Ring buffer always returns TOP 60 (computed sample_time can't be filtered server-side).
+           For Azure SQL DB, we push the filter into the SQL query since end_time is a real column. */
+        var lastSampleTime = await GetLastCollectedTimeAsync(
+            serverId, "cpu_utilization_stats", "sample_time", cancellationToken);
+
+        string query;
+        if (isAzureSqlDb && lastSampleTime.HasValue)
+        {
+            /* Azure SQL DB: filter server-side since end_time is a real column */
+            query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    sample_time = drs.end_time,
+    sqlserver_cpu_utilization = CONVERT(integer, drs.avg_cpu_percent),
+    other_process_cpu_utilization = 0
+FROM sys.dm_db_resource_stats AS drs
+WHERE drs.end_time > @last_sample_time
+ORDER BY
+    drs.end_time DESC
+OPTION(RECOMPILE);";
+        }
+        else
+        {
+            query = isAzureSqlDb ? azureSqlDbQuery : ringBufferQuery;
+        }
+
         var sqlSw = Stopwatch.StartNew();
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
         using var command = new SqlCommand(query, sqlConnection);
         command.CommandTimeout = CommandTimeoutSeconds;
+
+        if (isAzureSqlDb && lastSampleTime.HasValue)
+        {
+            command.Parameters.Add(new SqlParameter("@last_sample_time", System.Data.SqlDbType.DateTime2) { Value = lastSampleTime.Value });
+        }
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         sqlSw.Stop();
@@ -104,12 +135,18 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var sampleTime = reader.GetDateTime(0);
+
+            /* Client-side dedup for ring buffer (computed sample_time can't be filtered in SQL) */
+            if (!isAzureSqlDb && lastSampleTime.HasValue && sampleTime <= lastSampleTime.Value)
+                continue;
+
             var row = appender.CreateRow();
             row.AppendValue(GenerateCollectionId())
                .AppendValue(collectionTime)
                .AppendValue(serverId)
                .AppendValue(server.ServerName)
-               .AppendValue(reader.GetDateTime(0))
+               .AppendValue(sampleTime)
                .AppendValue(reader.IsDBNull(1) ? 0 : reader.GetInt32(1))
                .AppendValue(reader.IsDBNull(2) ? 0 : reader.GetInt32(2))
                .EndRow();
