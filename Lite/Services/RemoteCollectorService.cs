@@ -528,6 +528,31 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
+    /// Gets the most recent value of a timestamp column from DuckDB for incremental collection.
+    /// Returns null on first run or if the query fails (caller uses a fallback window).
+    /// </summary>
+    protected async Task<DateTime?> GetLastCollectedTimeAsync(
+        int serverId, string tableName, string columnName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            if (result is DateTime dt)
+                return dt;
+        }
+        catch
+        {
+            /* If DuckDB query fails, caller uses fallback window */
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Safely converts a SQL Server float/real value to decimal.
     /// Returns 0 for Infinity, NaN, or values outside decimal range.
     /// </summary>

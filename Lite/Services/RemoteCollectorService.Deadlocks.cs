@@ -13,7 +13,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Models;
@@ -358,22 +357,8 @@ OPTION(RECOMPILE);";
            Pass it to SQL Server so we only fetch events newer than what we've collected.
            This prevents the same deadlock from being inserted multiple times as it
            lingers in the ring buffer across collection cycles. */
-        DateTime? lastCollectedTime = null;
-        try
-        {
-            using var duckConn = _duckDb.CreateConnection();
-            await duckConn.OpenAsync(cancellationToken);
-            using var cmd = duckConn.CreateCommand();
-            cmd.CommandText = "SELECT MAX(deadlock_time) FROM deadlocks WHERE server_id = $1";
-            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
-                lastCollectedTime = dt;
-        }
-        catch
-        {
-            /* If DuckDB query fails, fall back to default 10-minute window */
-        }
+        var lastCollectedTime = await GetLastCollectedTimeAsync(
+            serverId, "deadlocks", "deadlock_time", cancellationToken);
 
         var sqlSw = Stopwatch.StartNew();
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
@@ -389,24 +374,33 @@ OPTION(RECOMPILE);";
             sqlSw.Stop();
             _lastSqlMs = sqlSw.ElapsedMilliseconds;
 
+            /* Read all rows and parse XML before starting DuckDB timing.
+               ExtractVictimSqlText does XElement.Parse which is expensive
+               and was previously misattributed as DuckDB time. */
+            var deadlockRows = new System.Collections.Generic.List<(DateTime? deadlockTime, string? victimProcessId, string? victimSqlText, string? graphXml)>();
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var victimProcessId = reader.IsDBNull(1) ? null : reader.GetString(1);
+                var graphXml = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var victimSqlText = ExtractVictimSqlText(graphXml, victimProcessId);
+                var deadlockTime = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);
+                deadlockRows.Add((deadlockTime, victimProcessId, victimSqlText, graphXml));
+            }
+
             var duckSw = Stopwatch.StartNew();
             using var duckConnection = _duckDb.CreateConnection();
             await duckConnection.OpenAsync(cancellationToken);
 
             using var appender = duckConnection.CreateAppender("deadlocks");
 
-            while (await reader.ReadAsync(cancellationToken))
+            foreach (var (deadlockTime, victimProcessId, victimSqlText, graphXml) in deadlockRows)
             {
-                var victimProcessId = reader.IsDBNull(1) ? null : reader.GetString(1);
-                var graphXml = reader.IsDBNull(2) ? null : reader.GetString(2);
-                var victimSqlText = ExtractVictimSqlText(graphXml, victimProcessId);
-
                 var row = appender.CreateRow();
                 row.AppendValue(GenerateCollectionId())
                    .AppendValue(collectionTime)
                    .AppendValue(serverId)
                    .AppendValue(server.ServerName)
-                   .AppendValue(reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0))
+                   .AppendValue(deadlockTime)
                    .AppendValue(victimProcessId)
                    .AppendValue(victimSqlText)
                    .AppendValue(graphXml)
