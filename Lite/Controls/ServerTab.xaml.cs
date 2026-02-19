@@ -1475,7 +1475,7 @@ public partial class ServerTab : UserControl
         var darkBackground = ScottPlot.Color.FromHex("#22252b");
         var darkerBackground = ScottPlot.Color.FromHex("#111217");
         var textColor = ScottPlot.Color.FromHex("#9DA5B4");
-        var gridColor = ScottPlot.Colors.White.WithAlpha(20);
+        var gridColor = ScottPlot.Colors.White.WithAlpha(40);
 
         chart.Plot.FigureBackground.Color = darkBackground;
         chart.Plot.DataBackground.Color = darkerBackground;

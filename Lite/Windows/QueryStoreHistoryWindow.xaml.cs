@@ -161,7 +161,7 @@ public partial class QueryStoreHistoryWindow : Window
         var darkBg = ScottPlot.Color.FromHex("#22252b");
         var darkerBg = ScottPlot.Color.FromHex("#111217");
         var text = ScottPlot.Color.FromHex("#9DA5B4");
-        var grid = ScottPlot.Colors.White.WithAlpha(20);
+        var grid = ScottPlot.Colors.White.WithAlpha(40);
 
         chart.Plot.FigureBackground.Color = darkBg;
         chart.Plot.DataBackground.Color = darkerBg;

@@ -150,8 +150,18 @@
                     <StackPanel>
                         <Button x:Name="AddServerButton" Content="+ Add Server" Click="AddServerButton_Click"/>
                         <Button x:Name="ManageServersButton" Content="Manage Servers" Click="ManageServersButton_Click" Margin="0,8,0,0"/>
-                        <Button x:Name="SettingsButton" Content="Settings" Click="SettingsButton_Click" Margin="0,8,0,0"/>
-                        <Button Content="About" Click="AboutButton_Click" Margin="0,8,0,0"/>
+                        <Button x:Name="SettingsButton" Click="SettingsButton_Click" Margin="0,8,0,0">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="Settings" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Click="AboutButton_Click" Margin="0,8,0,0">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE897;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="About" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
                     </StackPanel>
                 </Border>
             </Grid>
