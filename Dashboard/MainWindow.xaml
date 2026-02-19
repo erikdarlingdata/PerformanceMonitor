@@ -172,14 +172,22 @@
                             Margin="0,0,0,12"/>
                     <Separator/>
                     <Button x:Name="SettingsButton"
-                            Content="Settings"
                             Click="Settings_Click"
                             Height="28"
-                            Margin="0,8,0,6"/>
+                            Margin="0,8,0,6">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock Text="Settings" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
                     <Button x:Name="HelpButton"
-                            Content="Help / About"
                             Click="Help_Click"
-                            Height="28"/>
+                            Height="28">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE897;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock Text="Help / About" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
             </Grid>
         </Border>
