@@ -132,7 +132,7 @@ namespace PerformanceMonitorDashboard.Helpers
             var darkBackground = ScottPlot.Color.FromHex("#22252b");
             var darkerBackground = ScottPlot.Color.FromHex("#111217");
             var textColor = ScottPlot.Color.FromHex("#9DA5B4");
-            var gridColor = ScottPlot.Colors.White.WithAlpha(50);
+            var gridColor = ScottPlot.Colors.White.WithAlpha(20);
 
             chart.Plot.FigureBackground.Color = darkBackground;
             chart.Plot.DataBackground.Color = darkerBackground;

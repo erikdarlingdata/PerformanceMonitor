@@ -49,6 +49,9 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _queryDurationTrendHover;
     private Helpers.ChartHoverHelper? _procDurationTrendHover;
     private Helpers.ChartHoverHelper? _queryStoreDurationTrendHover;
+    private Helpers.ChartHoverHelper? _executionCountTrendHover;
+    private Helpers.ChartHoverHelper? _blockingTrendHover;
+    private Helpers.ChartHoverHelper? _deadlockTrendHover;
 
     /* Column filtering */
     private Popup? _filterPopup;
@@ -146,6 +149,9 @@ public partial class ServerTab : UserControl
         _queryDurationTrendHover = new Helpers.ChartHoverHelper(QueryDurationTrendChart, "ms/sec");
         _procDurationTrendHover = new Helpers.ChartHoverHelper(ProcDurationTrendChart, "ms/sec");
         _queryStoreDurationTrendHover = new Helpers.ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec");
+        _executionCountTrendHover = new Helpers.ChartHoverHelper(ExecutionCountTrendChart, "/sec");
+        _blockingTrendHover = new Helpers.ChartHoverHelper(BlockingTrendChart, "incidents");
+        _deadlockTrendHover = new Helpers.ChartHoverHelper(DeadlockTrendChart, "deadlocks");
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -855,6 +861,7 @@ public partial class ServerTab : UserControl
             rangeStart = rangeEnd.AddHours(-hoursBack);
         }
 
+        _blockingTrendHover?.Clear();
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
@@ -904,6 +911,7 @@ public partial class ServerTab : UserControl
         plot.LegendText = "Blocking Incidents";
         plot.Color = ScottPlot.Color.FromHex("#E57373");
         plot.MarkerSize = 0; /* No markers, just lines */
+        _blockingTrendHover?.Add(plot, "Blocking Incidents");
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
@@ -932,6 +940,7 @@ public partial class ServerTab : UserControl
             rangeStart = rangeEnd.AddHours(-hoursBack);
         }
 
+        _deadlockTrendHover?.Clear();
         if (data.Count == 0)
         {
             /* No deadlocks — show a flat line at zero so the chart looks active */
@@ -981,6 +990,7 @@ public partial class ServerTab : UserControl
         plot.LegendText = "Deadlocks";
         plot.Color = ScottPlot.Color.FromHex("#FFB74D");
         plot.MarkerSize = 0; /* No markers, just lines */
+        _deadlockTrendHover?.Add(plot, "Deadlocks");
 
         DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
         DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
@@ -1075,9 +1085,11 @@ public partial class ServerTab : UserControl
         var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
         var values = data.Select(d => d.Value).ToArray();
 
+        _executionCountTrendHover?.Clear();
         var plot = ExecutionCountTrendChart.Plot.Add.Scatter(times, values);
         plot.LegendText = "Executions";
         plot.Color = ScottPlot.Color.FromHex("#BA68C8");
+        _executionCountTrendHover?.Add(plot, "Executions");
 
         ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottom();
         ReapplyAxisColors(ExecutionCountTrendChart);
