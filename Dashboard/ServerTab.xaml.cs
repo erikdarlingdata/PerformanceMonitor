@@ -114,6 +114,7 @@ namespace PerformanceMonitorDashboard
             // Initialize Overview sub-tab UserControls
             DailySummaryTab.Initialize(_databaseService);
             CriticalIssuesTab.Initialize(_databaseService);
+            DefaultTraceTab.Initialize(_databaseService);
             MemoryTab.Initialize(_databaseService);
             PerformanceTab.Initialize(_databaseService, s => StatusText.Text = s);
             SystemEventsContent.Initialize(_databaseService);
@@ -699,7 +700,8 @@ namespace PerformanceMonitorDashboard
                 ResourceMetricsContent.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 SystemEventsContent.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 CriticalIssuesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
-                
+                DefaultTraceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
+
                 await LoadDataAsync();
             }
             catch (Exception ex)
@@ -862,6 +864,7 @@ namespace PerformanceMonitorDashboard
                 ResourceMetricsContent.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 SystemEventsContent.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 CriticalIssuesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
+                DefaultTraceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
 
                 // Refresh all data
                 StatusText.Text = GetLoadingMessage();
@@ -1162,8 +1165,10 @@ namespace PerformanceMonitorDashboard
                         _resourceOverviewFromDate = _globalFromDate;
                         _resourceOverviewToDate = _globalToDate;
                         CriticalIssuesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
+                        DefaultTraceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                         CollectionHealth_Refresh_Click(null, new RoutedEventArgs());
                         await CriticalIssuesTab.RefreshDataAsync();
+                        await DefaultTraceTab.RefreshAllDataAsync();
                         await RefreshResourceOverviewAsync();
                         break;
 
@@ -1272,13 +1277,14 @@ namespace PerformanceMonitorDashboard
                 var resourceMetricsTask = ResourceMetricsContent.RefreshAllDataAsync();
                 var dailySummaryTask = DailySummaryTab.RefreshDataAsync();
                 var criticalIssuesTask = CriticalIssuesTab.RefreshDataAsync();
+                var defaultTraceTask = DefaultTraceTab.RefreshAllDataAsync();
                 var systemEventsTask = SystemEventsContent.RefreshAllDataAsync();
 
                 // Wait for everything to complete before _isRefreshing resets
                 await Task.WhenAll(
                     healthTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask,
                     performanceTask, memoryTask, resourceOverviewTask, runningJobsTask,
-                    resourceMetricsTask, dailySummaryTask, criticalIssuesTask, systemEventsTask);
+                    resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, systemEventsTask);
 
                 // Populate grids with fetched data
                 var healthData = await healthTask;

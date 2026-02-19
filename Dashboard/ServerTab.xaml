@@ -224,6 +224,11 @@
                         <controls:CriticalIssuesContent x:Name="CriticalIssuesTab" />
                     </TabItem>
 
+                    <!-- Default Trace Sub-Tab -->
+                    <TabItem Header="Default Trace">
+                        <controls:DefaultTraceContent x:Name="DefaultTraceTab" />
+                    </TabItem>
+
                     <!-- Server Configuration Changes Sub-Tab -->
                     <TabItem Header="Server Config Changes">
                         <Grid>

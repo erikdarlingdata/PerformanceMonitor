@@ -16,7 +16,6 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using Microsoft.Win32;
 using PerformanceMonitorDashboard.Models;
@@ -29,7 +28,7 @@ namespace PerformanceMonitorDashboard.Controls
     /// <summary>
     /// UserControl for the Resource Metrics tab content.
     /// Displays Latch Stats, Spinlock Stats, TempDB Stats, CPU Spikes, Session Stats,
-    /// File I/O Latency, Server Trends, Perfmon Counters, Default Trace Events, and Trace Analysis.
+    /// File I/O Latency, Server Trends, and Perfmon Counters.
     /// </summary>
     public partial class ResourceMetricsContent : UserControl
     {
@@ -75,16 +74,6 @@ namespace PerformanceMonitorDashboard.Controls
         private List<PerfmonStatsItem>? _allPerfmonCountersData;
         private List<PerfmonCounterSelectionItem>? _perfmonCounterItems;
 
-        // Default Trace Events state
-        private int _defaultTraceEventsHoursBack = 24;
-        private DateTime? _defaultTraceEventsFromDate;
-        private DateTime? _defaultTraceEventsToDate;
-
-        // Trace Analysis state
-        private int _traceAnalysisHoursBack = 24;
-        private DateTime? _traceAnalysisFromDate;
-        private DateTime? _traceAnalysisToDate;
-
         // Wait Stats Detail state
         private int _waitStatsDetailHoursBack = 24;
         private DateTime? _waitStatsDetailFromDate;
@@ -105,19 +94,7 @@ namespace PerformanceMonitorDashboard.Controls
         private Helpers.ChartHoverHelper? _serverTrendsTempdbHover;
         private Helpers.ChartHoverHelper? _serverTrendsMemoryHover;
         private Helpers.ChartHoverHelper? _serverTrendsPerfmonHover;
-        // Column filter popup and state
-        private Popup? _filterPopup;
-        private ColumnFilterPopup? _filterPopupContent;
-        private string? _currentFilterDataGridName;
-
         // Filter state dictionaries for each DataGrid
-        private Dictionary<string, ColumnFilterState> _defaultTraceEventsFilters = new();
-        private Dictionary<string, ColumnFilterState> _traceAnalysisFilters = new();
-
-        // Unfiltered data for each DataGrid
-        private List<DefaultTraceEventItem>? _defaultTraceEventsUnfilteredData;
-        private List<TraceAnalysisItem>? _traceAnalysisUnfilteredData;
-
         // Legend panel references for edge-based legends (ScottPlot issue #4717 workaround)
         // Must store and remove these by reference before creating new ones
         private Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
@@ -147,12 +124,8 @@ namespace PerformanceMonitorDashboard.Controls
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
             // Apply minimum column widths based on header text
-            TabHelpers.AutoSizeColumnMinWidths(DefaultTraceEventsDataGrid);
-            TabHelpers.AutoSizeColumnMinWidths(TraceAnalysisDataGrid);
 
             // Freeze identifier columns
-            TabHelpers.FreezeColumns(DefaultTraceEventsDataGrid, 1);
-            TabHelpers.FreezeColumns(TraceAnalysisDataGrid, 1);
         }
 
         private void SetupChartContextMenus()
@@ -230,14 +203,6 @@ namespace PerformanceMonitorDashboard.Controls
             _perfmonCountersFromDate = fromDate;
             _perfmonCountersToDate = toDate;
 
-            _defaultTraceEventsHoursBack = hoursBack;
-            _defaultTraceEventsFromDate = fromDate;
-            _defaultTraceEventsToDate = toDate;
-
-            _traceAnalysisHoursBack = hoursBack;
-            _traceAnalysisFromDate = fromDate;
-            _traceAnalysisToDate = toDate;
-
             _waitStatsDetailHoursBack = hoursBack;
             _waitStatsDetailFromDate = fromDate;
             _waitStatsDetailToDate = toDate;
@@ -262,8 +227,6 @@ namespace PerformanceMonitorDashboard.Controls
                     LoadFileIoLatencyChartsAsync(),
                     RefreshServerTrendsAsync(),
                     RefreshPerfmonCountersTabAsync(),
-                    RefreshDefaultTraceEventsAsync(),
-                    RefreshTraceAnalysisAsync(),
                     RefreshWaitStatsDetailTabAsync()
                 );
             }
@@ -1284,134 +1247,6 @@ namespace PerformanceMonitorDashboard.Controls
 
         #endregion
 
-        // Filtering logic moved to DataGridFilterService.ApplyFilter()
-
-
-        #region Shared Filter Popup Methods
-
-        private void ShowFilterPopup(Button button, string columnName, string dataGridName, Dictionary<string, ColumnFilterState> filters)
-        {
-            if (_filterPopup == null)
-            {
-                _filterPopupContent = new ColumnFilterPopup();
-                _filterPopupContent.FilterApplied += FilterPopup_FilterApplied;
-                _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
-
-                _filterPopup = new Popup
-                {
-                    Child = _filterPopupContent,
-                    StaysOpen = false,
-                    Placement = PlacementMode.Bottom,
-                    AllowsTransparency = true
-                };
-            }
-
-            _currentFilterDataGridName = dataGridName;
-            filters.TryGetValue(columnName, out var existingFilter);
-            _filterPopupContent!.Initialize(columnName, existingFilter);
-            _filterPopup.PlacementTarget = button;
-            _filterPopup.IsOpen = true;
-        }
-
-        private void FilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
-        {
-            if (_filterPopup != null) _filterPopup.IsOpen = false;
-
-            switch (_currentFilterDataGridName)
-            {
-                case "DefaultTraceEvents":
-                    UpdateFilterState(_defaultTraceEventsFilters, e.FilterState);
-                    ApplyDefaultTraceEventsFilters();
-                    UpdateDataGridFilterButtonStyles(DefaultTraceEventsDataGrid, _defaultTraceEventsFilters);
-                    break;
-                case "TraceAnalysis":
-                    UpdateFilterState(_traceAnalysisFilters, e.FilterState);
-                    ApplyTraceAnalysisFilters();
-                    UpdateDataGridFilterButtonStyles(TraceAnalysisDataGrid, _traceAnalysisFilters);
-                    break;
-            }
-        }
-
-        private void FilterPopup_FilterCleared(object? sender, EventArgs e)
-        {
-            if (_filterPopup != null) _filterPopup.IsOpen = false;
-        }
-
-        private void UpdateFilterState(Dictionary<string, ColumnFilterState> filters, ColumnFilterState filterState)
-        {
-            if (filterState.IsActive)
-                filters[filterState.ColumnName] = filterState;
-            else
-                filters.Remove(filterState.ColumnName);
-        }
-
-        private void UpdateDataGridFilterButtonStyles(DataGrid dataGrid, Dictionary<string, ColumnFilterState> filters)
-        {
-            foreach (var column in dataGrid.Columns)
-            {
-                if (column.Header is StackPanel headerPanel)
-                {
-                    var filterButton = headerPanel.Children.OfType<Button>().FirstOrDefault();
-                    if (filterButton != null && filterButton.Tag is string columnName)
-                    {
-                        bool hasActiveFilter = filters.TryGetValue(columnName, out var filter) && filter.IsActive;
-
-                        var textBlock = new System.Windows.Controls.TextBlock
-                        {
-                            Text = "\uE71C",
-                            FontFamily = new System.Windows.Media.FontFamily("Segoe MDL2 Assets"),
-                            Foreground = hasActiveFilter
-                                ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xD7, 0x00))
-                                : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF))
-                        };
-                        filterButton.Content = textBlock;
-
-                        filterButton.ToolTip = hasActiveFilter && filter != null
-                            ? $"Filter: {filter.DisplayText}\n(Click to modify)"
-                            : "Click to filter";
-                    }
-                }
-            }
-        }
-
-        #endregion
-
-        #region Filter Click Handlers
-
-        private void DefaultTraceEventsFilter_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is Button button && button.Tag is string columnName)
-                ShowFilterPopup(button, columnName, "DefaultTraceEvents", _defaultTraceEventsFilters);
-        }
-
-        private void TraceAnalysisFilter_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is Button button && button.Tag is string columnName)
-                ShowFilterPopup(button, columnName, "TraceAnalysis", _traceAnalysisFilters);
-        }
-
-        #endregion
-
-        #region Apply Filter Methods
-
-        private void ApplyDefaultTraceEventsFilters()
-        {
-            if (_defaultTraceEventsUnfilteredData == null) { _defaultTraceEventsUnfilteredData = DefaultTraceEventsDataGrid.ItemsSource as List<DefaultTraceEventItem> ?? (DefaultTraceEventsDataGrid.ItemsSource as IEnumerable<DefaultTraceEventItem>)?.ToList(); }
-            if (_defaultTraceEventsUnfilteredData == null) return;
-            if (_defaultTraceEventsFilters.Count == 0) { DefaultTraceEventsDataGrid.ItemsSource = _defaultTraceEventsUnfilteredData; return; }
-            DefaultTraceEventsDataGrid.ItemsSource = _defaultTraceEventsUnfilteredData.Where(item => _defaultTraceEventsFilters.Values.All(f => !f.IsActive || DataGridFilterService.MatchesFilter(item, f))).ToList();
-        }
-
-        private void ApplyTraceAnalysisFilters()
-        {
-            if (_traceAnalysisUnfilteredData == null) { _traceAnalysisUnfilteredData = TraceAnalysisDataGrid.ItemsSource as List<TraceAnalysisItem> ?? (TraceAnalysisDataGrid.ItemsSource as IEnumerable<TraceAnalysisItem>)?.ToList(); }
-            if (_traceAnalysisUnfilteredData == null) return;
-            if (_traceAnalysisFilters.Count == 0) { TraceAnalysisDataGrid.ItemsSource = _traceAnalysisUnfilteredData; return; }
-            TraceAnalysisDataGrid.ItemsSource = _traceAnalysisUnfilteredData.Where(item => _traceAnalysisFilters.Values.All(f => !f.IsActive || DataGridFilterService.MatchesFilter(item, f))).ToList();
-        }
-
-        #endregion
-
         #region Context Menu Handlers
 
         private void CopyCell_Click(object sender, RoutedEventArgs e)
@@ -1783,105 +1618,6 @@ namespace PerformanceMonitorDashboard.Controls
             PerfmonCountersChart.Plot.YLabel("Value/sec");
             TabHelpers.LockChartVerticalAxis(PerfmonCountersChart);
             PerfmonCountersChart.Refresh();
-        }
-
-        #endregion
-
-        #region Default Trace Events Tab
-
-        private string? _defaultTraceEventsFilter;
-
-        private void DefaultTraceEventsFilter_Changed(object sender, SelectionChangedEventArgs e)
-        {
-            if (DefaultTraceEventsFilterCombo.SelectedItem is ComboBoxItem selected)
-            {
-                _defaultTraceEventsFilter = selected.Tag?.ToString();
-                if (string.IsNullOrEmpty(_defaultTraceEventsFilter))
-                {
-                    _defaultTraceEventsFilter = null;
-                }
-                DefaultTraceEvents_Refresh_Click(sender, new RoutedEventArgs());
-            }
-        }
-
-        private async void DefaultTraceEvents_Refresh_Click(object? sender, RoutedEventArgs e)
-        {
-            try
-            {
-                await RefreshDefaultTraceEventsAsync();
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error refreshing Default Trace Events data: {ex.Message}", ex);
-            }
-        }
-
-        private async Task RefreshDefaultTraceEventsAsync()
-        {
-            if (_databaseService == null) return;
-
-            try
-            {
-                var data = await _databaseService.GetDefaultTraceEventsAsync(_defaultTraceEventsHoursBack, _defaultTraceEventsFromDate, _defaultTraceEventsToDate, _defaultTraceEventsFilter);
-                DefaultTraceEventsDataGrid.ItemsSource = data;
-                DefaultTraceEventsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error loading default trace events: {ex.Message}");
-            }
-        }
-
-        private void DefaultTraceEventsFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
-        {
-            DataGridFilterService.ApplyFilter(DefaultTraceEventsDataGrid, sender as TextBox);
-        }
-
-        private void DefaultTraceEventsNumericFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
-        {
-            DataGridFilterService.ApplyFilter(DefaultTraceEventsDataGrid, sender as TextBox);
-        }
-
-        #endregion
-
-        #region Trace Analysis Tab
-
-        private async void TraceAnalysis_Refresh_Click(object? sender, RoutedEventArgs e)
-        {
-            try
-            {
-                await RefreshTraceAnalysisAsync();
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error refreshing Trace Analysis data: {ex.Message}", ex);
-            }
-        }
-
-        private async Task RefreshTraceAnalysisAsync()
-        {
-            if (_databaseService == null) return;
-
-            try
-            {
-                var data = await _databaseService.GetTraceAnalysisAsync(_traceAnalysisHoursBack, _traceAnalysisFromDate, _traceAnalysisToDate);
-                TraceAnalysisDataGrid.ItemsSource = data;
-                TraceAnalysisNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error loading trace analysis: {ex.Message}");
-            }
-        }
-
-        private void TraceAnalysisFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
-        {
-            DataGridFilterService.ApplyFilter(TraceAnalysisDataGrid, sender as TextBox);
-        }
-
-        private void TraceAnalysisNumericFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
-        {
-            DataGridFilterService.ApplyFilter(TraceAnalysisDataGrid, sender as TextBox);
         }
 
         #endregion
