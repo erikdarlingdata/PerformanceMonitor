@@ -6,8 +6,8 @@
         MinHeight="600" MinWidth="700"
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized"
-        Background="#333333"
-        Foreground="#FFFFFF">
+        Background="{DynamicResource BackgroundBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
 
     <Grid Margin="20">
         <Grid.RowDefinitions>

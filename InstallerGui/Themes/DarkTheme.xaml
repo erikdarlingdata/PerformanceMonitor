@@ -11,15 +11,15 @@
     <SolidColorBrush x:Key="AccentHoverBrush" Color="#5bc4f5"/>
     <SolidColorBrush x:Key="AccentPressedBrush" Color="#1a9ae0"/>
 
-    <SolidColorBrush x:Key="BackgroundDarkBrush" Color="#252525"/>
-    <SolidColorBrush x:Key="BackgroundBrush" Color="#333333"/>
-    <SolidColorBrush x:Key="BackgroundLightBrush" Color="#404040"/>
-    <SolidColorBrush x:Key="BackgroundLighterBrush" Color="#4a4a4a"/>
+    <SolidColorBrush x:Key="BackgroundDarkBrush" Color="#111217"/>
+    <SolidColorBrush x:Key="BackgroundBrush" Color="#181b1f"/>
+    <SolidColorBrush x:Key="BackgroundLightBrush" Color="#22252b"/>
+    <SolidColorBrush x:Key="BackgroundLighterBrush" Color="#2a2d35"/>
 
-    <SolidColorBrush x:Key="ForegroundBrush" Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="ForegroundMutedBrush" Color="#858585"/>
+    <SolidColorBrush x:Key="ForegroundBrush" Color="#E4E6EB"/>
+    <SolidColorBrush x:Key="ForegroundMutedBrush" Color="#6B7280"/>
 
-    <SolidColorBrush x:Key="BorderBrush" Color="#555555"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="#2a2d35"/>
 
     <!-- ============================================ -->
     <!-- TextBlock Style                              -->

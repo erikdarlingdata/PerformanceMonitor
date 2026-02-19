@@ -1,5 +1,6 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
 
     <!-- ============================================ -->
     <!-- Darling Data Dark Theme                      -->
@@ -32,6 +33,18 @@
     <Color x:Key="WarningColor">#FFD54F</Color>
     <Color x:Key="ErrorColor">#E57373</Color>
     <Color x:Key="InfoColor">#2eaef1</Color>
+
+    <!-- Spacing Scale -->
+    <sys:Double x:Key="SpacingXS">2</sys:Double>
+    <sys:Double x:Key="SpacingSm">4</sys:Double>
+    <sys:Double x:Key="SpacingMd">8</sys:Double>
+    <sys:Double x:Key="SpacingLg">12</sys:Double>
+    <sys:Double x:Key="SpacingXL">16</sys:Double>
+
+    <!-- Corner Radius -->
+    <CornerRadius x:Key="CornerRadiusSm">2</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusMd">4</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusLg">6</CornerRadius>
 
     <!-- Brushes -->
     <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}"/>

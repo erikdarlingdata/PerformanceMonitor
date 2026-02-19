@@ -4,6 +4,7 @@
         xmlns:controls="clr-namespace:PerformanceMonitorDashboard.Controls"
         Title="Performance Monitor Dashboard"
         Height="700" Width="1400"
+        MinHeight="600" MinWidth="900"
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized"
         Background="{DynamicResource BackgroundBrush}">

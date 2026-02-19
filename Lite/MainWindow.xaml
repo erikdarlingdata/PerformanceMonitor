@@ -4,6 +4,7 @@
         xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls"
         Title="Performance Monitor Lite"
         Height="700" Width="1200"
+        MinHeight="600" MinWidth="900"
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized"
         Icon="EDD.ico"
