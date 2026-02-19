@@ -1063,7 +1063,7 @@
     <!-- ============================================ -->
     <!-- ToolTip Style                                -->
     <!-- ============================================ -->
-    <Style x:Key="DarkToolTip" TargetType="ToolTip">
+    <Style TargetType="ToolTip">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderLightBrush}"/>
