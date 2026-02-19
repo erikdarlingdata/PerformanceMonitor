@@ -1248,51 +1248,66 @@ namespace PerformanceMonitorDashboard.Services
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
         
-                    string query;
-                    if (fromDate.HasValue && toDate.HasValue)
-                    {
-                        query = @"
+                    /* Inline the aggregation with time-bounded CTE instead of using the view.
+                       The view aggregates ALL time then takes TOP 50 by avg_duration, which causes
+                       the dashboard's time filter to find zero matches when recent patterns are
+                       shorter-running than old load test patterns (GitHub issue #168). */
+                    string timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "ta.end_time >= @from_date AND ta.end_time <= @to_date"
+                        : "ta.end_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())";
+
+                    string query = $@"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-        SELECT
-            lrqp.database_name,
-            lrqp.query_pattern,
-            lrqp.executions,
-            lrqp.avg_duration_sec,
-            lrqp.max_duration_sec,
-            lrqp.avg_cpu_sec,
-            lrqp.avg_reads,
-            lrqp.avg_writes,
-            lrqp.concern_level,
-            lrqp.recommendation,
-            lrqp.sample_query_text,
-            lrqp.last_execution
-        FROM report.long_running_query_patterns AS lrqp
-        WHERE lrqp.last_execution >= @from_date AND lrqp.last_execution <= @to_date
-        ORDER BY lrqp.last_execution DESC;";
-                    }
-                    else
-                    {
-                        query = @"
-        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-        SELECT
-            lrqp.database_name,
-            lrqp.query_pattern,
-            lrqp.executions,
-            lrqp.avg_duration_sec,
-            lrqp.max_duration_sec,
-            lrqp.avg_cpu_sec,
-            lrqp.avg_reads,
-            lrqp.avg_writes,
-            lrqp.concern_level,
-            lrqp.recommendation,
-            lrqp.sample_query_text,
-            lrqp.last_execution
-        FROM report.long_running_query_patterns AS lrqp
-        WHERE lrqp.last_execution >= DATEADD(HOUR, @hours_back, SYSDATETIME())
-        ORDER BY lrqp.last_execution DESC;";
-                    }
+        WITH
+            query_patterns AS
+        (
+            SELECT
+                ta.database_name,
+                query_pattern = LEFT(ta.sql_text, 200),
+                executions = COUNT_BIG(*),
+                avg_duration_ms = AVG(ta.duration_ms),
+                max_duration_ms = MAX(ta.duration_ms),
+                avg_cpu_ms = AVG(ta.cpu_ms),
+                avg_reads = AVG(ta.reads),
+                avg_writes = AVG(ta.writes),
+                sample_query_text = MAX(ta.sql_text),
+                last_execution = MAX(ta.end_time)
+            FROM collect.trace_analysis AS ta
+            WHERE {timeFilter}
+            GROUP BY
+                ta.database_name,
+                LEFT(ta.sql_text, 200)
+        )
+        SELECT TOP (50)
+            database_name,
+            query_pattern,
+            executions,
+            avg_duration_sec = avg_duration_ms / 1000.0,
+            max_duration_sec = max_duration_ms / 1000.0,
+            avg_cpu_sec = avg_cpu_ms / 1000.0,
+            avg_reads,
+            avg_writes,
+            concern_level =
+                CASE
+                    WHEN avg_duration_ms > 60000 THEN N'CRITICAL - Avg > 1 minute'
+                    WHEN avg_duration_ms > 30000 THEN N'HIGH - Avg > 30 seconds'
+                    WHEN avg_duration_ms > 10000 THEN N'MEDIUM - Avg > 10 seconds'
+                    ELSE N'INFO'
+                END,
+            recommendation =
+                CASE
+                    WHEN avg_reads > 1000000 THEN N'High read count - check for missing indexes, table scans'
+                    WHEN avg_cpu_ms > avg_duration_ms * 0.8 THEN N'CPU-bound query - check for complex calculations, functions'
+                    WHEN avg_writes > 100000 THEN N'High write volume - review update/delete patterns'
+                    ELSE N'Review execution plan for optimization opportunities'
+                END,
+            sample_query_text = CONVERT(nvarchar(500), sample_query_text),
+            last_execution
+        FROM query_patterns
+        WHERE executions > 1
+        ORDER BY
+            avg_duration_ms DESC;";
         
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
