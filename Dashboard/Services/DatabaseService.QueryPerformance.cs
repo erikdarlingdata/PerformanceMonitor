@@ -1486,6 +1486,7 @@ namespace PerformanceMonitorDashboard.Services
         FROM collect.query_store_data AS qsd
         WHERE qsd.database_name = @database_name
         AND   qsd.query_id = @query_id
+        AND   qsd.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
         ORDER BY
             qsd.collection_time DESC;";
 
@@ -1591,6 +1592,7 @@ namespace PerformanceMonitorDashboard.Services
         FROM collect.procedure_stats AS ps
         WHERE ps.database_name = @database_name
         AND   ps.object_id = @object_id
+        AND   ps.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
         ORDER BY
             ps.collection_time DESC;";
 
@@ -1704,6 +1706,7 @@ namespace PerformanceMonitorDashboard.Services
         FROM collect.query_stats AS qs
         WHERE qs.database_name = @database_name
         AND   qs.query_hash = CONVERT(binary(8), @query_hash, 1)
+        AND   qs.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
         ORDER BY
             qs.collection_time DESC;";
 
