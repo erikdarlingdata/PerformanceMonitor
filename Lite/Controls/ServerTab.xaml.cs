@@ -1948,7 +1948,7 @@ public partial class ServerTab : UserControl
             var points = group.OrderBy(d => d.CollectionTime).ToList();
             if (points.Count < 2) continue;
 
-            var times = points.Select(d => d.CollectionTime.ToLocalTime().ToOADate()).ToArray();
+            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
             var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
 
             var scatter = CollectorDurationChart.Plot.Add.Scatter(times, durations);
