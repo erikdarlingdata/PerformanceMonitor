@@ -1,0 +1,62 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+title: "[FEATURE] "
+labels: ["enhancement"]
+
+body:
+  - type: checkboxes
+    id: component
+    attributes:
+      label: Which component(s) does this affect?
+      options:
+        - label: Full Dashboard
+        - label: Lite
+        - label: SQL collection scripts
+        - label: Installer
+        - label: Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Describe the problem you're trying to solve or the limitation you're facing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe your proposed feature or enhancement.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: How would you use this feature? Provide a specific example.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative solutions or workarounds?
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: |
+        Anything else:
+        - Is this related to a specific SQL Server version?
+        - Would this require schema changes?
+        - How frequently would you use this feature?
+    validations:
+      required: false

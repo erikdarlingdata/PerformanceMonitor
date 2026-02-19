@@ -1,0 +1,59 @@
+name: Question
+description: I have a question about Performance Monitor
+title: "[QUESTION] "
+labels: ["question"]
+
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component is your question about?
+      options:
+        - Full Dashboard
+        - Lite
+        - SQL collection scripts
+        - Installer
+        - General / setup
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Performance Monitor Version
+      description: Check the About dialog or the release you downloaded.
+      placeholder: "e.g., 1.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: question-type
+    attributes:
+      label: Is your question about how it works, or the results?
+      description: Questions about results or SQL Server tuning are better suited for https://www.erikdarling.com/ or https://dba.stackexchange.com/
+      options:
+        - How the tool works
+        - Setup / installation
+        - Results / data interpretation
+        - Contributing / development
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What's your question?
+      description: A clear description of what you'd like to know.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: |
+        Anything that might help:
+        - SQL Server version and edition
+        - Are you using Azure SQL DB, Azure MI, or AWS RDS?
+    validations:
+      required: false

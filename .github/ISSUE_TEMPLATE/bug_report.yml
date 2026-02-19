@@ -1,0 +1,111 @@
+name: Bug Report
+description: Report a problem with Performance Monitor
+title: "[BUG] "
+labels: ["bug"]
+
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Performance Monitor is affected?
+      options:
+        - Full Dashboard
+        - Lite
+        - Installer (CLI)
+        - Installer (GUI)
+        - SQL collection scripts
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Performance Monitor Version
+      description: Check the About dialog or the release you downloaded.
+      placeholder: "e.g., 1.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: sql-version
+    attributes:
+      label: SQL Server Version
+      description: "Run SELECT @@VERSION on the target server."
+      placeholder: "e.g., SQL Server 2019 CU25"
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows Version
+      description: The OS where the Dashboard or Lite app is running.
+      placeholder: "e.g., Windows 11 23H2, Windows Server 2022"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this?
+      placeholder: |
+        1. Open the Dashboard
+        2. Click on...
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: errors
+    attributes:
+      label: Error Messages / Log Output
+      description: Paste any error messages or relevant log entries. Dashboard logs are in %LOCALAPPDATA%\PerformanceMonitor\Logs\.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: If applicable, add screenshots to help explain the problem.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: |
+        Anything else that might help:
+        - Did this work before? If so, what changed?
+        - Is SQL Server Agent running? (Full Edition only)
+        - Are you monitoring Azure SQL DB, Azure MI, or AWS RDS?
+    validations:
+      required: false
