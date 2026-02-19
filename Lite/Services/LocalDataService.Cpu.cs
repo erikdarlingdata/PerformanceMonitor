@@ -32,7 +32,7 @@ SELECT
     sample_time,
     sqlserver_cpu_utilization,
     other_process_cpu_utilization
-FROM cpu_utilization_stats
+FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   sample_time >= $2
 AND   sample_time <= $3

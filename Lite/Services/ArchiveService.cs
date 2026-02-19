@@ -128,6 +128,9 @@ COPY (
                 _logger?.LogError(ex, "Failed to archive table {Table}", table);
             }
         }
+
+        /* Refresh archive views so newly archived parquet files are queryable */
+        await _duckDb.CreateArchiveViewsAsync();
         }
         finally
         {

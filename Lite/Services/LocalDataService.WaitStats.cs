@@ -32,7 +32,7 @@ SELECT
     SUM(delta_wait_time_ms) AS total_wait_time_ms,
     SUM(delta_signal_wait_time_ms) AS total_signal_wait_time_ms,
     COUNT(*) AS sample_count
-FROM wait_stats
+FROM v_wait_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -75,7 +75,7 @@ LIMIT 50";
 SELECT
     wait_type,
     SUM(delta_wait_time_ms) AS total_delta
-FROM wait_stats
+FROM v_wait_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -114,7 +114,7 @@ WITH raw AS
         delta_signal_wait_time_ms,
         delta_waiting_tasks,
         date_diff('second', LAG(collection_time) OVER (ORDER BY collection_time), collection_time) AS interval_seconds
-    FROM wait_stats
+    FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type = $2
     AND   collection_time >= $3
@@ -166,7 +166,7 @@ SELECT
     CASE WHEN delta_waiting_tasks > 0
     THEN CAST(delta_wait_time_ms AS DOUBLE) / delta_waiting_tasks
     ELSE 0 END AS avg_ms_per_wait
-FROM wait_stats
+FROM v_wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
 AND delta_waiting_tasks > 0
@@ -213,9 +213,9 @@ SELECT
     writes,
     wait_type,
     blocking_session_id
-FROM query_snapshots
+FROM v_query_snapshots
 WHERE server_id = $1
-AND collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1)
+AND collection_time = (SELECT MAX(collection_time) FROM v_query_snapshots WHERE server_id = $1)
 AND session_id > 50
 AND total_elapsed_time_ms >= $2
 ORDER BY total_elapsed_time_ms DESC

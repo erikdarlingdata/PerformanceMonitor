@@ -66,7 +66,7 @@ SELECT
     MAX(plan_handle) AS plan_handle,
     MAX(query_text) AS query_text,
     MAX(query_plan_xml) AS query_plan
-FROM query_stats
+FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -139,7 +139,7 @@ SELECT
     max_elapsed_time,
     query_plan_xml,
     query_plan_hash
-FROM query_stats
+FROM v_query_stats
 WHERE server_id = $1
 AND   database_name = $2
 AND   query_hash = $3
@@ -196,7 +196,7 @@ SELECT
     delta_logical_reads,
     delta_logical_writes,
     delta_physical_reads
-FROM procedure_stats
+FROM v_procedure_stats
 WHERE server_id = $1
 AND   database_name = $2
 AND   schema_name = $3
@@ -330,7 +330,7 @@ SELECT
     SUM(total_spills) AS total_spills,
     MAX(sql_handle) AS sql_handle,
     MAX(plan_handle) AS plan_handle
-FROM procedure_stats
+FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -389,7 +389,7 @@ WITH raw AS
         SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
         SUM(delta_execution_count) AS total_executions,
         date_diff('second', LAG(collection_time) OVER (ORDER BY collection_time), collection_time) AS interval_seconds
-    FROM query_stats
+    FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -438,7 +438,7 @@ WITH raw AS
         SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
         SUM(delta_execution_count) AS total_executions,
         date_diff('second', LAG(collection_time) OVER (ORDER BY collection_time), collection_time) AS interval_seconds
-    FROM procedure_stats
+    FROM v_procedure_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -486,7 +486,7 @@ WITH raw AS
         collection_time,
         SUM(delta_execution_count) AS total_executions,
         date_diff('second', LAG(collection_time) OVER (ORDER BY collection_time), collection_time) AS interval_seconds
-    FROM query_stats
+    FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3

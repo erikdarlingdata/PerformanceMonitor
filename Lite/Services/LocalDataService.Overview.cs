@@ -34,7 +34,7 @@ public partial class LocalDataService
         {
             cmd.CommandText = @"
 SELECT sqlserver_cpu_utilization, sample_time
-FROM cpu_utilization_stats
+FROM v_cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY sample_time DESC
 LIMIT 1";
@@ -52,7 +52,7 @@ LIMIT 1";
         {
             cmd.CommandText = @"
 SELECT total_server_memory_mb
-FROM memory_stats
+FROM v_memory_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -69,7 +69,7 @@ LIMIT 1";
         {
             cmd.CommandText = @"
 SELECT COUNT(*)
-FROM blocked_process_reports
+FROM v_blocked_process_reports
 WHERE server_id = $1
 AND   event_time >= $2";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -83,7 +83,7 @@ AND   event_time >= $2";
         {
             cmd.CommandText = @"
 SELECT COUNT(*)
-FROM deadlocks
+FROM v_deadlocks
 WHERE server_id = $1
 AND   deadlock_time >= $2";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -97,7 +97,7 @@ AND   deadlock_time >= $2";
         {
             cmd.CommandText = @"
 SELECT MAX(collection_time)
-FROM collection_log
+FROM v_collection_log
 WHERE server_id = $1";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();

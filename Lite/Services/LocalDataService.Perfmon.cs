@@ -28,9 +28,9 @@ SELECT
     instance_name,
     cntr_value,
     delta_cntr_value
-FROM perfmon_stats
+FROM v_perfmon_stats
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM perfmon_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
 ORDER BY counter_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -63,7 +63,7 @@ ORDER BY counter_name";
 
         command.CommandText = @"
 SELECT DISTINCT counter_name
-FROM perfmon_stats
+FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -97,7 +97,7 @@ SELECT
     collection_time,
     cntr_value,
     delta_cntr_value
-FROM perfmon_stats
+FROM v_perfmon_stats
 WHERE server_id = $1
 AND   counter_name = $2
 AND   collection_time >= $3

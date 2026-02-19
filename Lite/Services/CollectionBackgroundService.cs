@@ -22,6 +22,7 @@ namespace PerformanceMonitorLite.Services;
 public class CollectionBackgroundService : BackgroundService
 {
     private readonly RemoteCollectorService _collectorService;
+    private readonly DuckDbInitializer? _duckDb;
     private readonly ServerManager? _serverManager;
     private readonly ArchiveService? _archiveService;
     private readonly RetentionService? _retentionService;
@@ -30,10 +31,15 @@ public class CollectionBackgroundService : BackgroundService
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
     private DateTime _lastArchiveTime = DateTime.MinValue;
     private DateTime _lastRetentionTime = DateTime.MinValue;
+    private DateTime _lastCompactionTime = DateTime.MinValue;
 
-    /* Archive every hour, retention cleanup once per day */
+    /* Archive every hour, retention + compaction once per day */
     private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
     private static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
+    private static readonly TimeSpan CompactionInterval = TimeSpan.FromHours(24);
+
+    /* Warn if database exceeds this size between compaction cycles */
+    private const double SizeWarningThresholdMb = 1024;
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
@@ -41,12 +47,14 @@ public class CollectionBackgroundService : BackgroundService
 
     public CollectionBackgroundService(
         RemoteCollectorService collectorService,
+        DuckDbInitializer? duckDb = null,
         ArchiveService? archiveService = null,
         RetentionService? retentionService = null,
         ServerManager? serverManager = null,
         ILogger<CollectionBackgroundService>? logger = null)
     {
         _collectorService = collectorService;
+        _duckDb = duckDb;
         _serverManager = serverManager;
         _archiveService = archiveService;
         _retentionService = retentionService;
@@ -108,6 +116,9 @@ public class CollectionBackgroundService : BackgroundService
 
                 /* Periodic retention cleanup */
                 RunRetentionIfDue();
+
+                /* Periodic database compaction to prevent bloat */
+                await RunCompactionIfDueAsync();
             }
 
             try
@@ -156,6 +167,39 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Retention cleanup failed");
+        }
+    }
+
+    private async Task RunCompactionIfDueAsync()
+    {
+        if (_duckDb == null || DateTime.UtcNow - _lastCompactionTime < CompactionInterval)
+        {
+            /* Size watchdog: warn if database is large even between compaction cycles */
+            if (_duckDb != null)
+            {
+                var sizeMb = _duckDb.GetDatabaseSizeMb();
+                if (sizeMb > SizeWarningThresholdMb)
+                {
+                    _logger?.LogWarning("Database size is {SizeMb:F0} MB (threshold: {Threshold} MB) — compaction will run at next scheduled interval",
+                        sizeMb, SizeWarningThresholdMb);
+                }
+            }
+            return;
+        }
+
+        try
+        {
+            IsPaused = true;
+            await _duckDb.CompactAsync();
+            _lastCompactionTime = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Database compaction failed");
+        }
+        finally
+        {
+            IsPaused = false;
         }
     }
 }
