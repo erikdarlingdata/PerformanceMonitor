@@ -19,7 +19,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 10;
+    internal const int CurrentSchemaVersion = 11;
 
     private readonly string _archivePath;
 
@@ -358,6 +358,15 @@ public class DuckDbInitializer
             {
                 /* Table doesn't exist yet — will be created with correct schema below */
             }
+        }
+
+        if (fromVersion < 11)
+        {
+            /* v11: Expanded database_config from 9 to 28 columns (sys.databases).
+                    Added state_desc, collation, RCSI, snapshot isolation, stats settings,
+                    encryption, security, and version-gated columns (ADR, memory optimized, optimized locking). */
+            _logger?.LogInformation("Running migration to v11: rebuilding database_config for expanded sys.databases columns");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS database_config");
         }
     }
 

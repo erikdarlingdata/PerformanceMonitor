@@ -96,22 +96,64 @@ OPTION(RECOMPILE);";
 
     /// <summary>
     /// Collects database configuration from sys.databases. On-load only, not scheduled.
+    /// Version-gated columns are conditionally included based on the server's major version.
     /// </summary>
     private async Task<int> CollectDatabaseConfigAsync(ServerConnection server, CancellationToken cancellationToken)
     {
-        const string query = @"
+        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+        var majorVersion = serverStatus.SqlMajorVersion;
+
+        /* Base columns available on all supported versions (2016+) */
+        var selectColumns = @"
+    database_name = d.name,
+    state_desc = d.state_desc,
+    compatibility_level = d.compatibility_level,
+    collation_name = d.collation_name,
+    recovery_model = d.recovery_model_desc,
+    is_read_only = d.is_read_only,
+    is_auto_close_on = d.is_auto_close_on,
+    is_auto_shrink_on = d.is_auto_shrink_on,
+    is_auto_create_stats_on = d.is_auto_create_stats_on,
+    is_auto_update_stats_on = d.is_auto_update_stats_on,
+    is_auto_update_stats_async_on = d.is_auto_update_stats_async_on,
+    is_read_committed_snapshot_on = d.is_read_committed_snapshot_on,
+    snapshot_isolation_state = d.snapshot_isolation_state_desc,
+    is_parameterization_forced = d.is_parameterization_forced,
+    is_query_store_on = d.is_query_store_on,
+    is_encrypted = d.is_encrypted,
+    is_trustworthy_on = d.is_trustworthy_on,
+    is_db_chaining_on = d.is_db_chaining_on,
+    is_broker_enabled = d.is_broker_enabled,
+    is_cdc_enabled = d.is_cdc_enabled,
+    is_mixed_page_allocation_on = d.is_mixed_page_allocation_on,
+    log_reuse_wait_desc = d.log_reuse_wait_desc,
+    page_verify_option = d.page_verify_option_desc,
+    target_recovery_time_seconds = d.target_recovery_time_in_seconds,
+    delayed_durability = d.delayed_durability_desc";
+
+        /* SQL Server 2019+ (major version 15), or Azure SQL DB/MI which always have these */
+        var isAzure = serverStatus.SqlEngineEdition == 5 || serverStatus.SqlEngineEdition == 8;
+        var has2019Columns = majorVersion >= 15 || majorVersion == 0 || isAzure;
+        if (has2019Columns)
+        {
+            selectColumns += @",
+    is_accelerated_database_recovery_on = d.is_accelerated_database_recovery_on,
+    is_memory_optimized_enabled = d.is_memory_optimized_enabled";
+        }
+
+        /* SQL Server 2025+ (major version 17) */
+        var has2025Columns = majorVersion >= 17;
+        if (has2025Columns)
+        {
+            selectColumns += @",
+    is_optimized_locking_on = d.is_optimized_locking_on";
+        }
+
+        var query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
-    database_name = d.name,
-    compatibility_level = d.compatibility_level,
-    recovery_model = d.recovery_model_desc,
-    is_auto_close_on = d.is_auto_close_on,
-    is_auto_shrink_on = d.is_auto_shrink_on,
-    is_query_store_on = d.is_query_store_on,
-    page_verify_option = d.page_verify_option_desc,
-    target_recovery_time_seconds = d.target_recovery_time_in_seconds,
-    delayed_durability = d.delayed_durability_desc
+{selectColumns}
 FROM sys.databases AS d
 WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
@@ -125,7 +167,7 @@ OPTION(RECOMPILE);";
         _lastSqlMs = 0;
         _lastDuckDbMs = 0;
 
-        var rows = new List<(string DbName, int CompatLevel, string? RecoveryModel, bool AutoClose, bool AutoShrink, bool QueryStore, string? PageVerify, int TargetRecovery, string? DelayedDurability)>();
+        var rows = new List<DatabaseConfigCollected>();
 
         var sqlSw = Stopwatch.StartNew();
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
@@ -135,16 +177,48 @@ OPTION(RECOMPILE);";
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add((
-                reader.GetString(0),
-                Convert.ToInt32(reader.GetValue(1)),
-                reader.IsDBNull(2) ? null : reader.GetString(2),
-                reader.GetBoolean(3),
-                reader.GetBoolean(4),
-                reader.GetBoolean(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                Convert.ToInt32(reader.GetValue(7)),
-                reader.IsDBNull(8) ? null : reader.GetString(8)));
+            var ordinal = 0;
+            var r = new DatabaseConfigCollected
+            {
+                DbName = reader.GetString(ordinal++),
+                StateDesc = reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal),
+                CompatLevel = Convert.ToInt32(reader.GetValue(++ordinal)),
+                CollationName = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
+                RecoveryModel = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
+                IsReadOnly = reader.GetBoolean(++ordinal),
+                AutoClose = reader.GetBoolean(++ordinal),
+                AutoShrink = reader.GetBoolean(++ordinal),
+                AutoCreateStats = reader.GetBoolean(++ordinal),
+                AutoUpdateStats = reader.GetBoolean(++ordinal),
+                AutoUpdateStatsAsync = reader.GetBoolean(++ordinal),
+                Rcsi = reader.GetBoolean(++ordinal),
+                SnapshotIsolation = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
+                ParameterizationForced = reader.GetBoolean(++ordinal),
+                QueryStore = reader.GetBoolean(++ordinal),
+                Encrypted = reader.GetBoolean(++ordinal),
+                Trustworthy = reader.GetBoolean(++ordinal),
+                DbChaining = reader.GetBoolean(++ordinal),
+                BrokerEnabled = reader.GetBoolean(++ordinal),
+                CdcEnabled = reader.GetBoolean(++ordinal),
+                MixedPageAllocation = reader.GetBoolean(++ordinal),
+                LogReuseWait = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
+                PageVerify = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
+                TargetRecovery = Convert.ToInt32(reader.GetValue(++ordinal)),
+                DelayedDurability = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
+            };
+
+            if (has2019Columns)
+            {
+                r.AcceleratedDatabaseRecovery = reader.GetBoolean(++ordinal);
+                r.MemoryOptimized = reader.GetBoolean(++ordinal);
+            }
+
+            if (has2025Columns)
+            {
+                r.OptimizedLocking = reader.GetBoolean(++ordinal);
+            }
+
+            rows.Add(r);
         }
         sqlSw.Stop();
 
@@ -161,15 +235,48 @@ OPTION(RECOMPILE);";
                .AppendValue(serverId)
                .AppendValue(server.ServerName)
                .AppendValue(r.DbName)
+               .AppendValue(r.StateDesc)
                .AppendValue(r.CompatLevel)
+               .AppendValue(r.CollationName)
                .AppendValue(r.RecoveryModel)
+               .AppendValue(r.IsReadOnly)
                .AppendValue(r.AutoClose)
                .AppendValue(r.AutoShrink)
+               .AppendValue(r.AutoCreateStats)
+               .AppendValue(r.AutoUpdateStats)
+               .AppendValue(r.AutoUpdateStatsAsync)
+               .AppendValue(r.Rcsi)
+               .AppendValue(r.SnapshotIsolation)
+               .AppendValue(r.ParameterizationForced)
                .AppendValue(r.QueryStore)
+               .AppendValue(r.Encrypted)
+               .AppendValue(r.Trustworthy)
+               .AppendValue(r.DbChaining)
+               .AppendValue(r.BrokerEnabled)
+               .AppendValue(r.CdcEnabled)
+               .AppendValue(r.MixedPageAllocation)
+               .AppendValue(r.LogReuseWait)
                .AppendValue(r.PageVerify)
                .AppendValue(r.TargetRecovery)
-               .AppendValue(r.DelayedDurability)
-               .EndRow();
+               .AppendValue(r.DelayedDurability);
+
+            /* Version-gated columns: write value if collected, NULL otherwise */
+            if (r.AcceleratedDatabaseRecovery.HasValue)
+                row.AppendValue(r.AcceleratedDatabaseRecovery.Value);
+            else
+                row.AppendNullValue();
+
+            if (r.MemoryOptimized.HasValue)
+                row.AppendValue(r.MemoryOptimized.Value);
+            else
+                row.AppendNullValue();
+
+            if (r.OptimizedLocking.HasValue)
+                row.AppendValue(r.OptimizedLocking.Value);
+            else
+                row.AppendNullValue();
+
+            row.EndRow();
             rowsCollected++;
         }
 
@@ -179,6 +286,38 @@ OPTION(RECOMPILE);";
 
         _logger?.LogDebug("Collected {RowCount} database config rows for server '{Server}'", rowsCollected, server.DisplayName);
         return rowsCollected;
+    }
+
+    private class DatabaseConfigCollected
+    {
+        public string DbName { get; set; } = "";
+        public string? StateDesc { get; set; }
+        public int CompatLevel { get; set; }
+        public string? CollationName { get; set; }
+        public string? RecoveryModel { get; set; }
+        public bool IsReadOnly { get; set; }
+        public bool AutoClose { get; set; }
+        public bool AutoShrink { get; set; }
+        public bool AutoCreateStats { get; set; }
+        public bool AutoUpdateStats { get; set; }
+        public bool AutoUpdateStatsAsync { get; set; }
+        public bool Rcsi { get; set; }
+        public string? SnapshotIsolation { get; set; }
+        public bool ParameterizationForced { get; set; }
+        public bool QueryStore { get; set; }
+        public bool Encrypted { get; set; }
+        public bool Trustworthy { get; set; }
+        public bool DbChaining { get; set; }
+        public bool BrokerEnabled { get; set; }
+        public bool CdcEnabled { get; set; }
+        public bool MixedPageAllocation { get; set; }
+        public string? LogReuseWait { get; set; }
+        public string? PageVerify { get; set; }
+        public int TargetRecovery { get; set; }
+        public string? DelayedDurability { get; set; }
+        public bool? AcceleratedDatabaseRecovery { get; set; }
+        public bool? MemoryOptimized { get; set; }
+        public bool? OptimizedLocking { get; set; }
     }
 
     /// <summary>
