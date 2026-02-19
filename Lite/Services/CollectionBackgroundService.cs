@@ -29,9 +29,11 @@ public class CollectionBackgroundService : BackgroundService
     private readonly ILogger<CollectionBackgroundService>? _logger;
 
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
-    private DateTime _lastArchiveTime = DateTime.MinValue;
-    private DateTime _lastRetentionTime = DateTime.MinValue;
-    private DateTime _lastCompactionTime = DateTime.MinValue;
+    /* Start at UtcNow so maintenance tasks don't all fire on the very first cycle.
+       Archival runs after 1 hour, retention + compaction after 24 hours of uptime. */
+    private DateTime _lastArchiveTime = DateTime.UtcNow;
+    private DateTime _lastRetentionTime = DateTime.UtcNow;
+    private DateTime _lastCompactionTime = DateTime.UtcNow;
 
     /* Archive every hour, retention + compaction once per day */
     private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
@@ -93,10 +95,6 @@ public class CollectionBackgroundService : BackgroundService
                     IsCollecting = true;
                     await _collectorService.RunDueCollectorsAsync(stoppingToken);
                     LastCollectionTime = DateTime.UtcNow;
-
-                    /* Flush WAL during idle time instead of letting auto-checkpoint
-                       stall collectors mid-write with 2-3s stop-the-world pauses */
-                    await _collectorService.CheckpointAsync();
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {

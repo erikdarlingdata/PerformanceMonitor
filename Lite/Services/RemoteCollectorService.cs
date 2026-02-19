@@ -237,6 +237,22 @@ public partial class RemoteCollectorService
         }, cancellationToken));
 
         await Task.WhenAll(serverTasks);
+
+        /* Run CHECKPOINT here after all collector connections are closed.
+           This avoids opening a separate DuckDB instance that could conflict
+           with concurrent UI connections via OS file locks. */
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "CHECKPOINT";
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Post-collection checkpoint failed (non-critical)");
+        }
     }
 
     /// <summary>

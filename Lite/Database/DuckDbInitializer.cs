@@ -604,14 +604,35 @@ public class DuckDbInitializer
                 }
             }
 
-            /* Swap files: old → backup, compact → primary */
-            if (File.Exists(backupPath)) File.Delete(backupPath);
-            File.Move(_databasePath, backupPath);
-
+            /* Delete WAL files before swap — the old WAL belongs to the pre-compaction
+               database and would confuse the fresh compacted file on next open */
             var walPath = _databasePath + ".wal";
             if (File.Exists(walPath)) File.Delete(walPath);
 
-            File.Move(tempPath, _databasePath);
+            var tempWalPath = tempPath + ".wal";
+            if (File.Exists(tempWalPath)) File.Delete(tempWalPath);
+
+            /* Atomically replace the database file with the compacted version.
+               File.Replace swaps in a single OS operation, eliminating any window
+               where _databasePath doesn't exist (unlike two separate File.Move calls).
+               Retry briefly if a UI connection still has the file open. */
+            if (File.Exists(backupPath)) File.Delete(backupPath);
+
+            const int maxSwapAttempts = 3;
+            for (int attempt = 1; attempt <= maxSwapAttempts; attempt++)
+            {
+                try
+                {
+                    File.Replace(tempPath, _databasePath, backupPath);
+                    break;
+                }
+                catch (IOException) when (attempt < maxSwapAttempts)
+                {
+                    _logger?.LogDebug("Compaction file swap attempt {Attempt}/{Max} failed (file in use), retrying in 500ms",
+                        attempt, maxSwapAttempts);
+                    await Task.Delay(500);
+                }
+            }
 
             /* Recreate indexes and views on the fresh database */
             using (var connection = CreateConnection())
