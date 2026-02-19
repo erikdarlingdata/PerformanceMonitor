@@ -971,7 +971,6 @@ namespace PerformanceMonitorDashboard.Controls
                 chart.Plot.Axes.DateTimeTicksBottom();
                 chart.Plot.Axes.SetLimitsX(xMin, xMax);
                 chart.Plot.YLabel("Duration (ms/sec)");
-                chart.Plot.HideGrid();
                 TabHelpers.LockChartVerticalAxis(chart);
                 chart.Refresh();
             }
@@ -1027,7 +1026,6 @@ namespace PerformanceMonitorDashboard.Controls
             QueryPerfTrendsExecChart.Plot.Axes.DateTimeTicksBottom();
             QueryPerfTrendsExecChart.Plot.Axes.SetLimitsX(xMin, xMax);
             QueryPerfTrendsExecChart.Plot.YLabel("Executions/sec");
-            QueryPerfTrendsExecChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(QueryPerfTrendsExecChart);
             QueryPerfTrendsExecChart.Refresh();
         }

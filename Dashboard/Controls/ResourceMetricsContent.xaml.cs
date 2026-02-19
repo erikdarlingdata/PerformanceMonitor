@@ -358,7 +358,6 @@ namespace PerformanceMonitorDashboard.Controls
             LatchStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(LatchStatsChart);
             LatchStatsChart.Plot.YLabel("Wait Time (ms/sec)");
-            LatchStatsChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(LatchStatsChart);
             LatchStatsChart.Refresh();
         }
@@ -450,7 +449,6 @@ namespace PerformanceMonitorDashboard.Controls
             SpinlockStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(SpinlockStatsChart);
             SpinlockStatsChart.Plot.YLabel("Collisions/sec");
-            SpinlockStatsChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(SpinlockStatsChart);
             SpinlockStatsChart.Refresh();
         }
@@ -559,7 +557,6 @@ namespace PerformanceMonitorDashboard.Controls
             TempDbLatencyChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(TempDbLatencyChart);
             TempDbLatencyChart.Plot.YLabel("Latency (ms)");
-            TempDbLatencyChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(TempDbLatencyChart);
             TempDbLatencyChart.Refresh();
         }
@@ -665,7 +662,6 @@ namespace PerformanceMonitorDashboard.Controls
             TempdbStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TempdbStatsChart.Plot.Axes.AutoScaleY();
             TempdbStatsChart.Plot.YLabel("MB");
-            TempdbStatsChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(TempdbStatsChart);
             TempdbStatsChart.Refresh();
         }
@@ -837,7 +833,6 @@ namespace PerformanceMonitorDashboard.Controls
             SessionStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(SessionStatsChart);
             SessionStatsChart.Plot.YLabel("Session Count");
-            SessionStatsChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(SessionStatsChart);
             SessionStatsChart.Refresh();
         }
@@ -951,7 +946,6 @@ namespace PerformanceMonitorDashboard.Controls
             chart.Plot.Axes.DateTimeTicksBottom();
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
             chart.Plot.YLabel(yLabel);
-            chart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(chart);
             chart.Refresh();
         }
@@ -1043,7 +1037,6 @@ namespace PerformanceMonitorDashboard.Controls
             ServerUtilTrendsCpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsCpuChart);
             ServerUtilTrendsCpuChart.Plot.YLabel("CPU %");
-            ServerUtilTrendsCpuChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(ServerUtilTrendsCpuChart);
             ServerUtilTrendsCpuChart.Refresh();
         }
@@ -1105,7 +1098,6 @@ namespace PerformanceMonitorDashboard.Controls
             ServerUtilTrendsTempdbChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsTempdbChart);
             ServerUtilTrendsTempdbChart.Plot.YLabel("MB");
-            ServerUtilTrendsTempdbChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(ServerUtilTrendsTempdbChart);
             ServerUtilTrendsTempdbChart.Refresh();
         }
@@ -1211,7 +1203,6 @@ namespace PerformanceMonitorDashboard.Controls
             ServerUtilTrendsMemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsMemoryChart);
             ServerUtilTrendsMemoryChart.Plot.YLabel("MB");
-            ServerUtilTrendsMemoryChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(ServerUtilTrendsMemoryChart);
             ServerUtilTrendsMemoryChart.Refresh();
         }
@@ -1287,7 +1278,6 @@ namespace PerformanceMonitorDashboard.Controls
             ServerUtilTrendsPerfmonChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsPerfmonChart);
             ServerUtilTrendsPerfmonChart.Plot.YLabel("Per Second");
-            ServerUtilTrendsPerfmonChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(ServerUtilTrendsPerfmonChart);
             ServerUtilTrendsPerfmonChart.Refresh();
         }
@@ -1791,7 +1781,6 @@ namespace PerformanceMonitorDashboard.Controls
             PerfmonCountersChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(PerfmonCountersChart);
             PerfmonCountersChart.Plot.YLabel("Value/sec");
-            PerfmonCountersChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(PerfmonCountersChart);
             PerfmonCountersChart.Refresh();
         }
@@ -2167,7 +2156,6 @@ namespace PerformanceMonitorDashboard.Controls
             WaitStatsDetailChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(WaitStatsDetailChart);
             WaitStatsDetailChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");
-            WaitStatsDetailChart.Plot.HideGrid();
             TabHelpers.LockChartVerticalAxis(WaitStatsDetailChart);
             WaitStatsDetailChart.Refresh();
         }
