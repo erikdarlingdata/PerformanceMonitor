@@ -1923,8 +1923,8 @@ namespace PerformanceMonitorDashboard.Controls
         {
             if (_waitTypeItems == null || WaitTypeCountText == null) return;
             int count = _waitTypeItems.Count(x => x.IsSelected);
-            WaitTypeCountText.Text = $"{count} / 20 selected";
-            WaitTypeCountText.Foreground = count >= 20
+            WaitTypeCountText.Text = $"{count} / 30 selected";
+            WaitTypeCountText.Foreground = count >= 30
                 ? new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#E57373")!)
                 : (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
         }

@@ -112,7 +112,7 @@
                         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="5,2">
                             <Button Content="Top Waits" Click="WaitTypes_SelectAll_Click" Padding="6,2" FontSize="10" Margin="0,0,5,0"/>
                             <Button Content="Clear All" Click="WaitTypes_ClearAll_Click" Padding="6,2" FontSize="10"/>
-                            <TextBlock x:Name="WaitTypeCountText" Text="0 / 20 selected" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                            <TextBlock x:Name="WaitTypeCountText" Text="0 / 30 selected" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                         </StackPanel>
                         <TextBox Grid.Row="2" x:Name="WaitTypeSearchBox" Margin="5,2" Height="24" FontSize="11"
                                  TextChanged="WaitTypeSearch_TextChanged"

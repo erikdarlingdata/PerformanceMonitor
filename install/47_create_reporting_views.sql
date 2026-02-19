@@ -144,7 +144,7 @@ WITH
     WHERE ws.collection_time >= DATEADD(HOUR, -1, SYSDATETIME())
     AND   ws.wait_time_ms_delta > 0
 )
-SELECT TOP (20)
+SELECT TOP (50)
     wait_type = rw.wait_type,
     wait_time_ms = rw.wait_time_ms_delta,
     wait_time_sec = rw.wait_time_ms_delta / 1000.0,
