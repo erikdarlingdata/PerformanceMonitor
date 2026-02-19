@@ -357,9 +357,13 @@
     <!-- Column Filter Button Style when filter is active -->
     <Style x:Key="ColumnFilterButtonActiveStyle" TargetType="Button" BasedOn="{StaticResource ColumnFilterButtonStyle}">
         <Setter Property="Foreground" Value="#FFD700"/>
+        <Setter Property="Background" Value="#33FFD700"/>
+        <Setter Property="Content" Value="&#xE16E;"/>
+        <Setter Property="ToolTip" Value="Filter active — click to modify"/>
         <Style.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
                 <Setter Property="Foreground" Value="#FFEC8B"/>
+                <Setter Property="Background" Value="#55FFD700"/>
             </Trigger>
         </Style.Triggers>
     </Style>

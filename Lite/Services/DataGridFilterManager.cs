@@ -118,7 +118,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
                     var textBlock = new TextBlock
                     {
-                        Text = "\uE71C",
+                        Text = hasActive ? "\uE16E" : "\uE71C",
                         FontFamily = new FontFamily("Segoe MDL2 Assets"),
                         Foreground = hasActive
                             ? new SolidColorBrush(Color.FromRgb(0xFF, 0xD7, 0x00))
