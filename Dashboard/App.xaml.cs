@@ -20,13 +20,14 @@ namespace PerformanceMonitorDashboard
     {
         private const string MutexName = "PerformanceMonitorDashboard_SingleInstance";
         private Mutex? _singleInstanceMutex;
+        private bool _ownsMutex;
 
         protected override void OnStartup(StartupEventArgs e)
         {
             // Check for existing instance
-            _singleInstanceMutex = new Mutex(true, MutexName, out bool isNewInstance);
+            _singleInstanceMutex = new Mutex(true, MutexName, out _ownsMutex);
 
-            if (!isNewInstance)
+            if (!_ownsMutex)
             {
                 // Another instance is already running - activate it and exit
                 NativeMethods.BroadcastShowMessage();
@@ -58,8 +59,10 @@ namespace PerformanceMonitorDashboard
                 mainWin.ExitApplication();
             }
 
-            // Release the mutex
-            _singleInstanceMutex?.ReleaseMutex();
+            if (_ownsMutex)
+            {
+                _singleInstanceMutex?.ReleaseMutex();
+            }
             _singleInstanceMutex?.Dispose();
 
             base.OnExit(e);
