@@ -29,6 +29,23 @@ namespace PerformanceMonitorDashboard.Helpers
     public static class TabHelpers
     {
         /// <summary>
+        /// Returns true if a double-click originated from a DataGridRow (not a header).
+        /// Use at the top of MouseDoubleClick handlers to prevent header clicks from
+        /// triggering row actions.
+        /// </summary>
+        public static bool IsDoubleClickOnRow(DependencyObject originalSource)
+        {
+            var dep = originalSource;
+            while (dep != null)
+            {
+                if (dep is DataGridRow) return true;
+                if (dep is DataGridColumnHeader) return false;
+                dep = VisualTreeHelper.GetParent(dep);
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Material Design 300-level color palette for chart data series.
         /// Soft pastels optimized for dark backgrounds, ordered to map 1:1
         /// with common ScottPlot stock colors (Blue→[0], Green→[1], etc.).

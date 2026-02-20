@@ -1356,6 +1356,7 @@ namespace PerformanceMonitorDashboard
 
         private void HealthDataGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
+            if (!Helpers.TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             if (HealthDataGrid.SelectedItem is CollectionHealthItem item)
             {
                 var logWindow = new CollectionLogWindow(item.CollectorName, _databaseService);

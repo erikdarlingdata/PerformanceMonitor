@@ -34,6 +34,7 @@ namespace PerformanceMonitorDashboard
 
         private void ServersDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
+            if (!Helpers.TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             EditSelectedServer();
         }
 

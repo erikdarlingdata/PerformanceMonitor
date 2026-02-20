@@ -761,6 +761,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void QueryStoreDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             if (_databaseService == null) return;
 
             if (QueryStoreDataGrid.SelectedItem is QueryStoreItem item)
@@ -793,6 +794,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void ProcStatsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             if (_databaseService == null) return;
 
             if (ProcStatsDataGrid.SelectedItem is ProcedureStatsItem item)
@@ -825,6 +827,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void QueryStatsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             if (_databaseService == null) return;
 
             if (QueryStatsDataGrid.SelectedItem is QueryStatsItem item)
