@@ -83,7 +83,7 @@ namespace PerformanceMonitorDashboard
             // Default to 24 hours if no match
             if (DefaultTimeRangeComboBox.SelectedItem == null)
             {
-                DefaultTimeRangeComboBox.SelectedIndex = 2; // 24 hours
+                DefaultTimeRangeComboBox.SelectedIndex = 4; // 24 hours
             }
 
             // Navigation settings
