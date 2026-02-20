@@ -1754,6 +1754,19 @@ namespace PerformanceMonitorDashboard.Controls
                     })
                     .ToList();
 
+                // Ensure poison waits are always in the picker even if they have no collected data
+                foreach (var poisonWait in TabHelpers.PoisonWaits)
+                {
+                    if (!waitTypes.Any(w => string.Equals(w.WaitType, poisonWait, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        waitTypes.Add(new WaitTypeSelectionItem
+                        {
+                            WaitType = poisonWait,
+                            IsSelected = previouslySelected.Contains(poisonWait)
+                        });
+                    }
+                }
+
                 // If nothing was previously selected, apply poison waits + usual suspects + top 10
                 if (!waitTypes.Any(w => w.IsSelected))
                 {
