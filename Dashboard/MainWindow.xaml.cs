@@ -145,6 +145,7 @@ namespace PerformanceMonitorDashboard
             LoadSidebarState();
             ConfigureConnectionStatusTimer();
             ConfigureAlertCheckTimer();
+            UpdateAlertBadge();
             StartMcpServerIfEnabled();
 
             _displayRefreshTimer.Start();
@@ -970,6 +971,24 @@ namespace PerformanceMonitorDashboard
 
             /* Auto-refresh alert history if the tab is open */
             _alertsHistoryContent?.RefreshAlerts();
+
+            UpdateAlertBadge();
+        }
+
+        private void UpdateAlertBadge()
+        {
+            var alerts = _emailAlertService.GetAlertHistory(hoursBack: 24, limit: 100);
+            var count = alerts.Count;
+
+            if (count > 0)
+            {
+                AlertBadgeText.Text = count > 99 ? "99+" : count.ToString();
+                AlertBadge.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                AlertBadge.Visibility = Visibility.Collapsed;
+            }
         }
 
         /// <summary>

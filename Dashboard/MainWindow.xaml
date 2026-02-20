@@ -148,11 +148,31 @@
                             Height="32"
                             Margin="0,0,0,8"/>
                     <Button x:Name="AlertsHistoryButton"
-                            Content="Alerts"
                             Click="AlertsHistory_Click"
                             Style="{StaticResource AccentButton}"
                             Height="32"
-                            Margin="0,0,0,8"/>
+                            Margin="0,0,0,8">
+                        <Grid>
+                            <TextBlock Text="Alerts" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Border x:Name="AlertBadge"
+                                    Background="#FF4444"
+                                    CornerRadius="8"
+                                    MinWidth="16" Height="16"
+                                    Padding="4,0"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Margin="0,-4,-8,0"
+                                    Visibility="Collapsed">
+                                <TextBlock x:Name="AlertBadgeText"
+                                           Text="0"
+                                           FontSize="10"
+                                           FontWeight="Bold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"/>
+                            </Border>
+                        </Grid>
+                    </Button>
                     <Separator Margin="0,0,0,8"/>
                     <Button x:Name="RefreshAllButton"
                             Content="&#x21BB; Refresh All Status"
