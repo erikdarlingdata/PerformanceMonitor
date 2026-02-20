@@ -33,7 +33,7 @@
 
                 <Grid Grid.Row="1">
                 <DataGrid x:Name="DefaultTraceEventsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                          RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
+                          RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
                           ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
@@ -103,7 +103,7 @@
         <TabItem Header="Trace Analysis">
             <Grid>
             <DataGrid x:Name="TraceAnalysisDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
+                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">

@@ -11,7 +11,7 @@
         <TabItem Header="Server Configuration">
             <Grid>
             <DataGrid x:Name="ServerConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="220">
@@ -54,7 +54,7 @@
         <TabItem Header="Database Configuration">
             <Grid>
             <DataGrid x:Name="DatabaseConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="150">
@@ -100,7 +100,7 @@
         <TabItem Header="Trace Flags">
             <Grid>
             <DataGrid x:Name="TraceFlagsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding TraceFlag}" Width="100" Header="Trace Flag"/>
