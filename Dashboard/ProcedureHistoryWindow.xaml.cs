@@ -97,7 +97,7 @@ namespace PerformanceMonitorDashboard
                     var lastSample = _historyData.Max(h => h.CollectionTime);
 
                     SummaryText.Text = string.Format(CultureInfo.CurrentCulture,
-                        "Samples: {0} | First: {1:yyyy-MM-dd HH:mm} | Last: {2:yyyy-MM-dd HH:mm} | Total Executions: {3:N0} | Avg CPU: {4:N2} ms | Avg Duration: {5:N2} ms",
+                        "Samples: {0} | First: {1:yyyy-MM-dd HH:mm} | Last: {2:yyyy-MM-dd HH:mm} | Executions: {3:N0} | Avg CPU: {4:N2} ms | Avg Duration: {5:N2} ms",
                         _historyData.Count, firstSample, lastSample, totalExecutions, avgCpu, avgDuration);
 
                     UpdateChart();
