@@ -182,40 +182,40 @@ OPTION(RECOMPILE);";
             {
                 DbName = reader.GetString(ordinal++),
                 StateDesc = reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal),
-                CompatLevel = Convert.ToInt32(reader.GetValue(++ordinal)),
+                CompatLevel = reader.IsDBNull(++ordinal) ? 0 : Convert.ToInt32(reader.GetValue(ordinal)),
                 CollationName = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
                 RecoveryModel = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
-                IsReadOnly = reader.GetBoolean(++ordinal),
-                AutoClose = reader.GetBoolean(++ordinal),
-                AutoShrink = reader.GetBoolean(++ordinal),
-                AutoCreateStats = reader.GetBoolean(++ordinal),
-                AutoUpdateStats = reader.GetBoolean(++ordinal),
-                AutoUpdateStatsAsync = reader.GetBoolean(++ordinal),
-                Rcsi = reader.GetBoolean(++ordinal),
+                IsReadOnly = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                AutoClose = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                AutoShrink = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                AutoCreateStats = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                AutoUpdateStats = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                AutoUpdateStatsAsync = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                Rcsi = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 SnapshotIsolation = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
-                ParameterizationForced = reader.GetBoolean(++ordinal),
-                QueryStore = reader.GetBoolean(++ordinal),
-                Encrypted = reader.GetBoolean(++ordinal),
-                Trustworthy = reader.GetBoolean(++ordinal),
-                DbChaining = reader.GetBoolean(++ordinal),
-                BrokerEnabled = reader.GetBoolean(++ordinal),
-                CdcEnabled = reader.GetBoolean(++ordinal),
-                MixedPageAllocation = reader.GetBoolean(++ordinal),
+                ParameterizationForced = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                QueryStore = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                Encrypted = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                Trustworthy = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                DbChaining = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                BrokerEnabled = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                CdcEnabled = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
+                MixedPageAllocation = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 LogReuseWait = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
                 PageVerify = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
-                TargetRecovery = Convert.ToInt32(reader.GetValue(++ordinal)),
+                TargetRecovery = reader.IsDBNull(++ordinal) ? 0 : Convert.ToInt32(reader.GetValue(ordinal)),
                 DelayedDurability = reader.IsDBNull(++ordinal) ? null : reader.GetString(ordinal),
             };
 
             if (has2019Columns)
             {
-                r.AcceleratedDatabaseRecovery = reader.GetBoolean(++ordinal);
-                r.MemoryOptimized = reader.GetBoolean(++ordinal);
+                r.AcceleratedDatabaseRecovery = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal);
+                r.MemoryOptimized = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal);
             }
 
             if (has2025Columns)
             {
-                r.OptimizedLocking = reader.GetBoolean(++ordinal);
+                r.OptimizedLocking = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal);
             }
 
             rows.Add(r);
