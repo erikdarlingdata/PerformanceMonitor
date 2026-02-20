@@ -234,7 +234,7 @@ namespace PerformanceMonitorDashboard
                 try
                 {
                     _mcpCts?.Cancel();
-                    _mcpHostService.StopAsync(CancellationToken.None).Wait(TimeSpan.FromSeconds(5));
+                    Task.Run(() => _mcpHostService.StopAsync(CancellationToken.None)).Wait(TimeSpan.FromSeconds(5));
                 }
                 catch (Exception ex)
                 {
