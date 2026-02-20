@@ -38,57 +38,57 @@
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
                             <DataGridTextColumn.Header>
-                                <StackPanel>
-                                    <TextBlock Text="Event Time" FontWeight="Bold" Margin="0,0,0,2"/>
-                                    <TextBox Width="140" Height="22" FontSize="11" TextChanged="DefaultTraceEventsFilterTextBox_TextChanged" Tag="EventTime"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTime" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
                         <DataGridTextColumn Binding="{Binding EventName}" Width="150">
                             <DataGridTextColumn.Header>
-                                <StackPanel>
-                                    <TextBlock Text="Event Name" FontWeight="Bold" Margin="0,0,0,2"/>
-                                    <TextBox Width="140" Height="22" FontSize="11" TextChanged="DefaultTraceEventsFilterTextBox_TextChanged" Tag="EventName"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Event Name" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
                         <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                             <DataGridTextColumn.Header>
-                                <StackPanel>
-                                    <TextBlock Text="Database" FontWeight="Bold" Margin="0,0,0,2"/>
-                                    <TextBox Width="110" Height="22" FontSize="11" TextChanged="DefaultTraceEventsFilterTextBox_TextChanged" Tag="DatabaseName"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
                         <DataGridTextColumn Binding="{Binding ObjectName}" Width="150">
                             <DataGridTextColumn.Header>
-                                <StackPanel>
-                                    <TextBlock Text="Object Name" FontWeight="Bold" Margin="0,0,0,2"/>
-                                    <TextBox Width="140" Height="22" FontSize="11" TextChanged="DefaultTraceEventsFilterTextBox_TextChanged" Tag="ObjectName"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ObjectName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Object Name" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
                         <DataGridTextColumn Binding="{Binding LoginName}" Width="120">
                             <DataGridTextColumn.Header>
-                                <StackPanel>
-                                    <TextBlock Text="Login" FontWeight="Bold" Margin="0,0,0,2"/>
-                                    <TextBox Width="110" Height="22" FontSize="11" TextChanged="DefaultTraceEventsFilterTextBox_TextChanged" Tag="LoginName"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LoginName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Login" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
                         <DataGridTextColumn Binding="{Binding TextData}" Width="300">
                             <DataGridTextColumn.Header>
-                                <StackPanel>
-                                    <TextBlock Text="Text Data" FontWeight="Bold" Margin="0,0,0,2"/>
-                                    <TextBox Width="290" Height="22" FontSize="11" TextChanged="DefaultTraceEventsFilterTextBox_TextChanged" Tag="TextData"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TextData" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Text Data" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
                         <DataGridTextColumn Binding="{Binding Severity}" Width="60">
                             <DataGridTextColumn.Header>
-                                <StackPanel>
-                                    <TextBlock Text="Severity" FontWeight="Bold" Margin="0,0,0,2"/>
-                                    <TextBox Width="50" Height="22" FontSize="11" TextChanged="DefaultTraceEventsNumericFilterTextBox_TextChanged" Tag="Severity"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
@@ -108,73 +108,73 @@
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="Collected" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="140" Height="22" FontSize="11" TextChanged="TraceAnalysisFilterTextBox_TextChanged" Tag="CollectionTime"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding EventName}" Width="150">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="Event Name" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="140" Height="22" FontSize="11" TextChanged="TraceAnalysisFilterTextBox_TextChanged" Tag="EventName"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventName" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Event Name" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="Database" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="110" Height="22" FontSize="11" TextChanged="TraceAnalysisFilterTextBox_TextChanged" Tag="DatabaseName"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding LoginName}" Width="100">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="Login" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="90" Height="22" FontSize="11" TextChanged="TraceAnalysisFilterTextBox_TextChanged" Tag="LoginName"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LoginName" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Login" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding DurationMs, StringFormat=N0}" Width="90">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="Duration (ms)" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="80" Height="22" FontSize="11" TextChanged="TraceAnalysisNumericFilterTextBox_TextChanged" Tag="DurationMs"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding CpuMs, StringFormat=N0}" Width="80">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="CPU (ms)" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="70" Height="22" FontSize="11" TextChanged="TraceAnalysisNumericFilterTextBox_TextChanged" Tag="CpuMs"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuMs" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding Reads, StringFormat=N0}" Width="90">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="Reads (pages)" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="80" Height="22" FontSize="11" TextChanged="TraceAnalysisNumericFilterTextBox_TextChanged" Tag="Reads"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Reads" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Reads (pages)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding Writes, StringFormat=N0}" Width="90">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="Writes (pages)" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="80" Height="22" FontSize="11" TextChanged="TraceAnalysisNumericFilterTextBox_TextChanged" Tag="Writes"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Writes" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Writes (pages)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding SqlText}" Width="400">
                         <DataGridTextColumn.Header>
-                            <StackPanel>
-                                <TextBlock Text="SQL Text" FontWeight="Bold" Margin="0,0,0,2"/>
-                                <TextBox Width="390" Height="22" FontSize="11" TextChanged="TraceAnalysisFilterTextBox_TextChanged" Tag="SqlText"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlText" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="SQL Text" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
