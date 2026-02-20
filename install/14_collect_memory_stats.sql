@@ -169,8 +169,15 @@ BEGIN
         system_memory AS
         (
             SELECT
-                available_physical_memory_mb = sm.available_physical_memory_kb / 1024.0
+                available_physical_memory_mb = sm.available_physical_memory_kb / 1024.0,
+                total_physical_memory_mb = sm.total_physical_memory_kb / 1024.0
             FROM sys.dm_os_sys_memory AS sm
+        ),
+        system_info AS
+        (
+            SELECT
+                committed_target_memory_mb = si.committed_target_kb / 1024.0
+            FROM sys.dm_os_sys_info AS si
         )
         INSERT INTO
             collect.memory_stats
@@ -182,6 +189,8 @@ BEGIN
             physical_memory_in_use_mb,
             available_physical_memory_mb,
             memory_utilization_percentage,
+            total_physical_memory_mb,
+            committed_target_memory_mb,
             buffer_pool_pressure_warning,
             plan_cache_pressure_warning
         )
@@ -193,6 +202,8 @@ BEGIN
             physical_memory_in_use_mb = pm.physical_memory_in_use_mb,
             available_physical_memory_mb = sm.available_physical_memory_mb,
             memory_utilization_percentage = pm.memory_utilization_percentage,
+            total_physical_memory_mb = sm.total_physical_memory_mb,
+            committed_target_memory_mb = si.committed_target_memory_mb,
             buffer_pool_pressure_warning =
                 CASE
                     WHEN @previous_buffer_pool_mb IS NOT NULL
@@ -210,6 +221,7 @@ BEGIN
         FROM memory_clerks AS mc
         CROSS JOIN process_memory AS pm
         CROSS JOIN system_memory AS sm
+        CROSS JOIN system_info AS si
         OPTION(RECOMPILE);
         
         SET @rows_collected = ROWCOUNT_BIG();

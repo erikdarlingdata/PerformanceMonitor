@@ -294,6 +294,9 @@ BEGIN
         physical_memory_in_use_mb decimal(19,2) NOT NULL,
         available_physical_memory_mb decimal(19,2) NOT NULL,
         memory_utilization_percentage integer NOT NULL,
+        /*Server and target memory*/
+        total_physical_memory_mb decimal(19,2) NULL,
+        committed_target_memory_mb decimal(19,2) NULL,
         /*Pressure warnings*/
         buffer_pool_pressure_warning bit NOT NULL DEFAULT 0,
         plan_cache_pressure_warning bit NOT NULL DEFAULT 0,
@@ -307,12 +310,12 @@ BEGIN
         (
             plan_cache_mb * 100.0 /
               NULLIF(total_memory_mb, 0)
-        ),        
-        CONSTRAINT 
-            PK_memory_stats 
-        PRIMARY KEY CLUSTERED 
-            (collection_time, collection_id) 
-        WITH 
+        ),
+        CONSTRAINT
+            PK_memory_stats
+        PRIMARY KEY CLUSTERED
+            (collection_time, collection_id)
+        WITH
             (DATA_COMPRESSION = PAGE)
     );
         END;
