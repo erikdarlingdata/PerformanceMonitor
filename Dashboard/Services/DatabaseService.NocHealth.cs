@@ -623,6 +623,8 @@ namespace PerformanceMonitorDashboard.Services
                 JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
                 WHERE r.session_id > 50
                 AND r.total_elapsed_time >= @thresholdMs
+                AND t.text NOT LIKE N'%waitfor delay%'
+                AND t.text NOT LIKE N'%waitfor receive%'
                 ORDER BY r.total_elapsed_time DESC
                 OPTION(MAXDOP 1, RECOMPILE);";
 

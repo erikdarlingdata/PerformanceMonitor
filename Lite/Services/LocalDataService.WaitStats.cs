@@ -218,6 +218,8 @@ WHERE server_id = $1
 AND collection_time = (SELECT MAX(collection_time) FROM v_query_snapshots WHERE server_id = $1)
 AND session_id > 50
 AND total_elapsed_time_ms >= $2
+AND query_text NOT LIKE '%waitfor delay%'
+AND query_text NOT LIKE '%waitfor receive%'
 ORDER BY total_elapsed_time_ms DESC
 LIMIT 5";
 
