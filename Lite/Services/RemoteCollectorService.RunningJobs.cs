@@ -153,28 +153,33 @@ OPTION(RECOMPILE);";
         sqlSw.Stop();
 
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("running_jobs");
-        foreach (var r in rows)
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var row = appender.CreateRow();
-            row.AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(r.JobName)
-               .AppendValue(r.JobId)
-               .AppendValue(r.JobEnabled)
-               .AppendValue(r.StartTime)
-               .AppendValue(r.CurrentDuration)
-               .AppendValue(r.AvgDuration)
-               .AppendValue(r.P95Duration)
-               .AppendValue(r.SuccessfulRunCount)
-               .AppendValue(r.IsRunningLong)
-               .AppendValue(r.PercentOfAverage)
-               .EndRow();
-            rowsCollected++;
+            await duckConnection.OpenAsync(cancellationToken);
+
+            using (var appender = duckConnection.CreateAppender("running_jobs"))
+            {
+                foreach (var r in rows)
+                {
+                    var row = appender.CreateRow();
+                    row.AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(r.JobName)
+                       .AppendValue(r.JobId)
+                       .AppendValue(r.JobEnabled)
+                       .AppendValue(r.StartTime)
+                       .AppendValue(r.CurrentDuration)
+                       .AppendValue(r.AvgDuration)
+                       .AppendValue(r.P95Duration)
+                       .AppendValue(r.SuccessfulRunCount)
+                       .AppendValue(r.IsRunningLong)
+                       .AppendValue(r.PercentOfAverage)
+                       .EndRow();
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

@@ -18,6 +18,10 @@ namespace PerformanceMonitorDashboard.Models
         public decimal AvailablePhysicalMemoryMb { get; set; }
         public int MemoryUtilizationPercentage { get; set; }
 
+        // Server and target memory
+        public decimal? TotalPhysicalMemoryMb { get; set; }
+        public decimal? CommittedTargetMemoryMb { get; set; }
+
         // Pressure warnings
         public bool BufferPoolPressureWarning { get; set; }
         public bool PlanCachePressureWarning { get; set; }

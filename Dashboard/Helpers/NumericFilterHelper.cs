@@ -23,14 +23,10 @@ namespace PerformanceMonitorDashboard.Helpers
             if (!TryConvertToDecimal(value, out decimal numericValue))
                 return true; // If can't convert, don't filter out
 
-            // Check for range: "100-200" or "100..200"
-            if (filterText.Contains('-', StringComparison.Ordinal) && !filterText.StartsWith('-'))
+            // Check for range: "100-200", "-100-200", "-100--50", or "100..200"
+            if (TryParseRange(filterText, out decimal rangeMin, out decimal rangeMax))
             {
-                return EvaluateRange(numericValue, filterText);
-            }
-            else if (filterText.Contains("..", StringComparison.Ordinal))
-            {
-                return EvaluateRange(numericValue, filterText.Replace("..", "-", StringComparison.Ordinal));
+                return numericValue >= rangeMin && numericValue <= rangeMax;
             }
             // Check for >=
             else if (filterText.StartsWith(">=", StringComparison.Ordinal))
@@ -84,28 +80,33 @@ namespace PerformanceMonitorDashboard.Helpers
             }
         }
 
-        private static bool EvaluateRange(decimal value, string rangeText)
+        private static bool TryParseRange(string text, out decimal min, out decimal max)
         {
-            var parts = rangeText.Split('-');
-            if (parts.Length == 2)
+            min = max = 0;
+
+            // Try ".." separator first (unambiguous)
+            int dotIdx = text.IndexOf("..", StringComparison.Ordinal);
+            if (dotIdx >= 0)
             {
-                if (decimal.TryParse(parts[0].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal min) &&
-                    decimal.TryParse(parts[1].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal max))
-                {
-                    return value >= min && value <= max;
-                }
+                return decimal.TryParse(text.Substring(0, dotIdx).Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out min) &&
+                       decimal.TryParse(text.Substring(dotIdx + 2).Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out max);
             }
-            // Handle negative numbers in range: e.g., "-100-200" means -100 to 200
-            else if (parts.Length == 3 && string.IsNullOrEmpty(parts[0]))
+
+            // For "-" separator, find the dash that separates two values (not a negative sign).
+            // A separator dash has a digit before it: "100-200", "-100-200", "-100--50"
+            for (int i = 1; i < text.Length; i++)
             {
-                if (decimal.TryParse("-" + parts[1].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal min) &&
-                    decimal.TryParse(parts[2].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal max))
+                if (text[i] == '-' && char.IsDigit(text[i - 1]))
                 {
-                    return value >= min && value <= max;
+                    if (decimal.TryParse(text.Substring(0, i).Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out min) &&
+                        decimal.TryParse(text.Substring(i + 1).Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out max))
+                    {
+                        return true;
+                    }
                 }
             }
 
-            return true; // Invalid range, don't filter
+            return false;
         }
     }
 }

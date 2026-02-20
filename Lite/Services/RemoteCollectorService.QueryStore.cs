@@ -74,15 +74,17 @@ OPTION(RECOMPILE);";
         }
 
         var duckSw = new Stopwatch();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        /* For each database, collect new query store intervals since last collection */
-        foreach (var dbName in databases)
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            try
+            await duckConnection.OpenAsync(cancellationToken);
+
+            /* For each database, collect new query store intervals since last collection */
+            foreach (var dbName in databases)
             {
-                var qsQuery = $@"
+                try
+                {
+                    var qsQuery = $@"
 EXECUTE [{dbName.Replace("]", "]]")}].sys.sp_executesql
     N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -112,50 +114,54 @@ EXECUTE [{dbName.Replace("]", "]]")}].sys.sp_executesql
     N'@cutoff_time datetime2(7)',
     @cutoff_time;";
 
-                sqlSw.Start();
-                using var qsCommand = new SqlCommand(qsQuery, sqlConnection);
-                qsCommand.CommandTimeout = CommandTimeoutSeconds;
-                qsCommand.Parameters.Add(new SqlParameter("@cutoff_time", System.Data.SqlDbType.DateTime2) { Value = cutoffTime });
+                    sqlSw.Start();
+                    using var qsCommand = new SqlCommand(qsQuery, sqlConnection);
+                    qsCommand.CommandTimeout = CommandTimeoutSeconds;
+                    qsCommand.Parameters.Add(new SqlParameter("@cutoff_time", System.Data.SqlDbType.DateTime2) { Value = cutoffTime });
 
-                using var reader = await qsCommand.ExecuteReaderAsync(cancellationToken);
-                sqlSw.Stop();
+                    using var reader = await qsCommand.ExecuteReaderAsync(cancellationToken);
+                    sqlSw.Stop();
 
-                duckSw.Start();
-                using var appender = duckConnection.CreateAppender("query_store_stats");
+                    duckSw.Start();
 
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    var row = appender.CreateRow();
-                    row.AppendValue(GenerateCollectionId())
-                       .AppendValue(collectionTime)
-                       .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
-                       .AppendValue(dbName)
-                       .AppendValue(reader.GetInt64(0))                                                         /* query_id */
-                       .AppendValue(reader.GetInt64(1))                                                         /* plan_id */
-                       .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))                   /* query_text */
-                       .AppendValue(reader.IsDBNull(3) ? (string?)null : reader.GetString(3))                   /* query_hash */
-                       .AppendValue(reader.GetInt64(4))                                                         /* execution_count */
-                       .AppendValue(reader.IsDBNull(5) ? 0m : reader.GetDecimal(5))                              /* avg_duration_ms */
-                       .AppendValue(reader.IsDBNull(6) ? 0m : reader.GetDecimal(6))                              /* avg_cpu_time_ms */
-                       .AppendValue(reader.IsDBNull(7) ? 0m : reader.GetDecimal(7))                              /* avg_logical_reads */
-                       .AppendValue(reader.IsDBNull(8) ? 0m : reader.GetDecimal(8))                              /* avg_logical_writes */
-                       .AppendValue(reader.IsDBNull(9) ? 0m : reader.GetDecimal(9))                              /* avg_physical_reads */
-                       .AppendValue(reader.IsDBNull(10) ? 0m : reader.GetDecimal(10))                            /* avg_rowcount */
-                       .AppendValue(reader.IsDBNull(11) ? (DateTime?)null : ((DateTimeOffset)reader.GetValue(11)).UtcDateTime)
-                       .AppendValue(reader.IsDBNull(12) ? (string?)null : reader.GetString(12))
-                       .EndRow();
+                    using (var appender = duckConnection.CreateAppender("query_store_stats"))
+                    {
+                        while (await reader.ReadAsync(cancellationToken))
+                        {
+                            var row = appender.CreateRow();
+                            row.AppendValue(GenerateCollectionId())
+                               .AppendValue(collectionTime)
+                               .AppendValue(serverId)
+                               .AppendValue(server.ServerName)
+                               .AppendValue(dbName)
+                               .AppendValue(reader.GetInt64(0))                                                         /* query_id */
+                               .AppendValue(reader.GetInt64(1))                                                         /* plan_id */
+                               .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))                   /* query_text */
+                               .AppendValue(reader.IsDBNull(3) ? (string?)null : reader.GetString(3))                   /* query_hash */
+                               .AppendValue(reader.GetInt64(4))                                                         /* execution_count */
+                               .AppendValue(reader.IsDBNull(5) ? 0m : reader.GetDecimal(5))                              /* avg_duration_ms */
+                               .AppendValue(reader.IsDBNull(6) ? 0m : reader.GetDecimal(6))                              /* avg_cpu_time_ms */
+                               .AppendValue(reader.IsDBNull(7) ? 0m : reader.GetDecimal(7))                              /* avg_logical_reads */
+                               .AppendValue(reader.IsDBNull(8) ? 0m : reader.GetDecimal(8))                              /* avg_logical_writes */
+                               .AppendValue(reader.IsDBNull(9) ? 0m : reader.GetDecimal(9))                              /* avg_physical_reads */
+                               .AppendValue(reader.IsDBNull(10) ? 0m : reader.GetDecimal(10))                            /* avg_rowcount */
+                               .AppendValue(reader.IsDBNull(11) ? (DateTime?)null : ((DateTimeOffset)reader.GetValue(11)).UtcDateTime)
+                               .AppendValue(reader.IsDBNull(12) ? (string?)null : reader.GetString(12))
+                               .EndRow();
 
-                    totalRows++;
+                            totalRows++;
+                        }
+                    }
+
+                    duckSw.Stop();
                 }
-                duckSw.Stop();
-            }
-            catch (SqlException ex)
-            {
-                sqlSw.Stop();
-                duckSw.Stop();
-                _logger?.LogWarning("Failed to collect Query Store data from [{Database}] on '{Server}': {Message}",
-                    dbName, server.DisplayName, ex.Message);
+                catch (SqlException ex)
+                {
+                    sqlSw.Stop();
+                    duckSw.Stop();
+                    _logger?.LogWarning("Failed to collect Query Store data from [{Database}] on '{Server}': {Message}",
+                        dbName, server.DisplayName, ex.Message);
+                }
             }
         }
 

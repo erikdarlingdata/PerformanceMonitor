@@ -35,9 +35,9 @@ SELECT
     delta_write_bytes,
     delta_stall_read_ms,
     delta_stall_write_ms
-FROM file_io_stats
+FROM v_file_io_stats
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM file_io_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
 ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -81,7 +81,7 @@ SELECT
     database_name,
     CASE WHEN SUM(delta_reads) > 0 THEN SUM(CAST(delta_stall_read_ms AS DOUBLE)) / SUM(delta_reads) ELSE 0 END AS avg_read_latency_ms,
     CASE WHEN SUM(delta_writes) > 0 THEN SUM(CAST(delta_stall_write_ms AS DOUBLE)) / SUM(delta_writes) ELSE 0 END AS avg_write_latency_ms
-FROM file_io_stats
+FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -124,7 +124,7 @@ SELECT
     file_name,
     CASE WHEN SUM(delta_reads) > 0 THEN SUM(CAST(delta_stall_read_ms AS DOUBLE)) / SUM(delta_reads) ELSE 0 END AS avg_read_latency_ms,
     CASE WHEN SUM(delta_writes) > 0 THEN SUM(CAST(delta_stall_write_ms AS DOUBLE)) / SUM(delta_writes) ELSE 0 END AS avg_write_latency_ms
-FROM file_io_stats
+FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3

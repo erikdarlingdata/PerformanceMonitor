@@ -23,6 +23,8 @@ namespace PerformanceMonitorDashboard.Controls
 {
     public partial class AlertsHistoryContent : UserControl
     {
+        public event EventHandler? AlertsDismissed;
+
         private List<AlertHistoryDisplayItem> _allAlerts = new();
 
         /* Column filter state */
@@ -219,6 +221,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             service.HideAlerts(keys);
             LoadAlerts();
+            AlertsDismissed?.Invoke(this, EventArgs.Empty);
         }
 
         private void DismissAll_Click(object sender, RoutedEventArgs e)
@@ -247,6 +250,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             service.HideAllAlerts(hoursBack > 0 ? hoursBack : 8760, serverName);
             LoadAlerts();
+            AlertsDismissed?.Invoke(this, EventArgs.Empty);
         }
 
         #endregion

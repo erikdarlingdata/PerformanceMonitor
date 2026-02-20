@@ -11,6 +11,7 @@ namespace PerformanceMonitorDashboard.Helpers;
 /// <summary>
 /// Adds mouse-hover tooltips to a ScottPlot chart with multiple scatter series.
 /// Shows the series name, value, and timestamp in a popup that follows the mouse.
+/// Uses X-axis (time) proximity for reliable detection on time-series charts.
 /// </summary>
 internal sealed class ChartHoverHelper
 {
@@ -64,47 +65,60 @@ internal sealed class ChartHoverHelper
     {
         if (_scatters.Count == 0) return;
         var now = DateTime.UtcNow;
-        if ((now - _lastUpdate).TotalMilliseconds < 50) return;
+        if ((now - _lastUpdate).TotalMilliseconds < 30) return;
         _lastUpdate = now;
 
-        var pos = e.GetPosition(_chart);
-        var pixel = new ScottPlot.Pixel(
-            (float)(pos.X * _chart.DisplayScale),
-            (float)(pos.Y * _chart.DisplayScale));
-        var mouseCoords = _chart.Plot.GetCoordinates(pixel);
-
-        double bestDistance = double.MaxValue;
-        ScottPlot.DataPoint bestPoint = default;
-        string bestLabel = "";
-
-        foreach (var (scatter, label) in _scatters)
+        try
         {
-            var nearest = scatter.Data.GetNearest(mouseCoords, _chart.Plot.LastRender);
-            if (nearest.IsReal)
+            var pos = e.GetPosition(_chart);
+            var pixel = new ScottPlot.Pixel(
+                (float)(pos.X * _chart.DisplayScale),
+                (float)(pos.Y * _chart.DisplayScale));
+            var mouseCoords = _chart.Plot.GetCoordinates(pixel);
+
+            /* Use X-axis (time) proximity as the primary filter, Y-axis distance
+               as tiebreaker. This makes tooltips appear reliably when hovering at
+               any Y position near a data point's time — standard for time-series. */
+            double bestYDistance = double.MaxValue;
+            ScottPlot.DataPoint bestPoint = default;
+            string bestLabel = "";
+            bool found = false;
+
+            foreach (var (scatter, label) in _scatters)
             {
+                var nearest = scatter.Data.GetNearest(mouseCoords, _chart.Plot.LastRender);
+                if (!nearest.IsReal) continue;
+
                 var nearestPixel = _chart.Plot.GetPixel(
                     new ScottPlot.Coordinates(nearest.X, nearest.Y));
-                double dx = nearestPixel.X - pixel.X;
-                double dy = nearestPixel.Y - pixel.Y;
-                double dist = dx * dx + dy * dy;
-                if (dist < bestDistance)
+                double dx = Math.Abs(nearestPixel.X - pixel.X);
+                double dy = Math.Abs(nearestPixel.Y - pixel.Y);
+
+                /* Must be within 80px horizontally (time axis). Among matches,
+                   pick the series closest in Y (nearest line to cursor). */
+                if (dx < 80 && dy < bestYDistance)
                 {
-                    bestDistance = dist;
+                    bestYDistance = dy;
                     bestPoint = nearest;
                     bestLabel = label;
+                    found = true;
                 }
             }
-        }
 
-        if (bestPoint.IsReal && bestDistance < 2500) // ~50px radius
-        {
-            var time = DateTime.FromOADate(bestPoint.X);
-            _text.Text = $"{bestLabel}\n{bestPoint.Y:N1} {_unit}\n{time:HH:mm:ss}";
-            _popup.HorizontalOffset = pos.X + 15;
-            _popup.VerticalOffset = pos.Y + 15;
-            _popup.IsOpen = true;
+            if (found)
+            {
+                var time = DateTime.FromOADate(bestPoint.X);
+                _text.Text = $"{bestLabel}\n{bestPoint.Y:N1} {_unit}\n{time:HH:mm:ss}";
+                _popup.HorizontalOffset = pos.X + 15;
+                _popup.VerticalOffset = pos.Y + 15;
+                _popup.IsOpen = true;
+            }
+            else
+            {
+                _popup.IsOpen = false;
+            }
         }
-        else
+        catch
         {
             _popup.IsOpen = false;
         }

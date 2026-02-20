@@ -433,6 +433,8 @@ namespace PerformanceMonitorDashboard.Models
             get
             {
                 if (DeadlocksSinceLastCheck > 0) return HealthSeverity.Critical;
+                if (_lastDeadlockMinutesAgo.HasValue && _lastDeadlockMinutesAgo.Value <= 10) return HealthSeverity.Critical;
+                if (_lastDeadlockMinutesAgo.HasValue && _lastDeadlockMinutesAgo.Value <= 60) return HealthSeverity.Warning;
                 return HealthSeverity.Healthy;
             }
         }
@@ -447,6 +449,7 @@ namespace PerformanceMonitorDashboard.Models
                 _lastDeadlockMinutesAgo = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(DeadlockDetailText));
+                OnPropertyChanged(nameof(DeadlockSeverity));
             }
         }
 

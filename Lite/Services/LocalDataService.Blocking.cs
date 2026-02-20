@@ -78,7 +78,7 @@ SELECT
     victim_process_id,
     victim_sql_text,
     deadlock_graph_xml
-FROM deadlocks
+FROM v_deadlocks
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -139,7 +139,7 @@ SELECT
     query_plan,
     live_query_plan,
     collection_time
-FROM query_snapshots
+FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -230,7 +230,7 @@ SELECT
     blocking_last_batch_completed,
     blocked_priority,
     blocking_priority
-FROM blocked_process_reports
+FROM v_blocked_process_reports
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -310,7 +310,7 @@ FROM (
     SELECT
         DATE_TRUNC('minute', event_time) AS bucket,
         COUNT(*) AS incident_count
-    FROM blocked_process_reports
+    FROM v_blocked_process_reports
     WHERE server_id = $1
     AND   event_time >= $2
     AND   event_time <= $3
@@ -353,7 +353,7 @@ FROM (
     SELECT
         DATE_TRUNC('hour', deadlock_time) AS bucket,
         COUNT(*) AS deadlock_count
-    FROM deadlocks
+    FROM v_deadlocks
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3

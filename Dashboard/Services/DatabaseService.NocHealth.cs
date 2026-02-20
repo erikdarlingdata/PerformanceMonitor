@@ -505,7 +505,7 @@ namespace PerformanceMonitorDashboard.Services
 
                 SELECT TOP (1)
                     minutes_ago =
-                        DATEDIFF(MINUTE, bpx.event_time, SYSDATETIME())
+                        DATEDIFF(MINUTE, bpx.event_time, SYSUTCDATETIME())
                 FROM collect.blocked_process_xml AS bpx
                 ORDER BY
                     bpx.id DESC
@@ -530,7 +530,7 @@ namespace PerformanceMonitorDashboard.Services
 
                 SELECT TOP (1)
                     minutes_ago =
-                        DATEDIFF(MINUTE, dx.event_time, SYSDATETIME())
+                        DATEDIFF(MINUTE, dx.event_time, SYSUTCDATETIME())
                 FROM collect.deadlock_xml AS dx
                 ORDER BY
                     dx.id DESC
@@ -623,6 +623,8 @@ namespace PerformanceMonitorDashboard.Services
                 JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
                 WHERE r.session_id > 50
                 AND r.total_elapsed_time >= @thresholdMs
+                AND t.text NOT LIKE N'%waitfor delay%'
+                AND t.text NOT LIKE N'%waitfor receive%'
                 ORDER BY r.total_elapsed_time DESC
                 OPTION(MAXDOP 1, RECOMPILE);";
 

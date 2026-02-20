@@ -145,6 +145,7 @@ namespace PerformanceMonitorDashboard
             LoadSidebarState();
             ConfigureConnectionStatusTimer();
             ConfigureAlertCheckTimer();
+            UpdateAlertBadge();
             StartMcpServerIfEnabled();
 
             _displayRefreshTimer.Start();
@@ -233,7 +234,7 @@ namespace PerformanceMonitorDashboard
                 try
                 {
                     _mcpCts?.Cancel();
-                    _mcpHostService.StopAsync(CancellationToken.None).Wait(TimeSpan.FromSeconds(5));
+                    Task.Run(() => _mcpHostService.StopAsync(CancellationToken.None)).Wait(TimeSpan.FromSeconds(5));
                 }
                 catch (Exception ex)
                 {
@@ -444,6 +445,12 @@ namespace PerformanceMonitorDashboard
             Helpers.ServerTimeHelper.UtcOffsetMinutes = utcOffset;
 
             var serverTab = new ServerTab(server, utcOffset);
+            serverTab.AlertAcknowledged += (_, _) =>
+            {
+                _emailAlertService.HideAllAlerts(8760, server.DisplayName);
+                UpdateAlertBadge();
+                _alertsHistoryContent?.RefreshAlerts();
+            };
 
             var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
             var headerText = new TextBlock
@@ -553,7 +560,7 @@ namespace PerformanceMonitorDashboard
             }
 
             // Create the landing page
-            _landingPage = new LandingPage();
+            _landingPage = new LandingPage(_serverManager);
             _landingPage.ServerCardClicked += LandingPage_ServerCardClicked;
 
             // Create tab header with close button
@@ -605,6 +612,7 @@ namespace PerformanceMonitorDashboard
             }
 
             _alertsHistoryContent = new AlertsHistoryContent();
+            _alertsHistoryContent.AlertsDismissed += (_, _) => UpdateAlertBadge();
 
             var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
             var headerText = new TextBlock
@@ -970,6 +978,24 @@ namespace PerformanceMonitorDashboard
 
             /* Auto-refresh alert history if the tab is open */
             _alertsHistoryContent?.RefreshAlerts();
+
+            UpdateAlertBadge();
+        }
+
+        private void UpdateAlertBadge()
+        {
+            var alerts = _emailAlertService.GetAlertHistory(hoursBack: 24, limit: 100);
+            var count = alerts.Count;
+
+            if (count > 0)
+            {
+                AlertBadgeText.Text = count > 99 ? "99+" : count.ToString();
+                AlertBadge.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                AlertBadge.Visibility = Visibility.Collapsed;
+            }
         }
 
         /// <summary>
@@ -1548,6 +1574,15 @@ namespace PerformanceMonitorDashboard
                 if (_openTabs.TryGetValue(serverId, out var tabItem) && tabItem.Content is ServerTab serverTab)
                 {
                     serverTab.UpdateBadges(null, _alertStateService);
+                }
+
+                // Hide alerts in the email alert log so the sidebar badge updates
+                var server = _serverManager.GetAllServers().FirstOrDefault(s => s.Id == serverId);
+                if (server != null)
+                {
+                    _emailAlertService.HideAllAlerts(8760, server.DisplayName);
+                    UpdateAlertBadge();
+                    _alertsHistoryContent?.RefreshAlerts();
                 }
             }
         }

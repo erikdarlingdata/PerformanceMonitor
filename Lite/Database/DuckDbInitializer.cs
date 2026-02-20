@@ -19,18 +19,32 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 10;
+    internal const int CurrentSchemaVersion = 11;
+
+    private readonly string _archivePath;
 
     public DuckDbInitializer(string databasePath, ILogger<DuckDbInitializer>? logger = null)
     {
         _databasePath = databasePath;
         _logger = logger;
+        _archivePath = Path.Combine(Path.GetDirectoryName(databasePath) ?? ".", "archive");
     }
+
+    /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files */
+    private static readonly string[] ArchivableTables =
+    [
+        "wait_stats", "query_stats", "procedure_stats", "query_store_stats",
+        "query_snapshots", "cpu_utilization_stats", "file_io_stats", "memory_stats",
+        "memory_clerks", "tempdb_stats", "perfmon_stats", "deadlocks",
+        "blocked_process_reports", "collection_log"
+    ];
 
     /// <summary>
     /// Gets the connection string for the DuckDB database.
+    /// Disables automatic WAL checkpoints to prevent 2-3s stop-the-world stalls
+    /// during collector writes. Manual CHECKPOINT runs between collection cycles instead.
     /// </summary>
-    public string ConnectionString => $"Data Source={_databasePath}";
+    public string ConnectionString => $"Data Source={_databasePath};checkpoint_threshold=1GB";
 
     /// <summary>
     /// Ensures the database exists and all tables are created.
@@ -97,6 +111,8 @@ public class DuckDbInitializer
 
             _logger?.LogInformation("Database initialization complete. Schema version: {Version}", CurrentSchemaVersion);
         }
+
+        await CreateArchiveViewsAsync();
     }
 
     /// <summary>
@@ -343,6 +359,15 @@ public class DuckDbInitializer
                 /* Table doesn't exist yet — will be created with correct schema below */
             }
         }
+
+        if (fromVersion < 11)
+        {
+            /* v11: Expanded database_config from 9 to 28 columns (sys.databases).
+                    Added state_desc, collation, RCSI, snapshot isolation, stats settings,
+                    encryption, security, and version-gated columns (ADR, memory optimized, optimized locking). */
+            _logger?.LogInformation("Running migration to v11: rebuilding database_config for expanded sys.databases columns");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS database_config");
+        }
     }
 
     /// <summary>
@@ -409,6 +434,78 @@ public class DuckDbInitializer
     }
 
     /// <summary>
+    /// Creates or refreshes views that UNION hot DuckDB tables with archived parquet files.
+    /// Call at startup and after each archive cycle so newly archived data is queryable.
+    /// </summary>
+    public async Task CreateArchiveViewsAsync()
+    {
+        using var connection = CreateConnection();
+        await connection.OpenAsync();
+
+        foreach (var table in ArchivableTables)
+        {
+            try
+            {
+                var parquetGlob = Path.Combine(_archivePath, $"*_{table}.parquet");
+                var hasParquetFiles = Directory.Exists(_archivePath)
+                    && Directory.GetFiles(_archivePath, $"*_{table}.parquet").Length > 0;
+
+                string viewSql;
+                if (hasParquetFiles)
+                {
+                    var globPath = parquetGlob.Replace("\\", "/");
+                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
+                }
+                else
+                {
+                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                }
+
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = viewSql;
+                await cmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                /* Schema mismatch between hot table and old parquet — fall back to table-only view */
+                _logger?.LogWarning(ex, "Failed to create archive view for {Table}, using table-only view", table);
+                try
+                {
+                    using var fallbackCmd = connection.CreateCommand();
+                    fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                    await fallbackCmd.ExecuteNonQueryAsync();
+                }
+                catch (Exception fallbackEx)
+                {
+                    _logger?.LogError(fallbackEx, "Failed to create fallback view for {Table}", table);
+                }
+            }
+        }
+
+        _logger?.LogDebug("Archive views created/refreshed for {Count} tables", ArchivableTables.Length);
+    }
+
+    /// <summary>
+    /// Runs a manual WAL checkpoint. Call this between collection cycles
+    /// to flush the WAL during idle time instead of during collector writes.
+    /// </summary>
+    public async Task CheckpointAsync()
+    {
+        try
+        {
+            using var connection = CreateConnection();
+            await connection.OpenAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = "CHECKPOINT";
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Manual checkpoint failed (non-critical)");
+        }
+    }
+
+    /// <summary>
     /// Executes a non-query SQL statement.
     /// </summary>
     private async Task ExecuteNonQueryAsync(DuckDBConnection connection, string sql)
@@ -446,6 +543,150 @@ public class DuckDbInitializer
 
         var fileInfo = new FileInfo(_databasePath);
         return fileInfo.Length / (1024.0 * 1024.0);
+    }
+
+    /// <summary>
+    /// Compacts the database by exporting all tables to a fresh file and swapping.
+    /// DuckDB VACUUM does not reclaim space from append-fragmented files — only
+    /// export/reimport eliminates bloat. Typically takes 2-5 seconds for a 300MB database.
+    /// </summary>
+    /// <returns>True if compaction was performed, false if skipped or failed.</returns>
+    public async Task<bool> CompactAsync()
+    {
+        if (!DatabaseExists())
+        {
+            return false;
+        }
+
+        var sizeBefore = GetDatabaseSizeMb();
+        var tempPath = _databasePath + ".compact";
+        var backupPath = _databasePath + ".precompact";
+
+        _logger?.LogInformation("Starting database compaction ({SizeMb:F0} MB)", sizeBefore);
+
+        try
+        {
+            /* Export all data to a fresh database via ATTACH + CREATE TABLE AS */
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+
+            using (var connection = CreateConnection())
+            {
+                await connection.OpenAsync();
+
+                /* Checkpoint first to flush WAL */
+                using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = "CHECKPOINT";
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                /* Attach the new database and copy all tables */
+                using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = $"ATTACH '{tempPath.Replace("\\", "/")}' AS compact_db";
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                /* Get all table names (exclude views) */
+                var tableNames = new List<string>();
+                using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' AND table_type = 'BASE TABLE'";
+                    using var reader = await cmd.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        tableNames.Add(reader.GetString(0));
+                    }
+                }
+
+                foreach (var table in tableNames)
+                {
+                    using var cmd = connection.CreateCommand();
+                    cmd.CommandText = $"CREATE TABLE compact_db.{table} AS SELECT * FROM main.{table}";
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = "DETACH compact_db";
+                    await cmd.ExecuteNonQueryAsync();
+                }
+            }
+
+            /* Delete WAL files before swap — the old WAL belongs to the pre-compaction
+               database and would confuse the fresh compacted file on next open */
+            var walPath = _databasePath + ".wal";
+            if (File.Exists(walPath)) File.Delete(walPath);
+
+            var tempWalPath = tempPath + ".wal";
+            if (File.Exists(tempWalPath)) File.Delete(tempWalPath);
+
+            /* Atomically replace the database file with the compacted version.
+               File.Replace swaps in a single OS operation, eliminating any window
+               where _databasePath doesn't exist (unlike two separate File.Move calls).
+               Retry briefly if a UI connection still has the file open. */
+            if (File.Exists(backupPath)) File.Delete(backupPath);
+
+            const int maxSwapAttempts = 3;
+            for (int attempt = 1; attempt <= maxSwapAttempts; attempt++)
+            {
+                try
+                {
+                    File.Replace(tempPath, _databasePath, backupPath);
+                    break;
+                }
+                catch (IOException) when (attempt < maxSwapAttempts)
+                {
+                    _logger?.LogDebug("Compaction file swap attempt {Attempt}/{Max} failed (file in use), retrying in 500ms",
+                        attempt, maxSwapAttempts);
+                    await Task.Delay(500);
+                }
+            }
+
+            /* Recreate indexes and views on the fresh database */
+            using (var connection = CreateConnection())
+            {
+                await connection.OpenAsync();
+
+                foreach (var indexStatement in Schema.GetAllIndexStatements())
+                {
+                    try
+                    {
+                        using var cmd = connection.CreateCommand();
+                        cmd.CommandText = indexStatement;
+                        await cmd.ExecuteNonQueryAsync();
+                    }
+                    catch { /* Index may already exist from CREATE TABLE AS */ }
+                }
+            }
+
+            await CreateArchiveViewsAsync();
+
+            /* Clean up backup */
+            File.Delete(backupPath);
+
+            var sizeAfter = GetDatabaseSizeMb();
+            _logger?.LogInformation("Compaction complete: {Before:F0} MB -> {After:F0} MB ({Saved:F0} MB reclaimed)",
+                sizeBefore, sizeAfter, sizeBefore - sizeAfter);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Database compaction failed");
+
+            /* Restore from backup if the primary file was moved */
+            if (!File.Exists(_databasePath) && File.Exists(backupPath))
+            {
+                File.Move(backupPath, _databasePath);
+                _logger?.LogInformation("Restored database from pre-compaction backup");
+            }
+
+            /* Clean up temp file */
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+
+            return false;
+        }
     }
 
 }

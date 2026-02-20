@@ -59,35 +59,39 @@ OPTION(RECOMPILE);";
         _lastSqlMs = sqlSw.ElapsedMilliseconds;
 
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("waiting_tasks");
-
-        while (await reader.ReadAsync(cancellationToken))
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            /* session_id and blocking_session_id are smallint in sys.dm_os_waiting_tasks */
-            var sessionId = reader.IsDBNull(0) ? 0 : reader.GetInt16(0);
-            var waitType = reader.IsDBNull(1) ? null : reader.GetString(1);
-            var waitDurationMs = reader.IsDBNull(2) ? 0L : reader.GetInt64(2);
-            var blockingSessionId = reader.IsDBNull(3) ? (short?)null : reader.GetInt16(3);
-            var resourceDescription = reader.IsDBNull(4) ? null : reader.GetString(4);
-            var databaseName = reader.IsDBNull(5) ? null : reader.GetString(5);
+            await duckConnection.OpenAsync(cancellationToken);
 
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue((int)sessionId)
-               .AppendValue(waitType)
-               .AppendValue(waitDurationMs)
-               .AppendValue(blockingSessionId.HasValue ? (int?)blockingSessionId.Value : null)
-               .AppendValue(resourceDescription)
-               .AppendValue(databaseName)
-               .EndRow();
+            using (var appender = duckConnection.CreateAppender("waiting_tasks"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    /* session_id and blocking_session_id are smallint in sys.dm_os_waiting_tasks */
+                    var sessionId = reader.IsDBNull(0) ? 0 : reader.GetInt16(0);
+                    var waitType = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    var waitDurationMs = reader.IsDBNull(2) ? 0L : reader.GetInt64(2);
+                    var blockingSessionId = reader.IsDBNull(3) ? (short?)null : reader.GetInt16(3);
+                    var resourceDescription = reader.IsDBNull(4) ? null : reader.GetString(4);
+                    var databaseName = reader.IsDBNull(5) ? null : reader.GetString(5);
 
-            rowsCollected++;
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue((int)sessionId)
+                       .AppendValue(waitType)
+                       .AppendValue(waitDurationMs)
+                       .AppendValue(blockingSessionId.HasValue ? (int?)blockingSessionId.Value : null)
+                       .AppendValue(resourceDescription)
+                       .AppendValue(databaseName)
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

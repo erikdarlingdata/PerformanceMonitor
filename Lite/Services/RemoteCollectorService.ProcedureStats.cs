@@ -199,71 +199,75 @@ OPTION(RECOMPILE);";
         sqlSw.Stop();
 
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("procedure_stats");
-
-        while (await reader.ReadAsync(cancellationToken))
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var dbName = reader.IsDBNull(0) ? "" : reader.GetString(0);
-            var schemaName = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            var objectName = reader.IsDBNull(2) ? "" : reader.GetString(2);
-            var objectType = reader.IsDBNull(3) ? "" : reader.GetString(3);
-            var execCount = reader.GetInt64(4);
-            var workerTime = reader.GetInt64(5);
-            var elapsedTime = reader.GetInt64(6);
-            var logicalReads = reader.GetInt64(7);
-            var physicalReads = reader.GetInt64(8);
-            var logicalWrites = reader.GetInt64(9);
-            var minWorkerTime = reader.GetInt64(10);
-            var maxWorkerTime = reader.GetInt64(11);
-            var minElapsedTime = reader.GetInt64(12);
-            var maxElapsedTime = reader.GetInt64(13);
-            var totalSpills = reader.GetInt64(14);
-            var sqlHandle = reader.IsDBNull(15) ? (string?)null : reader.GetString(15);
-            var planHandle = reader.IsDBNull(16) ? (string?)null : reader.GetString(16);
+            await duckConnection.OpenAsync(cancellationToken);
 
-            /* Delta key: database.schema.object */
-            var deltaKey = $"{dbName}.{schemaName}.{objectName}";
-            var deltaExec = _deltaCalculator.CalculateDelta(serverId, "proc_stats_exec", deltaKey, execCount);
-            var deltaWorker = _deltaCalculator.CalculateDelta(serverId, "proc_stats_worker", deltaKey, workerTime);
-            var deltaElapsed = _deltaCalculator.CalculateDelta(serverId, "proc_stats_elapsed", deltaKey, elapsedTime);
-            var deltaReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_reads", deltaKey, logicalReads);
-            var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "proc_stats_writes", deltaKey, logicalWrites);
-            var deltaPhysReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_phys_reads", deltaKey, physicalReads);
+            using (var appender = duckConnection.CreateAppender("procedure_stats"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var dbName = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                    var schemaName = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                    var objectName = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                    var objectType = reader.IsDBNull(3) ? "" : reader.GetString(3);
+                    var execCount = reader.GetInt64(4);
+                    var workerTime = reader.GetInt64(5);
+                    var elapsedTime = reader.GetInt64(6);
+                    var logicalReads = reader.GetInt64(7);
+                    var physicalReads = reader.GetInt64(8);
+                    var logicalWrites = reader.GetInt64(9);
+                    var minWorkerTime = reader.GetInt64(10);
+                    var maxWorkerTime = reader.GetInt64(11);
+                    var minElapsedTime = reader.GetInt64(12);
+                    var maxElapsedTime = reader.GetInt64(13);
+                    var totalSpills = reader.GetInt64(14);
+                    var sqlHandle = reader.IsDBNull(15) ? (string?)null : reader.GetString(15);
+                    var planHandle = reader.IsDBNull(16) ? (string?)null : reader.GetString(16);
 
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(dbName)
-               .AppendValue(schemaName)
-               .AppendValue(objectName)
-               .AppendValue(objectType)
-               .AppendValue(execCount)
-               .AppendValue(workerTime)
-               .AppendValue(elapsedTime)
-               .AppendValue(logicalReads)
-               .AppendValue(physicalReads)
-               .AppendValue(logicalWrites)
-               .AppendValue(minWorkerTime)
-               .AppendValue(maxWorkerTime)
-               .AppendValue(minElapsedTime)
-               .AppendValue(maxElapsedTime)
-               .AppendValue(totalSpills)
-               .AppendValue(sqlHandle)
-               .AppendValue(planHandle)
-               .AppendValue(deltaExec)
-               .AppendValue(deltaWorker)
-               .AppendValue(deltaElapsed)
-               .AppendValue(deltaReads)
-               .AppendValue(deltaWrites)
-               .AppendValue(deltaPhysReads)
-               .EndRow();
+                    /* Delta key: database.schema.object */
+                    var deltaKey = $"{dbName}.{schemaName}.{objectName}";
+                    var deltaExec = _deltaCalculator.CalculateDelta(serverId, "proc_stats_exec", deltaKey, execCount);
+                    var deltaWorker = _deltaCalculator.CalculateDelta(serverId, "proc_stats_worker", deltaKey, workerTime);
+                    var deltaElapsed = _deltaCalculator.CalculateDelta(serverId, "proc_stats_elapsed", deltaKey, elapsedTime);
+                    var deltaReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_reads", deltaKey, logicalReads);
+                    var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "proc_stats_writes", deltaKey, logicalWrites);
+                    var deltaPhysReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_phys_reads", deltaKey, physicalReads);
 
-            rowsCollected++;
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(dbName)
+                       .AppendValue(schemaName)
+                       .AppendValue(objectName)
+                       .AppendValue(objectType)
+                       .AppendValue(execCount)
+                       .AppendValue(workerTime)
+                       .AppendValue(elapsedTime)
+                       .AppendValue(logicalReads)
+                       .AppendValue(physicalReads)
+                       .AppendValue(logicalWrites)
+                       .AppendValue(minWorkerTime)
+                       .AppendValue(maxWorkerTime)
+                       .AppendValue(minElapsedTime)
+                       .AppendValue(maxElapsedTime)
+                       .AppendValue(totalSpills)
+                       .AppendValue(sqlHandle)
+                       .AppendValue(planHandle)
+                       .AppendValue(deltaExec)
+                       .AppendValue(deltaWorker)
+                       .AppendValue(deltaElapsed)
+                       .AppendValue(deltaReads)
+                       .AppendValue(deltaWrites)
+                       .AppendValue(deltaPhysReads)
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

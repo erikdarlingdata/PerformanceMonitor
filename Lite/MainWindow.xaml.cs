@@ -105,7 +105,7 @@ public partial class MainWindow : Window
             var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory);
             var retentionService = new RetentionService(App.ArchiveDirectory);
 
-            _backgroundService = new CollectionBackgroundService(_collectorService, archiveService, retentionService, _serverManager);
+            _backgroundService = new CollectionBackgroundService(_collectorService, _databaseInitializer, archiveService, retentionService, _serverManager);
 
             // Start background collection
             _backgroundCts = new CancellationTokenSource();

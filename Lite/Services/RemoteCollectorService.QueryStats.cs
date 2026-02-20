@@ -156,78 +156,82 @@ OPTION(RECOMPILE);";
         sqlSw.Stop();
 
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("query_stats");
-
-        while (await reader.ReadAsync(cancellationToken))
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var queryHash = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            var executionCount = reader.IsDBNull(3) ? 0L : reader.GetInt64(3);
-            var totalWorkerTime = reader.IsDBNull(4) ? 0L : reader.GetInt64(4);
-            var totalElapsedTime = reader.IsDBNull(5) ? 0L : reader.GetInt64(5);
-            var totalLogicalReads = reader.IsDBNull(6) ? 0L : reader.GetInt64(6);
-            var totalLogicalWrites = reader.IsDBNull(7) ? 0L : reader.GetInt64(7);
-            var totalPhysicalReads = reader.IsDBNull(8) ? 0L : reader.GetInt64(8);
-            var totalRows = reader.IsDBNull(9) ? 0L : reader.GetInt64(9);
-            var totalSpills = reader.IsDBNull(10) ? 0L : reader.GetInt64(10);
-            var minWorkerTime = reader.IsDBNull(11) ? 0L : reader.GetInt64(11);
-            var maxWorkerTime = reader.IsDBNull(12) ? 0L : reader.GetInt64(12);
-            var minElapsedTime = reader.IsDBNull(13) ? 0L : reader.GetInt64(13);
-            var maxElapsedTime = reader.IsDBNull(14) ? 0L : reader.GetInt64(14);
-            var minDop = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15));
-            var maxDop = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16));
-            var sqlHandle = reader.IsDBNull(17) ? (string?)null : reader.GetString(17);
-            var planHandle = reader.IsDBNull(18) ? (string?)null : reader.GetString(18);
+            await duckConnection.OpenAsync(cancellationToken);
 
-            /* Delta calculations based on query_hash */
-            var deltaExecCount = _deltaCalculator.CalculateDelta(serverId, "query_stats_exec", queryHash, executionCount);
-            var deltaWorkerTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_worker", queryHash, totalWorkerTime);
-            var deltaElapsedTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_elapsed", queryHash, totalElapsedTime);
-            var deltaLogicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_reads", queryHash, totalLogicalReads);
-            var deltaLogicalWrites = _deltaCalculator.CalculateDelta(serverId, "query_stats_writes", queryHash, totalLogicalWrites);
-            var deltaPhysicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_phys_reads", queryHash, totalPhysicalReads);
-            var deltaRows = _deltaCalculator.CalculateDelta(serverId, "query_stats_rows", queryHash, totalRows);
-            var deltaSpills = _deltaCalculator.CalculateDelta(serverId, "query_stats_spills", queryHash, totalSpills);
+            using (var appender = duckConnection.CreateAppender("query_stats"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var queryHash = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                    var executionCount = reader.IsDBNull(3) ? 0L : reader.GetInt64(3);
+                    var totalWorkerTime = reader.IsDBNull(4) ? 0L : reader.GetInt64(4);
+                    var totalElapsedTime = reader.IsDBNull(5) ? 0L : reader.GetInt64(5);
+                    var totalLogicalReads = reader.IsDBNull(6) ? 0L : reader.GetInt64(6);
+                    var totalLogicalWrites = reader.IsDBNull(7) ? 0L : reader.GetInt64(7);
+                    var totalPhysicalReads = reader.IsDBNull(8) ? 0L : reader.GetInt64(8);
+                    var totalRows = reader.IsDBNull(9) ? 0L : reader.GetInt64(9);
+                    var totalSpills = reader.IsDBNull(10) ? 0L : reader.GetInt64(10);
+                    var minWorkerTime = reader.IsDBNull(11) ? 0L : reader.GetInt64(11);
+                    var maxWorkerTime = reader.IsDBNull(12) ? 0L : reader.GetInt64(12);
+                    var minElapsedTime = reader.IsDBNull(13) ? 0L : reader.GetInt64(13);
+                    var maxElapsedTime = reader.IsDBNull(14) ? 0L : reader.GetInt64(14);
+                    var minDop = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15));
+                    var maxDop = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16));
+                    var sqlHandle = reader.IsDBNull(17) ? (string?)null : reader.GetString(17);
+                    var planHandle = reader.IsDBNull(18) ? (string?)null : reader.GetString(18);
 
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(reader.IsDBNull(0) ? (string?)null : reader.GetString(0))
-               .AppendValue(queryHash)
-               .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))
-               .AppendValue(executionCount)
-               .AppendValue(totalWorkerTime)
-               .AppendValue(totalElapsedTime)
-               .AppendValue(totalLogicalReads)
-               .AppendValue(totalLogicalWrites)
-               .AppendValue(totalPhysicalReads)
-               .AppendValue(totalRows)
-               .AppendValue(totalSpills)
-               .AppendValue(minWorkerTime)
-               .AppendValue(maxWorkerTime)
-               .AppendValue(minElapsedTime)
-               .AppendValue(maxElapsedTime)
-               .AppendValue(minDop)
-               .AppendValue(maxDop)
-               .AppendValue(reader.IsDBNull(19) ? (string?)null : reader.GetString(19))
-               .AppendValue((string?)null) /* query plans retrieved on-demand */
-               .AppendValue(sqlHandle)
-               .AppendValue(planHandle)
-               .AppendValue(deltaExecCount)
-               .AppendValue(deltaWorkerTime)
-               .AppendValue(deltaElapsedTime)
-               .AppendValue(deltaLogicalReads)
-               .AppendValue(deltaLogicalWrites)
-               .AppendValue(deltaPhysicalReads)
-               .AppendValue(deltaRows)
-               .AppendValue(deltaSpills)
-               .EndRow();
+                    /* Delta calculations based on query_hash */
+                    var deltaExecCount = _deltaCalculator.CalculateDelta(serverId, "query_stats_exec", queryHash, executionCount);
+                    var deltaWorkerTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_worker", queryHash, totalWorkerTime);
+                    var deltaElapsedTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_elapsed", queryHash, totalElapsedTime);
+                    var deltaLogicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_reads", queryHash, totalLogicalReads);
+                    var deltaLogicalWrites = _deltaCalculator.CalculateDelta(serverId, "query_stats_writes", queryHash, totalLogicalWrites);
+                    var deltaPhysicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_phys_reads", queryHash, totalPhysicalReads);
+                    var deltaRows = _deltaCalculator.CalculateDelta(serverId, "query_stats_rows", queryHash, totalRows);
+                    var deltaSpills = _deltaCalculator.CalculateDelta(serverId, "query_stats_spills", queryHash, totalSpills);
 
-            rowsCollected++;
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(reader.IsDBNull(0) ? (string?)null : reader.GetString(0))
+                       .AppendValue(queryHash)
+                       .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))
+                       .AppendValue(executionCount)
+                       .AppendValue(totalWorkerTime)
+                       .AppendValue(totalElapsedTime)
+                       .AppendValue(totalLogicalReads)
+                       .AppendValue(totalLogicalWrites)
+                       .AppendValue(totalPhysicalReads)
+                       .AppendValue(totalRows)
+                       .AppendValue(totalSpills)
+                       .AppendValue(minWorkerTime)
+                       .AppendValue(maxWorkerTime)
+                       .AppendValue(minElapsedTime)
+                       .AppendValue(maxElapsedTime)
+                       .AppendValue(minDop)
+                       .AppendValue(maxDop)
+                       .AppendValue(reader.IsDBNull(19) ? (string?)null : reader.GetString(19))
+                       .AppendValue((string?)null) /* query plans retrieved on-demand */
+                       .AppendValue(sqlHandle)
+                       .AppendValue(planHandle)
+                       .AppendValue(deltaExecCount)
+                       .AppendValue(deltaWorkerTime)
+                       .AppendValue(deltaElapsedTime)
+                       .AppendValue(deltaLogicalReads)
+                       .AppendValue(deltaLogicalWrites)
+                       .AppendValue(deltaPhysicalReads)
+                       .AppendValue(deltaRows)
+                       .AppendValue(deltaSpills)
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

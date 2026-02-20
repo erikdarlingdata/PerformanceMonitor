@@ -146,26 +146,31 @@ OPTION(RECOMPILE);";
 
         /* Insert into DuckDB using Appender */
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("memory_stats");
-        var row = appender.CreateRow();
-        row.AppendValue(GenerateCollectionId())
-           .AppendValue(collectionTime)
-           .AppendValue(serverId)
-           .AppendValue(server.ServerName)
-           .AppendValue(totalPhysicalMb)
-           .AppendValue(availablePhysicalMb)
-           .AppendValue(totalPageFileMb)
-           .AppendValue(availablePageFileMb)
-           .AppendValue(systemMemoryState)
-           .AppendValue(sqlMemoryModel)
-           .AppendValue(targetServerMemoryMb)
-           .AppendValue(totalServerMemoryMb)
-           .AppendValue(bufferPoolMb)
-           .AppendValue(planCacheMb)
-           .EndRow();
+        using (var duckConnection = _duckDb.CreateConnection())
+        {
+            await duckConnection.OpenAsync(cancellationToken);
+
+            using (var appender = duckConnection.CreateAppender("memory_stats"))
+            {
+                var row = appender.CreateRow();
+                row.AppendValue(GenerateCollectionId())
+                   .AppendValue(collectionTime)
+                   .AppendValue(serverId)
+                   .AppendValue(server.ServerName)
+                   .AppendValue(totalPhysicalMb)
+                   .AppendValue(availablePhysicalMb)
+                   .AppendValue(totalPageFileMb)
+                   .AppendValue(availablePageFileMb)
+                   .AppendValue(systemMemoryState)
+                   .AppendValue(sqlMemoryModel)
+                   .AppendValue(targetServerMemoryMb)
+                   .AppendValue(totalServerMemoryMb)
+                   .AppendValue(bufferPoolMb)
+                   .AppendValue(planCacheMb)
+                   .EndRow();
+            }
+        }
 
         duckSw.Stop();
         _lastSqlMs = sqlSw.ElapsedMilliseconds;
@@ -211,23 +216,27 @@ OPTION(RECOMPILE);";
 
         /* Insert into DuckDB */
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("memory_clerks");
-
-        while (await reader.ReadAsync(cancellationToken))
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(reader.GetString(0))
-               .AppendValue(reader.GetDecimal(1))
-               .EndRow();
+            await duckConnection.OpenAsync(cancellationToken);
 
-            rowsCollected++;
+            using (var appender = duckConnection.CreateAppender("memory_clerks"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(reader.GetString(0))
+                       .AppendValue(reader.GetDecimal(1))
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

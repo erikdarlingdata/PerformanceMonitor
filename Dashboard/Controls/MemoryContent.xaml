@@ -49,18 +49,45 @@
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="Memory Usage Over Time" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
                     <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryStatsOverviewChart"/>
-                    <!-- Summary Panel for percentages and pressure status -->
-                    <Border Grid.Row="2" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,8">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                            <TextBlock Text="Buffer Pool:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryStatsBPPercentText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Plan Cache:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryStatsPCPercentText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Utilization:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryStatsUtilPercentText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Pressure:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryStatsPressureText" Text="None" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                        </StackPanel>
+                    <!-- Summary Panel with absolute GB values and pressure status -->
+                    <Border Grid.Row="2" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,6">
+                        <WrapPanel HorizontalAlignment="Center">
+                            <!-- Physical Memory -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,24,0">
+                                <TextBlock Text="Physical Memory:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryStatsPhysicalText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <!-- SQL Server Memory (committed) -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,24,0">
+                                <TextBlock Text="SQL Server Memory:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryStatsSqlServerText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <!-- Target Memory -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,24,0">
+                                <TextBlock Text="Target Memory:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryStatsTargetText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <!-- Buffer Pool -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,24,0">
+                                <TextBlock Text="Buffer Pool:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryStatsBPPercentText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <!-- Plan Cache -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,24,0">
+                                <TextBlock Text="Plan Cache:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryStatsPCPercentText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <!-- Utilization -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,24,0">
+                                <TextBlock Text="Utilization:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryStatsUtilPercentText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <!-- Pressure -->
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Pressure:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryStatsPressureText" Text="None" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </WrapPanel>
                     </Border>
                 </Grid>
             </Border>

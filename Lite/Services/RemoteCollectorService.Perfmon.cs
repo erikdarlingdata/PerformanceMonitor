@@ -149,36 +149,40 @@ OPTION(RECOMPILE);";
         _lastSqlMs = sqlSw.ElapsedMilliseconds;
 
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("perfmon_stats");
-
-        while (await reader.ReadAsync(cancellationToken))
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var objectName = reader.IsDBNull(0) ? "" : reader.GetString(0);
-            var counterName = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            var instanceName = reader.IsDBNull(2) ? "" : reader.GetString(2);
-            var cntrValue = reader.GetInt64(3);
+            await duckConnection.OpenAsync(cancellationToken);
 
-            /* Delta for per-second counters */
-            var deltaKey = $"{objectName}|{counterName}|{instanceName}";
-            var deltaCntrValue = _deltaCalculator.CalculateDelta(serverId, "perfmon", deltaKey, cntrValue);
+            using (var appender = duckConnection.CreateAppender("perfmon_stats"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var objectName = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                    var counterName = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                    var instanceName = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                    var cntrValue = reader.GetInt64(3);
 
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(objectName)
-               .AppendValue(counterName)
-               .AppendValue(instanceName)
-               .AppendValue(cntrValue)
-               .AppendValue(deltaCntrValue)
-               .AppendValue(600) /* 10-minute interval */
-               .EndRow();
+                    /* Delta for per-second counters */
+                    var deltaKey = $"{objectName}|{counterName}|{instanceName}";
+                    var deltaCntrValue = _deltaCalculator.CalculateDelta(serverId, "perfmon", deltaKey, cntrValue);
 
-            rowsCollected++;
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(objectName)
+                       .AppendValue(counterName)
+                       .AppendValue(instanceName)
+                       .AppendValue(cntrValue)
+                       .AppendValue(deltaCntrValue)
+                       .AppendValue(600) /* 10-minute interval */
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

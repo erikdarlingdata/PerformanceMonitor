@@ -761,6 +761,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void QueryStoreDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             if (_databaseService == null) return;
 
             if (QueryStoreDataGrid.SelectedItem is QueryStoreItem item)
@@ -781,7 +782,10 @@ namespace PerformanceMonitorDashboard.Controls
                     _databaseService,
                     item.DatabaseName,
                     item.QueryId,
-                    "Query Store"
+                    "Query Store",
+                    _queryStoreHoursBack,
+                    _queryStoreFromDate,
+                    _queryStoreToDate
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();
@@ -790,6 +794,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void ProcStatsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             if (_databaseService == null) return;
 
             if (ProcStatsDataGrid.SelectedItem is ProcedureStatsItem item)
@@ -810,7 +815,10 @@ namespace PerformanceMonitorDashboard.Controls
                     _databaseService,
                     item.DatabaseName,
                     item.ObjectId,
-                    item.FullObjectName ?? item.ObjectName ?? $"ObjectId_{item.ObjectId}"
+                    item.FullObjectName ?? item.ObjectName ?? $"ObjectId_{item.ObjectId}",
+                    _procStatsHoursBack,
+                    _procStatsFromDate,
+                    _procStatsToDate
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();
@@ -819,6 +827,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void QueryStatsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
             if (_databaseService == null) return;
 
             if (QueryStatsDataGrid.SelectedItem is QueryStatsItem item)
@@ -838,7 +847,10 @@ namespace PerformanceMonitorDashboard.Controls
                 var historyWindow = new QueryStatsHistoryWindow(
                     _databaseService,
                     item.DatabaseName,
-                    item.QueryHash
+                    item.QueryHash,
+                    _queryStatsHoursBack,
+                    _queryStatsFromDate,
+                    _queryStatsToDate
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();

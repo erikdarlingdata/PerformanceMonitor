@@ -1119,7 +1119,7 @@ public partial class ServerTab : UserControl
         int added = 0;
         foreach (var w in availableWaitTypes)
         {
-            if (defaults.Count >= 20) break;
+            if (defaults.Count >= 30) break;
             if (added >= 10) break;
             if (defaults.Add(w)) { added++; }
         }
@@ -1156,8 +1156,8 @@ public partial class ServerTab : UserControl
     {
         if (_waitTypeItems == null || WaitTypeCountText == null) return;
         int count = _waitTypeItems.Count(x => x.IsSelected);
-        WaitTypeCountText.Text = $"{count} / 20 selected";
-        WaitTypeCountText.Foreground = count >= 20
+        WaitTypeCountText.Text = $"{count} / 30 selected";
+        WaitTypeCountText.Foreground = count >= 30
             ? new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E57373")!)
             : (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
     }

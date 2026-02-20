@@ -58,9 +58,12 @@
                             <TextBlock Text="Show data from last:" VerticalAlignment="Center" Margin="0,0,10,0"/>
                             <ComboBox x:Name="DefaultTimeRangeComboBox" Width="120" SelectionChanged="DefaultTimeRangeComboBox_Changed">
                                 <ComboBoxItem Content="1 hour" Tag="1"/>
-                                <ComboBoxItem Content="6 hours" Tag="6"/>
+                                <ComboBoxItem Content="4 hours" Tag="4"/>
+                                <ComboBoxItem Content="8 hours" Tag="8"/>
+                                <ComboBoxItem Content="12 hours" Tag="12"/>
                                 <ComboBoxItem Content="24 hours" Tag="24"/>
                                 <ComboBoxItem Content="7 days" Tag="168"/>
+                                <ComboBoxItem Content="30 days" Tag="720"/>
                             </ComboBox>
                         </StackPanel>
 

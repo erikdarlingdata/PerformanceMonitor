@@ -44,7 +44,7 @@ SELECT
     AVG(avg_rowcount) AS avg_rowcount,
     MAX(last_execution_time) AS last_execution_time,
     MAX(query_plan_hash) AS query_plan_hash
-FROM query_store_stats
+FROM v_query_store_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -102,7 +102,7 @@ SELECT
     avg_physical_reads,
     avg_rowcount,
     last_execution_time
-FROM query_store_stats
+FROM v_query_store_stats
 WHERE server_id = $1
 AND   database_name = $2
 AND   query_id = $3
@@ -146,7 +146,7 @@ ORDER BY collection_time";
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT DISTINCT database_name
-FROM query_store_stats
+FROM v_query_store_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 ORDER BY database_name";
@@ -221,7 +221,7 @@ WITH raw AS
         SUM(execution_count * avg_duration_ms) AS total_duration_ms,
         SUM(execution_count) AS total_executions,
         date_diff('second', LAG(collection_time) OVER (ORDER BY collection_time), collection_time) AS interval_seconds
-    FROM query_store_stats
+    FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3

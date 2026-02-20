@@ -34,7 +34,7 @@ SELECT
     MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
     MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
     SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count
-FROM collection_log
+FROM v_collection_log
 WHERE server_id = $1
 AND   collection_time >= $2
 GROUP BY collector_name
@@ -83,7 +83,7 @@ SELECT
     status,
     error_message,
     server_name
-FROM collection_log
+FROM v_collection_log
 WHERE server_id = $1
 AND   collection_time >= $2
 ORDER BY collection_time DESC

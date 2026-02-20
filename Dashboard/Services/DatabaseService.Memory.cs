@@ -46,7 +46,9 @@ namespace PerformanceMonitorDashboard.Services
             ms.available_physical_memory_mb,
             ms.memory_utilization_percentage,
             ms.buffer_pool_pressure_warning,
-            ms.plan_cache_pressure_warning
+            ms.plan_cache_pressure_warning,
+            ms.total_physical_memory_mb,
+            ms.committed_target_memory_mb
         FROM collect.memory_stats AS ms
         {dateFilter}
         ORDER BY
@@ -80,7 +82,9 @@ namespace PerformanceMonitorDashboard.Services
                             AvailablePhysicalMemoryMb = reader.GetDecimal(7),
                             MemoryUtilizationPercentage = reader.GetInt32(8),
                             BufferPoolPressureWarning = reader.GetBoolean(9),
-                            PlanCachePressureWarning = reader.GetBoolean(10)
+                            PlanCachePressureWarning = reader.GetBoolean(10),
+                            TotalPhysicalMemoryMb = reader.IsDBNull(11) ? null : reader.GetDecimal(11),
+                            CommittedTargetMemoryMb = reader.IsDBNull(12) ? null : reader.GetDecimal(12)
                         });
                     }
         

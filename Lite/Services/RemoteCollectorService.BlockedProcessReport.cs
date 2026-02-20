@@ -390,71 +390,76 @@ OPTION(RECOMPILE);";
             _lastSqlMs = sqlSw.ElapsedMilliseconds;
 
             var duckSw = Stopwatch.StartNew();
-            using var duckConnection = _duckDb.CreateConnection();
-            await duckConnection.OpenAsync(cancellationToken);
 
-            using var appender = duckConnection.CreateAppender("blocked_process_reports");
-
-            while (await reader.ReadAsync(cancellationToken))
+            using (var duckConnection = _duckDb.CreateConnection())
             {
-                var eventTime = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);
-                var reportXml = reader.IsDBNull(1) ? null : reader.GetString(1);
+                await duckConnection.OpenAsync(cancellationToken);
 
-                if (string.IsNullOrEmpty(reportXml))
+                using (var appender = duckConnection.CreateAppender("blocked_process_reports"))
                 {
-                    continue;
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        var eventTime = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);
+                        var reportXml = reader.IsDBNull(1) ? null : reader.GetString(1);
+
+                        if (string.IsNullOrEmpty(reportXml))
+                        {
+                            continue;
+                        }
+
+                        /* Parse the blocked process report XML in C# */
+                        var parsed = ParseBlockedProcessReportXml(reportXml, eventTime);
+                        if (parsed == null)
+                        {
+                            continue;
+                        }
+
+                        var row = appender.CreateRow();
+                        row.AppendValue(GenerateCollectionId())
+                           .AppendValue(collectionTime)
+                           .AppendValue(serverId)
+                           .AppendValue(server.ServerName)
+                           .AppendValue(parsed.EventTime)
+                           .AppendValue(parsed.DatabaseName)
+                           .AppendValue(parsed.BlockedSpid)
+                           .AppendValue(parsed.BlockedEcid)
+                           .AppendValue(parsed.BlockingSpid)
+                           .AppendValue(parsed.BlockingEcid)
+                           .AppendValue(parsed.WaitTimeMs)
+                           .AppendValue(parsed.WaitResource)
+                           .AppendValue(parsed.LockMode)
+                           .AppendValue(parsed.BlockedStatus)
+                           .AppendValue(parsed.BlockedIsolationLevel)
+                           .AppendValue(parsed.BlockedLogUsed)
+                           .AppendValue(parsed.BlockedTransactionCount)
+                           .AppendValue(parsed.BlockedClientApp)
+                           .AppendValue(parsed.BlockedHostName)
+                           .AppendValue(parsed.BlockedLoginName)
+                           .AppendValue(parsed.BlockedSqlText)
+                           .AppendValue(parsed.BlockingStatus)
+                           .AppendValue(parsed.BlockingIsolationLevel)
+                           .AppendValue(parsed.BlockingClientApp)
+                           .AppendValue(parsed.BlockingHostName)
+                           .AppendValue(parsed.BlockingLoginName)
+                           .AppendValue(parsed.BlockingSqlText)
+                           .AppendValue(parsed.BlockedTransactionName)
+                           .AppendValue(parsed.BlockingTransactionName)
+                           .AppendValue(parsed.BlockedLastTranStarted)
+                           .AppendValue(parsed.BlockingLastTranStarted)
+                           .AppendValue(parsed.BlockedLastBatchStarted)
+                           .AppendValue(parsed.BlockingLastBatchStarted)
+                           .AppendValue(parsed.BlockedLastBatchCompleted)
+                           .AppendValue(parsed.BlockingLastBatchCompleted)
+                           .AppendValue(parsed.BlockedPriority)
+                           .AppendValue(parsed.BlockingPriority)
+                           .AppendValue(reportXml)
+                           .EndRow();
+
+                        rowsCollected++;
+                    }
                 }
-
-                /* Parse the blocked process report XML in C# */
-                var parsed = ParseBlockedProcessReportXml(reportXml, eventTime);
-                if (parsed == null)
-                {
-                    continue;
-                }
-
-                var row = appender.CreateRow();
-                row.AppendValue(GenerateCollectionId())
-                   .AppendValue(collectionTime)
-                   .AppendValue(serverId)
-                   .AppendValue(server.ServerName)
-                   .AppendValue(parsed.EventTime)
-                   .AppendValue(parsed.DatabaseName)
-                   .AppendValue(parsed.BlockedSpid)
-                   .AppendValue(parsed.BlockedEcid)
-                   .AppendValue(parsed.BlockingSpid)
-                   .AppendValue(parsed.BlockingEcid)
-                   .AppendValue(parsed.WaitTimeMs)
-                   .AppendValue(parsed.WaitResource)
-                   .AppendValue(parsed.LockMode)
-                   .AppendValue(parsed.BlockedStatus)
-                   .AppendValue(parsed.BlockedIsolationLevel)
-                   .AppendValue(parsed.BlockedLogUsed)
-                   .AppendValue(parsed.BlockedTransactionCount)
-                   .AppendValue(parsed.BlockedClientApp)
-                   .AppendValue(parsed.BlockedHostName)
-                   .AppendValue(parsed.BlockedLoginName)
-                   .AppendValue(parsed.BlockedSqlText)
-                   .AppendValue(parsed.BlockingStatus)
-                   .AppendValue(parsed.BlockingIsolationLevel)
-                   .AppendValue(parsed.BlockingClientApp)
-                   .AppendValue(parsed.BlockingHostName)
-                   .AppendValue(parsed.BlockingLoginName)
-                   .AppendValue(parsed.BlockingSqlText)
-                   .AppendValue(parsed.BlockedTransactionName)
-                   .AppendValue(parsed.BlockingTransactionName)
-                   .AppendValue(parsed.BlockedLastTranStarted)
-                   .AppendValue(parsed.BlockingLastTranStarted)
-                   .AppendValue(parsed.BlockedLastBatchStarted)
-                   .AppendValue(parsed.BlockingLastBatchStarted)
-                   .AppendValue(parsed.BlockedLastBatchCompleted)
-                   .AppendValue(parsed.BlockingLastBatchCompleted)
-                   .AppendValue(parsed.BlockedPriority)
-                   .AppendValue(parsed.BlockingPriority)
-                   .AppendValue(reportXml)
-                   .EndRow();
-
-                rowsCollected++;
             }
+
             duckSw.Stop();
             _lastDuckDbMs = duckSw.ElapsedMilliseconds;
         }

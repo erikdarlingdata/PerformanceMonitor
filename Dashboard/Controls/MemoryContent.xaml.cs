@@ -333,6 +333,9 @@ namespace PerformanceMonitorDashboard.Controls
         {
             if (dataList == null || dataList.Count == 0)
             {
+                MemoryStatsPhysicalText.Text = "N/A";
+                MemoryStatsSqlServerText.Text = "N/A";
+                MemoryStatsTargetText.Text = "N/A";
                 MemoryStatsBPPercentText.Text = "N/A";
                 MemoryStatsPCPercentText.Text = "N/A";
                 MemoryStatsUtilPercentText.Text = "N/A";
@@ -344,13 +347,25 @@ namespace PerformanceMonitorDashboard.Controls
             // Use the most recent data point
             var latest = dataList.OrderByDescending(d => d.CollectionTime).First();
 
-            MemoryStatsBPPercentText.Text = latest.BufferPoolPercentage.HasValue
-                ? $"{latest.BufferPoolPercentage:F1}%"
+            // Absolute GB values
+            MemoryStatsPhysicalText.Text = latest.TotalPhysicalMemoryMb.HasValue
+                ? $"{latest.TotalPhysicalMemoryMb.Value / 1024.0m:F1} GB"
                 : "N/A";
 
-            MemoryStatsPCPercentText.Text = latest.PlanCachePercentage.HasValue
-                ? $"{latest.PlanCachePercentage:F1}%"
+            MemoryStatsSqlServerText.Text = $"{latest.PhysicalMemoryInUseMb / 1024.0m:F1} GB";
+
+            MemoryStatsTargetText.Text = latest.CommittedTargetMemoryMb.HasValue
+                ? $"{latest.CommittedTargetMemoryMb.Value / 1024.0m:F1} GB"
                 : "N/A";
+
+            // Buffer Pool and Plan Cache with GB and percentage
+            MemoryStatsBPPercentText.Text = latest.BufferPoolPercentage.HasValue
+                ? $"{latest.BufferPoolMb / 1024.0m:F1} GB ({latest.BufferPoolPercentage:F1}%)"
+                : $"{latest.BufferPoolMb / 1024.0m:F1} GB";
+
+            MemoryStatsPCPercentText.Text = latest.PlanCachePercentage.HasValue
+                ? $"{latest.PlanCacheMb / 1024.0m:F1} GB ({latest.PlanCachePercentage:F1}%)"
+                : $"{latest.PlanCacheMb / 1024.0m:F1} GB";
 
             MemoryStatsUtilPercentText.Text = $"{latest.MemoryUtilizationPercentage}%";
 

@@ -121,33 +121,37 @@ OPTION(RECOMPILE);";
 
         /* Insert into DuckDB with delta calculations using Appender for bulk performance */
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("wait_stats");
-
-        foreach (var stat in waitStats)
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var deltaKey = stat.WaitType;
-            var deltaWaitingTasks = _deltaCalculator.CalculateDelta(serverId, "wait_stats_tasks", deltaKey, stat.WaitingTasks);
-            var deltaWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_time", deltaKey, stat.WaitTimeMs);
-            var deltaSignalWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_signal", deltaKey, stat.SignalWaitTimeMs);
+            await duckConnection.OpenAsync(cancellationToken);
 
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())    /* collection_id BIGINT */
-               .AppendValue(collectionTime)            /* collection_time TIMESTAMP */
-               .AppendValue(serverId)                  /* server_id INTEGER */
-               .AppendValue(server.ServerName)         /* server_name VARCHAR */
-               .AppendValue(stat.WaitType)             /* wait_type VARCHAR */
-               .AppendValue(stat.WaitingTasks)         /* waiting_tasks_count BIGINT */
-               .AppendValue(stat.WaitTimeMs)           /* wait_time_ms BIGINT */
-               .AppendValue(stat.SignalWaitTimeMs)     /* signal_wait_time_ms BIGINT */
-               .AppendValue(deltaWaitingTasks)         /* delta_waiting_tasks BIGINT */
-               .AppendValue(deltaWaitTimeMs)           /* delta_wait_time_ms BIGINT */
-               .AppendValue(deltaSignalWaitTimeMs)     /* delta_signal_wait_time_ms BIGINT */
-               .EndRow();
+            using (var appender = duckConnection.CreateAppender("wait_stats"))
+            {
+                foreach (var stat in waitStats)
+                {
+                    var deltaKey = stat.WaitType;
+                    var deltaWaitingTasks = _deltaCalculator.CalculateDelta(serverId, "wait_stats_tasks", deltaKey, stat.WaitingTasks);
+                    var deltaWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_time", deltaKey, stat.WaitTimeMs);
+                    var deltaSignalWaitTimeMs = _deltaCalculator.CalculateDelta(serverId, "wait_stats_signal", deltaKey, stat.SignalWaitTimeMs);
 
-            rowsCollected++;
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())    /* collection_id BIGINT */
+                       .AppendValue(collectionTime)            /* collection_time TIMESTAMP */
+                       .AppendValue(serverId)                  /* server_id INTEGER */
+                       .AppendValue(server.ServerName)         /* server_name VARCHAR */
+                       .AppendValue(stat.WaitType)             /* wait_type VARCHAR */
+                       .AppendValue(stat.WaitingTasks)         /* waiting_tasks_count BIGINT */
+                       .AppendValue(stat.WaitTimeMs)           /* wait_time_ms BIGINT */
+                       .AppendValue(stat.SignalWaitTimeMs)     /* signal_wait_time_ms BIGINT */
+                       .AppendValue(deltaWaitingTasks)         /* delta_waiting_tasks BIGINT */
+                       .AppendValue(deltaWaitTimeMs)           /* delta_wait_time_ms BIGINT */
+                       .AppendValue(deltaSignalWaitTimeMs)     /* delta_signal_wait_time_ms BIGINT */
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

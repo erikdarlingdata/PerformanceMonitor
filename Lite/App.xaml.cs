@@ -20,6 +20,7 @@ public partial class App : Application
 {
     private const string MutexName = "PerformanceMonitorLite_SingleInstance";
     private Mutex? _singleInstanceMutex;
+    private bool _ownsMutex;
 
     /// <summary>
     /// Gets the application data directory where config and data files are stored.
@@ -119,9 +120,9 @@ public partial class App : Application
     {
 
         // Check for existing instance
-        _singleInstanceMutex = new Mutex(true, MutexName, out bool isNewInstance);
+        _singleInstanceMutex = new Mutex(true, MutexName, out _ownsMutex);
 
-        if (!isNewInstance)
+        if (!_ownsMutex)
         {
             MessageBox.Show(
                 "Performance Monitor Lite is already running.",
@@ -168,8 +169,10 @@ public partial class App : Application
         AppLogger.Info("App", "Shutting down");
         AppLogger.Shutdown();
 
-        // Release the mutex
-        _singleInstanceMutex?.ReleaseMutex();
+        if (_ownsMutex)
+        {
+            _singleInstanceMutex?.ReleaseMutex();
+        }
         _singleInstanceMutex?.Dispose();
 
         base.OnExit(e);

@@ -29,6 +29,23 @@ namespace PerformanceMonitorDashboard.Helpers
     public static class TabHelpers
     {
         /// <summary>
+        /// Returns true if a double-click originated from a DataGridRow (not a header).
+        /// Use at the top of MouseDoubleClick handlers to prevent header clicks from
+        /// triggering row actions.
+        /// </summary>
+        public static bool IsDoubleClickOnRow(DependencyObject originalSource)
+        {
+            var dep = originalSource;
+            while (dep != null)
+            {
+                if (dep is DataGridRow) return true;
+                if (dep is DataGridColumnHeader) return false;
+                dep = VisualTreeHelper.GetParent(dep);
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Material Design 300-level color palette for chart data series.
         /// Soft pastels optimized for dark backgrounds, ordered to map 1:1
         /// with common ScottPlot stock colors (Blue→[0], Green→[1], etc.).
@@ -87,7 +104,7 @@ namespace PerformanceMonitorDashboard.Helpers
 
         /// <summary>
         /// Returns the set of wait types that should be selected by default:
-        /// poison waits + usual suspects + top 10 by total wait time (deduped), capped at 20.
+        /// poison waits + usual suspects + top 10 by total wait time (deduped), capped at 30.
         /// The availableWaitTypes list must be sorted by total wait time descending.
         /// </summary>
         public static HashSet<string> GetDefaultWaitTypes(IList<string> availableWaitTypes)
@@ -108,11 +125,11 @@ namespace PerformanceMonitorDashboard.Helpers
                     if (w.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                         defaults.Add(w);
 
-            // 4. Top 10 by total wait time (items not already in the set), hard cap at 20 total
+            // 4. Top 10 by total wait time (items not already in the set), hard cap at 30 total
             int added = 0;
             foreach (var w in availableWaitTypes)
             {
-                if (defaults.Count >= 20) break;
+                if (defaults.Count >= 30) break;
                 if (added >= 10) break;
                 if (defaults.Add(w))
                 {

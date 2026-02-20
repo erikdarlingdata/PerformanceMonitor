@@ -103,41 +103,45 @@ OPTION(MAXDOP 1, RECOMPILE);";
         _lastSqlMs = sqlSw.ElapsedMilliseconds;
 
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("query_snapshots");
-
-        while (await reader.ReadAsync(cancellationToken))
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(Convert.ToInt32(reader.GetValue(0)))                                       /* session_id */
-               .AppendValue(reader.IsDBNull(1) ? (string?)null : reader.GetString(1))                  /* database_name */
-               .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))                  /* elapsed_time_formatted */
-               .AppendValue(reader.IsDBNull(3) ? (string?)null : reader.GetString(3))                  /* query_text */
-               .AppendValue(reader.IsDBNull(4) ? (string?)null : reader.GetString(4))                  /* query_plan */
-               .AppendValue(reader.IsDBNull(5) ? (string?)null : reader.GetValue(5)?.ToString())       /* live_query_plan (xml) */
-               .AppendValue(reader.IsDBNull(6) ? (string?)null : reader.GetString(6))                  /* status */
-               .AppendValue(reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)))              /* blocking_session_id */
-               .AppendValue(reader.IsDBNull(8) ? (string?)null : reader.GetString(8))                  /* wait_type */
-               .AppendValue(reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)))             /* wait_time_ms */
-               .AppendValue(reader.IsDBNull(10) ? (string?)null : reader.GetString(10))                /* wait_resource */
-               .AppendValue(reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)))           /* cpu_time_ms */
-               .AppendValue(reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)))           /* total_elapsed_time_ms */
-               .AppendValue(reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)))           /* reads */
-               .AppendValue(reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)))           /* writes */
-               .AppendValue(reader.IsDBNull(15) ? 0L : Convert.ToInt64(reader.GetValue(15)))           /* logical_reads */
-               .AppendValue(reader.IsDBNull(16) ? 0m : reader.GetDecimal(16))                            /* granted_query_memory_gb */
-               .AppendValue(reader.IsDBNull(17) ? (string?)null : reader.GetString(17))                /* transaction_isolation_level */
-               .AppendValue(reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)))            /* dop */
-               .AppendValue(reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)))            /* parallel_worker_count */
-               .EndRow();
+            await duckConnection.OpenAsync(cancellationToken);
 
-            rowsCollected++;
+            using (var appender = duckConnection.CreateAppender("query_snapshots"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(Convert.ToInt32(reader.GetValue(0)))                                       /* session_id */
+                       .AppendValue(reader.IsDBNull(1) ? (string?)null : reader.GetString(1))                  /* database_name */
+                       .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))                  /* elapsed_time_formatted */
+                       .AppendValue(reader.IsDBNull(3) ? (string?)null : reader.GetString(3))                  /* query_text */
+                       .AppendValue(reader.IsDBNull(4) ? (string?)null : reader.GetString(4))                  /* query_plan */
+                       .AppendValue(reader.IsDBNull(5) ? (string?)null : reader.GetValue(5)?.ToString())       /* live_query_plan (xml) */
+                       .AppendValue(reader.IsDBNull(6) ? (string?)null : reader.GetString(6))                  /* status */
+                       .AppendValue(reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)))              /* blocking_session_id */
+                       .AppendValue(reader.IsDBNull(8) ? (string?)null : reader.GetString(8))                  /* wait_type */
+                       .AppendValue(reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)))             /* wait_time_ms */
+                       .AppendValue(reader.IsDBNull(10) ? (string?)null : reader.GetString(10))                /* wait_resource */
+                       .AppendValue(reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)))           /* cpu_time_ms */
+                       .AppendValue(reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)))           /* total_elapsed_time_ms */
+                       .AppendValue(reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)))           /* reads */
+                       .AppendValue(reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)))           /* writes */
+                       .AppendValue(reader.IsDBNull(15) ? 0L : Convert.ToInt64(reader.GetValue(15)))           /* logical_reads */
+                       .AppendValue(reader.IsDBNull(16) ? 0m : reader.GetDecimal(16))                            /* granted_query_memory_gb */
+                       .AppendValue(reader.IsDBNull(17) ? (string?)null : reader.GetString(17))                /* transaction_isolation_level */
+                       .AppendValue(reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)))            /* dop */
+                       .AppendValue(reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)))            /* parallel_worker_count */
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

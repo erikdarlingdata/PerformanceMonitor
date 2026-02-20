@@ -128,30 +128,34 @@ OPTION(RECOMPILE);";
 
         /* Insert into DuckDB using Appender for bulk performance */
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("cpu_utilization_stats");
-
-        while (await reader.ReadAsync(cancellationToken))
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var sampleTime = reader.GetDateTime(0);
+            await duckConnection.OpenAsync(cancellationToken);
 
-            /* Client-side dedup for ring buffer (computed sample_time can't be filtered in SQL) */
-            if (!isAzureSqlDb && lastSampleTime.HasValue && sampleTime <= lastSampleTime.Value)
-                continue;
+            using (var appender = duckConnection.CreateAppender("cpu_utilization_stats"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var sampleTime = reader.GetDateTime(0);
 
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(sampleTime)
-               .AppendValue(reader.IsDBNull(1) ? 0 : reader.GetInt32(1))
-               .AppendValue(reader.IsDBNull(2) ? 0 : reader.GetInt32(2))
-               .EndRow();
+                    /* Client-side dedup for ring buffer (computed sample_time can't be filtered in SQL) */
+                    if (!isAzureSqlDb && lastSampleTime.HasValue && sampleTime <= lastSampleTime.Value)
+                        continue;
 
-            rowsCollected++;
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(sampleTime)
+                       .AppendValue(reader.IsDBNull(1) ? 0 : reader.GetInt32(1))
+                       .AppendValue(reader.IsDBNull(2) ? 0 : reader.GetInt32(2))
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

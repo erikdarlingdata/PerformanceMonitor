@@ -55,7 +55,10 @@ BEGIN
         @error_number integer,
         @blitzlock_database sysname = NULL,
         @sql nvarchar(max) = N'',
-        @debug_msg nvarchar(500) = N'';
+        @debug_msg nvarchar(500) = N'',
+        @utc_offset_minutes integer = DATEDIFF(MINUTE, SYSUTCDATETIME(), SYSDATETIME()),
+        @start_date_local datetime2(7) = NULL,
+        @end_date_local datetime2(7) = NULL;
 
     BEGIN TRY
         BEGIN TRANSACTION;
@@ -143,15 +146,32 @@ BEGIN
             END;
 
             /*
+            Convert UTC dates to local time for sp_BlitzLock and comparison
+            with collect.deadlocks.event_date (which sp_BlitzLock stores in local time).
+            event_time in collect.deadlock_xml stores UTC (from XE timestamps).
+            sp_BlitzLock converts @StartDate/@EndDate from local time to UTC internally.
+            */
+            SELECT
+                @start_date_local = DATEADD(MINUTE, @utc_offset_minutes, @start_date),
+                @end_date_local = DATEADD(MINUTE, @utc_offset_minutes, @end_date);
+
+            IF @debug = 1
+            BEGIN
+                SET @debug_msg = N'UTC offset: ' + CAST(@utc_offset_minutes AS nvarchar(10)) + N' minutes. Local dates: ' + ISNULL(CONVERT(nvarchar(30), @start_date_local, 121), N'NULL') + N' to ' + ISNULL(CONVERT(nvarchar(30), @end_date_local, 121), N'NULL');
+                RAISERROR(@debug_msg, 0, 1) WITH NOWAIT;
+            END;
+
+            /*
             Delete existing parsed deadlocks for the time range to prevent duplicates
             sp_BlitzLock will re-insert fresh parsed data
+            Uses local-time dates because sp_BlitzLock stores event_date in local time
             */
             IF @start_date IS NOT NULL AND @end_date IS NOT NULL
             BEGIN
                 DELETE d
                 FROM collect.deadlocks AS d
-                WHERE d.event_date >= @start_date
-                AND   d.event_date <= @end_date;
+                WHERE d.event_date >= @start_date_local
+                AND   d.event_date <= @end_date_local;
 
                 SELECT
                     @rows_deleted = ROWCOUNT_BIG();
@@ -175,8 +195,8 @@ BEGIN
                 @TargetTableName = N''deadlock_xml'',
                 @TargetColumnName = N''deadlock_xml'',
                 @TargetTimestampColumnName = N''event_time'',
-                @StartDate = @start_date,
-                @EndDate = @end_date,
+                @StartDate = @start_date_local,
+                @EndDate = @end_date_local,
                 @OutputDatabaseName = N''PerformanceMonitor'',
                 @OutputSchemaName = N''collect'',
                 @OutputTableName = N''deadlocks'',
@@ -184,20 +204,21 @@ BEGIN
 
             EXECUTE sys.sp_executesql
                 @sql,
-                N'@start_date datetime2(7), @end_date datetime2(7), @debug bit',
-                @start_date = @start_date,
-                @end_date = @end_date,
+                N'@start_date_local datetime2(7), @end_date_local datetime2(7), @debug bit',
+                @start_date_local = @start_date_local,
+                @end_date_local = @end_date_local,
                 @debug = @debug;
 
             /*
             Verify sp_BlitzLock produced parsed results before marking rows as processed
             If no results were inserted, leave rows unprocessed so they are retried next run
+            Uses local-time dates because sp_BlitzLock stores event_date in local time
             */
             SELECT
                 @rows_parsed = COUNT_BIG(*)
             FROM collect.deadlocks AS d
-            WHERE d.event_date >= @start_date
-            AND   d.event_date <= @end_date
+            WHERE d.event_date >= @start_date_local
+            AND   d.event_date <= @end_date_local
             OPTION(RECOMPILE);
 
             IF @rows_parsed > 0

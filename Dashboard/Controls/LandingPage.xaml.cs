@@ -30,11 +30,11 @@ namespace PerformanceMonitorDashboard.Controls
 
         public event EventHandler<ServerConnection>? ServerCardClicked;
 
-        public LandingPage()
+        public LandingPage(ServerManager? serverManager = null)
         {
             InitializeComponent();
 
-            _serverManager = new ServerManager();
+            _serverManager = serverManager ?? new ServerManager();
             _preferencesService = new UserPreferencesService();
             _credentialService = new CredentialService();
             _serverHealthStatuses = new ObservableCollection<ServerHealthStatus>();

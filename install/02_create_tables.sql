@@ -194,6 +194,9 @@ BEGIN
         physical_memory_in_use_mb decimal(19,2) NOT NULL,
         available_physical_memory_mb decimal(19,2) NOT NULL,
         memory_utilization_percentage integer NOT NULL,
+        /*Server and target memory*/
+        total_physical_memory_mb decimal(19,2) NULL,
+        committed_target_memory_mb decimal(19,2) NULL,
         /*Pressure warnings*/
         buffer_pool_pressure_warning bit NOT NULL DEFAULT 0,
         plan_cache_pressure_warning bit NOT NULL DEFAULT 0,
@@ -217,6 +220,19 @@ BEGIN
     );
     
     PRINT 'Created collect.memory_stats table';
+END;
+
+/*Add columns for existing installs*/
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'collect.memory_stats') AND name = N'total_physical_memory_mb')
+BEGIN
+    ALTER TABLE collect.memory_stats ADD total_physical_memory_mb decimal(19,2) NULL;
+    PRINT 'Added total_physical_memory_mb to collect.memory_stats';
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'collect.memory_stats') AND name = N'committed_target_memory_mb')
+BEGIN
+    ALTER TABLE collect.memory_stats ADD committed_target_memory_mb decimal(19,2) NULL;
+    PRINT 'Added committed_target_memory_mb to collect.memory_stats';
 END;
 
 /*

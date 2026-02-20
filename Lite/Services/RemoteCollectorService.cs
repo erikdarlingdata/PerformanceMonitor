@@ -121,6 +121,11 @@ public partial class RemoteCollectorService
     public Task SeedDeltaCacheAsync() => _deltaCalculator.SeedFromDatabaseAsync(_duckDb);
 
     /// <summary>
+    /// Runs a manual DuckDB WAL checkpoint during idle time between collection cycles.
+    /// </summary>
+    public Task CheckpointAsync() => _duckDb.CheckpointAsync();
+
+    /// <summary>
     /// Gets a summary of collector health. When serverId is provided, filters to that server only.
     /// </summary>
     public CollectorHealthSummary GetHealthSummary(int? serverId = null)
@@ -201,8 +206,8 @@ public partial class RemoteCollectorService
             return;
         }
 
-        var tasks = new List<Task>();
         int skippedOffline = 0;
+        var onlineServers = new List<ServerConnection>();
 
         foreach (var server in enabledServers)
         {
@@ -213,17 +218,41 @@ public partial class RemoteCollectorService
                 _logger?.LogDebug("Skipping offline server '{Server}'", server.DisplayName);
                 continue;
             }
-
-            foreach (var collector in dueCollectors)
-            {
-                tasks.Add(RunCollectorAsync(server, collector.Name, cancellationToken));
-            }
+            onlineServers.Add(server);
         }
 
         _logger?.LogInformation("Running {CollectorCount} collectors for {OnlineCount}/{TotalCount} servers ({SkippedCount} offline, skipped)",
-            dueCollectors.Count, enabledServers.Count - skippedOffline, enabledServers.Count, skippedOffline);
+            dueCollectors.Count, onlineServers.Count, enabledServers.Count, skippedOffline);
 
-        await Task.WhenAll(tasks);
+        /* Run servers in parallel, but collectors within each server sequentially.
+           DuckDB is single-writer; running all collectors in parallel causes spin-wait
+           contention (50%+ CPU, multi-second stalls). Sequential per-server eliminates
+           this while still allowing multi-server parallelism. */
+        var serverTasks = onlineServers.Select(server => Task.Run(async () =>
+        {
+            foreach (var collector in dueCollectors)
+            {
+                await RunCollectorAsync(server, collector.Name, cancellationToken);
+            }
+        }, cancellationToken));
+
+        await Task.WhenAll(serverTasks);
+
+        /* Run CHECKPOINT here after all collector connections are closed.
+           This avoids opening a separate DuckDB instance that could conflict
+           with concurrent UI connections via OS file locks. */
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "CHECKPOINT";
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Post-collection checkpoint failed (non-critical)");
+        }
     }
 
     /// <summary>

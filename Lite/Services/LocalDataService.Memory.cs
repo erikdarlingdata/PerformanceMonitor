@@ -35,7 +35,7 @@ SELECT
     total_server_memory_mb,
     buffer_pool_mb,
     plan_cache_mb
-FROM memory_stats
+FROM v_memory_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -81,7 +81,7 @@ SELECT
     target_server_memory_mb,
     buffer_pool_mb,
     plan_cache_mb
-FROM memory_stats
+FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -117,9 +117,9 @@ ORDER BY collection_time";
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT clerk_type, memory_mb
-FROM memory_clerks
+FROM v_memory_clerks
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM memory_clerks WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_clerks WHERE server_id = $1)
 ORDER BY memory_mb DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

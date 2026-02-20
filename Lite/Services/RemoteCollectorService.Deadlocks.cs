@@ -388,26 +388,31 @@ OPTION(RECOMPILE);";
             }
 
             var duckSw = Stopwatch.StartNew();
-            using var duckConnection = _duckDb.CreateConnection();
-            await duckConnection.OpenAsync(cancellationToken);
 
-            using var appender = duckConnection.CreateAppender("deadlocks");
-
-            foreach (var (deadlockTime, victimProcessId, victimSqlText, graphXml) in deadlockRows)
+            using (var duckConnection = _duckDb.CreateConnection())
             {
-                var row = appender.CreateRow();
-                row.AppendValue(GenerateCollectionId())
-                   .AppendValue(collectionTime)
-                   .AppendValue(serverId)
-                   .AppendValue(server.ServerName)
-                   .AppendValue(deadlockTime)
-                   .AppendValue(victimProcessId)
-                   .AppendValue(victimSqlText)
-                   .AppendValue(graphXml)
-                   .EndRow();
+                await duckConnection.OpenAsync(cancellationToken);
 
-                rowsCollected++;
+                using (var appender = duckConnection.CreateAppender("deadlocks"))
+                {
+                    foreach (var (deadlockTime, victimProcessId, victimSqlText, graphXml) in deadlockRows)
+                    {
+                        var row = appender.CreateRow();
+                        row.AppendValue(GenerateCollectionId())
+                           .AppendValue(collectionTime)
+                           .AppendValue(serverId)
+                           .AppendValue(server.ServerName)
+                           .AppendValue(deadlockTime)
+                           .AppendValue(victimProcessId)
+                           .AppendValue(victimSqlText)
+                           .AppendValue(graphXml)
+                           .EndRow();
+
+                        rowsCollected++;
+                    }
+                }
             }
+
             duckSw.Stop();
             _lastDuckDbMs = duckSw.ElapsedMilliseconds;
         }

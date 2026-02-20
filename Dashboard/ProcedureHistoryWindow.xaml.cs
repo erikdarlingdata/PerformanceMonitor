@@ -11,10 +11,13 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using Microsoft.Win32;
+using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 using ScottPlot;
@@ -27,13 +30,25 @@ namespace PerformanceMonitorDashboard
         private readonly string _databaseName;
         private readonly int _objectId;
         private readonly string _objectName;
+        private readonly int _hoursBack;
+        private readonly DateTime? _fromDate;
+        private readonly DateTime? _toDate;
         private List<ProcedureExecutionHistoryItem> _historyData = new();
+
+        // Filter state
+        private Dictionary<string, ColumnFilterState> _filters = new();
+        private List<ProcedureExecutionHistoryItem>? _unfilteredData;
+        private Popup? _filterPopup;
+        private ColumnFilterPopup? _filterPopupContent;
 
         public ProcedureHistoryWindow(
             DatabaseService databaseService,
             string databaseName,
             int objectId,
-            string objectName)
+            string objectName,
+            int hoursBack = 24,
+            DateTime? fromDate = null,
+            DateTime? toDate = null)
         {
             InitializeComponent();
 
@@ -41,6 +56,9 @@ namespace PerformanceMonitorDashboard
             _databaseName = databaseName;
             _objectId = objectId;
             _objectName = objectName;
+            _hoursBack = hoursBack;
+            _fromDate = fromDate;
+            _toDate = toDate;
 
             ProcedureIdentifierText.Text = $"Procedure Execution History: {objectName} in [{databaseName}]";
 
@@ -74,9 +92,12 @@ namespace PerformanceMonitorDashboard
         {
             try
             {
-                _historyData = await _databaseService.GetProcedureStatsHistoryAsync(_databaseName, _objectId);
+                _historyData = await _databaseService.GetProcedureStatsHistoryAsync(_databaseName, _objectId, _hoursBack, _fromDate, _toDate);
 
+                _unfilteredData = _historyData;
+                _filters.Clear();
                 HistoryDataGrid.ItemsSource = _historyData;
+                UpdateFilterButtonStyles();
 
                 if (_historyData.Count > 0)
                 {
@@ -88,7 +109,7 @@ namespace PerformanceMonitorDashboard
                     var lastSample = _historyData.Max(h => h.CollectionTime);
 
                     SummaryText.Text = string.Format(CultureInfo.CurrentCulture,
-                        "Samples: {0} | First: {1:yyyy-MM-dd HH:mm} | Last: {2:yyyy-MM-dd HH:mm} | Total Executions: {3:N0} | Avg CPU: {4:N2} ms | Avg Duration: {5:N2} ms",
+                        "Samples: {0} | First: {1:yyyy-MM-dd HH:mm} | Last: {2:yyyy-MM-dd HH:mm} | Executions: {3:N0} | Avg CPU: {4:N2} ms | Avg Duration: {5:N2} ms",
                         _historyData.Count, firstSample, lastSample, totalExecutions, avgCpu, avgDuration);
 
                     UpdateChart();
@@ -167,40 +188,240 @@ namespace PerformanceMonitorDashboard
             Close();
         }
 
-        private void DownloadPlan_Click(object sender, RoutedEventArgs e)
+        private async void DownloadPlan_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.DataContext is ProcedureExecutionHistoryItem item)
             {
-                if (string.IsNullOrWhiteSpace(item.QueryPlanXml))
+                try
                 {
-                    MessageBox.Show("No query plan available for this collection.", "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
-                }
+                    button.IsEnabled = false;
+                    button.Content = "Loading...";
 
-                var timestamp = item.CollectionTime.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-                var safeObjectName = string.Join("_", _objectName.Split(Path.GetInvalidFileNameChars()));
-                var defaultFileName = $"procedure_history_{safeObjectName}_{timestamp}.sqlplan";
+                    var planXml = await _databaseService.GetProcedureStatsPlanXmlByCollectionIdAsync(item.CollectionId);
 
-                var saveFileDialog = new SaveFileDialog
-                {
-                    FileName = defaultFileName,
-                    Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|XML files (*.xml)|*.xml|All files (*.*)|*.*",
-                    DefaultExt = ".sqlplan"
-                };
-
-                if (saveFileDialog.ShowDialog() == true)
-                {
-                    try
+                    if (string.IsNullOrWhiteSpace(planXml))
                     {
-                        File.WriteAllText(saveFileDialog.FileName, item.QueryPlanXml);
+                        MessageBox.Show("No query plan available for this collection.", "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+                        return;
+                    }
+
+                    var timestamp = item.CollectionTime.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                    var safeObjectName = string.Join("_", _objectName.Split(Path.GetInvalidFileNameChars()));
+                    var defaultFileName = $"procedure_history_{safeObjectName}_{timestamp}.sqlplan";
+
+                    var saveFileDialog = new SaveFileDialog
+                    {
+                        FileName = defaultFileName,
+                        Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|XML files (*.xml)|*.xml|All files (*.*)|*.*",
+                        DefaultExt = ".sqlplan"
+                    };
+
+                    if (saveFileDialog.ShowDialog() == true)
+                    {
+                        File.WriteAllText(saveFileDialog.FileName, planXml);
                         MessageBox.Show($"Query plan saved to:\n{saveFileDialog.FileName}", "Plan Saved", MessageBoxButton.OK, MessageBoxImage.Information);
                     }
-                    catch (Exception ex)
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to download query plan:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+                finally
+                {
+                    button.IsEnabled = true;
+                    button.Content = "Download Plan";
+                }
+            }
+        }
+
+        #region Column Filter Popup
+
+        private void Filter_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.Tag is not string columnName) return;
+
+            if (_filterPopup == null)
+            {
+                _filterPopupContent = new ColumnFilterPopup();
+                _filterPopupContent.FilterApplied += FilterPopup_FilterApplied;
+                _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
+
+                _filterPopup = new Popup
+                {
+                    Child = _filterPopupContent,
+                    StaysOpen = false,
+                    Placement = PlacementMode.Bottom,
+                    AllowsTransparency = true
+                };
+            }
+
+            _filters.TryGetValue(columnName, out var existingFilter);
+            _filterPopupContent!.Initialize(columnName, existingFilter);
+
+            _filterPopup.PlacementTarget = button;
+            _filterPopup.IsOpen = true;
+        }
+
+        private void FilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
+        {
+            if (_filterPopup != null) _filterPopup.IsOpen = false;
+
+            if (e.FilterState.IsActive)
+                _filters[e.FilterState.ColumnName] = e.FilterState;
+            else
+                _filters.Remove(e.FilterState.ColumnName);
+
+            ApplyFilters();
+            UpdateFilterButtonStyles();
+        }
+
+        private void FilterPopup_FilterCleared(object? sender, EventArgs e)
+        {
+            if (_filterPopup != null) _filterPopup.IsOpen = false;
+        }
+
+        private void ApplyFilters()
+        {
+            if (_unfilteredData == null) return;
+
+            if (_filters.Count == 0)
+            {
+                HistoryDataGrid.ItemsSource = _unfilteredData;
+                return;
+            }
+
+            var filtered = _unfilteredData.Where(item =>
+            {
+                foreach (var filter in _filters.Values)
+                {
+                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
+                        return false;
+                }
+                return true;
+            }).ToList();
+
+            HistoryDataGrid.ItemsSource = filtered;
+        }
+
+        private void UpdateFilterButtonStyles()
+        {
+            foreach (var column in HistoryDataGrid.Columns)
+            {
+                if (column.Header is StackPanel stackPanel)
+                {
+                    var filterButton = stackPanel.Children.OfType<Button>().FirstOrDefault();
+                    if (filterButton?.Tag is string columnName)
                     {
-                        MessageBox.Show($"Failed to save query plan:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        bool hasActive = _filters.TryGetValue(columnName, out var filter) && filter.IsActive;
+                        filterButton.Content = new System.Windows.Controls.TextBlock
+                        {
+                            Text = "\uE71C",
+                            FontFamily = new System.Windows.Media.FontFamily("Segoe MDL2 Assets"),
+                            Foreground = hasActive
+                                ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xD7, 0x00))
+                                : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF))
+                        };
+                        filterButton.ToolTip = hasActive && filter != null
+                            ? $"Filter: {filter.DisplayText}\n(Click to modify)"
+                            : "Click to filter";
                     }
                 }
             }
         }
+
+        #endregion
+
+        #region Context Menu Handlers
+
+        private void CopyCell_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.CurrentCell.Item != null)
+                {
+                    var cellContent = TabHelpers.GetCellContent(dataGrid, dataGrid.CurrentCell);
+                    if (!string.IsNullOrEmpty(cellContent))
+                        Clipboard.SetDataObject(cellContent, false);
+                }
+            }
+        }
+
+        private void CopyRow_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid?.SelectedItem != null)
+                    Clipboard.SetDataObject(TabHelpers.GetRowAsText(dataGrid, dataGrid.SelectedItem), false);
+            }
+        }
+
+        private void CopyAllRows_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.Items.Count > 0)
+                {
+                    var sb = new StringBuilder();
+                    var headers = new List<string>();
+                    foreach (var column in dataGrid.Columns)
+                    {
+                        if (column is DataGridBoundColumn)
+                            headers.Add(TabHelpers.GetColumnHeader(column));
+                    }
+                    sb.AppendLine(string.Join("\t", headers));
+                    foreach (var item in dataGrid.Items)
+                        sb.AppendLine(TabHelpers.GetRowAsText(dataGrid, item));
+                    Clipboard.SetDataObject(sb.ToString(), false);
+                }
+            }
+        }
+
+        private void ExportToCsv_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.Items.Count > 0)
+                {
+                    var saveFileDialog = new SaveFileDialog
+                    {
+                        FileName = $"procedure_history_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                        DefaultExt = ".csv",
+                        Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+                    };
+
+                    if (saveFileDialog.ShowDialog() == true)
+                    {
+                        try
+                        {
+                            var sb = new StringBuilder();
+                            var headers = new List<string>();
+                            foreach (var column in dataGrid.Columns)
+                            {
+                                if (column is DataGridBoundColumn)
+                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                            }
+                            sb.AppendLine(string.Join(",", headers));
+                            foreach (var item in dataGrid.Items)
+                            {
+                                var values = TabHelpers.GetRowValues(dataGrid, item);
+                                sb.AppendLine(string.Join(",", values.Select(v => TabHelpers.EscapeCsvField(v))));
+                            }
+                            File.WriteAllText(saveFileDialog.FileName, sb.ToString());
+                            MessageBox.Show($"Data exported successfully to:\n{saveFileDialog.FileName}", "Export Complete", MessageBoxButton.OK, MessageBoxImage.Information);
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show($"Error exporting data:\n\n{ex.Message}", "Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        }
+                    }
+                }
+            }
+        }
+
+        #endregion
     }
 }

@@ -84,32 +84,37 @@ OPTION(RECOMPILE);";
         sqlSw.Stop();
 
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("memory_grant_stats");
-        foreach (var r in rows)
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(r.SessionId)
-               .AppendValue(r.DatabaseName)
-               .AppendValue(r.QueryText)
-               .AppendValue(r.RequestedMb)
-               .AppendValue(r.GrantedMb)
-               .AppendValue(r.UsedMb)
-               .AppendValue(r.MaxUsedMb)
-               .AppendValue(r.IdealMb)
-               .AppendValue(r.RequiredMb)
-               .AppendValue(r.WaitTimeMs)
-               .AppendValue(r.IsSmall)
-               .AppendValue(r.Dop)
-               .AppendValue(r.QueryCost)
-               .EndRow();
-            rowsCollected++;
+            await duckConnection.OpenAsync(cancellationToken);
+
+            using (var appender = duckConnection.CreateAppender("memory_grant_stats"))
+            {
+                foreach (var r in rows)
+                {
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(r.SessionId)
+                       .AppendValue(r.DatabaseName)
+                       .AppendValue(r.QueryText)
+                       .AppendValue(r.RequestedMb)
+                       .AppendValue(r.GrantedMb)
+                       .AppendValue(r.UsedMb)
+                       .AppendValue(r.MaxUsedMb)
+                       .AppendValue(r.IdealMb)
+                       .AppendValue(r.RequiredMb)
+                       .AppendValue(r.WaitTimeMs)
+                       .AppendValue(r.IsSmall)
+                       .AppendValue(r.Dop)
+                       .AppendValue(r.QueryCost)
+                       .EndRow();
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

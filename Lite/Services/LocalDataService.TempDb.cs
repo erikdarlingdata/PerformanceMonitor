@@ -36,7 +36,7 @@ SELECT
     total_sessions_using_tempdb,
     top_session_id,
     top_session_tempdb_mb
-FROM tempdb_stats
+FROM v_tempdb_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -84,7 +84,7 @@ SELECT
     version_store_reserved_mb,
     top_session_tempdb_mb,
     top_session_id
-FROM tempdb_stats
+FROM v_tempdb_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";

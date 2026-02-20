@@ -120,46 +120,50 @@ OPTION(RECOMPILE);";
 
         /* Insert into DuckDB with delta calculations */
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("file_io_stats");
-
-        foreach (var stat in fileStats)
+        using (var duckConnection = _duckDb.CreateConnection())
         {
-            var deltaKey = $"{stat.DatabaseId}_{stat.FileId}";
-            var deltaReads = _deltaCalculator.CalculateDelta(serverId, "file_io_reads", deltaKey, stat.NumOfReads);
-            var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "file_io_writes", deltaKey, stat.NumOfWrites);
-            var deltaReadBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_read_bytes", deltaKey, stat.ReadBytes);
-            var deltaWriteBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_write_bytes", deltaKey, stat.WriteBytes);
-            var deltaStallReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_read", deltaKey, stat.IoStallReadMs);
-            var deltaStallWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_write", deltaKey, stat.IoStallWriteMs);
+            await duckConnection.OpenAsync(cancellationToken);
 
-            var row = appender.CreateRow();
-            row.AppendValue(GenerateCollectionId())
-               .AppendValue(collectionTime)
-               .AppendValue(serverId)
-               .AppendValue(server.ServerName)
-               .AppendValue(stat.DatabaseName)
-               .AppendValue(stat.FileName)
-               .AppendValue(stat.FileType)
-               .AppendValue(stat.PhysicalName)
-               .AppendValue(stat.SizeMb)
-               .AppendValue(stat.NumOfReads)
-               .AppendValue(stat.NumOfWrites)
-               .AppendValue(stat.ReadBytes)
-               .AppendValue(stat.WriteBytes)
-               .AppendValue(stat.IoStallReadMs)
-               .AppendValue(stat.IoStallWriteMs)
-               .AppendValue(deltaReads)
-               .AppendValue(deltaWrites)
-               .AppendValue(deltaReadBytes)
-               .AppendValue(deltaWriteBytes)
-               .AppendValue(deltaStallReadMs)
-               .AppendValue(deltaStallWriteMs)
-               .EndRow();
+            using (var appender = duckConnection.CreateAppender("file_io_stats"))
+            {
+                foreach (var stat in fileStats)
+                {
+                    var deltaKey = $"{stat.DatabaseId}_{stat.FileId}";
+                    var deltaReads = _deltaCalculator.CalculateDelta(serverId, "file_io_reads", deltaKey, stat.NumOfReads);
+                    var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "file_io_writes", deltaKey, stat.NumOfWrites);
+                    var deltaReadBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_read_bytes", deltaKey, stat.ReadBytes);
+                    var deltaWriteBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_write_bytes", deltaKey, stat.WriteBytes);
+                    var deltaStallReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_read", deltaKey, stat.IoStallReadMs);
+                    var deltaStallWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_write", deltaKey, stat.IoStallWriteMs);
 
-            rowsCollected++;
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(server.ServerName)
+                       .AppendValue(stat.DatabaseName)
+                       .AppendValue(stat.FileName)
+                       .AppendValue(stat.FileType)
+                       .AppendValue(stat.PhysicalName)
+                       .AppendValue(stat.SizeMb)
+                       .AppendValue(stat.NumOfReads)
+                       .AppendValue(stat.NumOfWrites)
+                       .AppendValue(stat.ReadBytes)
+                       .AppendValue(stat.WriteBytes)
+                       .AppendValue(stat.IoStallReadMs)
+                       .AppendValue(stat.IoStallWriteMs)
+                       .AppendValue(deltaReads)
+                       .AppendValue(deltaWrites)
+                       .AppendValue(deltaReadBytes)
+                       .AppendValue(deltaWriteBytes)
+                       .AppendValue(deltaStallReadMs)
+                       .AppendValue(deltaStallWriteMs)
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
         }
 
         duckSw.Stop();

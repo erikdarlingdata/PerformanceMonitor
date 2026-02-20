@@ -77,24 +77,29 @@ ORDER BY (ssu.user_objects_alloc_page_count + ssu.internal_objects_alloc_page_co
 
         /* Insert into DuckDB using Appender */
         var duckSw = Stopwatch.StartNew();
-        using var duckConnection = _duckDb.CreateConnection();
-        await duckConnection.OpenAsync(cancellationToken);
 
-        using var appender = duckConnection.CreateAppender("tempdb_stats");
-        var row = appender.CreateRow();
-        row.AppendValue(GenerateCollectionId())
-           .AppendValue(collectionTime)
-           .AppendValue(serverId)
-           .AppendValue(server.ServerName)
-           .AppendValue(userObjMb)
-           .AppendValue(internalObjMb)
-           .AppendValue(versionStoreMb)
-           .AppendValue(totalReservedMb)
-           .AppendValue(unallocatedMb)
-           .AppendValue(totalSessions)
-           .AppendValue(topSessionId)
-           .AppendValue(topSessionMb)
-           .EndRow();
+        using (var duckConnection = _duckDb.CreateConnection())
+        {
+            await duckConnection.OpenAsync(cancellationToken);
+
+            using (var appender = duckConnection.CreateAppender("tempdb_stats"))
+            {
+                var row = appender.CreateRow();
+                row.AppendValue(GenerateCollectionId())
+                   .AppendValue(collectionTime)
+                   .AppendValue(serverId)
+                   .AppendValue(server.ServerName)
+                   .AppendValue(userObjMb)
+                   .AppendValue(internalObjMb)
+                   .AppendValue(versionStoreMb)
+                   .AppendValue(totalReservedMb)
+                   .AppendValue(unallocatedMb)
+                   .AppendValue(totalSessions)
+                   .AppendValue(topSessionId)
+                   .AppendValue(topSessionMb)
+                   .EndRow();
+            }
+        }
 
         duckSw.Stop();
         _lastSqlMs = sqlSw.ElapsedMilliseconds;

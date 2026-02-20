@@ -1,0 +1,201 @@
+<UserControl x:Class="PerformanceMonitorDashboard.Controls.CurrentConfigContent"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="450" d:DesignWidth="800"
+             Loaded="OnLoaded">
+    <TabControl>
+        <!-- Current Server Configuration Sub-Tab -->
+        <TabItem Header="Server Configuration">
+            <Grid>
+            <DataGrid x:Name="ServerConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                      ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="220">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Setting" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ValueConfigured}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueConfigured" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Configured" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ValueInUse}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueInUse" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="In Use" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ValueMinimum}" Width="80">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueMinimum" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Minimum" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ValueMaximum}" Width="80">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueMaximum" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Maximum" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridCheckBoxColumn Binding="{Binding IsDynamic}" Width="65">
+                        <DataGridCheckBoxColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IsDynamic" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Dynamic" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridCheckBoxColumn.Header>
+                    </DataGridCheckBoxColumn>
+                    <DataGridCheckBoxColumn Binding="{Binding IsAdvanced}" Width="70">
+                        <DataGridCheckBoxColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IsAdvanced" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Advanced" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridCheckBoxColumn.Header>
+                    </DataGridCheckBoxColumn>
+                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastChanged" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Last Changed" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding Description}" Width="*" MinWidth="200">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Description" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Description" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="ServerConfigNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
+            </Grid>
+        </TabItem>
+
+        <!-- Current Database Configuration Sub-Tab -->
+        <TabItem Header="Database Configuration">
+            <Grid>
+            <DataGrid x:Name="DatabaseConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                      ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="150">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="DatabaseConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding SettingType}" Width="160">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SettingType" Click="DatabaseConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Setting Type" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding SettingName}" Width="220">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SettingName" Click="DatabaseConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Setting Name" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding SettingValue}" Width="200">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SettingValue" Click="DatabaseConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Value" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastChanged" Click="DatabaseConfigFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Last Changed" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="DatabaseConfigNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
+            </Grid>
+        </TabItem>
+
+        <!-- Current Trace Flags Sub-Tab -->
+        <TabItem Header="Trace Flags">
+            <Grid>
+            <DataGrid x:Name="TraceFlagsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                      ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding TraceFlag}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TraceFlag" Click="TraceFlagsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Trace Flag" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridCheckBoxColumn Binding="{Binding Status}" Width="70">
+                        <DataGridCheckBoxColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Status" Click="TraceFlagsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Enabled" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridCheckBoxColumn.Header>
+                    </DataGridCheckBoxColumn>
+                    <DataGridCheckBoxColumn Binding="{Binding IsGlobal}" Width="70">
+                        <DataGridCheckBoxColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IsGlobal" Click="TraceFlagsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Global" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridCheckBoxColumn.Header>
+                    </DataGridCheckBoxColumn>
+                    <DataGridCheckBoxColumn Binding="{Binding IsSession}" Width="70">
+                        <DataGridCheckBoxColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IsSession" Click="TraceFlagsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Session" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridCheckBoxColumn.Header>
+                    </DataGridCheckBoxColumn>
+                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastChanged" Click="TraceFlagsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Last Changed" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TraceFlagsNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
+            </Grid>
+        </TabItem>
+    </TabControl>
+</UserControl>
