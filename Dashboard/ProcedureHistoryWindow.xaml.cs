@@ -27,13 +27,19 @@ namespace PerformanceMonitorDashboard
         private readonly string _databaseName;
         private readonly int _objectId;
         private readonly string _objectName;
+        private readonly int _hoursBack;
+        private readonly DateTime? _fromDate;
+        private readonly DateTime? _toDate;
         private List<ProcedureExecutionHistoryItem> _historyData = new();
 
         public ProcedureHistoryWindow(
             DatabaseService databaseService,
             string databaseName,
             int objectId,
-            string objectName)
+            string objectName,
+            int hoursBack = 24,
+            DateTime? fromDate = null,
+            DateTime? toDate = null)
         {
             InitializeComponent();
 
@@ -41,6 +47,9 @@ namespace PerformanceMonitorDashboard
             _databaseName = databaseName;
             _objectId = objectId;
             _objectName = objectName;
+            _hoursBack = hoursBack;
+            _fromDate = fromDate;
+            _toDate = toDate;
 
             ProcedureIdentifierText.Text = $"Procedure Execution History: {objectName} in [{databaseName}]";
 
@@ -74,7 +83,7 @@ namespace PerformanceMonitorDashboard
         {
             try
             {
-                _historyData = await _databaseService.GetProcedureStatsHistoryAsync(_databaseName, _objectId);
+                _historyData = await _databaseService.GetProcedureStatsHistoryAsync(_databaseName, _objectId, _hoursBack, _fromDate, _toDate);
 
                 HistoryDataGrid.ItemsSource = _historyData;
 
@@ -167,38 +176,48 @@ namespace PerformanceMonitorDashboard
             Close();
         }
 
-        private void DownloadPlan_Click(object sender, RoutedEventArgs e)
+        private async void DownloadPlan_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.DataContext is ProcedureExecutionHistoryItem item)
             {
-                if (string.IsNullOrWhiteSpace(item.QueryPlanXml))
+                try
                 {
-                    MessageBox.Show("No query plan available for this collection.", "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
-                }
+                    button.IsEnabled = false;
+                    button.Content = "Loading...";
 
-                var timestamp = item.CollectionTime.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-                var safeObjectName = string.Join("_", _objectName.Split(Path.GetInvalidFileNameChars()));
-                var defaultFileName = $"procedure_history_{safeObjectName}_{timestamp}.sqlplan";
+                    var planXml = await _databaseService.GetProcedureStatsPlanXmlByCollectionIdAsync(item.CollectionId);
 
-                var saveFileDialog = new SaveFileDialog
-                {
-                    FileName = defaultFileName,
-                    Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|XML files (*.xml)|*.xml|All files (*.*)|*.*",
-                    DefaultExt = ".sqlplan"
-                };
-
-                if (saveFileDialog.ShowDialog() == true)
-                {
-                    try
+                    if (string.IsNullOrWhiteSpace(planXml))
                     {
-                        File.WriteAllText(saveFileDialog.FileName, item.QueryPlanXml);
+                        MessageBox.Show("No query plan available for this collection.", "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+                        return;
+                    }
+
+                    var timestamp = item.CollectionTime.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                    var safeObjectName = string.Join("_", _objectName.Split(Path.GetInvalidFileNameChars()));
+                    var defaultFileName = $"procedure_history_{safeObjectName}_{timestamp}.sqlplan";
+
+                    var saveFileDialog = new SaveFileDialog
+                    {
+                        FileName = defaultFileName,
+                        Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|XML files (*.xml)|*.xml|All files (*.*)|*.*",
+                        DefaultExt = ".sqlplan"
+                    };
+
+                    if (saveFileDialog.ShowDialog() == true)
+                    {
+                        File.WriteAllText(saveFileDialog.FileName, planXml);
                         MessageBox.Show($"Query plan saved to:\n{saveFileDialog.FileName}", "Plan Saved", MessageBoxButton.OK, MessageBoxImage.Information);
                     }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"Failed to save query plan:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to download query plan:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+                finally
+                {
+                    button.IsEnabled = true;
+                    button.Content = "Download Plan";
                 }
             }
         }

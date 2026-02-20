@@ -27,6 +27,9 @@ namespace PerformanceMonitorDashboard
         private readonly string _databaseName;
         private readonly long _queryId;
         private readonly string _sourceType;
+        private readonly int _hoursBack;
+        private readonly DateTime? _fromDate;
+        private readonly DateTime? _toDate;
         private List<QueryExecutionHistoryItem> _historyData = new();
         private ScottPlot.IPanel? _legendPanel;
 
@@ -34,7 +37,10 @@ namespace PerformanceMonitorDashboard
             DatabaseService databaseService,
             string databaseName,
             long queryId,
-            string sourceType = "Query Store")
+            string sourceType = "Query Store",
+            int hoursBack = 24,
+            DateTime? fromDate = null,
+            DateTime? toDate = null)
         {
             InitializeComponent();
 
@@ -42,6 +48,9 @@ namespace PerformanceMonitorDashboard
             _databaseName = databaseName;
             _queryId = queryId;
             _sourceType = sourceType;
+            _hoursBack = hoursBack;
+            _fromDate = fromDate;
+            _toDate = toDate;
 
             QueryIdentifierText.Text = $"Query Execution History: Query {queryId} in [{databaseName}]";
 
@@ -78,7 +87,7 @@ namespace PerformanceMonitorDashboard
             {
                 if (_sourceType == "Query Store")
                 {
-                    _historyData = await _databaseService.GetQueryStoreHistoryAsync(_databaseName, _queryId);
+                    _historyData = await _databaseService.GetQueryStoreHistoryAsync(_databaseName, _queryId, _hoursBack, _fromDate, _toDate);
                 }
                 else
                 {
@@ -221,37 +230,47 @@ namespace PerformanceMonitorDashboard
             Close();
         }
 
-        private void DownloadPlan_Click(object sender, RoutedEventArgs e)
+        private async void DownloadPlan_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.DataContext is QueryExecutionHistoryItem item)
             {
-                if (string.IsNullOrWhiteSpace(item.QueryPlanXml))
+                try
                 {
-                    MessageBox.Show("No query plan available for this collection.", "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
-                }
+                    button.IsEnabled = false;
+                    button.Content = "Loading...";
 
-                var timestamp = item.CollectionTime.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-                var defaultFileName = $"querystore_history_{_queryId}_{timestamp}.sqlplan";
+                    var planXml = await _databaseService.GetQueryStorePlanXmlByCollectionIdAsync(item.CollectionId);
 
-                var saveFileDialog = new SaveFileDialog
-                {
-                    FileName = defaultFileName,
-                    Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|XML files (*.xml)|*.xml|All files (*.*)|*.*",
-                    DefaultExt = ".sqlplan"
-                };
-
-                if (saveFileDialog.ShowDialog() == true)
-                {
-                    try
+                    if (string.IsNullOrWhiteSpace(planXml))
                     {
-                        File.WriteAllText(saveFileDialog.FileName, item.QueryPlanXml);
+                        MessageBox.Show("No query plan available for this collection.", "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+                        return;
+                    }
+
+                    var timestamp = item.CollectionTime.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                    var defaultFileName = $"querystore_history_{_queryId}_{timestamp}.sqlplan";
+
+                    var saveFileDialog = new SaveFileDialog
+                    {
+                        FileName = defaultFileName,
+                        Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|XML files (*.xml)|*.xml|All files (*.*)|*.*",
+                        DefaultExt = ".sqlplan"
+                    };
+
+                    if (saveFileDialog.ShowDialog() == true)
+                    {
+                        File.WriteAllText(saveFileDialog.FileName, planXml);
                         MessageBox.Show($"Query plan saved to:\n{saveFileDialog.FileName}", "Plan Saved", MessageBoxButton.OK, MessageBoxImage.Information);
                     }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"Failed to save query plan:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to download query plan:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+                finally
+                {
+                    button.IsEnabled = true;
+                    button.Content = "Download Plan";
                 }
             }
         }

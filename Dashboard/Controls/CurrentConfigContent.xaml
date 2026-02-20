@@ -11,7 +11,7 @@
         <TabItem Header="Server Configuration">
             <Grid>
             <DataGrid x:Name="ServerConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="220">
@@ -46,7 +46,7 @@
                     <DataGridTextColumn Binding="{Binding Description}" Width="*" MinWidth="200" Header="Description"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="ServerConfigNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+            <TextBlock x:Name="ServerConfigNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
             </Grid>
         </TabItem>
 
@@ -54,7 +54,7 @@
         <TabItem Header="Database Configuration">
             <Grid>
             <DataGrid x:Name="DatabaseConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="150">
@@ -92,7 +92,7 @@
                     <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150" Header="Last Changed"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="DatabaseConfigNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+            <TextBlock x:Name="DatabaseConfigNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
             </Grid>
         </TabItem>
 
@@ -100,7 +100,7 @@
         <TabItem Header="Trace Flags">
             <Grid>
             <DataGrid x:Name="TraceFlagsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding TraceFlag}" Width="100" Header="Trace Flag"/>
@@ -110,7 +110,7 @@
                     <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150" Header="Last Changed"/>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="TraceFlagsNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+            <TextBlock x:Name="TraceFlagsNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
             </Grid>
         </TabItem>
     </TabControl>

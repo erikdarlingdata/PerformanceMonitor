@@ -64,7 +64,7 @@
                   Foreground="{DynamicResource ForegroundBrush}"
                   RowBackground="{DynamicResource BackgroundBrush}"
                   GridLinesVisibility="All"
-                  RowHeight="30"
+                  RowHeight="35"
                   Margin="10">
             <DataGrid.Columns>
                 <!-- Collection Info -->
@@ -127,9 +127,8 @@
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
                             <Button Content="Download" Click="DownloadPlan_Click"
-                                    IsEnabled="{Binding QueryPlanXml, Converter={StaticResource NullToBooleanConverter}}"
                                     HorizontalAlignment="Center" VerticalAlignment="Center"
-                                    Padding="8,4"/>
+                                    Padding="8,2"/>
                         </DataTemplate>
                     </DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>

@@ -70,5 +70,7 @@ GO
 
 - **1.0.0**: Initial release
 - **1.1.0**: Remove invalid query_hash column from trace_analysis table; fix trace_analysis_collector to properly query sys.traces for file paths; add PerformanceMonitor database exclusion filter to trace; make trace START action idempotent
+- **1.2.0**: Current Configuration tabs, Default Trace DynamicResource fix, alert badge, chart tooltips, drill-down sizing
+- **1.3.0**: Add total_physical_memory_mb and committed_target_memory_mb to memory_stats collector
 
 Future upgrade folders will be added here as new versions are released.

@@ -28,12 +28,12 @@
                         <ComboBoxItem Content="Security%" Tag="Security%"/>
                     </ComboBox>
                     <Separator Margin="10,0" Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"/>
-                    <Button Content="Refresh" Click="DefaultTraceEvents_Refresh_Click" Margin="5,0" Padding="10,4" Style="{StaticResource SuccessButton}"/>
+                    <Button Content="Refresh" Click="DefaultTraceEvents_Refresh_Click" Margin="5,0" Padding="10,4" Style="{DynamicResource SuccessButton}"/>
                 </StackPanel>
 
                 <Grid Grid.Row="1">
                 <DataGrid x:Name="DefaultTraceEventsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                          RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                          RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
                           ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
@@ -94,7 +94,7 @@
                         </DataGridTextColumn>
                     </DataGrid.Columns>
                 </DataGrid>
-                <TextBlock x:Name="DefaultTraceEventsNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+                <TextBlock x:Name="DefaultTraceEventsNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
                 </Grid>
             </Grid>
         </TabItem>
@@ -103,7 +103,7 @@
         <TabItem Header="Trace Analysis">
             <Grid>
             <DataGrid x:Name="TraceAnalysisDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
@@ -180,7 +180,7 @@
                     </DataGridTextColumn>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="TraceAnalysisNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+            <TextBlock x:Name="TraceAnalysisNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
             </Grid>
         </TabItem>
     </TabControl>

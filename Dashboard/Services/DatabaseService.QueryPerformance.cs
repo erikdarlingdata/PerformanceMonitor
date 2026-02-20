@@ -1435,58 +1435,64 @@ namespace PerformanceMonitorDashboard.Services
                     return items;
                 }
 
-                public async Task<List<QueryExecutionHistoryItem>> GetQueryStoreHistoryAsync(string databaseName, long queryId)
+                public async Task<List<QueryExecutionHistoryItem>> GetQueryStoreHistoryAsync(string databaseName, long queryId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
                 {
                     var items = new List<QueryExecutionHistoryItem>();
 
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
-                    string query = @"
+                    var timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "AND   qsd.collection_time >= @from_date AND qsd.collection_time <= @to_date"
+                        : "AND   qsd.collection_time >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
+
+                    string query = $@"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         SELECT
-            qsd.collection_id,
+            collection_id = MAX(qsd.collection_id),
             qsd.collection_time,
             qsd.plan_id,
-            qsd.count_executions,
-            qsd.avg_duration,
-            qsd.min_duration,
-            qsd.max_duration,
-            qsd.avg_cpu_time,
-            qsd.min_cpu_time,
-            qsd.max_cpu_time,
-            qsd.avg_logical_io_reads,
-            qsd.min_logical_io_reads,
-            qsd.max_logical_io_reads,
-            qsd.avg_logical_io_writes,
-            qsd.min_logical_io_writes,
-            qsd.max_logical_io_writes,
-            qsd.avg_physical_io_reads,
-            qsd.min_physical_io_reads,
-            qsd.max_physical_io_reads,
-            qsd.min_dop,
-            qsd.max_dop,
-            qsd.avg_query_max_used_memory,
-            qsd.min_query_max_used_memory,
-            qsd.max_query_max_used_memory,
-            qsd.avg_rowcount,
-            qsd.min_rowcount,
-            qsd.max_rowcount,
-            qsd.avg_tempdb_space_used,
-            qsd.min_tempdb_space_used,
-            qsd.max_tempdb_space_used,
-            qsd.plan_type,
-            qsd.is_forced_plan,
-            qsd.force_failure_count,
-            qsd.last_force_failure_reason_desc,
-            qsd.plan_forcing_type,
-            qsd.compatibility_level,
-            qsd.query_plan_text
+            count_executions = SUM(qsd.count_executions),
+            avg_duration = SUM(qsd.avg_duration * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_duration = MIN(qsd.min_duration),
+            max_duration = MAX(qsd.max_duration),
+            avg_cpu_time = SUM(qsd.avg_cpu_time * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_cpu_time = MIN(qsd.min_cpu_time),
+            max_cpu_time = MAX(qsd.max_cpu_time),
+            avg_logical_io_reads = SUM(qsd.avg_logical_io_reads * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_logical_io_reads = MIN(qsd.min_logical_io_reads),
+            max_logical_io_reads = MAX(qsd.max_logical_io_reads),
+            avg_logical_io_writes = SUM(qsd.avg_logical_io_writes * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_logical_io_writes = MIN(qsd.min_logical_io_writes),
+            max_logical_io_writes = MAX(qsd.max_logical_io_writes),
+            avg_physical_io_reads = SUM(qsd.avg_physical_io_reads * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_physical_io_reads = MIN(qsd.min_physical_io_reads),
+            max_physical_io_reads = MAX(qsd.max_physical_io_reads),
+            min_dop = MIN(qsd.min_dop),
+            max_dop = MAX(qsd.max_dop),
+            avg_query_max_used_memory = SUM(qsd.avg_query_max_used_memory * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_query_max_used_memory = MIN(qsd.min_query_max_used_memory),
+            max_query_max_used_memory = MAX(qsd.max_query_max_used_memory),
+            avg_rowcount = SUM(qsd.avg_rowcount * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_rowcount = MIN(qsd.min_rowcount),
+            max_rowcount = MAX(qsd.max_rowcount),
+            avg_tempdb_space_used = SUM(qsd.avg_tempdb_space_used * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_tempdb_space_used = MIN(qsd.min_tempdb_space_used),
+            max_tempdb_space_used = MAX(qsd.max_tempdb_space_used),
+            plan_type = MAX(qsd.plan_type),
+            is_forced_plan = CAST(MAX(CAST(qsd.is_forced_plan AS tinyint)) AS bit),
+            force_failure_count = MAX(qsd.force_failure_count),
+            last_force_failure_reason_desc = MAX(qsd.last_force_failure_reason_desc),
+            plan_forcing_type = MAX(qsd.plan_forcing_type),
+            compatibility_level = MAX(qsd.compatibility_level)
         FROM collect.query_store_data AS qsd
         WHERE qsd.database_name = @database_name
         AND   qsd.query_id = @query_id
-        AND   qsd.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+        {timeFilter}
+        GROUP BY
+            qsd.collection_time,
+            qsd.plan_id
         ORDER BY
             qsd.collection_time DESC;";
 
@@ -1495,6 +1501,16 @@ namespace PerformanceMonitorDashboard.Services
 
                     command.Parameters.Add(new SqlParameter("@database_name", SqlDbType.NVarChar, 128) { Value = databaseName });
                     command.Parameters.Add(new SqlParameter("@query_id", SqlDbType.BigInt) { Value = queryId });
+
+                    if (fromDate.HasValue && toDate.HasValue)
+                    {
+                        command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+                        command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+                    }
+                    else
+                    {
+                        command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = hoursBack });
+                    }
 
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
@@ -1536,22 +1552,25 @@ namespace PerformanceMonitorDashboard.Services
                             ForceFailureCount = reader.IsDBNull(32) ? null : reader.GetInt64(32),
                             LastForceFailureReasonDesc = reader.IsDBNull(33) ? null : reader.GetString(33),
                             PlanForcingType = reader.IsDBNull(34) ? null : reader.GetString(34),
-                            CompatibilityLevel = reader.IsDBNull(35) ? null : reader.GetInt16(35),
-                            QueryPlanXml = reader.IsDBNull(36) ? null : reader.GetString(36)
+                            CompatibilityLevel = reader.IsDBNull(35) ? null : reader.GetInt16(35)
                         });
                     }
 
                     return items;
                 }
 
-                public async Task<List<ProcedureExecutionHistoryItem>> GetProcedureStatsHistoryAsync(string databaseName, int objectId)
+                public async Task<List<ProcedureExecutionHistoryItem>> GetProcedureStatsHistoryAsync(string databaseName, int objectId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
                 {
                     var items = new List<ProcedureExecutionHistoryItem>();
 
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
-                    string query = @"
+                    var timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "AND   ps.collection_time >= @from_date AND ps.collection_time <= @to_date"
+                        : "AND   ps.collection_time >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
+
+                    string query = $@"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         SELECT
@@ -1587,12 +1606,11 @@ namespace PerformanceMonitorDashboard.Services
             ps.total_logical_reads_delta,
             ps.total_physical_reads_delta,
             ps.total_logical_writes_delta,
-            ps.sample_interval_seconds,
-            ps.query_plan
+            ps.sample_interval_seconds
         FROM collect.procedure_stats AS ps
         WHERE ps.database_name = @database_name
         AND   ps.object_id = @object_id
-        AND   ps.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+        {timeFilter}
         ORDER BY
             ps.collection_time DESC;";
 
@@ -1601,6 +1619,16 @@ namespace PerformanceMonitorDashboard.Services
 
                     command.Parameters.Add(new SqlParameter("@database_name", SqlDbType.NVarChar, 128) { Value = databaseName });
                     command.Parameters.Add(new SqlParameter("@object_id", SqlDbType.Int) { Value = objectId });
+
+                    if (fromDate.HasValue && toDate.HasValue)
+                    {
+                        command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+                        command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+                    }
+                    else
+                    {
+                        command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = hoursBack });
+                    }
 
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
@@ -1639,74 +1667,78 @@ namespace PerformanceMonitorDashboard.Services
                             TotalLogicalReadsDelta = reader.IsDBNull(29) ? null : reader.GetInt64(29),
                             TotalPhysicalReadsDelta = reader.IsDBNull(30) ? null : reader.GetInt64(30),
                             TotalLogicalWritesDelta = reader.IsDBNull(31) ? null : reader.GetInt64(31),
-                            SampleIntervalSeconds = reader.IsDBNull(32) ? null : reader.GetInt32(32),
-                            QueryPlanXml = reader.IsDBNull(33) ? null : reader.GetString(33)
+                            SampleIntervalSeconds = reader.IsDBNull(32) ? null : reader.GetInt32(32)
                         });
                     }
 
                     return items;
                 }
 
-                public async Task<List<QueryStatsHistoryItem>> GetQueryStatsHistoryAsync(string databaseName, string queryHash)
+                public async Task<List<QueryStatsHistoryItem>> GetQueryStatsHistoryAsync(string databaseName, string queryHash, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
                 {
                     var items = new List<QueryStatsHistoryItem>();
 
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
-                    string query = @"
+                    var timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "AND   qs.collection_time >= @from_date AND qs.collection_time <= @to_date"
+                        : "AND   qs.collection_time >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
+
+                    string query = $@"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         SELECT
-            qs.collection_id,
+            collection_id = MAX(qs.collection_id),
             qs.collection_time,
-            qs.server_start_time,
-            qs.object_type,
-            qs.creation_time,
-            qs.last_execution_time,
-            qs.execution_count,
-            qs.total_worker_time,
-            qs.min_worker_time,
-            qs.max_worker_time,
-            qs.total_elapsed_time,
-            qs.min_elapsed_time,
-            qs.max_elapsed_time,
-            qs.total_logical_reads,
-            qs.total_physical_reads,
-            qs.min_physical_reads,
-            qs.max_physical_reads,
-            qs.total_logical_writes,
-            qs.total_clr_time,
-            qs.total_rows,
-            qs.min_rows,
-            qs.max_rows,
-            qs.min_dop,
-            qs.max_dop,
-            qs.min_grant_kb,
-            qs.max_grant_kb,
-            qs.min_used_grant_kb,
-            qs.max_used_grant_kb,
-            qs.min_ideal_grant_kb,
-            qs.max_ideal_grant_kb,
-            qs.min_reserved_threads,
-            qs.max_reserved_threads,
-            qs.min_used_threads,
-            qs.max_used_threads,
-            qs.total_spills,
-            qs.min_spills,
-            qs.max_spills,
-            qs.execution_count_delta,
-            qs.total_worker_time_delta,
-            qs.total_elapsed_time_delta,
-            qs.total_logical_reads_delta,
-            qs.total_physical_reads_delta,
-            qs.total_logical_writes_delta,
-            qs.sample_interval_seconds,
-            qs.query_plan_text
+            server_start_time = MAX(qs.server_start_time),
+            object_type = MAX(qs.object_type),
+            creation_time = MIN(qs.creation_time),
+            last_execution_time = MAX(qs.last_execution_time),
+            execution_count = MAX(qs.execution_count),
+            total_worker_time = MAX(qs.total_worker_time),
+            min_worker_time = MIN(qs.min_worker_time),
+            max_worker_time = MAX(qs.max_worker_time),
+            total_elapsed_time = MAX(qs.total_elapsed_time),
+            min_elapsed_time = MIN(qs.min_elapsed_time),
+            max_elapsed_time = MAX(qs.max_elapsed_time),
+            total_logical_reads = MAX(qs.total_logical_reads),
+            total_physical_reads = MAX(qs.total_physical_reads),
+            min_physical_reads = MIN(qs.min_physical_reads),
+            max_physical_reads = MAX(qs.max_physical_reads),
+            total_logical_writes = MAX(qs.total_logical_writes),
+            total_clr_time = MAX(qs.total_clr_time),
+            total_rows = MAX(qs.total_rows),
+            min_rows = MIN(qs.min_rows),
+            max_rows = MAX(qs.max_rows),
+            min_dop = MIN(qs.min_dop),
+            max_dop = MAX(qs.max_dop),
+            min_grant_kb = MIN(qs.min_grant_kb),
+            max_grant_kb = MAX(qs.max_grant_kb),
+            min_used_grant_kb = MIN(qs.min_used_grant_kb),
+            max_used_grant_kb = MAX(qs.max_used_grant_kb),
+            min_ideal_grant_kb = MIN(qs.min_ideal_grant_kb),
+            max_ideal_grant_kb = MAX(qs.max_ideal_grant_kb),
+            min_reserved_threads = MIN(qs.min_reserved_threads),
+            max_reserved_threads = MAX(qs.max_reserved_threads),
+            min_used_threads = MIN(qs.min_used_threads),
+            max_used_threads = MAX(qs.max_used_threads),
+            total_spills = MAX(qs.total_spills),
+            min_spills = MIN(qs.min_spills),
+            max_spills = MAX(qs.max_spills),
+            execution_count_delta = SUM(qs.execution_count_delta),
+            total_worker_time_delta = SUM(qs.total_worker_time_delta),
+            total_elapsed_time_delta = SUM(qs.total_elapsed_time_delta),
+            total_logical_reads_delta = SUM(qs.total_logical_reads_delta),
+            total_physical_reads_delta = SUM(qs.total_physical_reads_delta),
+            total_logical_writes_delta = SUM(qs.total_logical_writes_delta),
+            sample_interval_seconds = MAX(qs.sample_interval_seconds)
         FROM collect.query_stats AS qs
         WHERE qs.database_name = @database_name
         AND   qs.query_hash = CONVERT(binary(8), @query_hash, 1)
-        AND   qs.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+        {timeFilter}
+        GROUP BY
+            qs.collection_time
         ORDER BY
             qs.collection_time DESC;";
 
@@ -1715,6 +1747,16 @@ namespace PerformanceMonitorDashboard.Services
 
                     command.Parameters.Add(new SqlParameter("@database_name", SqlDbType.NVarChar, 128) { Value = databaseName });
                     command.Parameters.Add(new SqlParameter("@query_hash", SqlDbType.NVarChar, 20) { Value = queryHash });
+
+                    if (fromDate.HasValue && toDate.HasValue)
+                    {
+                        command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+                        command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+                    }
+                    else
+                    {
+                        command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = hoursBack });
+                    }
 
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
@@ -1764,13 +1806,84 @@ namespace PerformanceMonitorDashboard.Services
                             TotalLogicalReadsDelta = reader.IsDBNull(40) ? null : reader.GetInt64(40),
                             TotalPhysicalReadsDelta = reader.IsDBNull(41) ? null : reader.GetInt64(41),
                             TotalLogicalWritesDelta = reader.IsDBNull(42) ? null : reader.GetInt64(42),
-                            SampleIntervalSeconds = reader.IsDBNull(43) ? null : reader.GetInt32(43),
-                            QueryPlanXml = reader.IsDBNull(44) ? null : reader.GetString(44)
+                            SampleIntervalSeconds = reader.IsDBNull(43) ? null : reader.GetInt32(43)
                         });
                     }
 
                     return items;
                 }
+
+        /// <summary>
+        /// Fetches query plan XML on demand for a single query_store_data row.
+        /// </summary>
+        public async Task<string?> GetQueryStorePlanXmlByCollectionIdAsync(long collectionId)
+        {
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT
+            qsd.query_plan_text
+        FROM collect.query_store_data AS qsd
+        WHERE qsd.collection_id = @collection_id;";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@collection_id", SqlDbType.BigInt) { Value = collectionId });
+
+            var result = await command.ExecuteScalarAsync();
+            return result == DBNull.Value || result == null ? null : (string)result;
+        }
+
+        /// <summary>
+        /// Fetches query plan XML on demand for a single procedure_stats row.
+        /// </summary>
+        public async Task<string?> GetProcedureStatsPlanXmlByCollectionIdAsync(long collectionId)
+        {
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT
+            ps.query_plan
+        FROM collect.procedure_stats AS ps
+        WHERE ps.collection_id = @collection_id;";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@collection_id", SqlDbType.BigInt) { Value = collectionId });
+
+            var result = await command.ExecuteScalarAsync();
+            return result == DBNull.Value || result == null ? null : (string)result;
+        }
+
+        /// <summary>
+        /// Fetches query plan XML on demand for a single query_stats row.
+        /// </summary>
+        public async Task<string?> GetQueryStatsPlanXmlByCollectionIdAsync(long collectionId)
+        {
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT
+            qs.query_plan_text
+        FROM collect.query_stats AS qs
+        WHERE qs.collection_id = @collection_id;";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@collection_id", SqlDbType.BigInt) { Value = collectionId });
+
+            var result = await command.ExecuteScalarAsync();
+            return result == DBNull.Value || result == null ? null : (string)result;
+        }
 
         /// <summary>
         /// Gets execution count trends from query stats deltas, aggregated by collection time.
