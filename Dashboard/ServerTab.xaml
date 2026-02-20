@@ -229,6 +229,11 @@
                         <controls:DefaultTraceContent x:Name="DefaultTraceTab" />
                     </TabItem>
 
+                    <!-- Current Configuration Sub-Tab -->
+                    <TabItem Header="Current Configuration">
+                        <controls:CurrentConfigContent x:Name="CurrentConfigTab" />
+                    </TabItem>
+
                     <!-- Server Configuration Changes Sub-Tab -->
                     <TabItem Header="Server Config Changes">
                         <Grid>

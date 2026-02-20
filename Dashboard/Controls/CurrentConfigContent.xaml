@@ -1,0 +1,117 @@
+<UserControl x:Class="PerformanceMonitorDashboard.Controls.CurrentConfigContent"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="450" d:DesignWidth="800"
+             Loaded="OnLoaded">
+    <TabControl>
+        <!-- Current Server Configuration Sub-Tab -->
+        <TabItem Header="Server Configuration">
+            <Grid>
+            <DataGrid x:Name="ServerConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                      ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="220">
+                        <DataGridTextColumn.Header>
+                            <StackPanel>
+                                <TextBlock Text="Setting" FontWeight="Bold" Margin="0,0,0,2"/>
+                                <TextBox Width="210" Height="22" FontSize="11" TextChanged="ServerConfigFilterTextBox_TextChanged" Tag="ConfigurationName"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ValueConfigured}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel>
+                                <TextBlock Text="Configured" FontWeight="Bold" Margin="0,0,0,2"/>
+                                <TextBox Width="90" Height="22" FontSize="11" TextChanged="ServerConfigFilterTextBox_TextChanged" Tag="ValueConfigured"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ValueInUse}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel>
+                                <TextBlock Text="In Use" FontWeight="Bold" Margin="0,0,0,2"/>
+                                <TextBox Width="90" Height="22" FontSize="11" TextChanged="ServerConfigFilterTextBox_TextChanged" Tag="ValueInUse"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ValueMinimum}" Width="80" Header="Minimum"/>
+                    <DataGridTextColumn Binding="{Binding ValueMaximum}" Width="80" Header="Maximum"/>
+                    <DataGridCheckBoxColumn Binding="{Binding IsDynamic}" Width="65" Header="Dynamic"/>
+                    <DataGridCheckBoxColumn Binding="{Binding IsAdvanced}" Width="70" Header="Advanced"/>
+                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150" Header="Last Changed"/>
+                    <DataGridTextColumn Binding="{Binding Description}" Width="*" MinWidth="200" Header="Description"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="ServerConfigNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+            </Grid>
+        </TabItem>
+
+        <!-- Current Database Configuration Sub-Tab -->
+        <TabItem Header="Database Configuration">
+            <Grid>
+            <DataGrid x:Name="DatabaseConfigDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                      ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="150">
+                        <DataGridTextColumn.Header>
+                            <StackPanel>
+                                <TextBlock Text="Database" FontWeight="Bold" Margin="0,0,0,2"/>
+                                <TextBox Width="140" Height="22" FontSize="11" TextChanged="DatabaseConfigFilterTextBox_TextChanged" Tag="DatabaseName"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding SettingType}" Width="160">
+                        <DataGridTextColumn.Header>
+                            <StackPanel>
+                                <TextBlock Text="Setting Type" FontWeight="Bold" Margin="0,0,0,2"/>
+                                <TextBox Width="150" Height="22" FontSize="11" TextChanged="DatabaseConfigFilterTextBox_TextChanged" Tag="SettingType"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding SettingName}" Width="220">
+                        <DataGridTextColumn.Header>
+                            <StackPanel>
+                                <TextBlock Text="Setting Name" FontWeight="Bold" Margin="0,0,0,2"/>
+                                <TextBox Width="210" Height="22" FontSize="11" TextChanged="DatabaseConfigFilterTextBox_TextChanged" Tag="SettingName"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding SettingValue}" Width="200">
+                        <DataGridTextColumn.Header>
+                            <StackPanel>
+                                <TextBlock Text="Value" FontWeight="Bold" Margin="0,0,0,2"/>
+                                <TextBox Width="190" Height="22" FontSize="11" TextChanged="DatabaseConfigFilterTextBox_TextChanged" Tag="SettingValue"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150" Header="Last Changed"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="DatabaseConfigNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+            </Grid>
+        </TabItem>
+
+        <!-- Current Trace Flags Sub-Tab -->
+        <TabItem Header="Trace Flags">
+            <Grid>
+            <DataGrid x:Name="TraceFlagsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                      RowHeight="25" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{StaticResource DataGridContextMenu}"
+                      ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding TraceFlag}" Width="100" Header="Trace Flag"/>
+                    <DataGridCheckBoxColumn Binding="{Binding Status}" Width="70" Header="Enabled"/>
+                    <DataGridCheckBoxColumn Binding="{Binding IsGlobal}" Width="70" Header="Global"/>
+                    <DataGridCheckBoxColumn Binding="{Binding IsSession}" Width="70" Header="Session"/>
+                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150" Header="Last Changed"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TraceFlagsNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+            </Grid>
+        </TabItem>
+    </TabControl>
+</UserControl>

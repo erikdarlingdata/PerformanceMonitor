@@ -115,6 +115,7 @@ namespace PerformanceMonitorDashboard
             DailySummaryTab.Initialize(_databaseService);
             CriticalIssuesTab.Initialize(_databaseService);
             DefaultTraceTab.Initialize(_databaseService);
+            CurrentConfigTab.Initialize(_databaseService);
             MemoryTab.Initialize(_databaseService);
             PerformanceTab.Initialize(_databaseService, s => StatusText.Text = s);
             SystemEventsContent.Initialize(_databaseService);
@@ -1169,6 +1170,7 @@ namespace PerformanceMonitorDashboard
                         CollectionHealth_Refresh_Click(null, new RoutedEventArgs());
                         await CriticalIssuesTab.RefreshDataAsync();
                         await DefaultTraceTab.RefreshAllDataAsync();
+                        await CurrentConfigTab.RefreshAllDataAsync();
                         await RefreshResourceOverviewAsync();
                         break;
 
@@ -1278,13 +1280,14 @@ namespace PerformanceMonitorDashboard
                 var dailySummaryTask = DailySummaryTab.RefreshDataAsync();
                 var criticalIssuesTask = CriticalIssuesTab.RefreshDataAsync();
                 var defaultTraceTask = DefaultTraceTab.RefreshAllDataAsync();
+                var currentConfigTask = CurrentConfigTab.RefreshAllDataAsync();
                 var systemEventsTask = SystemEventsContent.RefreshAllDataAsync();
 
                 // Wait for everything to complete before _isRefreshing resets
                 await Task.WhenAll(
                     healthTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask,
                     performanceTask, memoryTask, resourceOverviewTask, runningJobsTask,
-                    resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, systemEventsTask);
+                    resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, currentConfigTask, systemEventsTask);
 
                 // Populate grids with fetched data
                 var healthData = await healthTask;

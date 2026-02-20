@@ -1175,5 +1175,179 @@ namespace PerformanceMonitorDashboard.Services
         
                     return items;
                 }
+
+                public async Task<List<CurrentServerConfigItem>> GetCurrentServerConfigAsync()
+                {
+                    var items = new List<CurrentServerConfigItem>();
+
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        WITH
+            latest AS
+        (
+            SELECT
+                h.configuration_id,
+                h.configuration_name,
+                h.value_configured,
+                h.value_in_use,
+                h.value_minimum,
+                h.value_maximum,
+                h.is_dynamic,
+                h.is_advanced,
+                h.description,
+                h.collection_time,
+                rn = ROW_NUMBER() OVER (PARTITION BY h.configuration_id ORDER BY h.collection_time DESC)
+            FROM config.server_configuration_history AS h
+        )
+        SELECT
+            l.configuration_name,
+            value_configured = CONVERT(nvarchar(100), l.value_configured),
+            value_in_use = CONVERT(nvarchar(100), l.value_in_use),
+            value_minimum = CONVERT(nvarchar(100), l.value_minimum),
+            value_maximum = CONVERT(nvarchar(100), l.value_maximum),
+            l.is_dynamic,
+            l.is_advanced,
+            l.description,
+            last_changed = l.collection_time
+        FROM latest AS l
+        WHERE l.rn = 1
+        ORDER BY
+            l.configuration_name;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 30;
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        items.Add(new CurrentServerConfigItem
+                        {
+                            ConfigurationName = reader.GetString(0),
+                            ValueConfigured = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                            ValueInUse = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                            ValueMinimum = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                            ValueMaximum = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                            IsDynamic = reader.GetBoolean(5),
+                            IsAdvanced = reader.GetBoolean(6),
+                            Description = reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                            LastChanged = reader.GetDateTime(8)
+                        });
+                    }
+
+                    return items;
+                }
+
+                public async Task<List<CurrentDatabaseConfigItem>> GetCurrentDatabaseConfigAsync()
+                {
+                    var items = new List<CurrentDatabaseConfigItem>();
+
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        WITH
+            latest AS
+        (
+            SELECT
+                h.database_name,
+                h.setting_type,
+                h.setting_name,
+                h.setting_value,
+                h.collection_time,
+                rn = ROW_NUMBER() OVER (
+                    PARTITION BY h.database_name, h.setting_type, h.setting_name
+                    ORDER BY h.collection_time DESC
+                )
+            FROM config.database_configuration_history AS h
+        )
+        SELECT
+            l.database_name,
+            l.setting_type,
+            l.setting_name,
+            setting_value = CONVERT(nvarchar(500), l.setting_value),
+            last_changed = l.collection_time
+        FROM latest AS l
+        WHERE l.rn = 1
+        ORDER BY
+            l.database_name,
+            l.setting_type,
+            l.setting_name;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 30;
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        items.Add(new CurrentDatabaseConfigItem
+                        {
+                            DatabaseName = reader.GetString(0),
+                            SettingType = reader.GetString(1),
+                            SettingName = reader.GetString(2),
+                            SettingValue = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                            LastChanged = reader.GetDateTime(4)
+                        });
+                    }
+
+                    return items;
+                }
+
+                public async Task<List<CurrentTraceFlagItem>> GetCurrentTraceFlagsAsync()
+                {
+                    var items = new List<CurrentTraceFlagItem>();
+
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        WITH
+            latest AS
+        (
+            SELECT
+                h.trace_flag,
+                h.status,
+                h.is_global,
+                h.is_session,
+                h.collection_time,
+                rn = ROW_NUMBER() OVER (PARTITION BY h.trace_flag ORDER BY h.collection_time DESC)
+            FROM config.trace_flags_history AS h
+        )
+        SELECT
+            l.trace_flag,
+            l.status,
+            l.is_global,
+            l.is_session,
+            last_changed = l.collection_time
+        FROM latest AS l
+        WHERE l.rn = 1
+        ORDER BY
+            l.trace_flag;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 30;
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        items.Add(new CurrentTraceFlagItem
+                        {
+                            TraceFlag = reader.GetInt32(0),
+                            Status = reader.GetBoolean(1),
+                            IsGlobal = reader.GetBoolean(2),
+                            IsSession = reader.GetBoolean(3),
+                            LastChanged = reader.GetDateTime(4)
+                        });
+                    }
+
+                    return items;
+                }
     }
 }
