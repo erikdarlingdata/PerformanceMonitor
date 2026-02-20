@@ -606,6 +606,7 @@ namespace PerformanceMonitorDashboard
             }
 
             _alertsHistoryContent = new AlertsHistoryContent();
+            _alertsHistoryContent.AlertsDismissed += (_, _) => UpdateAlertBadge();
 
             var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
             var headerText = new TextBlock
@@ -1567,6 +1568,15 @@ namespace PerformanceMonitorDashboard
                 if (_openTabs.TryGetValue(serverId, out var tabItem) && tabItem.Content is ServerTab serverTab)
                 {
                     serverTab.UpdateBadges(null, _alertStateService);
+                }
+
+                // Hide alerts in the email alert log so the sidebar badge updates
+                var server = _serverManager.GetAllServers().FirstOrDefault(s => s.Id == serverId);
+                if (server != null)
+                {
+                    _emailAlertService.HideAllAlerts(8760, server.DisplayName);
+                    UpdateAlertBadge();
+                    _alertsHistoryContent?.RefreshAlerts();
                 }
             }
         }
