@@ -29,19 +29,19 @@ public class CollectionBackgroundService : BackgroundService
     private readonly ILogger<CollectionBackgroundService>? _logger;
 
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
-    /* Start at UtcNow so maintenance tasks don't all fire on the very first cycle.
-       Archival runs after 1 hour, retention + compaction after 24 hours of uptime. */
+    /* Start at UtcNow so maintenance tasks don't all fire on the very first cycle. */
     private DateTime _lastArchiveTime = DateTime.UtcNow;
     private DateTime _lastRetentionTime = DateTime.UtcNow;
-    private DateTime _lastCompactionTime = DateTime.UtcNow;
 
-    /* Archive every hour, retention + compaction once per day */
+    /* Archive every hour, retention once per day */
     private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
     private static readonly TimeSpan RetentionInterval = TimeSpan.FromHours(24);
-    private static readonly TimeSpan CompactionInterval = TimeSpan.FromHours(24);
 
-    /* Warn if database exceeds this size between compaction cycles */
-    private const double SizeWarningThresholdMb = 1024;
+    /* Size-based trigger — when the database exceeds this size, archive ALL data
+       to parquet and reset the database. INSERT performance degrades badly with
+       large tables (33x slower at 667MB in testing). Data remains fully queryable
+       through the archive views (hot UNION parquet). */
+    private const double ArchiveSizeThresholdMb = 512;
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
@@ -109,14 +109,11 @@ public class CollectionBackgroundService : BackgroundService
                     IsCollecting = false;
                 }
 
-                /* Periodic archival */
+                /* Periodic archival (time-based or size-based) */
                 await RunArchivalIfDueAsync();
 
                 /* Periodic retention cleanup */
                 RunRetentionIfDue();
-
-                /* Periodic database compaction to prevent bloat */
-                await RunCompactionIfDueAsync();
             }
 
             try
@@ -134,14 +131,31 @@ public class CollectionBackgroundService : BackgroundService
 
     private async Task RunArchivalIfDueAsync()
     {
-        if (_archiveService == null || DateTime.UtcNow - _lastArchiveTime < ArchiveInterval)
+        if (_archiveService == null)
+        {
+            return;
+        }
+
+        var timeDue = DateTime.UtcNow - _lastArchiveTime >= ArchiveInterval;
+        var sizeDue = _duckDb != null && _duckDb.GetDatabaseSizeMb() >= ArchiveSizeThresholdMb;
+
+        if (!timeDue && !sizeDue)
         {
             return;
         }
 
         try
         {
-            await _archiveService.ArchiveOldDataAsync(hotDataDays: 7);
+            if (sizeDue)
+            {
+                _logger?.LogInformation("Database size ({SizeMb:F0} MB) exceeds {Threshold} MB — archiving all data and resetting database",
+                    _duckDb!.GetDatabaseSizeMb(), ArchiveSizeThresholdMb);
+                await _archiveService.ArchiveAllAndResetAsync();
+            }
+            else
+            {
+                await _archiveService.ArchiveOldDataAsync(hotDataDays: 7);
+            }
             _lastArchiveTime = DateTime.UtcNow;
         }
         catch (Exception ex)
@@ -168,36 +182,4 @@ public class CollectionBackgroundService : BackgroundService
         }
     }
 
-    private async Task RunCompactionIfDueAsync()
-    {
-        if (_duckDb == null || DateTime.UtcNow - _lastCompactionTime < CompactionInterval)
-        {
-            /* Size watchdog: warn if database is large even between compaction cycles */
-            if (_duckDb != null)
-            {
-                var sizeMb = _duckDb.GetDatabaseSizeMb();
-                if (sizeMb > SizeWarningThresholdMb)
-                {
-                    _logger?.LogWarning("Database size is {SizeMb:F0} MB (threshold: {Threshold} MB) — compaction will run at next scheduled interval",
-                        sizeMb, SizeWarningThresholdMb);
-                }
-            }
-            return;
-        }
-
-        try
-        {
-            IsPaused = true;
-            await _duckDb.CompactAsync();
-            _lastCompactionTime = DateTime.UtcNow;
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "Database compaction failed");
-        }
-        finally
-        {
-            IsPaused = false;
-        }
-    }
 }

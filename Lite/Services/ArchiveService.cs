@@ -58,10 +58,12 @@ public class ArchiveService
     }
 
     /// <summary>
-    /// Archives data older than the specified number of days to Parquet files,
+    /// Archives data older than the specified cutoff to Parquet files,
     /// then deletes the archived rows from the hot tables.
+    /// Use hotDataDays for scheduled archival (default 7), or hotDataHours
+    /// for size-triggered archival when the database is under space pressure.
     /// </summary>
-    public async Task ArchiveOldDataAsync(int hotDataDays = 7)
+    public async Task ArchiveOldDataAsync(int hotDataDays = 7, int? hotDataHours = null)
     {
         if (!await s_archiveLock.WaitAsync(TimeSpan.Zero))
         {
@@ -71,65 +73,55 @@ public class ArchiveService
 
         try
         {
-        var cutoffDate = DateTime.UtcNow.AddDays(-hotDataDays);
-        var archiveMonth = cutoffDate.ToString("yyyy-MM");
+        var cutoffDate = hotDataHours.HasValue
+            ? DateTime.UtcNow.AddHours(-hotDataHours.Value)
+            : DateTime.UtcNow.AddDays(-hotDataDays);
+        var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
-        _logger?.LogInformation("Archiving data older than {CutoffDate} to Parquet (month: {Month})", cutoffDate, archiveMonth);
+        _logger?.LogInformation("Archiving data older than {CutoffDate} to Parquet (prefix: {Timestamp})", cutoffDate, timestamp);
 
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-
-        foreach (var (table, timeColumn) in ArchivableTables)
+        /* Write lock covers export + DELETE. The DELETEs modify table data, and the
+           next CHECKPOINT will reorganize the file — readers must not be mid-query
+           when that happens or they get "Reached the end of the file" errors. */
+        using (_duckDb.AcquireWriteLock())
         {
-            try
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+
+            foreach (var (table, timeColumn) in ArchivableTables)
             {
-                /* Check if there are rows to archive */
-                var rowCount = await GetRowCountBeforeCutoff(connection, table, timeColumn, cutoffDate);
-                if (rowCount == 0)
+                try
                 {
-                    continue;
-                }
+                    /* Check if there are rows to archive */
+                    var rowCount = await GetRowCountBeforeCutoff(connection, table, timeColumn, cutoffDate);
+                    if (rowCount == 0)
+                    {
+                        continue;
+                    }
 
-                /* Export to Parquet (append mode - UNION if file exists) */
-                var parquetPath = Path.Combine(_archivePath, $"{archiveMonth}_{table}.parquet")
-                    .Replace("\\", "/");
+                    /* Export to a uniquely-named parquet file — no merging needed.
+                       Each archival cycle produces a new file with a timestamp prefix.
+                       Archive views use glob (*_table.parquet) to pick up all files. */
+                    var parquetPath = Path.Combine(_archivePath, $"{timestamp}_{table}.parquet")
+                        .Replace("\\", "/");
 
-                if (File.Exists(parquetPath))
-                {
-                    /* Append: write to temp, then UNION with existing */
-                    var tempPath = parquetPath + ".tmp";
-                    await ExportToParquet(connection, table, timeColumn, cutoffDate, tempPath);
-
-                    using var mergeCmd = connection.CreateCommand();
-                    mergeCmd.CommandText = $@"
-COPY (
-    SELECT * FROM read_parquet('{parquetPath}')
-    UNION ALL
-    SELECT * FROM read_parquet('{tempPath}')
-) TO '{parquetPath}' (FORMAT PARQUET, COMPRESSION ZSTD)";
-                    await mergeCmd.ExecuteNonQueryAsync();
-
-                    File.Delete(tempPath);
-                }
-                else
-                {
                     await ExportToParquet(connection, table, timeColumn, cutoffDate, parquetPath);
+
+                    /* Delete archived rows from hot table */
+                    using var deleteCmd = connection.CreateCommand();
+                    deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < '{cutoffDate:yyyy-MM-dd HH:mm:ss}'";
+                    await deleteCmd.ExecuteNonQueryAsync();
+
+                    _logger?.LogInformation("Archived {Count} rows from {Table} to {Path}", rowCount, table, parquetPath);
                 }
-
-                /* Delete archived rows from hot table */
-                using var deleteCmd = connection.CreateCommand();
-                deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < '{cutoffDate:yyyy-MM-dd HH:mm:ss}'";
-                await deleteCmd.ExecuteNonQueryAsync();
-
-                _logger?.LogInformation("Archived {Count} rows from {Table} to {Path}", rowCount, table, parquetPath);
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError(ex, "Failed to archive table {Table}", table);
+                catch (Exception ex)
+                {
+                    _logger?.LogError(ex, "Failed to archive table {Table}", table);
+                }
             }
         }
 
-        /* Refresh archive views so newly archived parquet files are queryable */
+        /* Refresh archive views outside write lock — view creation is fast and safe */
         await _duckDb.CreateArchiveViewsAsync();
         }
         finally
@@ -155,4 +147,74 @@ COPY (
 ) TO '{filePath}' (FORMAT PARQUET, COMPRESSION ZSTD)";
         await cmd.ExecuteNonQueryAsync();
     }
+
+    /// <summary>
+    /// Archives ALL data from every table to parquet, then deletes and reinitializes the database.
+    /// Called when the database exceeds the size threshold. Data remains queryable through archive views.
+    /// </summary>
+    public async Task ArchiveAllAndResetAsync()
+    {
+        if (!await s_archiveLock.WaitAsync(TimeSpan.Zero))
+        {
+            _logger?.LogDebug("Archive operation already in progress, skipping");
+            return;
+        }
+
+        try
+        {
+            var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+
+            _logger?.LogInformation("Archiving ALL data to Parquet (prefix: {Timestamp}) and resetting database", timestamp);
+
+            /* Export everything under write lock */
+            using (_duckDb.AcquireWriteLock())
+            {
+                using var connection = _duckDb.CreateConnection();
+                await connection.OpenAsync();
+
+                foreach (var (table, _) in ArchivableTables)
+                {
+                    try
+                    {
+                        /* Check row count */
+                        using var countCmd = connection.CreateCommand();
+                        countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+                        var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+                        if (rowCount == 0) continue;
+
+                        /* Export all rows to a uniquely-named parquet file.
+                           No merging needed — each reset produces a new file.
+                           Archive views use glob (*_table.parquet) to pick up all files. */
+                        var parquetPath = Path.Combine(_archivePath, $"{timestamp}_{table}.parquet")
+                            .Replace("\\", "/");
+
+                        using var exportCmd = connection.CreateCommand();
+                        exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{parquetPath}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                        await exportCmd.ExecuteNonQueryAsync();
+
+                        _logger?.LogInformation("Archived {Count} rows from {Table}", rowCount, table);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogError(ex, "Failed to archive table {Table}", table);
+                    }
+                }
+            }
+
+            /* Nuke and reinitialize outside the using-connection scope so all handles are closed */
+            _logger?.LogInformation("Deleting and reinitializing database");
+            await _duckDb.ResetDatabaseAsync();
+
+            _logger?.LogInformation("Database reset complete — archive views now serve all historical data from Parquet");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Archive-all-and-reset failed");
+        }
+        finally
+        {
+            s_archiveLock.Release();
+        }
+    }
+
 }

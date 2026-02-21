@@ -239,10 +239,11 @@ public partial class RemoteCollectorService
         await Task.WhenAll(serverTasks);
 
         /* Run CHECKPOINT here after all collector connections are closed.
-           This avoids opening a separate DuckDB instance that could conflict
-           with concurrent UI connections via OS file locks. */
+           Write lock ensures no UI readers have stale file offsets when
+           CHECKPOINT reorganizes/truncates the database file. */
         try
         {
+            using var writeLock = _duckDb.AcquireWriteLock();
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();

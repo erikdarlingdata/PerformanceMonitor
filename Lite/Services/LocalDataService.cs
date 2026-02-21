@@ -32,13 +32,24 @@ public partial class LocalDataService
     }
 
     /// <summary>
-    /// Creates and opens a DuckDB connection.
+    /// Creates and opens a DuckDB connection wrapped in a read lock.
+    /// The lock prevents CHECKPOINT and compaction from reorganizing the database file
+    /// while this connection is reading from it.
     /// </summary>
-    internal async Task<DuckDBConnection> OpenConnectionAsync()
+    internal async Task<LockedConnection> OpenConnectionAsync()
     {
-        var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-        return connection;
+        var readLock = _duckDb.AcquireReadLock();
+        try
+        {
+            var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            return new LockedConnection(connection, readLock);
+        }
+        catch
+        {
+            readLock.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
