@@ -140,6 +140,31 @@ namespace PerformanceMonitorDashboard.Services
             }
         }
 
+        public async Task DropMonitorDatabaseAsync(ServerConnection server)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "master",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            // Close active connections before dropping
+            using var killCmd = new SqlCommand(@"
+                IF DB_ID('PerformanceMonitor') IS NOT NULL
+                BEGIN
+                    ALTER DATABASE [PerformanceMonitor] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+                    DROP DATABASE [PerformanceMonitor];
+                END", connection);
+            killCmd.CommandTimeout = 30;
+            await killCmd.ExecuteNonQueryAsync();
+
+            Logger.Info($"Dropped PerformanceMonitor database on '{server.DisplayName}'");
+        }
+
         public void UpdateLastConnected(string id)
         {
             lock (_serversLock)

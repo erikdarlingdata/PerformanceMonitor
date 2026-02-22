@@ -377,6 +377,63 @@ ORDER BY bucket";
         }
         return items;
     }
+    /// <summary>
+    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
+    /// Returns per-second rates grouped by wait type.
+    /// </summary>
+    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+WITH raw AS
+(
+    SELECT
+        collection_time,
+        wait_type,
+        delta_wait_time_ms,
+        date_diff('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time), collection_time) AS interval_seconds
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   wait_type LIKE 'LCK%'
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+)
+SELECT
+    collection_time,
+    wait_type,
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+FROM raw
+WHERE delta_wait_time_ms >= 0
+ORDER BY collection_time, wait_type";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<LockWaitTrendPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new LockWaitTrendPoint
+            {
+                CollectionTime = reader.GetDateTime(0),
+                WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2)
+            });
+        }
+        return items;
+    }
+}
+
+public class LockWaitTrendPoint
+{
+    public DateTime CollectionTime { get; set; }
+    public string WaitType { get; set; } = string.Empty;
+    public double WaitTimeMsPerSecond { get; set; }
 }
 
 public class TrendPoint

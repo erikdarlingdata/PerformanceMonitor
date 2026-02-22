@@ -167,7 +167,7 @@ ORDER BY collection_time DESC;
 
 ### Data Retention
 
-Default: 30 days (configurable per table in `config.retention_settings`).
+Default: 30 days (configurable per collector via `retention_days` in `config.collection_schedule`).
 
 Storage estimates: 5-10 GB per week, 20-40 GB per month.
 

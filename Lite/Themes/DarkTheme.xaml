@@ -1,6 +1,7 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib"
+                    xmlns:helpers="clr-namespace:PerformanceMonitorLite.Helpers">
 
     <!-- ============================================ -->
     <!-- Darling Data Dark Theme                      -->
@@ -566,6 +567,7 @@
     <!-- DataGrid Style                               -->
     <!-- ============================================ -->
     <Style TargetType="DataGrid">
+        <Setter Property="helpers:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>

@@ -1289,7 +1289,7 @@ namespace PerformanceMonitorDashboard.Controls
                 {
                     var sb = new StringBuilder();
 
-                    var headers = grid.Columns.Select(c => c.Header?.ToString() ?? string.Empty);
+                    var headers = grid.Columns.Select(c => Helpers.DataGridClipboardBehavior.GetHeaderText(c));
                     sb.AppendLine(string.Join("\t", headers));
 
                     foreach (var item in grid.Items)
@@ -1336,7 +1336,7 @@ namespace PerformanceMonitorDashboard.Controls
                         {
                             var sb = new StringBuilder();
 
-                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(c.Header?.ToString() ?? string.Empty));
+                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c)));
                             sb.AppendLine(string.Join(",", headers));
 
                             foreach (var item in grid.Items)

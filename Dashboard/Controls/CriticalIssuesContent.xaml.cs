@@ -308,7 +308,7 @@ namespace PerformanceMonitorDashboard.Controls
                     {
                         if (column is DataGridBoundColumn)
                         {
-                            headers.Add(TabHelpers.GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                         }
                     }
                     sb.AppendLine(string.Join("\t", headers));
@@ -351,7 +351,7 @@ namespace PerformanceMonitorDashboard.Controls
                             {
                                 if (column is DataGridBoundColumn)
                                 {
-                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
                                 }
                             }
                             sb.AppendLine(string.Join(",", headers));

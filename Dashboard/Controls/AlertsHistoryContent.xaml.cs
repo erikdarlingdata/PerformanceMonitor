@@ -373,7 +373,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var sb = new StringBuilder();
                     var headers = dataGrid.Columns
                         .OfType<DataGridBoundColumn>()
-                        .Select(c => TabHelpers.GetColumnHeader(c))
+                        .Select(c => Helpers.DataGridClipboardBehavior.GetHeaderText(c))
                         .ToList();
                     sb.AppendLine(string.Join("\t", headers));
 
@@ -406,7 +406,7 @@ namespace PerformanceMonitorDashboard.Controls
                             var sb = new StringBuilder();
                             var headers = dataGrid.Columns
                                 .OfType<DataGridBoundColumn>()
-                                .Select(c => TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(c)))
+                                .Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c)))
                                 .ToList();
                             sb.AppendLine(string.Join(",", headers));
 

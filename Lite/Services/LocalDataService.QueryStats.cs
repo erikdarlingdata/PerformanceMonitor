@@ -72,6 +72,7 @@ AND   collection_time >= $2
 AND   collection_time <= $3
 AND   query_text NOT LIKE 'WAITFOR%'
 GROUP BY database_name, query_hash
+HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
 ORDER BY SUM(delta_elapsed_time) DESC
 LIMIT $4";
 
@@ -230,6 +231,52 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// Looks up a cached query plan from DuckDB by server_id and query_hash.
+    /// Returns the most recently collected plan XML, or null if not found.
+    /// </summary>
+    public async Task<string?> GetCachedQueryPlanAsync(int serverId, string queryHash)
+    {
+        const string query = @"
+SELECT query_plan_xml
+FROM v_query_stats
+WHERE server_id = $1
+AND   query_hash = $2
+AND   query_plan_xml IS NOT NULL
+AND   query_plan_xml <> ''
+ORDER BY collection_time DESC
+LIMIT 1";
+
+        using var connection = await OpenConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = query;
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = queryHash });
+        var result = await cmd.ExecuteScalarAsync();
+        return result as string;
+    }
+
+    public async Task<string?> GetCachedProcedurePlanAsync(int serverId, string planHandle)
+    {
+        const string query = @"
+SELECT query_plan_xml
+FROM v_query_stats
+WHERE server_id = $1
+AND   plan_handle = $2
+AND   query_plan_xml IS NOT NULL
+AND   query_plan_xml <> ''
+ORDER BY collection_time DESC
+LIMIT 1";
+
+        using var connection = await OpenConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = query;
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = planHandle });
+        var result = await cmd.ExecuteScalarAsync();
+        return result as string;
+    }
+
+    /// <summary>
     /// Fetches a query plan on-demand from the remote server by query hash.
     /// </summary>
     public static async Task<string?> FetchQueryPlanOnDemandAsync(string connectionString, string queryHash)
@@ -335,6 +382,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 GROUP BY database_name, schema_name, object_name, object_type
+HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
 ORDER BY SUM(delta_elapsed_time) DESC
 LIMIT $4";
 

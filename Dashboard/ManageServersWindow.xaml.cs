@@ -139,19 +139,32 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void RemoveServer_Click(object sender, RoutedEventArgs e)
+        private async void RemoveServer_Click(object sender, RoutedEventArgs e)
         {
             if (ServersDataGrid.SelectedItem is ServerConnection server)
             {
-                var result = MessageBox.Show(
-                    $"Are you sure you want to remove server '{server.DisplayName}'?\n\nThis action cannot be undone.",
-                    "Confirm Remove Server",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Warning
-                );
+                var dialog = new RemoveServerDialog(server.DisplayName);
+                dialog.Owner = this;
 
-                if (result == MessageBoxResult.Yes)
+                if (dialog.ShowDialog() == true)
                 {
+                    if (dialog.DropDatabase)
+                    {
+                        try
+                        {
+                            await _serverManager.DropMonitorDatabaseAsync(server);
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show(
+                                $"Could not drop the PerformanceMonitor database on '{server.DisplayName}':\n\n{ex.Message}\n\nThe server will still be removed from the Dashboard.",
+                                "Database Drop Failed",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Warning
+                            );
+                        }
+                    }
+
                     _serverManager.DeleteServer(server.Id);
                     LoadServers();
                     ServersModified = true;

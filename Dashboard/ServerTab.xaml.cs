@@ -49,14 +49,6 @@ namespace PerformanceMonitorDashboard
         private bool _isRefreshing;
 
         // Filter state dictionaries for each DataGrid
-        private Dictionary<string, ColumnFilterState> _serverConfigChangesFilters = new();
-        private List<ServerConfigChangeItem>? _serverConfigChangesUnfilteredData;
-
-        private Dictionary<string, ColumnFilterState> _dbConfigChangesFilters = new();
-        private List<DatabaseConfigChangeItem>? _dbConfigChangesUnfilteredData;
-
-        private Dictionary<string, ColumnFilterState> _traceFlagChangesFilters = new();
-        private List<TraceFlagChangeItem>? _traceFlagChangesUnfilteredData;
 
         private Dictionary<string, ColumnFilterState> _collectionHealthFilters = new();
         private List<CollectionHealthItem>? _collectionHealthUnfilteredData;
@@ -122,6 +114,7 @@ namespace PerformanceMonitorDashboard
             CriticalIssuesTab.Initialize(_databaseService);
             DefaultTraceTab.Initialize(_databaseService);
             CurrentConfigTab.Initialize(_databaseService);
+            ConfigChangesTab.Initialize(_databaseService);
             MemoryTab.Initialize(_databaseService);
             PerformanceTab.Initialize(_databaseService, s => StatusText.Text = s);
             SystemEventsContent.Initialize(_databaseService);
@@ -154,9 +147,7 @@ namespace PerformanceMonitorDashboard
             _blockingStatsHoursBack = defaultHours;
             // Performance tab state variables now managed by QueryPerformanceContent UserControl
             // Memory state variables now managed by MemoryContent UserControl
-            _serverConfigChangesHoursBack = defaultHours;
-            _dbConfigChangesHoursBack = defaultHours;
-            _traceFlagChangesHoursBack = defaultHours;
+            ConfigChangesTab.SetTimeRange(defaultHours, null, null);
             // _sessionStatsHoursBack and _queryPerfTrendsHoursBack now managed by QueryPerformanceContent UserControl
             // _criticalIssuesHoursBack now managed by CriticalIssuesTab UserControl
             // System Health/HealthParser state now managed by SystemEventsContent UserControl
@@ -680,17 +671,11 @@ namespace PerformanceMonitorDashboard
             try
             {
                 // Apply minimum column widths based on header text
-                Helpers.TabHelpers.AutoSizeColumnMinWidths(ServerConfigChangesDataGrid);
-                Helpers.TabHelpers.AutoSizeColumnMinWidths(DatabaseConfigChangesDataGrid);
-                Helpers.TabHelpers.AutoSizeColumnMinWidths(TraceFlagChangesDataGrid);
                 Helpers.TabHelpers.AutoSizeColumnMinWidths(HealthDataGrid);
                 Helpers.TabHelpers.AutoSizeColumnMinWidths(BlockingEventsDataGrid);
                 Helpers.TabHelpers.AutoSizeColumnMinWidths(DeadlocksDataGrid);
 
                 // Freeze identifier columns
-                Helpers.TabHelpers.FreezeColumns(ServerConfigChangesDataGrid, 1);
-                Helpers.TabHelpers.FreezeColumns(DatabaseConfigChangesDataGrid, 2);
-                Helpers.TabHelpers.FreezeColumns(TraceFlagChangesDataGrid, 1);
                 Helpers.TabHelpers.FreezeColumns(HealthDataGrid, 1);
                 Helpers.TabHelpers.FreezeColumns(BlockingEventsDataGrid, 1);
                 Helpers.TabHelpers.FreezeColumns(DeadlocksDataGrid, 1);
@@ -1173,10 +1158,12 @@ namespace PerformanceMonitorDashboard
                         _resourceOverviewToDate = _globalToDate;
                         CriticalIssuesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                         DefaultTraceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
+                        ConfigChangesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                         CollectionHealth_Refresh_Click(null, new RoutedEventArgs());
                         await CriticalIssuesTab.RefreshDataAsync();
                         await DefaultTraceTab.RefreshAllDataAsync();
                         await CurrentConfigTab.RefreshAllDataAsync();
+                        await ConfigChangesTab.RefreshAllDataAsync();
                         await RefreshResourceOverviewAsync();
                         break;
 
@@ -1218,19 +1205,6 @@ namespace PerformanceMonitorDashboard
                         // System Events tab - HealthParser data is handled by SystemEventsContent UserControl
                         SystemEventsContent.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                         await SystemEventsContent.RefreshAllDataAsync();
-                        // Configuration sub-tabs (Server Config Changes, DB Config Changes, Trace Flags) are still in ServerTab
-                        _serverConfigChangesHoursBack = _globalHoursBack;
-                        _serverConfigChangesFromDate = _globalFromDate;
-                        _serverConfigChangesToDate = _globalToDate;
-                        _dbConfigChangesHoursBack = _globalHoursBack;
-                        _dbConfigChangesFromDate = _globalFromDate;
-                        _dbConfigChangesToDate = _globalToDate;
-                        _traceFlagChangesHoursBack = _globalHoursBack;
-                        _traceFlagChangesFromDate = _globalFromDate;
-                        _traceFlagChangesToDate = _globalToDate;
-                        ServerConfigChanges_Refresh_Click(null, new RoutedEventArgs());
-                        DatabaseConfigChanges_Refresh_Click(null, new RoutedEventArgs());
-                        TraceFlagChanges_Refresh_Click(null, new RoutedEventArgs());
                         break;
 
                     default:
@@ -1287,13 +1261,14 @@ namespace PerformanceMonitorDashboard
                 var criticalIssuesTask = CriticalIssuesTab.RefreshDataAsync();
                 var defaultTraceTask = DefaultTraceTab.RefreshAllDataAsync();
                 var currentConfigTask = CurrentConfigTab.RefreshAllDataAsync();
+                var configChangesTask = ConfigChangesTab.RefreshAllDataAsync();
                 var systemEventsTask = SystemEventsContent.RefreshAllDataAsync();
 
                 // Wait for everything to complete before _isRefreshing resets
                 await Task.WhenAll(
                     healthTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask,
                     performanceTask, memoryTask, resourceOverviewTask, runningJobsTask,
-                    resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, currentConfigTask, systemEventsTask);
+                    resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, currentConfigTask, configChangesTask, systemEventsTask);
 
                 // Populate grids with fetched data
                 var healthData = await healthTask;
@@ -1877,7 +1852,7 @@ namespace PerformanceMonitorDashboard
                     {
                         if (column is DataGridBoundColumn boundColumn)
                         {
-                            headers.Add(GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                         }
                     }
                     sb.AppendLine(string.Join("	", headers));
@@ -1920,7 +1895,7 @@ namespace PerformanceMonitorDashboard
                             {
                                 if (column is DataGridBoundColumn)
                                 {
-                                    headers.Add(EscapeCsvField(GetColumnHeader(column)));
+                                    headers.Add(EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
                                 }
                             }
                             sb.AppendLine(string.Join(",", headers));
@@ -2054,93 +2029,6 @@ namespace PerformanceMonitorDashboard
                 StatusText.Text = "Error";
             }
         }
-
-        // ====================================================================
-        // Configuration Changes (System Events Tab)
-        // ====================================================================
-
-        #region Configuration Changes
-
-        // Server Configuration Changes
-        private int _serverConfigChangesHoursBack = 24;
-        private DateTime? _serverConfigChangesFromDate;
-        private DateTime? _serverConfigChangesToDate;
-
-        private async void ServerConfigChanges_Refresh_Click(object? sender, RoutedEventArgs e)
-        {
-            try
-            {
-                StatusText.Text = "Loading server configuration changes...";
-                var data = await _databaseService.GetServerConfigChangesAsync(_serverConfigChangesHoursBack, _serverConfigChangesFromDate, _serverConfigChangesToDate);
-                ServerConfigChangesDataGrid.ItemsSource = data;
-                UpdateDataGridFilterButtonStyles(ServerConfigChangesDataGrid, _serverConfigChangesFilters);
-                ServerConfigChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                StatusText.Text = $"Loaded {data.Count} server configuration change records";
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error loading server configuration changes: {ex.Message}");
-                StatusText.Text = "Error loading server configuration changes";
-            }
-        }
-
-        private void ServerConfigChangesBoolFilter_Changed(object sender, SelectionChangedEventArgs e)
-        {
-            ApplyServerConfigChangesPopupFilters();
-        }
-
-        // Database Configuration Changes
-        private int _dbConfigChangesHoursBack = 24;
-        private DateTime? _dbConfigChangesFromDate;
-        private DateTime? _dbConfigChangesToDate;
-
-        private async void DatabaseConfigChanges_Refresh_Click(object? sender, RoutedEventArgs e)
-        {
-            try
-            {
-                StatusText.Text = "Loading database configuration changes...";
-                var data = await _databaseService.GetDatabaseConfigChangesAsync(_dbConfigChangesHoursBack, _dbConfigChangesFromDate, _dbConfigChangesToDate);
-                DatabaseConfigChangesDataGrid.ItemsSource = data;
-                UpdateDataGridFilterButtonStyles(DatabaseConfigChangesDataGrid, _dbConfigChangesFilters);
-                DatabaseConfigChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                StatusText.Text = $"Loaded {data.Count} database configuration change records";
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error loading database configuration changes: {ex.Message}");
-                StatusText.Text = "Error loading database configuration changes";
-            }
-        }
-
-        // Trace Flag Changes
-        private int _traceFlagChangesHoursBack = 24;
-        private DateTime? _traceFlagChangesFromDate;
-        private DateTime? _traceFlagChangesToDate;
-
-        private async void TraceFlagChanges_Refresh_Click(object? sender, RoutedEventArgs e)
-        {
-            try
-            {
-                StatusText.Text = "Loading trace flag changes...";
-                var data = await _databaseService.GetTraceFlagChangesAsync(_traceFlagChangesHoursBack, _traceFlagChangesFromDate, _traceFlagChangesToDate);
-                TraceFlagChangesDataGrid.ItemsSource = data;
-                UpdateDataGridFilterButtonStyles(TraceFlagChangesDataGrid, _traceFlagChangesFilters);
-                TraceFlagChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                StatusText.Text = $"Loaded {data.Count} trace flag change records";
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error loading trace flag changes: {ex.Message}");
-                StatusText.Text = "Error loading trace flag changes";
-            }
-        }
-
-        private void TraceFlagChangesBoolFilter_Changed(object sender, SelectionChangedEventArgs e)
-        {
-            ApplyTraceFlagChangesPopupFilters();
-        }
-
-        #endregion
 
         // ====================================================================
         // Resource Overview Tab (on Overview tab)
@@ -2497,15 +2385,6 @@ namespace PerformanceMonitorDashboard
             ColumnFilterState? existingFilter = null;
             switch (dataGridName)
             {
-                case "ServerConfigChanges":
-                    _serverConfigChangesFilters.TryGetValue(columnName, out existingFilter);
-                    break;
-                case "DbConfigChanges":
-                    _dbConfigChangesFilters.TryGetValue(columnName, out existingFilter);
-                    break;
-                case "TraceFlagChanges":
-                    _traceFlagChangesFilters.TryGetValue(columnName, out existingFilter);
-                    break;
                 case "CollectionHealth":
                     _collectionHealthFilters.TryGetValue(columnName, out existingFilter);
                     break;
@@ -2529,21 +2408,6 @@ namespace PerformanceMonitorDashboard
 
             switch (_currentFilterDataGrid)
             {
-                case "ServerConfigChanges":
-                    UpdateFilterState(_serverConfigChangesFilters, e.FilterState);
-                    ApplyServerConfigChangesPopupFilters();
-                    UpdateDataGridFilterButtonStyles(ServerConfigChangesDataGrid, _serverConfigChangesFilters);
-                    break;
-                case "DbConfigChanges":
-                    UpdateFilterState(_dbConfigChangesFilters, e.FilterState);
-                    ApplyDbConfigChangesFilters();
-                    UpdateDataGridFilterButtonStyles(DatabaseConfigChangesDataGrid, _dbConfigChangesFilters);
-                    break;
-                case "TraceFlagChanges":
-                    UpdateFilterState(_traceFlagChangesFilters, e.FilterState);
-                    ApplyTraceFlagChangesPopupFilters();
-                    UpdateDataGridFilterButtonStyles(TraceFlagChangesDataGrid, _traceFlagChangesFilters);
-                    break;
                 case "CollectionHealth":
                     UpdateFilterState(_collectionHealthFilters, e.FilterState);
                     ApplyCollectionHealthFilters();
@@ -2632,192 +2496,6 @@ namespace PerformanceMonitorDashboard
                     }
                 }
             }
-        }
-
-        #endregion
-
-        // ====================================================================
-        // Server Config Changes Filter Handlers
-        // ====================================================================
-
-        #region Server Config Changes Filters
-
-        private void ServerConfigChangesFilter_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not Button button || button.Tag is not string columnName) return;
-            ShowFilterPopup(button, columnName, "ServerConfigChanges");
-        }
-
-        private void ApplyServerConfigChangesPopupFilters()
-        {
-            if (_serverConfigChangesUnfilteredData == null)
-            {
-                _serverConfigChangesUnfilteredData = ServerConfigChangesDataGrid.ItemsSource as List<ServerConfigChangeItem>;
-                if (_serverConfigChangesUnfilteredData == null && ServerConfigChangesDataGrid.ItemsSource != null)
-                {
-                    _serverConfigChangesUnfilteredData = (ServerConfigChangesDataGrid.ItemsSource as IEnumerable<ServerConfigChangeItem>)?.ToList();
-                }
-            }
-
-            if (_serverConfigChangesUnfilteredData == null) return;
-
-            // Get boolean filter states
-            var restartFilter = (ServerConfigChangesRestartFilterCombo?.SelectedItem as ComboBoxItem)?.Content?.ToString();
-            var dynamicFilter = (ServerConfigChangesDynamicFilterCombo?.SelectedItem as ComboBoxItem)?.Content?.ToString();
-            var advancedFilter = (ServerConfigChangesAdvancedFilterCombo?.SelectedItem as ComboBoxItem)?.Content?.ToString();
-
-            if (_serverConfigChangesFilters.Count == 0 && restartFilter == "All" && dynamicFilter == "All" && advancedFilter == "All")
-            {
-                ServerConfigChangesDataGrid.ItemsSource = _serverConfigChangesUnfilteredData;
-                return;
-            }
-
-            var filteredData = _serverConfigChangesUnfilteredData.Where(item =>
-            {
-                // Apply popup filters
-                foreach (var filter in _serverConfigChangesFilters.Values)
-                {
-                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
-                    {
-                        return false;
-                    }
-                }
-
-                // Apply boolean filters
-                if (restartFilter != "All" && restartFilter != null)
-                {
-                    bool expected = restartFilter == "True";
-                    if (item.RequiresRestart != expected) return false;
-                }
-                if (dynamicFilter != "All" && dynamicFilter != null)
-                {
-                    bool expected = dynamicFilter == "True";
-                    if (item.IsDynamic != expected) return false;
-                }
-                if (advancedFilter != "All" && advancedFilter != null)
-                {
-                    bool expected = advancedFilter == "True";
-                    if (item.IsAdvanced != expected) return false;
-                }
-
-                return true;
-            }).ToList();
-
-            ServerConfigChangesDataGrid.ItemsSource = filteredData;
-        }
-
-        #endregion
-
-        // ====================================================================
-        // Database Config Changes Filter Handlers
-        // ====================================================================
-
-        #region Database Config Changes Filters
-
-        private void DbConfigChangesFilter_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not Button button || button.Tag is not string columnName) return;
-            ShowFilterPopup(button, columnName, "DbConfigChanges");
-        }
-
-        private void ApplyDbConfigChangesFilters()
-        {
-            if (_dbConfigChangesUnfilteredData == null)
-            {
-                _dbConfigChangesUnfilteredData = DatabaseConfigChangesDataGrid.ItemsSource as List<DatabaseConfigChangeItem>;
-                if (_dbConfigChangesUnfilteredData == null && DatabaseConfigChangesDataGrid.ItemsSource != null)
-                {
-                    _dbConfigChangesUnfilteredData = (DatabaseConfigChangesDataGrid.ItemsSource as IEnumerable<DatabaseConfigChangeItem>)?.ToList();
-                }
-            }
-
-            if (_dbConfigChangesUnfilteredData == null) return;
-
-            if (_dbConfigChangesFilters.Count == 0)
-            {
-                DatabaseConfigChangesDataGrid.ItemsSource = _dbConfigChangesUnfilteredData;
-                return;
-            }
-
-            var filteredData = _dbConfigChangesUnfilteredData.Where(item =>
-            {
-                foreach (var filter in _dbConfigChangesFilters.Values)
-                {
-                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            }).ToList();
-
-            DatabaseConfigChangesDataGrid.ItemsSource = filteredData;
-        }
-
-        #endregion
-
-        // ====================================================================
-        // Trace Flag Changes Filter Handlers
-        // ====================================================================
-
-        #region Trace Flag Changes Filters
-
-        private void TraceFlagChangesFilter_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not Button button || button.Tag is not string columnName) return;
-            ShowFilterPopup(button, columnName, "TraceFlagChanges");
-        }
-
-        private void ApplyTraceFlagChangesPopupFilters()
-        {
-            if (_traceFlagChangesUnfilteredData == null)
-            {
-                _traceFlagChangesUnfilteredData = TraceFlagChangesDataGrid.ItemsSource as List<TraceFlagChangeItem>;
-                if (_traceFlagChangesUnfilteredData == null && TraceFlagChangesDataGrid.ItemsSource != null)
-                {
-                    _traceFlagChangesUnfilteredData = (TraceFlagChangesDataGrid.ItemsSource as IEnumerable<TraceFlagChangeItem>)?.ToList();
-                }
-            }
-
-            if (_traceFlagChangesUnfilteredData == null) return;
-
-            // Get boolean filter states
-            var globalFilter = (TraceFlagChangesGlobalFilterCombo?.SelectedItem as ComboBoxItem)?.Content?.ToString();
-            var sessionFilter = (TraceFlagChangesSessionFilterCombo?.SelectedItem as ComboBoxItem)?.Content?.ToString();
-
-            if (_traceFlagChangesFilters.Count == 0 && globalFilter == "All" && sessionFilter == "All")
-            {
-                TraceFlagChangesDataGrid.ItemsSource = _traceFlagChangesUnfilteredData;
-                return;
-            }
-
-            var filteredData = _traceFlagChangesUnfilteredData.Where(item =>
-            {
-                // Apply popup filters
-                foreach (var filter in _traceFlagChangesFilters.Values)
-                {
-                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
-                    {
-                        return false;
-                    }
-                }
-
-                // Apply boolean filters
-                if (globalFilter != "All" && globalFilter != null)
-                {
-                    bool expected = globalFilter == "True";
-                    if (item.IsGlobal != expected) return false;
-                }
-                if (sessionFilter != "All" && sessionFilter != null)
-                {
-                    bool expected = sessionFilter == "True";
-                    if (item.IsSession != expected) return false;
-                }
-
-                return true;
-            }).ToList();
-
-            TraceFlagChangesDataGrid.ItemsSource = filteredData;
         }
 
         #endregion

@@ -369,7 +369,7 @@ namespace PerformanceMonitorDashboard
                     foreach (var column in dataGrid.Columns)
                     {
                         if (column is DataGridBoundColumn)
-                            headers.Add(TabHelpers.GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                     }
                     sb.AppendLine(string.Join("\t", headers));
                     foreach (var item in dataGrid.Items)
@@ -402,7 +402,7 @@ namespace PerformanceMonitorDashboard
                             foreach (var column in dataGrid.Columns)
                             {
                                 if (column is DataGridBoundColumn)
-                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
                             }
                             sb.AppendLine(string.Join(",", headers));
                             foreach (var item in dataGrid.Items)

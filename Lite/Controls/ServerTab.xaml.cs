@@ -50,6 +50,7 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _procDurationTrendHover;
     private Helpers.ChartHoverHelper? _queryStoreDurationTrendHover;
     private Helpers.ChartHoverHelper? _executionCountTrendHover;
+    private Helpers.ChartHoverHelper? _lockWaitTrendHover;
     private Helpers.ChartHoverHelper? _blockingTrendHover;
     private Helpers.ChartHoverHelper? _deadlockTrendHover;
 
@@ -136,6 +137,15 @@ public partial class ServerTab : UserControl
         /* Initialize column filter managers */
         InitializeFilterManagers();
 
+        /* Fix DataGrid copy — StackPanel headers copy as type name without this */
+        foreach (var grid in new DataGrid[] { QuerySnapshotsGrid, QueryStatsGrid, ProcedureStatsGrid,
+            QueryStoreGrid, BlockedProcessReportGrid, DeadlockGrid, RunningJobsGrid,
+            ServerConfigGrid, DatabaseConfigGrid, DatabaseScopedConfigGrid, TraceFlagsGrid,
+            CollectionHealthGrid, CollectionLogGrid })
+        {
+            grid.CopyingRowClipboardContent += Helpers.DataGridClipboardBehavior.FixHeaderCopy;
+        }
+
         /* Chart hover tooltips */
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
         _perfmonHover = new Helpers.ChartHoverHelper(PerfmonChart, "");
@@ -150,6 +160,7 @@ public partial class ServerTab : UserControl
         _procDurationTrendHover = new Helpers.ChartHoverHelper(ProcDurationTrendChart, "ms/sec");
         _queryStoreDurationTrendHover = new Helpers.ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec");
         _executionCountTrendHover = new Helpers.ChartHoverHelper(ExecutionCountTrendChart, "/sec");
+        _lockWaitTrendHover = new Helpers.ChartHoverHelper(LockWaitTrendChart, "ms/sec");
         _blockingTrendHover = new Helpers.ChartHoverHelper(BlockingTrendChart, "incidents");
         _deadlockTrendHover = new Helpers.ChartHoverHelper(DeadlockTrendChart, "deadlocks");
 
@@ -478,6 +489,7 @@ public partial class ServerTab : UserControl
                 runningJobsTask, collectionHealthTask, collectionLogTask);
 
             /* Trend chart tasks - run separately so failures don't kill the whole refresh */
+            var lockWaitTrendTask = SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var blockingTrendTask = SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var deadlockTrendTask = SafeQueryAsync(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var queryDurationTrendTask = SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
@@ -486,7 +498,7 @@ public partial class ServerTab : UserControl
             var executionCountTrendTask = SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
             await System.Threading.Tasks.Task.WhenAll(
-                blockingTrendTask, deadlockTrendTask,
+                lockWaitTrendTask, blockingTrendTask, deadlockTrendTask,
                 queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask);
 
             loadSw.Stop();
@@ -525,6 +537,7 @@ public partial class ServerTab : UserControl
             UpdateTempDbChart(tempDbTask.Result);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result);
             UpdateFileIoCharts(fileIoTrendTask.Result);
+            UpdateLockWaitTrendChart(lockWaitTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateBlockingTrendChart(blockingTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateDeadlockTrendChart(deadlockTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result);
@@ -842,6 +855,68 @@ public partial class ServerTab : UserControl
     }
 
     /* ========== Blocking/Deadlock Trend Charts ========== */
+
+    private void UpdateLockWaitTrendChart(List<LockWaitTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(LockWaitTrendChart);
+        ApplyDarkTheme(LockWaitTrendChart);
+
+        DateTime rangeStart, rangeEnd;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
+        }
+        else
+        {
+            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeStart = rangeEnd.AddHours(-hoursBack);
+        }
+
+        _lockWaitTrendHover?.Clear();
+        if (data.Count == 0)
+        {
+            var zeroLine = LockWaitTrendChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Lock Waits";
+            zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
+            zeroLine.MarkerSize = 0;
+            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+            LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            ReapplyAxisColors(LockWaitTrendChart);
+            LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+            SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, 1);
+            ShowChartLegend(LockWaitTrendChart);
+            LockWaitTrendChart.Refresh();
+            return;
+        }
+
+        var grouped = data.GroupBy(d => d.WaitType).ToList();
+        double globalMax = 0;
+
+        for (int i = 0; i < grouped.Count; i++)
+        {
+            var group = grouped[i];
+            var times = group.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = group.Select(t => t.WaitTimeMsPerSecond).ToArray();
+
+            var plot = LockWaitTrendChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = group.Key;
+            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+            _lockWaitTrendHover?.Add(plot, group.Key);
+
+            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+        }
+
+        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+        LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        ReapplyAxisColors(LockWaitTrendChart);
+        LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+        SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, globalMax > 0 ? globalMax : 1);
+        ShowChartLegend(LockWaitTrendChart);
+        LockWaitTrendChart.Refresh();
+    }
 
     private void UpdateBlockingTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
@@ -1630,7 +1705,7 @@ public partial class ServerTab : UserControl
         /* Header */
         foreach (var col in grid.Columns)
         {
-            sb.Append(col.Header?.ToString() ?? "");
+            sb.Append(Helpers.DataGridClipboardBehavior.GetHeaderText(col));
             sb.Append('\t');
         }
         sb.AppendLine();
@@ -1817,14 +1892,36 @@ public partial class ServerTab : UserControl
         btn.Content = "...";
         try
         {
-            var connStr = _server.GetConnectionString(_credentialService);
-            var plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash);
+            string? plan = null;
+            var source = "collected data";
+
+            // Try DuckDB first
+            try
+            {
+                plan = await _dataService.GetCachedQueryPlanAsync(_serverId, row.QueryHash);
+            }
+            catch
+            {
+                // DuckDB lookup failed, fall through to live server
+            }
+
+            // Fall back to live server
             if (string.IsNullOrEmpty(plan))
             {
-                MessageBox.Show("No query plan found in the plan cache for this query hash. The plan may have been evicted.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                var connStr = _server.GetConnectionString(_credentialService);
+                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash);
+                source = "live server";
+            }
+
+            if (string.IsNullOrEmpty(plan))
+            {
+                MessageBox.Show("No query plan found in collected data or the live plan cache for this query hash.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
             SavePlanFile(plan, $"QueryPlan_{row.QueryHash}");
+            btn.Content = $"Saved ({source})";
+            return;
         }
         catch (Exception ex)
         {
@@ -1832,7 +1929,63 @@ public partial class ServerTab : UserControl
         }
         finally
         {
-            btn.Content = "Save";
+            if (btn.Content is "...")
+                btn.Content = "Download";
+            btn.IsEnabled = true;
+        }
+    }
+
+    private async void DownloadProcedurePlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.DataContext is not ProcedureStatsRow row) return;
+        if (string.IsNullOrEmpty(row.ObjectName)) return;
+
+        btn.IsEnabled = false;
+        btn.Content = "...";
+        try
+        {
+            string? plan = null;
+            var source = "collected data";
+
+            // Try DuckDB first — match by plan_handle in query_stats
+            if (!string.IsNullOrEmpty(row.PlanHandle))
+            {
+                try
+                {
+                    plan = await _dataService.GetCachedProcedurePlanAsync(_serverId, row.PlanHandle);
+                }
+                catch
+                {
+                    // DuckDB lookup failed, fall through to live server
+                }
+            }
+
+            // Fall back to live server
+            if (string.IsNullOrEmpty(plan))
+            {
+                var connStr = _server.GetConnectionString(_credentialService);
+                plan = await LocalDataService.FetchProcedurePlanOnDemandAsync(connStr, row.DatabaseName, row.SchemaName, row.ObjectName);
+                source = "live server";
+            }
+
+            if (string.IsNullOrEmpty(plan))
+            {
+                MessageBox.Show("No query plan found in collected data or the live plan cache for this procedure.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            SavePlanFile(plan, $"ProcPlan_{row.FullName}");
+            btn.Content = $"Saved ({source})";
+            return;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            if (btn.Content is "...")
+                btn.Content = "Download";
             btn.IsEnabled = true;
         }
     }
