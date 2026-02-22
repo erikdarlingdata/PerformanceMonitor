@@ -180,6 +180,48 @@ namespace PerformanceMonitorDashboard.Services
             return items;
         }
 
+        public async Task<List<CollectionLogEntry>> GetCollectionDurationLogsAsync(int hoursBack = 24)
+        {
+            var items = new List<CollectionLogEntry>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query = @"
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT
+                    collector_name,
+                    collection_time,
+                    duration_ms
+                FROM config.collection_log
+                WHERE collection_status = 'SUCCESS'
+                    AND duration_ms IS NOT NULL
+                    AND collection_time >= DATEADD(HOUR, -@hours_back, GETUTCDATE())
+                ORDER BY
+                    collection_time;";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = hoursBack });
+
+            using (StartQueryTiming("Collection Duration Logs", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new CollectionLogEntry
+                    {
+                        CollectorName = reader.GetString(0),
+                        CollectionTime = reader.GetDateTime(1),
+                        DurationMs = reader.GetInt32(2)
+                    });
+                }
+            }
+
+            return items;
+        }
+
         // ============================================
         // Helper Methods for Safe Type Conversion
         // ============================================

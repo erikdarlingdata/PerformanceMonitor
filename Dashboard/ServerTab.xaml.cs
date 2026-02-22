@@ -78,6 +78,7 @@ namespace PerformanceMonitorDashboard
         private Helpers.ChartHoverHelper? _blockingDurationHover;
         private Helpers.ChartHoverHelper? _deadlocksHover;
         private Helpers.ChartHoverHelper? _deadlockWaitTimeHover;
+        private Helpers.ChartHoverHelper? _collectorDurationHover;
 
         public ServerTab(ServerConnection serverConnection, int utcOffsetMinutes = 0)
         {
@@ -92,6 +93,7 @@ namespace PerformanceMonitorDashboard
             _blockingDurationHover = new Helpers.ChartHoverHelper(BlockingStatsDurationChart, "ms");
             _deadlocksHover = new Helpers.ChartHoverHelper(BlockingStatsDeadlocksChart, "events");
             _deadlockWaitTimeHover = new Helpers.ChartHoverHelper(BlockingStatsDeadlockWaitTimeChart, "ms");
+            _collectorDurationHover = new Helpers.ChartHoverHelper(CollectorDurationChart, "ms");
 
             _serverConnection = serverConnection;
             UtcOffsetMinutes = utcOffsetMinutes;
@@ -1247,6 +1249,7 @@ namespace PerformanceMonitorDashboard
 
                 // Fetch all data in parallel — overview queries + all tab refreshes
                 var healthTask = _databaseService.GetCollectionHealthAsync();
+                var durationLogsTask = _databaseService.GetCollectionDurationLogsAsync();
                 var blockingEventsTask = _databaseService.GetBlockingEventsAsync();
                 var deadlocksTask = _databaseService.GetDeadlocksAsync();
                 var blockingStatsTask = _databaseService.GetBlockingDeadlockStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
@@ -1266,7 +1269,7 @@ namespace PerformanceMonitorDashboard
 
                 // Wait for everything to complete before _isRefreshing resets
                 await Task.WhenAll(
-                    healthTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask,
+                    healthTask, durationLogsTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask,
                     performanceTask, memoryTask, resourceOverviewTask, runningJobsTask,
                     resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, currentConfigTask, configChangesTask, systemEventsTask);
 
@@ -1275,6 +1278,9 @@ namespace PerformanceMonitorDashboard
                 HealthDataGrid.ItemsSource = healthData;
                 UpdateDataGridFilterButtonStyles(HealthDataGrid, _collectionHealthFilters);
                 HealthNoDataMessage.Visibility = healthData.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+                var durationLogs = await durationLogsTask;
+                UpdateCollectorDurationChart(durationLogs);
 
                 try
                 {
@@ -1738,6 +1744,55 @@ namespace PerformanceMonitorDashboard
             BlockingStatsDeadlockWaitTimeChart.Plot.YLabel("Duration (ms)");
             LockChartVerticalAxis(BlockingStatsDeadlockWaitTimeChart);
             BlockingStatsDeadlockWaitTimeChart.Refresh();
+        }
+
+        private void UpdateCollectorDurationChart(List<CollectionLogEntry> data)
+        {
+            if (_legendPanels.TryGetValue(CollectorDurationChart, out var existingPanel) && existingPanel != null)
+            {
+                CollectorDurationChart.Plot.Axes.Remove(existingPanel);
+                _legendPanels[CollectorDurationChart] = null;
+            }
+            CollectorDurationChart.Plot.Clear();
+            _collectorDurationHover?.Clear();
+            ApplyDarkModeToChart(CollectorDurationChart);
+
+            if (data.Count == 0) { CollectorDurationChart.Refresh(); return; }
+
+            var groups = data
+                .Where(d => d.CollectorName != "scheduled_master_collector")
+                .GroupBy(d => d.CollectorName)
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            var colors = TabHelpers.ChartColors;
+            int colorIndex = 0;
+            foreach (var group in groups)
+            {
+                var points = group.OrderBy(d => d.CollectionTime).ToList();
+                if (points.Count < 2) continue;
+
+                var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
+                    points.Select(d => d.CollectionTime),
+                    points.Select(d => (double)d.DurationMs));
+
+                var scatter = CollectorDurationChart.Plot.Add.Scatter(xs, ys);
+                scatter.LegendText = group.Key;
+                scatter.Color = colors[colorIndex % colors.Length];
+                scatter.LineWidth = 2;
+                scatter.MarkerSize = 0;
+                _collectorDurationHover?.Add(scatter, group.Key);
+                colorIndex++;
+            }
+
+            CollectorDurationChart.Plot.Axes.DateTimeTicksBottom();
+            TabHelpers.ReapplyAxisColors(CollectorDurationChart);
+            CollectorDurationChart.Plot.YLabel("Duration (ms)");
+            CollectorDurationChart.Plot.Axes.AutoScale();
+            _legendPanels[CollectorDurationChart] = CollectorDurationChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+            CollectorDurationChart.Plot.Legend.FontSize = 12;
+            LockChartVerticalAxis(CollectorDurationChart);
+            CollectorDurationChart.Refresh();
         }
 
         private void LoadLockWaitStatsChart(List<LockWaitStatsItem> data, int hoursBack, DateTime? fromDate, DateTime? toDate)

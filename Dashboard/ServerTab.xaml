@@ -241,92 +241,98 @@
 
                     <!-- Collection Health Sub-Tab -->
                     <TabItem Header="Collection Health">
-                        <Grid>
-                        <DataGrid x:Name="HealthDataGrid"
-                                      RowStyle="{StaticResource HealthRowStyle}"
-                                      AutoGenerateColumns="False"
-                                      IsReadOnly="True"
-                                      CanUserSortColumns="True"
-
-                                      GridLinesVisibility="All" CanUserResizeColumns="True"
-                                      MouseDoubleClick="HealthDataGrid_MouseDoubleClick">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding CollectorName}" Width="250">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding HealthStatus}" Width="100">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HealthStatus" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding HoursSinceSuccess}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HoursSinceSuccess" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Hours Since Success" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastSuccessTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessTime" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat='{}{0:F2}%'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailureRatePercent" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Failure %" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding TotalRuns7d, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns7d" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Runs (7d)" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding FailedRuns7d, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailedRuns7d" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Failed (7d)" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding AvgDurationMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationMs" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Avg Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding TotalRowsCollected7d, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="150">
-                                        <DataGridTextColumn.Header>
-                                            <StackPanel Orientation="Horizontal">
-                                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRowsCollected7d" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
-                                                <TextBlock Text="Rows Collected (7d)" FontWeight="Bold" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        <TextBlock x:Name="HealthNoDataMessage" Style="{StaticResource NoDataMessage}"/>
-                        </Grid>
+                        <TabControl>
+                            <TabItem Header="Health Summary">
+                                <Grid>
+                                    <DataGrid x:Name="HealthDataGrid"
+                                              RowStyle="{StaticResource HealthRowStyle}"
+                                              AutoGenerateColumns="False"
+                                              IsReadOnly="True"
+                                              CanUserSortColumns="True"
+                                              GridLinesVisibility="All" CanUserResizeColumns="True"
+                                              MouseDoubleClick="HealthDataGrid_MouseDoubleClick">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Binding="{Binding CollectorName}" Width="250">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding HealthStatus}" Width="100">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HealthStatus" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding HoursSinceSuccess}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HoursSinceSuccess" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Hours Since Success" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding LastSuccessTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessTime" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat='{}{0:F2}%'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailureRatePercent" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Failure %" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding TotalRuns7d, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns7d" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Runs (7d)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding FailedRuns7d, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailedRuns7d" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Failed (7d)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding AvgDurationMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationMs" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Avg Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Binding="{Binding TotalRowsCollected7d, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="150">
+                                                <DataGridTextColumn.Header>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRowsCollected7d" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
+                                                        <TextBlock Text="Rows Collected (7d)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </DataGridTextColumn.Header>
+                                            </DataGridTextColumn>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <TextBlock x:Name="HealthNoDataMessage" Style="{StaticResource NoDataMessage}"/>
+                                </Grid>
+                            </TabItem>
+                            <TabItem Header="Duration Trends">
+                                <ScottPlot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
+                            </TabItem>
+                        </TabControl>
                     </TabItem>
 
                     <!-- Running Jobs Sub-Tab -->
