@@ -275,11 +275,11 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="2" x:Name="DatabaseSizeText" Text="Database: --" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="3" x:Name="CollectionStatusText" Text="Collection: Stopped" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="4" x:Name="ServerCountText" Text="Servers: 0" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="2" x:Name="DatabaseSizeText" Text="Database: --" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="3" x:Name="CollectionStatusText" Text="Collection: Stopped" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="4" x:Name="ServerCountText" Text="Servers: 0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                 </Grid>
             </Border>
         </Grid>
