@@ -207,7 +207,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding TraceFlag}" Width="90">
+                    <DataGridTextColumn Binding="{Binding TraceFlag}" ElementStyle="{StaticResource NumericCell}" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TraceFlag" Click="TraceFlagChangesFilter_Click" Margin="0,0,4,0"/>

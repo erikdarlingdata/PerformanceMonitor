@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -251,14 +252,17 @@ namespace PerformanceMonitorDashboard.Controls
                 var queryStats = await queryStatsTask;
                 QueryStatsDataGrid.ItemsSource = queryStats;
                 QueryStatsNoDataMessage.Visibility = queryStats.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(QueryStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
 
                 var procStats = await procStatsTask;
                 ProcStatsDataGrid.ItemsSource = procStats;
                 ProcStatsNoDataMessage.Visibility = procStats.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(ProcStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
 
                 var queryStore = await queryStoreTask;
                 QueryStoreDataGrid.ItemsSource = queryStore;
                 QueryStoreNoDataMessage.Visibility = queryStore.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(QueryStoreDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
 
                 // Populate charts from time-series data
                 LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0], _queryDurationHover);
@@ -279,6 +283,20 @@ namespace PerformanceMonitorDashboard.Controls
         private void SetStatus(string message)
         {
             _statusCallback?.Invoke(message);
+        }
+
+        private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+        {
+            foreach (var column in grid.Columns)
+            {
+                if (column is DataGridBoundColumn bc &&
+                    bc.Binding is Binding b &&
+                    b.Path.Path == bindingPath)
+                {
+                    column.SortDirection = direction;
+                    return;
+                }
+            }
         }
 
         private void SetupChartSaveMenus()
@@ -872,6 +890,7 @@ namespace PerformanceMonitorDashboard.Controls
                 var data = await _databaseService.GetQueryStoreRegressionsAsync(_qsRegressionsHoursBack, _qsRegressionsFromDate, _qsRegressionsToDate);
                 QueryStoreRegressionsDataGrid.ItemsSource = data;
                 QueryStoreRegressionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(QueryStoreRegressionsDataGrid, "DurationRegressionPercent", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} query store regression records");
             }
             catch (Exception ex)
@@ -908,6 +927,7 @@ namespace PerformanceMonitorDashboard.Controls
                 var data = await _databaseService.GetLongRunningQueryPatternsAsync(_lrqPatternsHoursBack, _lrqPatternsFromDate, _lrqPatternsToDate);
                 LongRunningQueryPatternsDataGrid.ItemsSource = data;
                 LongRunningQueryPatternsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(LongRunningQueryPatternsDataGrid, "AvgDurationSec", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} long running query pattern records");
             }
             catch (Exception ex)

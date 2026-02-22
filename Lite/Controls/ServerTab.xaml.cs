@@ -17,6 +17,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Controls.Primitives;
+using System.ComponentModel;
+using System.Windows.Data;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Database;
@@ -522,10 +524,13 @@ public partial class ServerTab : UserControl
             /* Update grids (via filter managers to preserve active filters) */
             _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
+            SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
             _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(deadlockTask.Result));
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
+            SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
             _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
             _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
@@ -2422,5 +2427,19 @@ public partial class ServerTab : UserControl
             current = VisualTreeHelper.GetParent(current);
         }
         return null;
+    }
+
+    private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+    {
+        foreach (var column in grid.Columns)
+        {
+            if (column is DataGridBoundColumn bc &&
+                bc.Binding is Binding b &&
+                b.Path.Path == bindingPath)
+            {
+                column.SortDirection = direction;
+                return;
+            }
+        }
     }
 }
