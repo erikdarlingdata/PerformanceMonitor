@@ -46,7 +46,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding RowsCollected}" Width="120">
+                <DataGridTextColumn Binding="{Binding RowsCollected}" ElementStyle="{StaticResource NumericCell}" Width="120">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button x:Name="RowsCollectedFilterButton" Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowsCollected" Click="LogFilter_Click" Margin="0,0,4,0"/>
@@ -54,7 +54,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding DurationMs, StringFormat='{}{0:N0}'}" Width="110">
+                <DataGridTextColumn Binding="{Binding DurationMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button x:Name="DurationFilterButton" Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="LogFilter_Click" Margin="0,0,4,0"/>

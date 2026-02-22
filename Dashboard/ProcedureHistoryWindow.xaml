@@ -128,7 +128,7 @@
                 </DataGridTextColumn>
 
                 <!-- Execution Count -->
-                <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat=N0}" Width="90">
+                <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecutionCount" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -136,7 +136,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding ExecutionCountDelta, StringFormat=N0}" Width="85">
+                <DataGridTextColumn Binding="{Binding ExecutionCountDelta, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="85">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecutionCountDelta" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -146,7 +146,7 @@
                 </DataGridTextColumn>
 
                 <!-- Worker Time (CPU) -->
-                <DataGridTextColumn Binding="{Binding TotalWorkerTimeMs, StringFormat=N2}" Width="110">
+                <DataGridTextColumn Binding="{Binding TotalWorkerTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalWorkerTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -154,7 +154,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding AvgWorkerTimeMs, StringFormat=N2}" Width="100">
+                <DataGridTextColumn Binding="{Binding AvgWorkerTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgWorkerTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -162,7 +162,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MinWorkerTimeMs, StringFormat=N2}" Width="100">
+                <DataGridTextColumn Binding="{Binding MinWorkerTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinWorkerTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -170,7 +170,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MaxWorkerTimeMs, StringFormat=N2}" Width="100">
+                <DataGridTextColumn Binding="{Binding MaxWorkerTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxWorkerTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -178,7 +178,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding TotalWorkerTimeDeltaMs, StringFormat=N2}" Width="105">
+                <DataGridTextColumn Binding="{Binding TotalWorkerTimeDeltaMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="105">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalWorkerTimeDeltaMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -188,7 +188,7 @@
                 </DataGridTextColumn>
 
                 <!-- Elapsed Time -->
-                <DataGridTextColumn Binding="{Binding TotalElapsedTimeMs, StringFormat=N2}" Width="125">
+                <DataGridTextColumn Binding="{Binding TotalElapsedTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="125">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalElapsedTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -196,7 +196,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding AvgElapsedTimeMs, StringFormat=N2}" Width="115">
+                <DataGridTextColumn Binding="{Binding AvgElapsedTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgElapsedTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -204,7 +204,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MinElapsedTimeMs, StringFormat=N2}" Width="115">
+                <DataGridTextColumn Binding="{Binding MinElapsedTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinElapsedTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -212,7 +212,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MaxElapsedTimeMs, StringFormat=N2}" Width="115">
+                <DataGridTextColumn Binding="{Binding MaxElapsedTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxElapsedTimeMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -220,7 +220,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding TotalElapsedTimeDeltaMs, StringFormat=N2}" Width="125">
+                <DataGridTextColumn Binding="{Binding TotalElapsedTimeDeltaMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="125">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalElapsedTimeDeltaMs" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -230,7 +230,7 @@
                 </DataGridTextColumn>
 
                 <!-- Logical Reads -->
-                <DataGridTextColumn Binding="{Binding TotalLogicalReads, StringFormat=N0}" Width="125">
+                <DataGridTextColumn Binding="{Binding TotalLogicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="125">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalLogicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -238,7 +238,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding AvgLogicalReads, StringFormat=N2}" Width="115">
+                <DataGridTextColumn Binding="{Binding AvgLogicalReads, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgLogicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -246,7 +246,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MinLogicalReads, StringFormat=N0}" Width="115">
+                <DataGridTextColumn Binding="{Binding MinLogicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinLogicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -254,7 +254,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MaxLogicalReads, StringFormat=N0}" Width="115">
+                <DataGridTextColumn Binding="{Binding MaxLogicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxLogicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -262,7 +262,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding TotalLogicalReadsDelta, StringFormat=N0}" Width="95">
+                <DataGridTextColumn Binding="{Binding TotalLogicalReadsDelta, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalLogicalReadsDelta" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -272,7 +272,7 @@
                 </DataGridTextColumn>
 
                 <!-- Physical Reads -->
-                <DataGridTextColumn Binding="{Binding TotalPhysicalReads, StringFormat=N0}" Width="130">
+                <DataGridTextColumn Binding="{Binding TotalPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="130">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalPhysicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -280,7 +280,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding AvgPhysicalReads, StringFormat=N2}" Width="120">
+                <DataGridTextColumn Binding="{Binding AvgPhysicalReads, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgPhysicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -288,7 +288,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MinPhysicalReads, StringFormat=N0}" Width="120">
+                <DataGridTextColumn Binding="{Binding MinPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinPhysicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -296,7 +296,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MaxPhysicalReads, StringFormat=N0}" Width="120">
+                <DataGridTextColumn Binding="{Binding MaxPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxPhysicalReads" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -304,7 +304,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding TotalPhysicalReadsDelta, StringFormat=N0}" Width="115">
+                <DataGridTextColumn Binding="{Binding TotalPhysicalReadsDelta, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalPhysicalReadsDelta" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -314,7 +314,7 @@
                 </DataGridTextColumn>
 
                 <!-- Logical Writes -->
-                <DataGridTextColumn Binding="{Binding TotalLogicalWrites, StringFormat=N0}" Width="125">
+                <DataGridTextColumn Binding="{Binding TotalLogicalWrites, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="125">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalLogicalWrites" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -322,7 +322,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding AvgLogicalWrites, StringFormat=N2}" Width="115">
+                <DataGridTextColumn Binding="{Binding AvgLogicalWrites, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgLogicalWrites" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -330,7 +330,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MinLogicalWrites, StringFormat=N0}" Width="115">
+                <DataGridTextColumn Binding="{Binding MinLogicalWrites, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinLogicalWrites" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -338,7 +338,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MaxLogicalWrites, StringFormat=N0}" Width="115">
+                <DataGridTextColumn Binding="{Binding MaxLogicalWrites, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="115">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxLogicalWrites" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -346,7 +346,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding TotalLogicalWritesDelta, StringFormat=N0}" Width="95">
+                <DataGridTextColumn Binding="{Binding TotalLogicalWritesDelta, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalLogicalWritesDelta" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -356,7 +356,7 @@
                 </DataGridTextColumn>
 
                 <!-- Spills -->
-                <DataGridTextColumn Binding="{Binding TotalSpills, StringFormat=N0}" Width="90">
+                <DataGridTextColumn Binding="{Binding TotalSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSpills" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -364,7 +364,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding AvgSpills, StringFormat=N2}" Width="85">
+                <DataGridTextColumn Binding="{Binding AvgSpills, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="85">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgSpills" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -372,7 +372,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MinSpills, StringFormat=N0}" Width="85">
+                <DataGridTextColumn Binding="{Binding MinSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="85">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinSpills" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -380,7 +380,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding MaxSpills, StringFormat=N0}" Width="85">
+                <DataGridTextColumn Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="85">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxSpills" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -390,7 +390,7 @@
                 </DataGridTextColumn>
 
                 <!-- Sample Interval -->
-                <DataGridTextColumn Binding="{Binding SampleIntervalSeconds}" Width="85">
+                <DataGridTextColumn Binding="{Binding SampleIntervalSeconds}" ElementStyle="{StaticResource NumericCell}" Width="85">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SampleIntervalSeconds" Click="Filter_Click" Margin="0,0,4,0"/>

@@ -202,7 +202,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding ErrorNumber}" Width="100">
+                    <DataGridTextColumn Binding="{Binding ErrorNumber}" ElementStyle="{StaticResource NumericCell}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorNumber" Click="SevereErrorsFilter_Click" Margin="0,0,4,0"/>
@@ -210,7 +210,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding Severity}" Width="80">
+                    <DataGridTextColumn Binding="{Binding Severity}" ElementStyle="{StaticResource NumericCell}" Width="80">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="SevereErrorsFilter_Click" Margin="0,0,4,0"/>
@@ -218,7 +218,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding State}" Width="70">
+                    <DataGridTextColumn Binding="{Binding State}" ElementStyle="{StaticResource NumericCell}" Width="70">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="State" Click="SevereErrorsFilter_Click" Margin="0,0,4,0"/>
