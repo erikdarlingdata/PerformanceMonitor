@@ -255,7 +255,12 @@ CREATE TABLE IF NOT EXISTS query_snapshots (
     granted_query_memory_gb DECIMAL(18,2),
     transaction_isolation_level VARCHAR,
     dop INTEGER,
-    parallel_worker_count INTEGER
+    parallel_worker_count INTEGER,
+    login_name VARCHAR,
+    host_name VARCHAR,
+    program_name VARCHAR,
+    open_transaction_count INTEGER,
+    percent_complete DECIMAL(5,2)
 )";
 
     public const string CreateTempdbStatsTable = @"

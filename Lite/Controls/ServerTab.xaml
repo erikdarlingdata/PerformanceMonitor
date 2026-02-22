@@ -196,7 +196,14 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <TextBlock Grid.Row="0" Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                    <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
+                                            Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
+                                            VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="LiveSnapshotIndicator" Text="" FontSize="12"
+                                               Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                </StackPanel>
                                 <DataGrid Grid.Row="1" x:Name="QuerySnapshotsGrid"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           RowStyle="{StaticResource GridRowStyle}"
@@ -211,6 +218,15 @@
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding LoginName}" Width="110">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LoginName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Login" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding HostName}" Width="110">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HostName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Host" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding ProgramName}" Width="140">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ProgramName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Program" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding Status}" Width="80">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Status" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -253,6 +269,12 @@
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding TransactionIsolationLevel}" Width="140">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TransactionIsolationLevel" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Isolation" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding OpenTransactionCount}" ElementStyle="{StaticResource NumericCell}" Width="70">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OpenTransactionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Open Tran" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding PercentComplete, StringFormat=F1}" ElementStyle="{StaticResource NumericCell}" Width="70">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PercentComplete" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="% Done" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                         <DataGridTemplateColumn Width="500">
                                             <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>

@@ -320,6 +320,231 @@
             </Grid>
         </TabItem>
 
+        <!-- Current Active Queries Sub-Tab (Live DMV Snapshot) -->
+        <TabItem Header="Current Active Queries">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
+                    <Button x:Name="CurrentActiveRefreshButton" Content="Refresh"
+                            Click="CurrentActiveRefresh_Click" Padding="12,4" Margin="0,0,8,0"/>
+                    <TextBlock x:Name="CurrentActiveTimestamp" VerticalAlignment="Center"
+                               Foreground="DarkGoldenrod" FontWeight="SemiBold" FontSize="12"/>
+                </StackPanel>
+
+                <DataGrid Grid.Row="1" x:Name="CurrentActiveQueriesDataGrid"
+                          AutoGenerateColumns="False" IsReadOnly="True"
+                          RowHeight="35" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
+                          ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                          RowStyle="{DynamicResource DefaultRowStyle}">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Binding="{Binding SessionId}" ElementStyle="{StaticResource NumericCell}" Width="60">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionId" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="SPID" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding Status}" Width="80">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Status" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding ElapsedTimeFormatted}" Width="120">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ElapsedTimeFormatted" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Elapsed" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding LoginName}" Width="110">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LoginName" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Login" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding HostName}" Width="110">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HostName" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Host" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding ProgramName}" Width="140">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ProgramName" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Program" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuTimeMs" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding LogicalReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LogicalReads" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Logical Reads" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding Reads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Reads" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Reads" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding Writes, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Writes" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Writes" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding WaitType}" Width="120">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitType" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Wait Type" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding WaitTimeMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitTimeMs" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Wait (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding WaitResource}" Width="140">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitResource" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Wait Resource" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding BlockingSessionId}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BlockingSessionId" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Blocking" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding Dop}" ElementStyle="{StaticResource NumericCell}" Width="50">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Dop" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="DOP" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding ParallelWorkerCount}" ElementStyle="{StaticResource NumericCell}" Width="60">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ParallelWorkerCount" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Workers" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding GrantedQueryMemoryGb, StringFormat='{}{0:F2}'}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrantedQueryMemoryGb" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Memory (GB)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding TransactionIsolationLevel}" Width="140">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TransactionIsolationLevel" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Isolation" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding OpenTransactionCount}" ElementStyle="{StaticResource NumericCell}" Width="70">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OpenTransactionCount" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Open Tran" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding PercentComplete, StringFormat='{}{0:F1}'}" ElementStyle="{StaticResource NumericCell}" Width="70">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PercentComplete" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="% Done" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding QueryText}" Width="500">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTemplateColumn Header="Est Plan" Width="Auto" MinWidth="80">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Button Content="Download" Click="DownloadCurrentActiveEstPlan_Click"
+                                            IsEnabled="{Binding HasQueryPlan}"
+                                            HorizontalAlignment="Center" VerticalAlignment="Center"
+                                            Padding="8,4"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Live Plan" Width="Auto" MinWidth="80">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Button Content="Download" Click="DownloadCurrentActiveLivePlan_Click"
+                                            IsEnabled="{Binding HasLiveQueryPlan}"
+                                            HorizontalAlignment="Center" VerticalAlignment="Center"
+                                            Padding="8,4"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock x:Name="CurrentActiveNoDataMessage" Style="{StaticResource EmptyStateMessage}"
+                           Text="Click Refresh to load current active queries" Grid.Row="1"/>
+                <local:LoadingOverlay x:Name="CurrentActiveLoading" Grid.Row="1"/>
+            </Grid>
+        </TabItem>
+
         <!-- Query Stats Sub-Tab -->
         <TabItem Header="Query Stats">
             <Grid>

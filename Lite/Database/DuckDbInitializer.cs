@@ -68,7 +68,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 11;
+    internal const int CurrentSchemaVersion = 12;
 
     private readonly string _archivePath;
 
@@ -416,6 +416,25 @@ public class DuckDbInitializer
                     encryption, security, and version-gated columns (ADR, memory optimized, optimized locking). */
             _logger?.LogInformation("Running migration to v11: rebuilding database_config for expanded sys.databases columns");
             await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS database_config");
+        }
+
+        if (fromVersion < 12)
+        {
+            /* v12: Added login_name, host_name, program_name, open_transaction_count,
+                    percent_complete columns to query_snapshots for Issue #149. */
+            _logger?.LogInformation("Running migration to v12: adding session columns to query_snapshots");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS login_name VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS host_name VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS program_name VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS open_transaction_count INTEGER");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS percent_complete DECIMAL(5,2)");
+            }
+            catch
+            {
+                /* Table doesn't exist yet — will be created with correct schema below */
+            }
         }
     }
 

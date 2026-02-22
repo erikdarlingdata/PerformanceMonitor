@@ -20,6 +20,7 @@ using System.Windows.Controls.Primitives;
 using System.ComponentModel;
 using System.Windows.Data;
 using System.Windows.Threading;
+using Microsoft.Data.SqlClient;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
@@ -525,6 +526,7 @@ public partial class ServerTab : UserControl
 
             /* Update grids (via filter managers to preserve active filters) */
             _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
+            LiveSnapshotIndicator.Text = "";
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
             SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
@@ -2231,6 +2233,78 @@ public partial class ServerTab : UserControl
     {
         if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row || row.LiveQueryPlan == null) return;
         SavePlanFile(row.LiveQueryPlan, $"ActualPlan_Session{row.SessionId}");
+    }
+
+    private async void LiveSnapshot_Click(object sender, RoutedEventArgs e)
+    {
+        LiveSnapshotButton.IsEnabled = false;
+        LiveSnapshotIndicator.Text = "Querying...";
+
+        try
+        {
+            var connectionString = _server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                ConnectTimeout = 15
+            };
+
+            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: true);
+
+            await using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 30;
+
+            using var reader = await command.ExecuteReaderAsync();
+            var results = new List<QuerySnapshotRow>();
+            var snapshotTime = DateTime.UtcNow;
+
+            while (await reader.ReadAsync())
+            {
+                results.Add(new QuerySnapshotRow
+                {
+                    SessionId = Convert.ToInt32(reader.GetValue(0)),
+                    DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    QueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    LiveQueryPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString(),
+                    Status = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                    BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
+                    WaitType = reader.IsDBNull(8) ? "" : reader.GetString(8),
+                    WaitTimeMs = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                    WaitResource = reader.IsDBNull(10) ? "" : reader.GetString(10),
+                    CpuTimeMs = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11)),
+                    TotalElapsedTimeMs = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+                    Reads = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
+                    Writes = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+                    LogicalReads = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
+                    GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0 : Convert.ToDouble(reader.GetValue(16)),
+                    TransactionIsolationLevel = reader.IsDBNull(17) ? "" : reader.GetString(17),
+                    Dop = reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)),
+                    ParallelWorkerCount = reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)),
+                    LoginName = reader.IsDBNull(20) ? "" : reader.GetString(20),
+                    HostName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+                    ProgramName = reader.IsDBNull(22) ? "" : reader.GetString(22),
+                    OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
+                    PercentComplete = reader.IsDBNull(24) ? 0m : reader.GetDecimal(24),
+                    CollectionTime = snapshotTime
+                });
+            }
+
+            _querySnapshotsFilterMgr!.UpdateData(results);
+            LiveSnapshotIndicator.Text = $"LIVE at {DateTime.Now:HH:mm:ss} ({results.Count} queries)";
+        }
+        catch (Exception ex)
+        {
+            LiveSnapshotIndicator.Text = $"Error: {ex.Message}";
+            AppLogger.Error("ServerTab", $"Live snapshot failed: {ex.Message}");
+        }
+        finally
+        {
+            LiveSnapshotButton.IsEnabled = true;
+        }
     }
 
     private void SavePlanFile(string planXml, string defaultName)

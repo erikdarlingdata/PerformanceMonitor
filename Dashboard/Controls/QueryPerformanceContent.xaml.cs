@@ -44,6 +44,10 @@ namespace PerformanceMonitorDashboard.Controls
         private Dictionary<string, Models.ColumnFilterState> _activeQueriesFilters = new();
         private List<QuerySnapshotItem>? _activeQueriesUnfilteredData;
 
+        // Current Active Queries filter state
+        private Dictionary<string, Models.ColumnFilterState> _currentActiveFilters = new();
+        private List<LiveQueryItem>? _currentActiveUnfilteredData;
+
         // Query Stats filter state
         private Dictionary<string, Models.ColumnFilterState> _queryStatsFilters = new();
         private List<QueryStatsItem>? _queryStatsUnfilteredData;
@@ -126,9 +130,12 @@ namespace PerformanceMonitorDashboard.Controls
                 _filterPopupContent.FilterCleared -= ProcStatsFilterPopup_FilterCleared;
                 _filterPopupContent.FilterApplied -= QueryStoreFilterPopup_FilterApplied;
                 _filterPopupContent.FilterCleared -= QueryStoreFilterPopup_FilterCleared;
+                _filterPopupContent.FilterApplied -= CurrentActiveFilterPopup_FilterApplied;
+                _filterPopupContent.FilterCleared -= CurrentActiveFilterPopup_FilterCleared;
             }
 
             /* Clear large data collections to free memory */
+            _currentActiveUnfilteredData = null;
             _activeQueriesUnfilteredData = null;
             _queryStatsUnfilteredData = null;
             _procStatsUnfilteredData = null;
@@ -149,6 +156,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Apply minimum column widths based on header text to all DataGrids
             TabHelpers.AutoSizeColumnMinWidths(ActiveQueriesDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(CurrentActiveQueriesDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(QueryStatsDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(ProcStatsDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(QueryStoreDataGrid);
@@ -157,6 +165,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Freeze first columns for easier horizontal scrolling
             TabHelpers.FreezeColumns(ActiveQueriesDataGrid, 2);
+            TabHelpers.FreezeColumns(CurrentActiveQueriesDataGrid, 2);
             TabHelpers.FreezeColumns(QueryStatsDataGrid, 2);
             TabHelpers.FreezeColumns(ProcStatsDataGrid, 2);
             TabHelpers.FreezeColumns(QueryStoreDataGrid, 2);
@@ -537,6 +546,164 @@ namespace PerformanceMonitorDashboard.Controls
                 {
                     MessageBox.Show($"Error fetching/saving query plan:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                     SetStatus("Error fetching query plan");
+                }
+            }
+        }
+
+        #endregion
+
+        #region Current Active Queries
+
+        private async void CurrentActiveRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            await RefreshCurrentActiveQueriesAsync();
+        }
+
+        private async Task RefreshCurrentActiveQueriesAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                CurrentActiveRefreshButton.IsEnabled = false;
+
+                if (CurrentActiveQueriesDataGrid.ItemsSource == null)
+                {
+                    CurrentActiveLoading.IsLoading = true;
+                    CurrentActiveNoDataMessage.Visibility = Visibility.Collapsed;
+                }
+                SetStatus("Loading current active queries...");
+
+                var data = await _databaseService.GetCurrentActiveQueriesAsync();
+
+                _currentActiveUnfilteredData = data;
+                CurrentActiveQueriesDataGrid.ItemsSource = data;
+                CurrentActiveNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                CurrentActiveTimestamp.Text = $"Last refreshed: {DateTime.Now:HH:mm:ss} — {data.Count} queries";
+
+                if (_currentActiveFilters.Count > 0)
+                    ApplyCurrentActiveFilters();
+
+                SetStatus($"Loaded {data.Count} current active queries");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading current active queries: {ex.Message}");
+                CurrentActiveTimestamp.Text = $"Error: {ex.Message}";
+                SetStatus("Error loading current active queries");
+            }
+            finally
+            {
+                CurrentActiveLoading.IsLoading = false;
+                CurrentActiveRefreshButton.IsEnabled = true;
+            }
+        }
+
+        private void CurrentActiveFilter_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.Tag is not string columnName) return;
+
+            EnsureFilterPopup();
+            RewireFilterPopupEvents(
+                CurrentActiveFilterPopup_FilterApplied,
+                CurrentActiveFilterPopup_FilterCleared);
+
+            _currentActiveFilters.TryGetValue(columnName, out var existingFilter);
+            _filterPopupContent!.Initialize(columnName, existingFilter);
+
+            _filterPopup!.PlacementTarget = button;
+            _filterPopup.IsOpen = true;
+        }
+
+        private void CurrentActiveFilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
+        {
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+
+            if (e.FilterState.IsActive)
+            {
+                _currentActiveFilters[e.FilterState.ColumnName] = e.FilterState;
+            }
+            else
+            {
+                _currentActiveFilters.Remove(e.FilterState.ColumnName);
+            }
+
+            ApplyCurrentActiveFilters();
+            UpdateDataGridFilterButtonStyles(CurrentActiveQueriesDataGrid, _currentActiveFilters);
+        }
+
+        private void CurrentActiveFilterPopup_FilterCleared(object? sender, EventArgs e)
+        {
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+        }
+
+        private void ApplyCurrentActiveFilters()
+        {
+            if (_currentActiveUnfilteredData == null) return;
+
+            if (_currentActiveFilters.Count == 0)
+            {
+                CurrentActiveQueriesDataGrid.ItemsSource = _currentActiveUnfilteredData;
+                return;
+            }
+
+            var filteredData = _currentActiveUnfilteredData.Where(item =>
+            {
+                foreach (var filter in _currentActiveFilters.Values)
+                {
+                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }).ToList();
+
+            CurrentActiveQueriesDataGrid.ItemsSource = filteredData;
+        }
+
+        private void DownloadCurrentActiveEstPlan_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.DataContext is LiveQueryItem item && !string.IsNullOrEmpty(item.QueryPlan))
+            {
+                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                var defaultFileName = $"estimated_plan_{item.SessionId}_{timestamp}.sqlplan";
+
+                var saveFileDialog = new SaveFileDialog
+                {
+                    FileName = defaultFileName,
+                    DefaultExt = ".sqlplan",
+                    Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
+                    Title = "Save Query Plan"
+                };
+
+                if (saveFileDialog.ShowDialog() == true)
+                {
+                    File.WriteAllText(saveFileDialog.FileName, item.QueryPlan);
+                }
+            }
+        }
+
+        private void DownloadCurrentActiveLivePlan_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.DataContext is LiveQueryItem item && !string.IsNullOrEmpty(item.LiveQueryPlan))
+            {
+                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                var defaultFileName = $"live_plan_{item.SessionId}_{timestamp}.sqlplan";
+
+                var saveFileDialog = new SaveFileDialog
+                {
+                    FileName = defaultFileName,
+                    DefaultExt = ".sqlplan",
+                    Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
+                    Title = "Save Live Query Plan"
+                };
+
+                if (saveFileDialog.ShowDialog() == true)
+                {
+                    File.WriteAllText(saveFileDialog.FileName, item.LiveQueryPlan);
                 }
             }
         }

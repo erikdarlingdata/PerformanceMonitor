@@ -138,7 +138,12 @@ SELECT
     parallel_worker_count,
     query_plan,
     live_query_plan,
-    collection_time
+    collection_time,
+    login_name,
+    host_name,
+    program_name,
+    open_transaction_count,
+    percent_complete
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -176,7 +181,12 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
                 ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
                 QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
                 LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
-                CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20)
+                CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
+                LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+                HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
+                ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
+                OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
+                PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25))
             });
         }
 
@@ -745,6 +755,11 @@ public class QuerySnapshotRow
     public DateTime CollectionTime { get; set; }
     public string? QueryPlan { get; set; }
     public string? LiveQueryPlan { get; set; }
+    public string LoginName { get; set; } = "";
+    public string HostName { get; set; } = "";
+    public string ProgramName { get; set; } = "";
+    public int OpenTransactionCount { get; set; }
+    public decimal PercentComplete { get; set; }
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
     public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);

@@ -19,17 +19,7 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class RemoteCollectorService
 {
-    /// <summary>
-    /// Collects currently running queries (point-in-time snapshot).
-    /// </summary>
-    private async Task<int> CollectQuerySnapshotsAsync(ServerConnection server, CancellationToken cancellationToken)
-    {
-        // dm_exec_query_statistics_xml requires SQL Server 2016 SP1+ (version 13)
-        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
-        var supportsLiveQueryPlan = serverStatus.SqlMajorVersion >= 13 || serverStatus.SqlMajorVersion == 0
-            || serverStatus.SqlEngineEdition == 5 || serverStatus.SqlEngineEdition == 8;
-
-        const string queryBase = @"
+    private const string QuerySnapshotsBase = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 1000;
 
@@ -71,8 +61,15 @@ SELECT
             ELSE '???'
         END,
     der.dop,
-    der.parallel_worker_count
+    der.parallel_worker_count,
+    des.login_name,
+    des.host_name,
+    des.program_name,
+    des.open_transaction_count,
+    der.percent_complete
 FROM sys.dm_exec_requests AS der
+JOIN sys.dm_exec_sessions AS des
+    ON des.session_id = der.session_id
 OUTER APPLY sys.dm_exec_sql_text(der.plan_handle) AS dest
 OUTER APPLY sys.dm_exec_text_query_plan(der.plan_handle, der.statement_start_offset, der.statement_end_offset) AS deqp
 {1}
@@ -83,9 +80,28 @@ AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
 ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC
 OPTION(MAXDOP 1, RECOMPILE);";
 
-        var query = supportsLiveQueryPlan
-            ? string.Format(queryBase, "live_query_plan = deqs.query_plan,", "OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs")
-            : string.Format(queryBase, "live_query_plan = CONVERT(xml, NULL),", "");
+    /// <summary>
+    /// Builds the query snapshots SQL with or without live query plan support.
+    /// Used by both the collector and the live snapshot button.
+    /// </summary>
+    internal static string BuildQuerySnapshotsQuery(bool supportsLiveQueryPlan)
+    {
+        return supportsLiveQueryPlan
+            ? string.Format(QuerySnapshotsBase, "live_query_plan = deqs.query_plan,", "OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs")
+            : string.Format(QuerySnapshotsBase, "live_query_plan = CONVERT(xml, NULL),", "");
+    }
+
+    /// <summary>
+    /// Collects currently running queries (point-in-time snapshot).
+    /// </summary>
+    private async Task<int> CollectQuerySnapshotsAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        // dm_exec_query_statistics_xml requires SQL Server 2016 SP1+ (version 13)
+        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+        var supportsLiveQueryPlan = serverStatus.SqlMajorVersion >= 13 || serverStatus.SqlMajorVersion == 0
+            || serverStatus.SqlEngineEdition == 5 || serverStatus.SqlEngineEdition == 8;
+
+        var query = BuildQuerySnapshotsQuery(supportsLiveQueryPlan);
 
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
@@ -137,6 +153,11 @@ OPTION(MAXDOP 1, RECOMPILE);";
                        .AppendValue(reader.IsDBNull(17) ? (string?)null : reader.GetString(17))                /* transaction_isolation_level */
                        .AppendValue(reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)))            /* dop */
                        .AppendValue(reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)))            /* parallel_worker_count */
+                       .AppendValue(reader.IsDBNull(20) ? (string?)null : reader.GetString(20))                /* login_name */
+                       .AppendValue(reader.IsDBNull(21) ? (string?)null : reader.GetString(21))                /* host_name */
+                       .AppendValue(reader.IsDBNull(22) ? (string?)null : reader.GetString(22))                /* program_name */
+                       .AppendValue(reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)))            /* open_transaction_count */
+                       .AppendValue(reader.IsDBNull(24) ? 0m : reader.GetDecimal(24))                          /* percent_complete */
                        .EndRow();
 
                     rowsCollected++;
