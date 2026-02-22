@@ -78,6 +78,7 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<CollectorHealthRow>? _collectionHealthFilterMgr;
     private DataGridFilterManager<CollectionLogRow>? _collectionLogFilterMgr;
+    private DateTime? _dailySummaryDate; // null = today
 
     private static readonly HashSet<string> _defaultPerfmonCounters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -488,6 +489,7 @@ public partial class ServerTab : UserControl
             var runningJobsTask = SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId));
             var collectionHealthTask = SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId));
             var collectionLogTask = SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack));
+            var dailySummaryTask = _dataService.GetDailySummaryAsync(_serverId, _dailySummaryDate);
             /* Core data tasks */
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
@@ -495,7 +497,7 @@ public partial class ServerTab : UserControl
                 deadlockTask, blockedProcessTask, waitTypesTask, memoryClerkTypesTask, perfmonCountersTask,
                 queryStoreTask, memoryGrantTrendTask,
                 serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
-                runningJobsTask, collectionHealthTask, collectionLogTask);
+                runningJobsTask, collectionHealthTask, collectionLogTask, dailySummaryTask);
 
             /* Trend chart tasks - run separately so failures don't kill the whole refresh */
             var lockWaitTrendTask = SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate));
@@ -538,6 +540,11 @@ public partial class ServerTab : UserControl
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
+            var dailySummary = await dailySummaryTask;
+            DailySummaryGrid.ItemsSource = dailySummary != null
+                ? new List<DailySummaryRow> { dailySummary } : null;
+            DailySummaryNoData.Visibility = dailySummary == null
+                ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
             UpdateCollectorDurationChart(collectionLogTask.Result);
 
             /* Update memory summary */
@@ -2062,6 +2069,50 @@ public partial class ServerTab : UserControl
         window.ShowDialog();
     }
 
+
+    private void CollectionHealthGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
+
+        var window = new Windows.CollectionLogWindow(_dataService, _serverId, item.CollectorName);
+        window.Owner = Window.GetWindow(this);
+        window.ShowDialog();
+    }
+
+    private void DailySummaryToday_Click(object sender, RoutedEventArgs e)
+    {
+        _dailySummaryDate = null;
+        DailySummaryDatePicker.SelectedDate = null;
+        DailySummaryTodayButton.FontWeight = FontWeights.Bold;
+        DailySummaryIndicator.Text = "Showing: Today (UTC)";
+        DailySummaryRefresh_Click(sender, e);
+    }
+
+    private void DailySummaryDate_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (DailySummaryDatePicker.SelectedDate.HasValue)
+        {
+            _dailySummaryDate = DailySummaryDatePicker.SelectedDate.Value.Date;
+            DailySummaryTodayButton.FontWeight = FontWeights.Normal;
+            DailySummaryIndicator.Text = $"Showing: {_dailySummaryDate.Value:MMM d, yyyy}";
+        }
+    }
+
+    private async void DailySummaryRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var result = await _dataService.GetDailySummaryAsync(_serverId, _dailySummaryDate);
+            DailySummaryGrid.ItemsSource = result != null
+                ? new List<DailySummaryRow> { result } : null;
+            DailySummaryNoData.Visibility = result == null
+                ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("DailySummary", $"Error refreshing: {ex.Message}");
+        }
+    }
 
     private async void DownloadQueryStatsPlan_Click(object sender, RoutedEventArgs e)
     {

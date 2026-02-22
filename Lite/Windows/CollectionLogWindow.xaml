@@ -1,0 +1,81 @@
+<Window x:Class="PerformanceMonitorLite.Windows.CollectionLogWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Collection History" Height="600" Width="1100"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource BackgroundBrush}">
+
+    <Window.Resources>
+        <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Border Grid.Row="0" Background="{StaticResource BackgroundLightBrush}" Padding="10" Margin="10,10,10,0" CornerRadius="4">
+            <StackPanel>
+                <TextBlock x:Name="CollectorNameText" FontSize="16" FontWeight="Bold"/>
+                <TextBlock x:Name="SummaryText" Margin="0,5,0,0"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Data Grid -->
+        <DataGrid Grid.Row="1" x:Name="LogDataGrid"
+                  AutoGenerateColumns="False"
+                  IsReadOnly="True"
+                  CanUserSortColumns="True"
+                  HeadersVisibility="Column"
+                  GridLinesVisibility="Horizontal"
+                  Margin="10">
+            <DataGrid.Columns>
+                <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="140">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Collection Time" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding Status}" Width="100">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Status" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding RowsCollected}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Rows" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding DurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Duration" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="SQL Duration" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding DuckDbDurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="DuckDB Duration" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding ErrorMessage}" Width="*">
+                    <DataGridTextColumn.Header>
+                        <TextBlock Text="Error Message" FontWeight="Bold"/>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <!-- Footer -->
+        <Border Grid.Row="2" Background="{StaticResource BackgroundLightBrush}" Padding="10" Margin="10,0,10,10" CornerRadius="4">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Close" Width="100" Height="30" Click="Close_Click"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

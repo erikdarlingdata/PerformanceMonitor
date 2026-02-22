@@ -1130,6 +1130,63 @@
                 </Grid>
             </TabItem>
 
+            <!-- Daily Summary Tab -->
+            <TabItem Header="Daily Summary">
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Date Selection -->
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
+                        <TextBlock Text="Summary Date:" VerticalAlignment="Center" Margin="0,0,6,0" FontWeight="Bold"/>
+                        <Button x:Name="DailySummaryTodayButton" Content="Today" Click="DailySummaryToday_Click" Margin="0,0,6,0" Padding="8,4" MinWidth="60" Style="{StaticResource AccentButton}"/>
+                        <DatePicker x:Name="DailySummaryDatePicker" Width="120" Margin="0,0,6,0" SelectedDateChanged="DailySummaryDate_Changed" CalendarOpened="DatePicker_CalendarOpened"/>
+                        <Button Content="Refresh" Click="DailySummaryRefresh_Click" Margin="0,0,6,0" Padding="8,4" MinWidth="60" Style="{StaticResource SuccessButton}"/>
+                        <TextBlock x:Name="DailySummaryIndicator" Text="Showing: Today (UTC)" VerticalAlignment="Center"
+                                   FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                    </StackPanel>
+
+                    <!-- Summary Grid -->
+                    <DataGrid Grid.Row="1" x:Name="DailySummaryGrid"
+                              AutoGenerateColumns="False" IsReadOnly="True"
+                              RowStyle="{StaticResource GridRowStyle}"
+                              HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Binding="{Binding SummaryDateFormatted}" Width="110">
+                                <DataGridTextColumn.Header><TextBlock Text="Date" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding OverallHealth}" Width="120">
+                                <DataGridTextColumn.Header><TextBlock Text="Health" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding TotalWaitFormatted}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                <DataGridTextColumn.Header><TextBlock Text="Total Wait" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding TopWaitType}" Width="180">
+                                <DataGridTextColumn.Header><TextBlock Text="Top Wait Type" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding UniqueQueries, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                <DataGridTextColumn.Header><TextBlock Text="Unique Queries" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding DeadlockCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                <DataGridTextColumn.Header><TextBlock Text="Deadlocks" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding BlockingEvents, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                <DataGridTextColumn.Header><TextBlock Text="Blocking Events" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding HighCpuEvents, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                <DataGridTextColumn.Header><TextBlock Text="High CPU" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding CollectionErrors, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                <DataGridTextColumn.Header><TextBlock Text="Collect Errors" FontWeight="Bold"/></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock Grid.Row="1" x:Name="DailySummaryNoData" Style="{StaticResource NoDataMessage}"/>
+                </Grid>
+            </TabItem>
+
             <!-- Collection Health Tab -->
             <TabItem Header="Collection Health">
                 <Grid Margin="8">
@@ -1138,7 +1195,8 @@
                             <DataGrid x:Name="CollectionHealthGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
-                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                      MouseDoubleClick="CollectionHealthGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding CollectorName}" Width="180">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
