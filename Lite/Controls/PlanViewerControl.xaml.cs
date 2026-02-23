@@ -224,8 +224,7 @@ public partial class PlanViewerControl : UserControl
             {
                 Width = 20, Height = 20,
                 Margin = new Thickness(4, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                ToolTip = "Has warnings"
+                VerticalAlignment = VerticalAlignment.Center
             };
             warnBadge.Children.Add(new Polygon
             {
@@ -254,8 +253,7 @@ public partial class PlanViewerControl : UserControl
             {
                 Width = 20, Height = 20,
                 Margin = new Thickness(4, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                ToolTip = "Parallel execution"
+                VerticalAlignment = VerticalAlignment.Center
             };
             parBadge.Children.Add(new Ellipse
             {
