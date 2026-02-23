@@ -25,7 +25,7 @@ public class PlanStatement
     public string StatementText { get; set; } = "";
     public string StatementType { get; set; } = "";
     public double StatementSubTreeCost { get; set; }
-    public int StatementEstRows { get; set; }
+    public double StatementEstRows { get; set; }
     public PlanNode? RootNode { get; set; }
     public List<MissingIndex> MissingIndexes { get; set; } = new();
     public MemoryGrantInfo? MemoryGrant { get; set; }
@@ -41,6 +41,49 @@ public class PlanStatement
     public long CachedPlanSizeKB { get; set; }
     public int DegreeOfParallelism { get; set; }
     public bool RetrievedFromCache { get; set; }
+
+    // Additional StmtSimple attributes
+    public string? StatementOptmLevel { get; set; }
+    public string? StatementOptmEarlyAbortReason { get; set; }
+    public int StatementParameterizationType { get; set; }
+    public string? StatementSqlHandle { get; set; }
+    public long DatabaseContextSettingsId { get; set; }
+    public int ParentObjectId { get; set; }
+    public bool SecurityPolicyApplied { get; set; }
+    public bool BatchModeOnRowStoreUsed { get; set; }
+
+    // QueryPlan sub-elements
+    public OptimizerHardwareInfo? HardwareProperties { get; set; }
+    public List<OptimizerStatsUsageItem> StatsUsage { get; set; } = new();
+    public ThreadStatInfo? ThreadStats { get; set; }
+    public SetOptionsInfo? SetOptions { get; set; }
+    public List<PlanParameter> Parameters { get; set; } = new();
+    public List<WaitStatInfo> WaitStats { get; set; } = new();
+    public QueryTimeInfo? QueryTimeStats { get; set; }
+
+    // Wave 2: MaxQueryMemory + QueryPlan-level warnings
+    public long MaxQueryMemoryKB { get; set; }
+    public List<PlanWarning> PlanWarnings { get; set; } = new();
+
+    // Wave 3: DOP feedback, plan guide, parameterized text, QS hints, trace flags, indexed views
+    public int EffectiveDOP { get; set; }
+    public string? DOPFeedbackAdjusted { get; set; }
+    public string? PlanGuideDB { get; set; }
+    public string? PlanGuideName { get; set; }
+    public bool UsePlan { get; set; }
+    public string? ParameterizedText { get; set; }
+    public int QueryStoreStatementHintId { get; set; }
+    public string? QueryStoreStatementHintText { get; set; }
+    public string? QueryStoreStatementHintSource { get; set; }
+    public List<TraceFlagInfo> TraceFlags { get; set; } = new();
+    public List<string> IndexedViews { get; set; } = new();
+
+    // Wave 4: Cursor plan metadata
+    public string? CursorName { get; set; }
+    public string? CursorActualType { get; set; }
+    public string? CursorRequestedType { get; set; }
+    public string? CursorConcurrency { get; set; }
+    public bool CursorForwardOnly { get; set; }
 }
 
 public class PlanNode
@@ -167,6 +210,28 @@ public class PlanNode
     // Layout coordinates (set by layout engine)
     public double X { get; set; }
     public double Y { get; set; }
+
+    // Wave 2: Merge/NL residual + pass-thru, parallelism hash keys, Top extras
+    public string? MergeResidual { get; set; }
+    public string? PassThru { get; set; }
+    public string? HashKeys { get; set; }
+    public string? OffsetExpression { get; set; }
+    public bool RowCount { get; set; }
+    public int TopRows { get; set; }
+
+    // Wave 3: MemoryFractions, RunTimePartitionSummary, Spool, Update DML, Columnstore, UDF
+    public double MemoryFractionInput { get; set; }
+    public double MemoryFractionOutput { get; set; }
+    public int PartitionsAccessed { get; set; }
+    public string? PartitionRanges { get; set; }
+    public bool SpoolStack { get; set; }
+    public int PrimaryNodeId { get; set; }
+    public bool DMLRequestSort { get; set; }
+    public string? ActionColumn { get; set; }
+    public long ActualSegmentReads { get; set; }
+    public long ActualSegmentSkips { get; set; }
+    public long UdfCpuTimeUs { get; set; }
+    public long UdfElapsedTimeUs { get; set; }
 }
 
 public class MissingIndex
@@ -199,4 +264,69 @@ public class MemoryGrantInfo
     public long RequestedMemoryKB { get; set; }
     public long GrantedMemoryKB { get; set; }
     public long MaxUsedMemoryKB { get; set; }
+    public long GrantWaitTimeMs { get; set; }
+    public long LastRequestedMemoryKB { get; set; }
+    public string? IsMemoryGrantFeedbackAdjusted { get; set; }
+}
+
+public class OptimizerHardwareInfo
+{
+    public long EstimatedAvailableMemoryGrant { get; set; }
+    public long EstimatedPagesCached { get; set; }
+    public int EstimatedAvailableDOP { get; set; }
+    public long MaxCompileMemory { get; set; }
+}
+
+public class OptimizerStatsUsageItem
+{
+    public string StatisticsName { get; set; } = "";
+    public string TableName { get; set; } = "";
+    public long ModificationCount { get; set; }
+    public double SamplingPercent { get; set; }
+    public string? LastUpdate { get; set; }
+}
+
+public class ThreadStatInfo
+{
+    public int Branches { get; set; }
+    public int UsedThreads { get; set; }
+}
+
+public class SetOptionsInfo
+{
+    public bool AnsiNulls { get; set; }
+    public bool AnsiPadding { get; set; }
+    public bool AnsiWarnings { get; set; }
+    public bool ArithAbort { get; set; }
+    public bool ConcatNullYieldsNull { get; set; }
+    public bool NumericRoundAbort { get; set; }
+    public bool QuotedIdentifier { get; set; }
+}
+
+public class PlanParameter
+{
+    public string Name { get; set; } = "";
+    public string DataType { get; set; } = "";
+    public string? CompiledValue { get; set; }
+    public string? RuntimeValue { get; set; }
+}
+
+public class WaitStatInfo
+{
+    public string WaitType { get; set; } = "";
+    public long WaitTimeMs { get; set; }
+    public long WaitCount { get; set; }
+}
+
+public class QueryTimeInfo
+{
+    public long CpuTimeMs { get; set; }
+    public long ElapsedTimeMs { get; set; }
+}
+
+public class TraceFlagInfo
+{
+    public int Value { get; set; }
+    public string Scope { get; set; } = "";
+    public bool IsCompileTime { get; set; }
 }

@@ -40,9 +40,8 @@ public static class ShowPlanParser
             {
                 foreach (var stmtEl in statementsEl.Elements())
                 {
-                    var stmt = ParseStatement(stmtEl);
-                    if (stmt != null)
-                        batch.Statements.Add(stmt);
+                    var stmts = ParseStatementAndChildren(stmtEl);
+                    batch.Statements.AddRange(stmts);
                 }
             }
             if (batch.Statements.Count > 0)
@@ -67,6 +66,88 @@ public static class ShowPlanParser
         return plan;
     }
 
+    /// <summary>
+    /// Handles StmtSimple, StmtCond (IF/ELSE), and StmtCursor recursively.
+    /// Returns a flat list of all parseable statements found.
+    /// </summary>
+    private static List<PlanStatement> ParseStatementAndChildren(XElement stmtEl)
+    {
+        var results = new List<PlanStatement>();
+        var localName = stmtEl.Name.LocalName;
+
+        if (localName == "StmtCond")
+        {
+            // IF/ELSE blocks — recurse into Condition, Then, Else
+            var condEl = stmtEl.Element(Ns + "Condition");
+            if (condEl != null)
+            {
+                foreach (var child in condEl.Elements())
+                    results.AddRange(ParseStatementAndChildren(child));
+            }
+
+            var thenStmts = stmtEl.Element(Ns + "Then")?.Element(Ns + "Statements");
+            if (thenStmts != null)
+            {
+                foreach (var child in thenStmts.Elements())
+                    results.AddRange(ParseStatementAndChildren(child));
+            }
+
+            var elseStmts = stmtEl.Element(Ns + "Else")?.Element(Ns + "Statements");
+            if (elseStmts != null)
+            {
+                foreach (var child in elseStmts.Elements())
+                    results.AddRange(ParseStatementAndChildren(child));
+            }
+        }
+        else if (localName == "StmtCursor")
+        {
+            // Cursor plans — parse each Operation's QueryPlan
+            var cursorPlanEl = stmtEl.Element(Ns + "CursorPlan");
+            if (cursorPlanEl != null)
+            {
+                var cursorName = cursorPlanEl.Attribute("CursorName")?.Value;
+                var cursorActualType = cursorPlanEl.Attribute("CursorActualType")?.Value;
+                var cursorRequestedType = cursorPlanEl.Attribute("CursorRequestedType")?.Value;
+                var cursorConcurrency = cursorPlanEl.Attribute("CursorConcurrency")?.Value;
+                var cursorForwardOnly = cursorPlanEl.Attribute("ForwardOnly")?.Value is "true" or "1";
+
+                foreach (var opEl in cursorPlanEl.Elements(Ns + "Operation"))
+                {
+                    var opType = opEl.Attribute("OperationType")?.Value ?? "CursorOp";
+                    var qpEl = opEl.Element(Ns + "QueryPlan");
+                    if (qpEl == null) continue;
+
+                    // Build a synthetic StmtSimple-like wrapper for ParseStatement
+                    var relOpEl = qpEl.Element(Ns + "RelOp");
+                    if (relOpEl == null) continue;
+
+                    var stmt = ParseQueryPlanAsStatement(stmtEl, qpEl, relOpEl);
+                    if (stmt != null)
+                    {
+                        // Override statement text with cursor context
+                        if (string.IsNullOrEmpty(stmt.StatementText))
+                            stmt.StatementText = $"Cursor: {cursorName} ({opType})";
+                        stmt.CursorName = cursorName;
+                        stmt.CursorActualType = cursorActualType;
+                        stmt.CursorRequestedType = cursorRequestedType;
+                        stmt.CursorConcurrency = cursorConcurrency;
+                        stmt.CursorForwardOnly = cursorForwardOnly;
+                        results.Add(stmt);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // StmtSimple or any other statement type
+            var stmt = ParseStatement(stmtEl);
+            if (stmt != null)
+                results.Add(stmt);
+        }
+
+        return results;
+    }
+
     private static PlanStatement? ParseStatement(XElement stmtEl)
     {
         var stmt = new PlanStatement
@@ -74,42 +155,14 @@ public static class ShowPlanParser
             StatementText = stmtEl.Attribute("StatementText")?.Value ?? "",
             StatementType = stmtEl.Attribute("StatementType")?.Value ?? "",
             StatementSubTreeCost = ParseDouble(stmtEl.Attribute("StatementSubTreeCost")?.Value),
-            StatementEstRows = (int)ParseDouble(stmtEl.Attribute("StatementEstRows")?.Value)
+            StatementEstRows = ParseDouble(stmtEl.Attribute("StatementEstRows")?.Value)
         };
 
         var queryPlanEl = stmtEl.Element(Ns + "QueryPlan");
         if (queryPlanEl == null) return stmt;
 
-        // Memory grant info
-        var memEl = queryPlanEl.Element(Ns + "MemoryGrantInfo");
-        if (memEl != null)
-        {
-            stmt.MemoryGrant = new MemoryGrantInfo
-            {
-                SerialRequiredMemoryKB = ParseLong(memEl.Attribute("SerialRequiredMemory")?.Value),
-                SerialDesiredMemoryKB = ParseLong(memEl.Attribute("SerialDesiredMemory")?.Value),
-                RequiredMemoryKB = ParseLong(memEl.Attribute("RequiredMemory")?.Value),
-                DesiredMemoryKB = ParseLong(memEl.Attribute("DesiredMemory")?.Value),
-                RequestedMemoryKB = ParseLong(memEl.Attribute("RequestedMemory")?.Value),
-                GrantedMemoryKB = ParseLong(memEl.Attribute("GrantedMemory")?.Value),
-                MaxUsedMemoryKB = ParseLong(memEl.Attribute("MaxUsedMemory")?.Value)
-            };
-        }
-
-        // Statement-level metadata from QueryPlan attributes
-        stmt.CachedPlanSizeKB = ParseLong(queryPlanEl.Attribute("CachedPlanSize")?.Value);
-        stmt.DegreeOfParallelism = (int)ParseDouble(queryPlanEl.Attribute("DegreeOfParallelism")?.Value);
-        stmt.NonParallelPlanReason = queryPlanEl.Attribute("NonParallelPlanReason")?.Value;
-        stmt.RetrievedFromCache = queryPlanEl.Attribute("RetrievedFromCache")?.Value is "true" or "1";
-        stmt.CompileTimeMs = ParseLong(queryPlanEl.Attribute("CompileTime")?.Value);
-        stmt.CompileMemoryKB = ParseLong(queryPlanEl.Attribute("CompileMemory")?.Value);
-        stmt.CompileCPUMs = ParseLong(queryPlanEl.Attribute("CompileCPU")?.Value);
-        stmt.CardinalityEstimationModelVersion = (int)ParseDouble(queryPlanEl.Attribute("CardinalityEstimationModelVersion")?.Value);
-        stmt.QueryHash = stmtEl.Attribute("QueryHash")?.Value;
-        stmt.QueryPlanHash = stmtEl.Attribute("QueryPlanHash")?.Value;
-
-        // Missing indexes
-        stmt.MissingIndexes = ParseMissingIndexes(queryPlanEl);
+        ParseStmtAttributes(stmt, stmtEl);
+        ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
 
         // Root RelOp — wrap in a synthetic statement-type node (SELECT, INSERT, etc.)
         var relOpEl = queryPlanEl.Element(Ns + "RelOp");
@@ -126,6 +179,7 @@ public static class ShowPlanParser
                 PhysicalOp = stmtType,
                 LogicalOp = stmtType,
                 EstimatedTotalSubtreeCost = stmt.StatementSubTreeCost,
+                EstimateRows = stmt.StatementEstRows,
                 IconName = stmtType switch
                 {
                     "SELECT" => "result",
@@ -141,6 +195,274 @@ public static class ShowPlanParser
         }
 
         return stmt;
+    }
+
+    /// <summary>
+    /// Parse a QueryPlan element that comes from a cursor Operation (no parent StmtSimple attributes).
+    /// </summary>
+    private static PlanStatement? ParseQueryPlanAsStatement(XElement stmtEl, XElement queryPlanEl, XElement relOpEl)
+    {
+        var stmt = new PlanStatement
+        {
+            StatementText = stmtEl.Attribute("StatementText")?.Value ?? "",
+            StatementType = stmtEl.Attribute("StatementType")?.Value ?? "SELECT",
+            StatementSubTreeCost = ParseDouble(stmtEl.Attribute("StatementSubTreeCost")?.Value)
+        };
+
+        ParseStmtAttributes(stmt, stmtEl);
+        ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
+
+        var opNode = ParseRelOp(relOpEl);
+        var stmtType = stmt.StatementType.Length > 0
+            ? stmt.StatementType.ToUpperInvariant()
+            : "QUERY";
+
+        // Use subtree cost from RelOp if statement cost is 0
+        if (stmt.StatementSubTreeCost <= 0)
+            stmt.StatementSubTreeCost = opNode.EstimatedTotalSubtreeCost;
+
+        var stmtNode = new PlanNode
+        {
+            NodeId = -1,
+            PhysicalOp = stmtType,
+            LogicalOp = stmtType,
+            EstimatedTotalSubtreeCost = stmt.StatementSubTreeCost,
+            EstimateRows = stmt.StatementEstRows,
+            IconName = stmtType switch
+            {
+                "SELECT" => "result",
+                "INSERT" => "insert",
+                "UPDATE" => "update",
+                "DELETE" => "delete",
+                _ => "language_construct_catch_all"
+            }
+        };
+        opNode.Parent = stmtNode;
+        stmtNode.Children.Add(opNode);
+        stmt.RootNode = stmtNode;
+
+        return stmt;
+    }
+
+    /// <summary>
+    /// Parse attributes from StmtSimple element.
+    /// </summary>
+    private static void ParseStmtAttributes(PlanStatement stmt, XElement stmtEl)
+    {
+        stmt.StatementOptmLevel = stmtEl.Attribute("StatementOptmLevel")?.Value;
+        stmt.StatementOptmEarlyAbortReason = stmtEl.Attribute("StatementOptmEarlyAbortReason")?.Value;
+        stmt.StatementParameterizationType = (int)ParseDouble(stmtEl.Attribute("StatementParameterizationType")?.Value);
+        stmt.StatementSqlHandle = stmtEl.Attribute("StatementSqlHandle")?.Value;
+        stmt.DatabaseContextSettingsId = ParseLong(stmtEl.Attribute("DatabaseContextSettingsId")?.Value);
+        stmt.ParentObjectId = (int)ParseDouble(stmtEl.Attribute("ParentObjectId")?.Value);
+        stmt.SecurityPolicyApplied = stmtEl.Attribute("SecurityPolicyApplied")?.Value is "true" or "1";
+        stmt.BatchModeOnRowStoreUsed = stmtEl.Attribute("BatchModeOnRowStoreUsed")?.Value is "true" or "1";
+        stmt.QueryHash = stmtEl.Attribute("QueryHash")?.Value;
+        stmt.QueryPlanHash = stmtEl.Attribute("QueryPlanHash")?.Value;
+
+        // Bug fix 1.3: CE version is on StmtSimple per XSD
+        stmt.CardinalityEstimationModelVersion = (int)ParseDouble(stmtEl.Attribute("CardinalityEstimationModelVersion")?.Value);
+
+        // Wave 3.6: Query Store hint attributes
+        stmt.QueryStoreStatementHintId = (int)ParseDouble(stmtEl.Attribute("QueryStoreStatementHintId")?.Value);
+        stmt.QueryStoreStatementHintText = stmtEl.Attribute("QueryStoreStatementHintText")?.Value;
+        stmt.QueryStoreStatementHintSource = stmtEl.Attribute("QueryStoreStatementHintSource")?.Value;
+    }
+
+    /// <summary>
+    /// Parse child elements of QueryPlan (memory grant, stats, parameters, etc.)
+    /// </summary>
+    private static void ParseQueryPlanElements(PlanStatement stmt, XElement stmtEl, XElement queryPlanEl)
+    {
+        // StatementSetOptions (child element of StmtSimple)
+        var setOptsEl = stmtEl.Element(Ns + "StatementSetOptions");
+        if (setOptsEl != null)
+        {
+            stmt.SetOptions = new SetOptionsInfo
+            {
+                AnsiNulls = setOptsEl.Attribute("ANSI_NULLS")?.Value is "true" or "1",
+                AnsiPadding = setOptsEl.Attribute("ANSI_PADDING")?.Value is "true" or "1",
+                AnsiWarnings = setOptsEl.Attribute("ANSI_WARNINGS")?.Value is "true" or "1",
+                ArithAbort = setOptsEl.Attribute("ARITHABORT")?.Value is "true" or "1",
+                ConcatNullYieldsNull = setOptsEl.Attribute("CONCAT_NULL_YIELDS_NULL")?.Value is "true" or "1",
+                NumericRoundAbort = setOptsEl.Attribute("NUMERIC_ROUNDABORT")?.Value is "true" or "1",
+                QuotedIdentifier = setOptsEl.Attribute("QUOTED_IDENTIFIER")?.Value is "true" or "1"
+            };
+        }
+
+        // Memory grant info
+        var memEl = queryPlanEl.Element(Ns + "MemoryGrantInfo");
+        if (memEl != null)
+        {
+            stmt.MemoryGrant = new MemoryGrantInfo
+            {
+                SerialRequiredMemoryKB = ParseLong(memEl.Attribute("SerialRequiredMemory")?.Value),
+                SerialDesiredMemoryKB = ParseLong(memEl.Attribute("SerialDesiredMemory")?.Value),
+                RequiredMemoryKB = ParseLong(memEl.Attribute("RequiredMemory")?.Value),
+                DesiredMemoryKB = ParseLong(memEl.Attribute("DesiredMemory")?.Value),
+                RequestedMemoryKB = ParseLong(memEl.Attribute("RequestedMemory")?.Value),
+                GrantedMemoryKB = ParseLong(memEl.Attribute("GrantedMemory")?.Value),
+                MaxUsedMemoryKB = ParseLong(memEl.Attribute("MaxUsedMemory")?.Value),
+                GrantWaitTimeMs = ParseLong(memEl.Attribute("GrantWaitTime")?.Value),
+                LastRequestedMemoryKB = ParseLong(memEl.Attribute("LastRequestedMemory")?.Value),
+                IsMemoryGrantFeedbackAdjusted = memEl.Attribute("IsMemoryGrantFeedbackAdjusted")?.Value
+            };
+        }
+
+        // Statement-level metadata from QueryPlan attributes
+        stmt.CachedPlanSizeKB = ParseLong(queryPlanEl.Attribute("CachedPlanSize")?.Value);
+        stmt.DegreeOfParallelism = (int)ParseDouble(queryPlanEl.Attribute("DegreeOfParallelism")?.Value);
+        stmt.NonParallelPlanReason = queryPlanEl.Attribute("NonParallelPlanReason")?.Value;
+        stmt.RetrievedFromCache = queryPlanEl.Attribute("RetrievedFromCache")?.Value is "true" or "1";
+        stmt.CompileTimeMs = ParseLong(queryPlanEl.Attribute("CompileTime")?.Value);
+        stmt.CompileMemoryKB = ParseLong(queryPlanEl.Attribute("CompileMemory")?.Value);
+        stmt.CompileCPUMs = ParseLong(queryPlanEl.Attribute("CompileCPU")?.Value);
+
+        // Fallback: some plans have CE version on QueryPlan instead of StmtSimple
+        if (stmt.CardinalityEstimationModelVersion == 0)
+            stmt.CardinalityEstimationModelVersion = (int)ParseDouble(queryPlanEl.Attribute("CardinalityEstimationModelVersion")?.Value);
+
+        // Wave 2.5: MaxQueryMemory
+        stmt.MaxQueryMemoryKB = ParseLong(queryPlanEl.Attribute("MaxQueryMemory")?.Value);
+
+        // Wave 3.1: EffectiveDOP + DOP feedback
+        stmt.EffectiveDOP = (int)ParseDouble(queryPlanEl.Attribute("EffectiveDegreeOfParallelism")?.Value);
+        stmt.DOPFeedbackAdjusted = queryPlanEl.Attribute("IsDOPFeedbackAdjusted")?.Value;
+
+        // Wave 3.4: Plan Guide attributes
+        stmt.PlanGuideDB = queryPlanEl.Attribute("PlanGuideDB")?.Value;
+        stmt.PlanGuideName = queryPlanEl.Attribute("PlanGuideName")?.Value;
+        stmt.UsePlan = queryPlanEl.Attribute("UsePlan")?.Value is "true" or "1";
+
+        // Wave 3.5: ParameterizedText
+        stmt.ParameterizedText = queryPlanEl.Element(Ns + "ParameterizedText")?.Value;
+
+        // Missing indexes
+        stmt.MissingIndexes = ParseMissingIndexes(queryPlanEl);
+
+        // Wave 2.8: QueryPlan-level warnings
+        var planWarningsEl = queryPlanEl.Element(Ns + "Warnings");
+        if (planWarningsEl != null)
+            stmt.PlanWarnings = ParseWarningsFromElement(planWarningsEl);
+
+        // OptimizerHardwareDependentProperties
+        var hwEl = queryPlanEl.Element(Ns + "OptimizerHardwareDependentProperties");
+        if (hwEl != null)
+        {
+            stmt.HardwareProperties = new OptimizerHardwareInfo
+            {
+                EstimatedAvailableMemoryGrant = ParseLong(hwEl.Attribute("EstimatedAvailableMemoryGrant")?.Value),
+                EstimatedPagesCached = ParseLong(hwEl.Attribute("EstimatedPagesCached")?.Value),
+                EstimatedAvailableDOP = (int)ParseDouble(hwEl.Attribute("EstimatedAvailableDegreeOfParallelism")?.Value),
+                MaxCompileMemory = ParseLong(hwEl.Attribute("MaxCompileMemory")?.Value)
+            };
+        }
+
+        // OptimizerStatsUsage
+        var statsUsageEl = queryPlanEl.Element(Ns + "OptimizerStatsUsage");
+        if (statsUsageEl != null)
+        {
+            foreach (var statEl in statsUsageEl.Elements(Ns + "StatisticsInfo"))
+            {
+                stmt.StatsUsage.Add(new OptimizerStatsUsageItem
+                {
+                    StatisticsName = statEl.Attribute("Statistics")?.Value?.Replace("[", "").Replace("]", "") ?? "",
+                    TableName = statEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "") ?? "",
+                    ModificationCount = ParseLong(statEl.Attribute("ModificationCount")?.Value),
+                    SamplingPercent = ParseDouble(statEl.Attribute("SamplingPercent")?.Value),
+                    LastUpdate = statEl.Attribute("LastUpdate")?.Value
+                });
+            }
+        }
+
+        // ThreadStat (actual plans)
+        var threadStatEl = queryPlanEl.Element(Ns + "ThreadStat");
+        if (threadStatEl != null)
+        {
+            stmt.ThreadStats = new ThreadStatInfo
+            {
+                Branches = (int)ParseDouble(threadStatEl.Attribute("Branches")?.Value),
+                UsedThreads = (int)ParseDouble(threadStatEl.Attribute("UsedThreads")?.Value)
+            };
+        }
+
+        // ParameterList
+        var paramListEl = queryPlanEl.Element(Ns + "ParameterList");
+        if (paramListEl != null)
+        {
+            foreach (var paramEl in paramListEl.Elements(Ns + "ColumnReference"))
+            {
+                stmt.Parameters.Add(new PlanParameter
+                {
+                    Name = paramEl.Attribute("Column")?.Value ?? "",
+                    DataType = paramEl.Attribute("ParameterDataType")?.Value ?? "",
+                    CompiledValue = paramEl.Attribute("ParameterCompiledValue")?.Value,
+                    RuntimeValue = paramEl.Attribute("ParameterRuntimeValue")?.Value
+                });
+            }
+        }
+
+        // WaitStats (actual plans)
+        var waitStatsEl = queryPlanEl.Element(Ns + "WaitStats");
+        if (waitStatsEl != null)
+        {
+            foreach (var waitEl in waitStatsEl.Elements(Ns + "Wait"))
+            {
+                stmt.WaitStats.Add(new WaitStatInfo
+                {
+                    WaitType = waitEl.Attribute("WaitType")?.Value ?? "",
+                    WaitTimeMs = ParseLong(waitEl.Attribute("WaitTimeMs")?.Value),
+                    WaitCount = ParseLong(waitEl.Attribute("WaitCount")?.Value)
+                });
+            }
+        }
+
+        // QueryTimeStats (actual plans)
+        var queryTimeEl = queryPlanEl.Element(Ns + "QueryTimeStats");
+        if (queryTimeEl != null)
+        {
+            stmt.QueryTimeStats = new QueryTimeInfo
+            {
+                CpuTimeMs = ParseLong(queryTimeEl.Attribute("CpuTime")?.Value),
+                ElapsedTimeMs = ParseLong(queryTimeEl.Attribute("ElapsedTime")?.Value)
+            };
+        }
+
+        // Wave 3.12: TraceFlags
+        foreach (var traceFlagsEl in queryPlanEl.Elements(Ns + "TraceFlags"))
+        {
+            var isCompile = traceFlagsEl.Attribute("IsCompileTime")?.Value is "true" or "1";
+            foreach (var tf in traceFlagsEl.Elements(Ns + "TraceFlag"))
+            {
+                stmt.TraceFlags.Add(new TraceFlagInfo
+                {
+                    Value = (int)ParseDouble(tf.Attribute("Value")?.Value),
+                    Scope = tf.Attribute("Scope")?.Value ?? "",
+                    IsCompileTime = isCompile
+                });
+            }
+        }
+
+        // Wave 3.13: IndexedViewInfo
+        var ivInfoEl = queryPlanEl.Element(Ns + "IndexedViewInfo");
+        if (ivInfoEl != null)
+        {
+            foreach (var objEl in ivInfoEl.Elements(Ns + "Object"))
+            {
+                var db = objEl.Attribute("Database")?.Value?.Replace("[", "").Replace("]", "");
+                var schema = objEl.Attribute("Schema")?.Value?.Replace("[", "").Replace("]", "");
+                var table = objEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "");
+                var index = objEl.Attribute("Index")?.Value?.Replace("[", "").Replace("]", "");
+                var parts = new List<string>();
+                if (!string.IsNullOrEmpty(db)) parts.Add(db);
+                if (!string.IsNullOrEmpty(schema)) parts.Add(schema);
+                if (!string.IsNullOrEmpty(table)) parts.Add(table);
+                if (!string.IsNullOrEmpty(index)) parts.Add(index);
+                var name = string.Join(".", parts);
+                if (!string.IsNullOrEmpty(name))
+                    stmt.IndexedViews.Add(name);
+            }
+        }
     }
 
     private static PlanNode ParseRelOp(XElement relOpEl)
@@ -160,16 +482,17 @@ public static class ShowPlanParser
             Parallel = relOpEl.Attribute("Parallel")?.Value is "true" or "1",
             Partitioned = relOpEl.Attribute("Partitioned")?.Value is "true" or "1",
             ExecutionMode = relOpEl.Attribute("EstimatedExecutionMode")?.Value,
-            // Adaptive join properties are on <RelOp> per XSD
             IsAdaptive = relOpEl.Attribute("IsAdaptive")?.Value is "true" or "1",
             AdaptiveThresholdRows = ParseDouble(relOpEl.Attribute("AdaptiveThresholdRows")?.Value),
-            EstimatedJoinType = relOpEl.Attribute("EstimatedJoinType")?.Value
+            EstimatedJoinType = relOpEl.Attribute("EstimatedJoinType")?.Value,
+            // Wave 3.14: Estimated DOP per operator
+            EstimatedDOP = (int)ParseDouble(relOpEl.Attribute("EstimatedAvailableDegreeOfParallelism")?.Value)
         };
 
         // Map to icon
         node.IconName = PlanIconMapper.GetIconName(node.PhysicalOp);
 
-        // Handle special icon cases
+        // Handle operator-specific element
         var physicalOpEl = GetOperatorElement(relOpEl);
         if (physicalOpEl != null)
         {
@@ -185,13 +508,11 @@ public static class ShowPlanParser
                 node.DatabaseName = db;
                 node.IndexName = index;
 
-                // Short name for node display: Schema.Table
                 var shortParts = new List<string>();
                 if (!string.IsNullOrEmpty(schema)) shortParts.Add(schema);
                 if (!string.IsNullOrEmpty(table)) shortParts.Add(table);
                 node.ObjectName = shortParts.Count > 0 ? string.Join(".", shortParts) : null;
 
-                // Full qualified name: Database.Schema.Table (Index)
                 var fullParts = new List<string>();
                 if (!string.IsNullOrEmpty(db)) fullParts.Add(db);
                 if (!string.IsNullOrEmpty(schema)) fullParts.Add(schema);
@@ -201,7 +522,6 @@ public static class ShowPlanParser
                     fullName += $".{index}";
                 node.FullObjectName = !string.IsNullOrEmpty(fullName) ? fullName : null;
 
-                // Storage type (Heap, Clustered, etc.)
                 node.StorageType = objEl.Attribute("Storage")?.Value;
             }
 
@@ -268,6 +588,20 @@ public static class ShowPlanParser
                 node.ProbeResidual = so?.Attribute("ScalarString")?.Value;
             }
 
+            // Wave 2.1/2.2: Merge Residual + PassThru (Merge Join + Nested Loops)
+            var residualEl = physicalOpEl.Element(Ns + "Residual");
+            if (residualEl != null)
+            {
+                var so = residualEl.Descendants(Ns + "ScalarOperator").FirstOrDefault();
+                node.MergeResidual = so?.Attribute("ScalarString")?.Value;
+            }
+            var passThruEl = physicalOpEl.Element(Ns + "PassThru");
+            if (passThruEl != null)
+            {
+                var so = passThruEl.Descendants(Ns + "ScalarOperator").FirstOrDefault();
+                node.PassThru = so?.Attribute("ScalarString")?.Value;
+            }
+
             // OrderBy columns (Sort operator)
             var orderByEl = physicalOpEl.Element(Ns + "OrderBy");
             if (orderByEl != null)
@@ -308,6 +642,9 @@ public static class ShowPlanParser
             // Partition columns (Parallelism)
             node.PartitionColumns = ParseColumnList(physicalOpEl, "PartitionColumns");
 
+            // Wave 2.6: Parallelism HashKeys
+            node.HashKeys = ParseColumnList(physicalOpEl, "HashKeys");
+
             // Segment column
             var segColEl = physicalOpEl.Element(Ns + "SegmentColumn")?.Element(Ns + "ColumnReference");
             if (segColEl != null)
@@ -335,7 +672,7 @@ public static class ShowPlanParser
                     node.DefinedValues = string.Join("; ", dvParts);
             }
 
-            // IndexScan / TableScan properties (IndexScanType / TableScanType per XSD)
+            // IndexScan / TableScan properties
             node.ScanDirection = physicalOpEl.Attribute("ScanDirection")?.Value;
             node.ForcedIndex = physicalOpEl.Attribute("ForcedIndex")?.Value is "true" or "1";
             node.ForceScan = physicalOpEl.Attribute("ForceScan")?.Value is "true" or "1";
@@ -350,31 +687,48 @@ public static class ShowPlanParser
             if (node.EstimatedRowsRead == 0)
                 node.EstimatedRowsRead = ParseDouble(relOpEl.Attribute("EstimateRowsWithoutRowGoal")?.Value);
 
-            // TOP operator properties (TopType per XSD)
+            // TOP operator properties
             var topExprEl = physicalOpEl.Element(Ns + "TopExpression")?.Descendants(Ns + "ScalarOperator").FirstOrDefault();
             if (topExprEl != null)
                 node.TopExpression = topExprEl.Attribute("ScalarString")?.Value;
             node.IsPercent = physicalOpEl.Attribute("IsPercent")?.Value is "true" or "1";
             node.WithTies = physicalOpEl.Attribute("WithTies")?.Value is "true" or "1";
 
-            // Sort properties (SortType per XSD)
+            // Wave 2.7: Top OffsetExpression, RowCount, Rows
+            var offsetEl = physicalOpEl.Element(Ns + "OffsetExpression")?.Descendants(Ns + "ScalarOperator").FirstOrDefault();
+            if (offsetEl != null)
+                node.OffsetExpression = offsetEl.Attribute("ScalarString")?.Value;
+            node.RowCount = physicalOpEl.Attribute("RowCount")?.Value is "true" or "1";
+            node.TopRows = (int)ParseDouble(physicalOpEl.Attribute("Rows")?.Value);
+
+            // Sort properties
             node.SortDistinct = physicalOpEl.Attribute("Distinct")?.Value is "true" or "1";
 
-            // Filter properties (FilterType per XSD)
+            // Filter properties
             node.StartupExpression = physicalOpEl.Attribute("StartupExpression")?.Value is "true" or "1";
 
-            // Nested Loops properties (NestedLoopsType per XSD)
+            // Nested Loops properties
             node.NLOptimized = physicalOpEl.Attribute("Optimized")?.Value is "true" or "1";
             node.WithOrderedPrefetch = physicalOpEl.Attribute("WithOrderedPrefetch")?.Value is "true" or "1";
             node.WithUnorderedPrefetch = physicalOpEl.Attribute("WithUnorderedPrefetch")?.Value is "true" or "1";
 
-            // Hash Match properties (HashType per XSD)
+            // Hash Match properties
             node.ManyToMany = physicalOpEl.Attribute("ManyToMany")?.Value is "true" or "1";
             node.BitmapCreator = physicalOpEl.Attribute("BitmapCreator")?.Value is "true" or "1";
 
-            // Parallelism properties (ParallelismType per XSD)
+            // Parallelism properties
             node.Remoting = physicalOpEl.Attribute("Remoting")?.Value is "true" or "1";
             node.LocalParallelism = physicalOpEl.Attribute("LocalParallelism")?.Value is "true" or "1";
+
+            // Wave 3.8: Spool Stack + PrimaryNodeId
+            node.SpoolStack = physicalOpEl.Attribute("Stack")?.Value is "true" or "1";
+            node.PrimaryNodeId = (int)ParseDouble(physicalOpEl.Attribute("PrimaryNodeId")?.Value);
+
+            // Wave 3.9: Update DMLRequestSort + ActionColumn
+            node.DMLRequestSort = physicalOpEl.Attribute("DMLRequestSort")?.Value is "true" or "1";
+            var actionColEl = physicalOpEl.Element(Ns + "ActionColumn")?.Element(Ns + "ColumnReference");
+            if (actionColEl != null)
+                node.ActionColumn = FormatColumnRef(actionColEl);
 
             // SET predicate (UPDATE operator)
             var setPredicateEl = physicalOpEl.Element(Ns + "SetPredicate");
@@ -408,6 +762,39 @@ public static class ShowPlanParser
         // Warnings
         node.Warnings = ParseWarnings(relOpEl);
 
+        // Wave 3.2: MemoryFractions (on RelOp)
+        var memFracEl = relOpEl.Element(Ns + "MemoryFractions");
+        if (memFracEl != null)
+        {
+            node.MemoryFractionInput = ParseDouble(memFracEl.Attribute("Input")?.Value);
+            node.MemoryFractionOutput = ParseDouble(memFracEl.Attribute("Output")?.Value);
+        }
+
+        // Wave 3.3: RunTimePartitionSummary (on RelOp)
+        var rtPartEl = relOpEl.Element(Ns + "RunTimePartitionSummary");
+        if (rtPartEl != null)
+        {
+            var partAccEl = rtPartEl.Element(Ns + "PartitionsAccessed");
+            if (partAccEl != null)
+            {
+                node.PartitionsAccessed = (int)ParseDouble(partAccEl.Attribute("PartitionCount")?.Value);
+                var ranges = partAccEl.Elements(Ns + "PartitionRange")
+                    .Select(r => $"{r.Attribute("Start")?.Value}-{r.Attribute("End")?.Value}");
+                node.PartitionRanges = string.Join(", ", ranges);
+                if (string.IsNullOrEmpty(node.PartitionRanges))
+                    node.PartitionRanges = null;
+            }
+        }
+
+        // Wave 2.4: Per-operator memory grants (MemoryGrant on RelOp)
+        var memGrantEl = relOpEl.Element(Ns + "MemoryGrant");
+        if (memGrantEl != null)
+        {
+            node.MemoryGrantKB = ParseLong(memGrantEl.Attribute("GrantedMemory")?.Value);
+            node.DesiredMemoryKB = ParseLong(memGrantEl.Attribute("DesiredMemory")?.Value);
+            node.MaxUsedMemoryKB = ParseLong(memGrantEl.Attribute("MaxUsedMemory")?.Value);
+        }
+
         // Runtime information (actual plan)
         var runtimeEl = relOpEl.Element(Ns + "RunTimeInformation");
         if (runtimeEl != null)
@@ -419,6 +806,8 @@ public static class ShowPlanParser
             long totalLogicalReads = 0, totalPhysicalReads = 0;
             long totalScans = 0, totalReadAheads = 0;
             long totalLobLogicalReads = 0, totalLobPhysicalReads = 0, totalLobReadAheads = 0;
+            long totalSegmentReads = 0, totalSegmentSkips = 0;
+            long totalUdfCpu = 0, maxUdfElapsed = 0;
             string? actualExecMode = null;
 
             foreach (var thread in runtimeEl.Elements(Ns + "RunTimeCountersPerThread"))
@@ -436,6 +825,15 @@ public static class ShowPlanParser
                 totalLobLogicalReads += ParseLong(thread.Attribute("ActualLobLogicalReads")?.Value);
                 totalLobPhysicalReads += ParseLong(thread.Attribute("ActualLobPhysicalReads")?.Value);
                 totalLobReadAheads += ParseLong(thread.Attribute("ActualLobReadAheads")?.Value);
+
+                // Wave 3.10: Columnstore segment reads/skips
+                totalSegmentReads += ParseLong(thread.Attribute("ActualSegmentReads")?.Value);
+                totalSegmentSkips += ParseLong(thread.Attribute("ActualSegmentSkips")?.Value);
+
+                // Wave 3.11: UDF timing
+                totalUdfCpu += ParseLong(thread.Attribute("UdfCpuTime")?.Value);
+                var udfElapsed = ParseLong(thread.Attribute("UdfElapsedTime")?.Value);
+                if (udfElapsed > maxUdfElapsed) maxUdfElapsed = udfElapsed;
 
                 actualExecMode ??= thread.Attribute("ActualExecutionMode")?.Value;
 
@@ -458,6 +856,10 @@ public static class ShowPlanParser
             node.ActualLobPhysicalReads = totalLobPhysicalReads;
             node.ActualLobReadAheads = totalLobReadAheads;
             node.ActualExecutionMode = actualExecMode;
+            node.ActualSegmentReads = totalSegmentReads;
+            node.ActualSegmentSkips = totalSegmentSkips;
+            node.UdfCpuTimeUs = totalUdfCpu;
+            node.UdfElapsedTimeUs = maxUdfElapsed;
         }
 
         // Recurse into child RelOps
@@ -473,13 +875,12 @@ public static class ShowPlanParser
 
     private static XElement? GetOperatorElement(XElement relOpEl)
     {
-        // The operator-specific element is the first child that isn't OutputList, RunTimeInformation, etc.
         foreach (var child in relOpEl.Elements())
         {
             var name = child.Name.LocalName;
             if (name != "OutputList" && name != "RunTimeInformation" && name != "Warnings"
                 && name != "MemoryFractions" && name != "RunTimePartitionSummary"
-                && name != "InternalInfo")
+                && name != "MemoryGrant" && name != "InternalInfo")
             {
                 return child;
             }
@@ -489,19 +890,15 @@ public static class ShowPlanParser
 
     private static IEnumerable<XElement> FindChildRelOps(XElement relOpEl)
     {
-        // Child RelOps are nested inside the operator-specific element
         var operatorEl = GetOperatorElement(relOpEl);
         if (operatorEl == null) yield break;
 
-        // Direct RelOp children of the operator element
         foreach (var child in operatorEl.Elements(Ns + "RelOp"))
             yield return child;
 
-        // Some operators nest RelOps deeper (e.g., Hash has BuildResidual/ProbeResidual)
-        // Walk one level of non-RelOp children to find nested RelOps
         foreach (var child in operatorEl.Elements())
         {
-            if (child.Name.LocalName == "RelOp") continue; // Already yielded
+            if (child.Name.LocalName == "RelOp") continue;
             foreach (var nestedRelOp in child.Elements(Ns + "RelOp"))
                 yield return nestedRelOp;
         }
@@ -542,7 +939,6 @@ public static class ShowPlanParser
                     }
                 }
 
-                // Generate CREATE INDEX statement
                 var keyCols = mi.EqualityColumns.Concat(mi.InequalityColumns).ToList();
                 if (keyCols.Count > 0)
                 {
@@ -558,11 +954,22 @@ public static class ShowPlanParser
         return result;
     }
 
-    private static List<PlanWarning> ParseWarnings(XElement relOpEl)
+    /// <summary>
+    /// Parse warnings from a parent element that contains a &lt;Warnings&gt; child (e.g. RelOp).
+    /// </summary>
+    private static List<PlanWarning> ParseWarnings(XElement parentEl)
+    {
+        var warningsEl = parentEl.Element(Ns + "Warnings");
+        if (warningsEl == null) return new List<PlanWarning>();
+        return ParseWarningsFromElement(warningsEl);
+    }
+
+    /// <summary>
+    /// Parse warnings directly from a &lt;Warnings&gt; element.
+    /// </summary>
+    private static List<PlanWarning> ParseWarningsFromElement(XElement warningsEl)
     {
         var result = new List<PlanWarning>();
-        var warningsEl = relOpEl.Element(Ns + "Warnings");
-        if (warningsEl == null) return result;
 
         // No join predicate
         if (warningsEl.Attribute("NoJoinPredicate")?.Value is "true" or "1")
@@ -575,15 +982,28 @@ public static class ShowPlanParser
             });
         }
 
-        // Spill to TempDb
+        // Spill to TempDb (with enhanced details — Wave 3.7)
         foreach (var spillEl in warningsEl.Elements(Ns + "SpillToTempDb"))
         {
             var spillLevel = spillEl.Attribute("SpillLevel")?.Value ?? "?";
             var threadCount = spillEl.Attribute("SpilledThreadCount")?.Value ?? "?";
+            var msg = $"Spill level {spillLevel}, {threadCount} thread(s)";
+
+            var grantedKB = ParseLong(spillEl.Attribute("GrantedMemoryKB")?.Value);
+            var usedKB = ParseLong(spillEl.Attribute("UsedMemoryKB")?.Value);
+            var writes = ParseLong(spillEl.Attribute("WritesToTempDb")?.Value);
+            var reads = ParseLong(spillEl.Attribute("ReadsFromTempDb")?.Value);
+            if (grantedKB > 0 || writes > 0)
+            {
+                msg += $" — Granted: {grantedKB:N0} KB, Used: {usedKB:N0} KB";
+                if (writes > 0) msg += $", Writes: {writes:N0}";
+                if (reads > 0) msg += $", Reads: {reads:N0}";
+            }
+
             result.Add(new PlanWarning
             {
                 WarningType = "Spill to TempDb",
-                Message = $"Spill level {spillLevel}, {threadCount} thread(s)",
+                Message = msg,
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -632,6 +1052,21 @@ public static class ShowPlanParser
             });
         }
 
+        // Wave 2.3: Columns with stale statistics
+        var staleStatsEl = warningsEl.Element(Ns + "ColumnsWithStaleStatistics");
+        if (staleStatsEl != null)
+        {
+            var cols = staleStatsEl.Elements(Ns + "ColumnReference")
+                .Select(c => c.Attribute("Column")?.Value ?? "")
+                .Where(s => !string.IsNullOrEmpty(s));
+            result.Add(new PlanWarning
+            {
+                WarningType = "Stale Statistics",
+                Message = $"Stale statistics on: {string.Join(", ", cols)}",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
         // Wait warnings
         foreach (var waitEl in warningsEl.Elements(Ns + "Wait"))
         {
@@ -656,7 +1091,7 @@ public static class ShowPlanParser
                 var totalCost = stmt.StatementSubTreeCost > 0
                     ? stmt.StatementSubTreeCost
                     : stmt.RootNode.EstimatedTotalSubtreeCost;
-                if (totalCost <= 0) totalCost = 1; // Avoid division by zero
+                if (totalCost <= 0) totalCost = 1;
                 ComputeNodeCosts(stmt.RootNode, totalCost);
             }
         }
@@ -664,7 +1099,6 @@ public static class ShowPlanParser
 
     private static void ComputeNodeCosts(PlanNode node, double totalStatementCost)
     {
-        // Operator cost = subtree cost - sum of children's subtree costs
         var childrenSubtreeCost = node.Children.Sum(c => c.EstimatedTotalSubtreeCost);
         node.EstimatedOperatorCost = Math.Max(0, node.EstimatedTotalSubtreeCost - childrenSubtreeCost);
         node.CostPercent = (int)Math.Round((node.EstimatedOperatorCost / totalStatementCost) * 100);
@@ -674,10 +1108,6 @@ public static class ShowPlanParser
             ComputeNodeCosts(child, totalStatementCost);
     }
 
-    /// <summary>
-    /// Like Descendants() but stops at RelOp boundaries to prevent
-    /// picking up properties from child operators.
-    /// </summary>
     private static IEnumerable<XElement> ScopedDescendants(XElement element, XName name)
     {
         foreach (var child in element.Elements())

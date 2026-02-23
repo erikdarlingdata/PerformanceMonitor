@@ -471,15 +471,19 @@ public partial class PlanViewerControl : UserControl
             || !string.IsNullOrEmpty(node.TopExpression)
             || !string.IsNullOrEmpty(node.GroupBy)
             || !string.IsNullOrEmpty(node.PartitionColumns)
+            || !string.IsNullOrEmpty(node.HashKeys)
             || !string.IsNullOrEmpty(node.SegmentColumn)
             || !string.IsNullOrEmpty(node.DefinedValues)
             || !string.IsNullOrEmpty(node.OuterReferences)
             || !string.IsNullOrEmpty(node.InnerSideJoinColumns)
             || !string.IsNullOrEmpty(node.OuterSideJoinColumns)
+            || !string.IsNullOrEmpty(node.ActionColumn)
             || node.ManyToMany || node.BitmapCreator
             || node.SortDistinct || node.StartupExpression
             || node.NLOptimized || node.WithOrderedPrefetch || node.WithUnorderedPrefetch
-            || node.WithTies || node.Remoting || node.LocalParallelism;
+            || node.WithTies || node.Remoting || node.LocalParallelism
+            || node.SpoolStack || node.DMLRequestSort
+            || !string.IsNullOrEmpty(node.OffsetExpression) || node.TopRows > 0;
 
         if (hasOperatorDetails)
         {
@@ -513,6 +517,20 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Group By", node.GroupBy, isCode: true);
             if (!string.IsNullOrEmpty(node.PartitionColumns))
                 AddPropertyRow("Partition Columns", node.PartitionColumns, isCode: true);
+            if (!string.IsNullOrEmpty(node.HashKeys))
+                AddPropertyRow("Hash Keys", node.HashKeys, isCode: true);
+            if (!string.IsNullOrEmpty(node.OffsetExpression))
+                AddPropertyRow("Offset", node.OffsetExpression);
+            if (node.TopRows > 0)
+                AddPropertyRow("Rows", $"{node.TopRows}");
+            if (node.SpoolStack)
+                AddPropertyRow("Stack Spool", "True");
+            if (node.PrimaryNodeId > 0)
+                AddPropertyRow("Primary Node Id", $"{node.PrimaryNodeId}");
+            if (node.DMLRequestSort)
+                AddPropertyRow("DML Request Sort", "True");
+            if (!string.IsNullOrEmpty(node.ActionColumn))
+                AddPropertyRow("Action Column", node.ActionColumn, isCode: true);
             if (!string.IsNullOrEmpty(node.SegmentColumn))
                 AddPropertyRow("Segment Column", node.SegmentColumn, isCode: true);
             if (!string.IsNullOrEmpty(node.DefinedValues))
@@ -548,8 +566,10 @@ public partial class PlanViewerControl : UserControl
 
         // === Estimated Rows Section ===
         AddPropertySection("Estimated Rows");
-        AddPropertyRow("Est. Executions", $"{1 + node.EstimateRebinds:N0}");
+        var estExecs = 1 + node.EstimateRebinds;
+        AddPropertyRow("Est. Executions", $"{estExecs:N0}");
         AddPropertyRow("Est. Rows Per Exec", $"{node.EstimateRows:N1}");
+        AddPropertyRow("Est. Rows All Execs", $"{node.EstimateRows * Math.Max(1, estExecs):N1}");
         if (node.EstimatedRowsRead > 0)
             AddPropertyRow("Est. Rows to Read", $"{node.EstimatedRowsRead:N1}");
         if (node.TableCardinality > 0)
@@ -571,19 +591,33 @@ public partial class PlanViewerControl : UserControl
             if (node.ActualRewinds > 0)
                 AddPropertyRow("Actual Rewinds", $"{node.ActualRewinds:N0}");
 
+            // Runtime partition summary
+            if (node.PartitionsAccessed > 0)
+            {
+                AddPropertyRow("Partitions Accessed", $"{node.PartitionsAccessed}");
+                if (!string.IsNullOrEmpty(node.PartitionRanges))
+                    AddPropertyRow("Partition Ranges", node.PartitionRanges);
+            }
+
             // Timing
-            if (node.ActualElapsedMs > 0 || node.ActualCPUMs > 0)
+            if (node.ActualElapsedMs > 0 || node.ActualCPUMs > 0
+                || node.UdfCpuTimeUs > 0 || node.UdfElapsedTimeUs > 0)
             {
                 AddPropertySection("Actual Timing");
                 if (node.ActualElapsedMs > 0)
                     AddPropertyRow("Elapsed Time", $"{node.ActualElapsedMs:N0} ms");
                 if (node.ActualCPUMs > 0)
                     AddPropertyRow("CPU Time", $"{node.ActualCPUMs:N0} ms");
+                if (node.UdfElapsedTimeUs > 0)
+                    AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeUs:N0} us");
+                if (node.UdfCpuTimeUs > 0)
+                    AddPropertyRow("UDF CPU", $"{node.UdfCpuTimeUs:N0} us");
             }
 
             // I/O
             var hasIo = node.ActualLogicalReads > 0 || node.ActualPhysicalReads > 0
-                || node.ActualScans > 0 || node.ActualReadAheads > 0;
+                || node.ActualScans > 0 || node.ActualReadAheads > 0
+                || node.ActualSegmentReads > 0 || node.ActualSegmentSkips > 0;
             if (hasIo)
             {
                 AddPropertySection("Actual I/O");
@@ -594,6 +628,10 @@ public partial class PlanViewerControl : UserControl
                     AddPropertyRow("Scans", $"{node.ActualScans:N0}");
                 if (node.ActualReadAheads > 0)
                     AddPropertyRow("Read-Ahead Reads", $"{node.ActualReadAheads:N0}");
+                if (node.ActualSegmentReads > 0)
+                    AddPropertyRow("Segment Reads", $"{node.ActualSegmentReads:N0}");
+                if (node.ActualSegmentSkips > 0)
+                    AddPropertyRow("Segment Skips", $"{node.ActualSegmentSkips:N0}");
             }
 
             // LOB I/O
@@ -615,6 +653,7 @@ public partial class PlanViewerControl : UserControl
         var hasPredicates = !string.IsNullOrEmpty(node.SeekPredicates) || !string.IsNullOrEmpty(node.Predicate)
             || !string.IsNullOrEmpty(node.HashKeysProbe) || !string.IsNullOrEmpty(node.HashKeysBuild)
             || !string.IsNullOrEmpty(node.BuildResidual) || !string.IsNullOrEmpty(node.ProbeResidual)
+            || !string.IsNullOrEmpty(node.MergeResidual) || !string.IsNullOrEmpty(node.PassThru)
             || !string.IsNullOrEmpty(node.SetPredicate);
         if (hasPredicates)
         {
@@ -631,6 +670,10 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Build Residual", node.BuildResidual, isCode: true);
             if (!string.IsNullOrEmpty(node.ProbeResidual))
                 AddPropertyRow("Probe Residual", node.ProbeResidual, isCode: true);
+            if (!string.IsNullOrEmpty(node.MergeResidual))
+                AddPropertyRow("Merge Residual", node.MergeResidual, isCode: true);
+            if (!string.IsNullOrEmpty(node.PassThru))
+                AddPropertyRow("Pass Through", node.PassThru, isCode: true);
             if (!string.IsNullOrEmpty(node.SetPredicate))
                 AddPropertyRow("Set Predicate", node.SetPredicate, isCode: true);
         }
@@ -643,57 +686,260 @@ public partial class PlanViewerControl : UserControl
         }
 
         // === Memory ===
-        if (node.MemoryGrantKB > 0 || node.DesiredMemoryKB > 0 || node.MaxUsedMemoryKB > 0)
+        if (node.MemoryGrantKB > 0 || node.DesiredMemoryKB > 0 || node.MaxUsedMemoryKB > 0
+            || node.MemoryFractionInput > 0 || node.MemoryFractionOutput > 0)
         {
             AddPropertySection("Memory");
             if (node.MemoryGrantKB > 0) AddPropertyRow("Granted", $"{node.MemoryGrantKB:N0} KB");
             if (node.DesiredMemoryKB > 0) AddPropertyRow("Desired", $"{node.DesiredMemoryKB:N0} KB");
             if (node.MaxUsedMemoryKB > 0) AddPropertyRow("Max Used", $"{node.MaxUsedMemoryKB:N0} KB");
+            if (node.MemoryFractionInput > 0) AddPropertyRow("Fraction Input", $"{node.MemoryFractionInput:F4}");
+            if (node.MemoryFractionOutput > 0) AddPropertyRow("Fraction Output", $"{node.MemoryFractionOutput:F4}");
         }
 
-        // === Statement Memory Grant (from MemoryGrantInfo) — root node only ===
-        if (node.Parent == null && _currentStatement?.MemoryGrant != null)
-        {
-            var mg = _currentStatement.MemoryGrant;
-            AddPropertySection("Statement Memory Grant");
-            if (mg.RequestedMemoryKB > 0) AddPropertyRow("Requested", $"{mg.RequestedMemoryKB:N0} KB");
-            if (mg.GrantedMemoryKB > 0) AddPropertyRow("Granted", $"{mg.GrantedMemoryKB:N0} KB");
-            if (mg.MaxUsedMemoryKB > 0) AddPropertyRow("Max Used", $"{mg.MaxUsedMemoryKB:N0} KB");
-            if (mg.DesiredMemoryKB > 0) AddPropertyRow("Desired", $"{mg.DesiredMemoryKB:N0} KB");
-            if (mg.SerialRequiredMemoryKB > 0) AddPropertyRow("Serial Required", $"{mg.SerialRequiredMemoryKB:N0} KB");
-            if (mg.SerialDesiredMemoryKB > 0) AddPropertyRow("Serial Desired", $"{mg.SerialDesiredMemoryKB:N0} KB");
-        }
-
-        // === Statement Info — root node only ===
+        // === Root node only: statement-level sections ===
         if (node.Parent == null && _currentStatement != null)
         {
             var s = _currentStatement;
-            var hasStmtInfo = s.CardinalityEstimationModelVersion > 0 || s.CompileTimeMs > 0
-                || s.CachedPlanSizeKB > 0 || !string.IsNullOrEmpty(s.QueryHash)
-                || s.DegreeOfParallelism > 0 || !string.IsNullOrEmpty(s.NonParallelPlanReason);
-            if (hasStmtInfo)
+
+            // === Statement Text ===
+            if (!string.IsNullOrEmpty(s.StatementText))
             {
-                AddPropertySection("Statement Info");
-                if (s.CardinalityEstimationModelVersion > 0)
-                    AddPropertyRow("CE Model Version", $"{s.CardinalityEstimationModelVersion}");
-                if (s.DegreeOfParallelism > 0)
-                    AddPropertyRow("DOP", $"{s.DegreeOfParallelism}");
-                if (!string.IsNullOrEmpty(s.NonParallelPlanReason))
-                    AddPropertyRow("Non-Parallel Reason", s.NonParallelPlanReason);
-                if (s.CompileTimeMs > 0)
-                    AddPropertyRow("Compile Time", $"{s.CompileTimeMs:N0} ms");
-                if (s.CompileCPUMs > 0)
-                    AddPropertyRow("Compile CPU", $"{s.CompileCPUMs:N0} ms");
-                if (s.CompileMemoryKB > 0)
-                    AddPropertyRow("Compile Memory", $"{s.CompileMemoryKB:N0} KB");
-                if (s.CachedPlanSizeKB > 0)
-                    AddPropertyRow("Cached Plan Size", $"{s.CachedPlanSizeKB:N0} KB");
-                if (!string.IsNullOrEmpty(s.QueryHash))
-                    AddPropertyRow("Query Hash", s.QueryHash, isCode: true);
-                if (!string.IsNullOrEmpty(s.QueryPlanHash))
-                    AddPropertyRow("Plan Hash", s.QueryPlanHash, isCode: true);
-                if (s.RetrievedFromCache)
-                    AddPropertyRow("From Cache", "True");
+                AddPropertySection("Statement");
+                AddPropertyRow("Text", s.StatementText, isCode: true);
+                if (!string.IsNullOrEmpty(s.ParameterizedText) && s.ParameterizedText != s.StatementText)
+                    AddPropertyRow("Parameterized", s.ParameterizedText, isCode: true);
+            }
+
+            // === Cursor Info ===
+            if (!string.IsNullOrEmpty(s.CursorName))
+            {
+                AddPropertySection("Cursor Info");
+                AddPropertyRow("Cursor Name", s.CursorName);
+                if (!string.IsNullOrEmpty(s.CursorActualType))
+                    AddPropertyRow("Actual Type", s.CursorActualType);
+                if (!string.IsNullOrEmpty(s.CursorRequestedType))
+                    AddPropertyRow("Requested Type", s.CursorRequestedType);
+                if (!string.IsNullOrEmpty(s.CursorConcurrency))
+                    AddPropertyRow("Concurrency", s.CursorConcurrency);
+                AddPropertyRow("Forward Only", s.CursorForwardOnly ? "True" : "False");
+            }
+
+            // === Statement Memory Grant ===
+            if (s.MemoryGrant != null)
+            {
+                var mg = s.MemoryGrant;
+                AddPropertySection("Memory Grant Info");
+                AddPropertyRow("Granted", $"{mg.GrantedMemoryKB:N0} KB");
+                AddPropertyRow("Max Used", $"{mg.MaxUsedMemoryKB:N0} KB");
+                AddPropertyRow("Requested", $"{mg.RequestedMemoryKB:N0} KB");
+                AddPropertyRow("Desired", $"{mg.DesiredMemoryKB:N0} KB");
+                AddPropertyRow("Required", $"{mg.RequiredMemoryKB:N0} KB");
+                AddPropertyRow("Serial Required", $"{mg.SerialRequiredMemoryKB:N0} KB");
+                AddPropertyRow("Serial Desired", $"{mg.SerialDesiredMemoryKB:N0} KB");
+                if (mg.GrantWaitTimeMs > 0)
+                    AddPropertyRow("Grant Wait Time", $"{mg.GrantWaitTimeMs:N0} ms");
+                if (mg.LastRequestedMemoryKB > 0)
+                    AddPropertyRow("Last Requested", $"{mg.LastRequestedMemoryKB:N0} KB");
+                if (!string.IsNullOrEmpty(mg.IsMemoryGrantFeedbackAdjusted))
+                    AddPropertyRow("Feedback Adjusted", mg.IsMemoryGrantFeedbackAdjusted);
+            }
+
+            // === Statement Info ===
+            AddPropertySection("Statement Info");
+            if (!string.IsNullOrEmpty(s.StatementOptmLevel))
+                AddPropertyRow("Optimization Level", s.StatementOptmLevel);
+            if (!string.IsNullOrEmpty(s.StatementOptmEarlyAbortReason))
+                AddPropertyRow("Early Abort Reason", s.StatementOptmEarlyAbortReason);
+            if (s.CardinalityEstimationModelVersion > 0)
+                AddPropertyRow("CE Model Version", $"{s.CardinalityEstimationModelVersion}");
+            if (s.DegreeOfParallelism > 0)
+                AddPropertyRow("DOP", $"{s.DegreeOfParallelism}");
+            if (s.EffectiveDOP > 0)
+                AddPropertyRow("Effective DOP", $"{s.EffectiveDOP}");
+            if (!string.IsNullOrEmpty(s.DOPFeedbackAdjusted))
+                AddPropertyRow("DOP Feedback", s.DOPFeedbackAdjusted);
+            if (!string.IsNullOrEmpty(s.NonParallelPlanReason))
+                AddPropertyRow("Non-Parallel Reason", s.NonParallelPlanReason);
+            if (s.MaxQueryMemoryKB > 0)
+                AddPropertyRow("Max Query Memory", $"{s.MaxQueryMemoryKB:N0} KB");
+            AddPropertyRow("Compile Time", $"{s.CompileTimeMs:N0} ms");
+            AddPropertyRow("Compile CPU", $"{s.CompileCPUMs:N0} ms");
+            AddPropertyRow("Compile Memory", $"{s.CompileMemoryKB:N0} KB");
+            if (s.CachedPlanSizeKB > 0)
+                AddPropertyRow("Cached Plan Size", $"{s.CachedPlanSizeKB:N0} KB");
+            AddPropertyRow("Retrieved From Cache", s.RetrievedFromCache ? "True" : "False");
+            AddPropertyRow("Batch Mode On RowStore", s.BatchModeOnRowStoreUsed ? "True" : "False");
+            AddPropertyRow("Security Policy", s.SecurityPolicyApplied ? "True" : "False");
+            AddPropertyRow("Parameterization Type", $"{s.StatementParameterizationType}");
+            if (!string.IsNullOrEmpty(s.QueryHash))
+                AddPropertyRow("Query Hash", s.QueryHash, isCode: true);
+            if (!string.IsNullOrEmpty(s.QueryPlanHash))
+                AddPropertyRow("Plan Hash", s.QueryPlanHash, isCode: true);
+            if (!string.IsNullOrEmpty(s.StatementSqlHandle))
+                AddPropertyRow("SQL Handle", s.StatementSqlHandle, isCode: true);
+            AddPropertyRow("DB Settings Id", $"{s.DatabaseContextSettingsId}");
+            AddPropertyRow("Parent Object Id", $"{s.ParentObjectId}");
+
+            // Plan Guide
+            if (!string.IsNullOrEmpty(s.PlanGuideName))
+            {
+                AddPropertyRow("Plan Guide", s.PlanGuideName);
+                if (!string.IsNullOrEmpty(s.PlanGuideDB))
+                    AddPropertyRow("Plan Guide DB", s.PlanGuideDB);
+            }
+            if (s.UsePlan)
+                AddPropertyRow("USE PLAN", "True");
+
+            // Query Store Hints
+            if (s.QueryStoreStatementHintId > 0)
+            {
+                AddPropertyRow("QS Hint Id", $"{s.QueryStoreStatementHintId}");
+                if (!string.IsNullOrEmpty(s.QueryStoreStatementHintText))
+                    AddPropertyRow("QS Hint", s.QueryStoreStatementHintText, isCode: true);
+                if (!string.IsNullOrEmpty(s.QueryStoreStatementHintSource))
+                    AddPropertyRow("QS Hint Source", s.QueryStoreStatementHintSource);
+            }
+
+            // === Set Options ===
+            if (s.SetOptions != null)
+            {
+                var so = s.SetOptions;
+                AddPropertySection("Set Options");
+                AddPropertyRow("ANSI_NULLS", so.AnsiNulls ? "True" : "False");
+                AddPropertyRow("ANSI_PADDING", so.AnsiPadding ? "True" : "False");
+                AddPropertyRow("ANSI_WARNINGS", so.AnsiWarnings ? "True" : "False");
+                AddPropertyRow("ARITHABORT", so.ArithAbort ? "True" : "False");
+                AddPropertyRow("CONCAT_NULL", so.ConcatNullYieldsNull ? "True" : "False");
+                AddPropertyRow("NUMERIC_ROUNDABORT", so.NumericRoundAbort ? "True" : "False");
+                AddPropertyRow("QUOTED_IDENTIFIER", so.QuotedIdentifier ? "True" : "False");
+            }
+
+            // === Optimizer Hardware Properties ===
+            if (s.HardwareProperties != null)
+            {
+                var hw = s.HardwareProperties;
+                AddPropertySection("Hardware Properties");
+                AddPropertyRow("Available Memory", $"{hw.EstimatedAvailableMemoryGrant:N0} KB");
+                AddPropertyRow("Pages Cached", $"{hw.EstimatedPagesCached:N0}");
+                AddPropertyRow("Available DOP", $"{hw.EstimatedAvailableDOP}");
+                if (hw.MaxCompileMemory > 0)
+                    AddPropertyRow("Max Compile Memory", $"{hw.MaxCompileMemory:N0} KB");
+            }
+
+            // === Optimizer Stats Usage ===
+            if (s.StatsUsage.Count > 0)
+            {
+                AddPropertySection("Statistics Used");
+                foreach (var stat in s.StatsUsage)
+                {
+                    var statLabel = !string.IsNullOrEmpty(stat.TableName)
+                        ? $"{stat.TableName}.{stat.StatisticsName}"
+                        : stat.StatisticsName;
+                    var statDetail = $"Modified: {stat.ModificationCount:N0}, Sampled: {stat.SamplingPercent:F1}%";
+                    if (!string.IsNullOrEmpty(stat.LastUpdate))
+                        statDetail += $", Updated: {stat.LastUpdate}";
+                    AddPropertyRow(statLabel, statDetail);
+                }
+            }
+
+            // === Parameters ===
+            if (s.Parameters.Count > 0)
+            {
+                AddPropertySection("Parameters");
+                foreach (var p in s.Parameters)
+                {
+                    var paramText = p.DataType;
+                    if (!string.IsNullOrEmpty(p.CompiledValue))
+                        paramText += $", Compiled: {p.CompiledValue}";
+                    if (!string.IsNullOrEmpty(p.RuntimeValue))
+                        paramText += $", Runtime: {p.RuntimeValue}";
+                    AddPropertyRow(p.Name, paramText);
+                }
+            }
+
+            // === Query Time Stats (actual plans) ===
+            if (s.QueryTimeStats != null)
+            {
+                AddPropertySection("Query Time Stats");
+                AddPropertyRow("CPU Time", $"{s.QueryTimeStats.CpuTimeMs:N0} ms");
+                AddPropertyRow("Elapsed Time", $"{s.QueryTimeStats.ElapsedTimeMs:N0} ms");
+            }
+
+            // === Thread Stats (actual plans) ===
+            if (s.ThreadStats != null)
+            {
+                AddPropertySection("Thread Stats");
+                AddPropertyRow("Branches", $"{s.ThreadStats.Branches}");
+                AddPropertyRow("Used Threads", $"{s.ThreadStats.UsedThreads}");
+            }
+
+            // === Wait Stats (actual plans) ===
+            if (s.WaitStats.Count > 0)
+            {
+                AddPropertySection("Wait Stats");
+                foreach (var w in s.WaitStats)
+                    AddPropertyRow(w.WaitType, $"{w.WaitTimeMs:N0} ms ({w.WaitCount:N0} waits)");
+            }
+
+            // === Trace Flags ===
+            if (s.TraceFlags.Count > 0)
+            {
+                AddPropertySection("Trace Flags");
+                foreach (var tf in s.TraceFlags)
+                {
+                    var tfLabel = $"TF {tf.Value}";
+                    var tfDetail = $"{tf.Scope}{(tf.IsCompileTime ? ", Compile-time" : ", Runtime")}";
+                    AddPropertyRow(tfLabel, tfDetail);
+                }
+            }
+
+            // === Indexed Views ===
+            if (s.IndexedViews.Count > 0)
+            {
+                AddPropertySection("Indexed Views");
+                foreach (var iv in s.IndexedViews)
+                    AddPropertyRow("View", iv, isCode: true);
+            }
+
+            // === Plan-Level Warnings ===
+            if (s.PlanWarnings.Count > 0)
+            {
+                AddPropertySection("Plan Warnings");
+                foreach (var w in s.PlanWarnings)
+                {
+                    var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
+                        : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
+                    warnPanel.Children.Add(new TextBlock
+                    {
+                        Text = $"\u26A0 {w.WarningType}",
+                        FontWeight = FontWeights.SemiBold,
+                        FontSize = 11,
+                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
+                    });
+                    warnPanel.Children.Add(new TextBlock
+                    {
+                        Text = w.Message,
+                        FontSize = 11,
+                        Foreground = TooltipFgBrush,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(16, 0, 0, 0)
+                    });
+                    PropertiesContent.Children.Add(warnPanel);
+                }
+            }
+
+            // === Missing Indexes ===
+            if (s.MissingIndexes.Count > 0)
+            {
+                AddPropertySection("Missing Indexes");
+                foreach (var mi in s.MissingIndexes)
+                {
+                    AddPropertyRow($"{mi.Schema}.{mi.Table}", $"Impact: {mi.Impact:F1}%");
+                    if (!string.IsNullOrEmpty(mi.CreateStatement))
+                        AddPropertyRow("CREATE INDEX", mi.CreateStatement, isCode: true);
+                }
             }
         }
 
