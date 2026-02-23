@@ -42,14 +42,27 @@ public partial class PlanViewerControl : UserControl
     private static readonly SolidColorBrush SectionHeaderBrush = new(Color.FromRgb(0x4F, 0xA3, 0xFF));
     private static readonly SolidColorBrush PropSeparatorBrush = new(Color.FromRgb(0x2A, 0x2D, 0x35));
 
+    // Current property section for collapsible groups
+    private StackPanel? _currentPropertySection;
+
     public PlanViewerControl()
     {
         InitializeComponent();
     }
 
-    public void LoadPlan(string planXml, string label)
+    public void LoadPlan(string planXml, string label, string? queryText = null)
     {
         _label = label;
+
+        if (!string.IsNullOrEmpty(queryText))
+        {
+            QueryTextBox.Text = queryText;
+            QueryTextExpander.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            QueryTextExpander.Visibility = Visibility.Collapsed;
+        }
         _currentPlan = ShowPlanParser.Parse(planXml);
 
         var allStatements = _currentPlan.Batches
@@ -86,11 +99,15 @@ public partial class PlanViewerControl : UserControl
                 });
             }
             StatementSelector.SelectedIndex = 0;
+            StatementLabel.Visibility = Visibility.Visible;
             StatementSelector.Visibility = Visibility.Visible;
+            CostText.Visibility = Visibility.Visible;
         }
         else
         {
+            StatementLabel.Visibility = Visibility.Collapsed;
             StatementSelector.Visibility = Visibility.Collapsed;
+            CostText.Visibility = Visibility.Collapsed;
             RenderStatement(allStatements[0]);
         }
     }
@@ -105,8 +122,10 @@ public partial class PlanViewerControl : UserControl
         PlanScrollViewer.Visibility = Visibility.Collapsed;
         MissingIndexBanner.Visibility = Visibility.Collapsed;
         WarningsBanner.Visibility = Visibility.Collapsed;
+        StatementLabel.Visibility = Visibility.Collapsed;
         StatementSelector.Visibility = Visibility.Collapsed;
         CostText.Text = "";
+        CostText.Visibility = Visibility.Collapsed;
         ClosePropertiesPanel();
     }
 
@@ -197,31 +216,61 @@ public partial class PlanViewerControl : UserControl
             });
         }
 
-        // Warning indicator
+        // Warning indicator badge (orange triangle with !)
         if (node.HasWarnings)
         {
-            iconRow.Children.Add(new TextBlock
+            var warnBadge = new Grid
             {
-                Text = "\u26A0",
-                FontSize = 12,
-                Foreground = Brushes.Orange,
-                VerticalAlignment = VerticalAlignment.Top,
-                Margin = new Thickness(2, 0, 0, 0)
+                Width = 20, Height = 20,
+                Margin = new Thickness(4, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = "Has warnings"
+            };
+            warnBadge.Children.Add(new Polygon
+            {
+                Points = new PointCollection
+                {
+                    new Point(10, 0), new Point(20, 18), new Point(0, 18)
+                },
+                Fill = Brushes.Orange
             });
+            warnBadge.Children.Add(new TextBlock
+            {
+                Text = "!",
+                FontSize = 12,
+                FontWeight = FontWeights.ExtraBold,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 3, 0, 0)
+            });
+            iconRow.Children.Add(warnBadge);
         }
 
-        // Parallel indicator
+        // Parallel indicator badge (amber circle with arrows)
         if (node.Parallel)
         {
-            iconRow.Children.Add(new TextBlock
+            var parBadge = new Grid
+            {
+                Width = 20, Height = 20,
+                Margin = new Thickness(4, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = "Parallel execution"
+            };
+            parBadge.Children.Add(new Ellipse
+            {
+                Width = 20, Height = 20,
+                Fill = new SolidColorBrush(Color.FromRgb(0xFF, 0xC1, 0x07))
+            });
+            parBadge.Children.Add(new TextBlock
             {
                 Text = "\u21C6",
-                FontSize = 11,
-                Foreground = new SolidColorBrush(Color.FromRgb(0x6B, 0xB5, 0xFF)),
-                VerticalAlignment = VerticalAlignment.Top,
-                Margin = new Thickness(2, 0, 0, 0),
-                ToolTip = "Parallel execution"
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
             });
+            iconRow.Children.Add(parBadge);
         }
 
         stack.Children.Add(iconRow);
@@ -242,7 +291,7 @@ public partial class PlanViewerControl : UserControl
         // Cost percentage
         var costColor = node.CostPercent >= 50 ? Brushes.OrangeRed
             : node.CostPercent >= 25 ? Brushes.Orange
-            : (Brush)FindResource("ForegroundMutedBrush");
+            : (Brush)FindResource("ForegroundBrush");
 
         stack.Children.Add(new TextBlock
         {
@@ -256,40 +305,44 @@ public partial class PlanViewerControl : UserControl
         // Actual plan stats: elapsed time, CPU time, and row counts
         if (node.HasActualStats)
         {
-            var mutedBrush = (Brush)FindResource("ForegroundMutedBrush");
+            var fgBrush = (Brush)FindResource("ForegroundBrush");
 
-            // Elapsed time
+            // Elapsed time — red if >= 1 second
             var elapsedSec = node.ActualElapsedMs / 1000.0;
+            var elapsedBrush = elapsedSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"{elapsedSec:F3}s",
                 FontSize = 10,
-                Foreground = mutedBrush,
+                Foreground = elapsedBrush,
                 TextAlignment = TextAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center
             });
 
-            // CPU time
+            // CPU time — red if >= 1 second
             var cpuSec = node.ActualCPUMs / 1000.0;
+            var cpuBrush = cpuSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"CPU: {cpuSec:F3}s",
                 FontSize = 9,
-                Foreground = mutedBrush,
+                Foreground = cpuBrush,
                 TextAlignment = TextAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center
             });
 
-            // Actual rows of Estimated rows (accuracy %)
+            // Actual rows of Estimated rows (accuracy %) — red if off by 10x+
             var estRows = node.EstimateRows;
+            var accuracyRatio = estRows > 0 ? node.ActualRows / estRows : (node.ActualRows > 0 ? double.MaxValue : 1.0);
+            var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? Brushes.OrangeRed : fgBrush;
             var accuracy = estRows > 0
-                ? $" ({node.ActualRows / estRows * 100:F0}%)"
+                ? $" ({accuracyRatio * 100:F0}%)"
                 : "";
             stack.Children.Add(new TextBlock
             {
                 Text = $"{node.ActualRows:N0} of {estRows:N0}{accuracy}",
                 FontSize = 9,
-                Foreground = mutedBrush,
+                Foreground = rowBrush,
                 TextAlignment = TextAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -304,7 +357,7 @@ public partial class PlanViewerControl : UserControl
             {
                 Text = node.FullObjectName ?? node.ObjectName,
                 FontSize = 9,
-                Foreground = (Brush)FindResource("ForegroundMutedBrush"),
+                Foreground = (Brush)FindResource("ForegroundBrush"),
                 TextAlignment = TextAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 MaxWidth = PlanLayoutEngine.NodeWidth - 16,
@@ -455,6 +508,7 @@ public partial class PlanViewerControl : UserControl
     private void ShowPropertiesPanel(PlanNode node)
     {
         PropertiesContent.Children.Clear();
+        _currentPropertySection = null;
 
         // Header
         var headerText = node.PhysicalOp;
@@ -970,7 +1024,7 @@ public partial class PlanViewerControl : UserControl
                         TextWrapping = TextWrapping.Wrap,
                         Margin = new Thickness(16, 0, 0, 0)
                     });
-                    PropertiesContent.Children.Add(warnPanel);
+                    (_currentPropertySection ?? PropertiesContent).Children.Add(warnPanel);
                 }
             }
 
@@ -1023,21 +1077,27 @@ public partial class PlanViewerControl : UserControl
 
     private void AddPropertySection(string title)
     {
-        PropertiesContent.Children.Add(new Border
+        var contentPanel = new StackPanel();
+        var expander = new Expander
         {
-            Padding = new Thickness(10, 6, 10, 4),
-            Margin = new Thickness(0, 2, 0, 0),
-            Background = new SolidColorBrush(Color.FromArgb(0x18, 0x4F, 0xA3, 0xFF)),
-            BorderBrush = PropSeparatorBrush,
-            BorderThickness = new Thickness(0, 0, 0, 1),
-            Child = new TextBlock
+            IsExpanded = true,
+            Header = new TextBlock
             {
                 Text = title,
                 FontWeight = FontWeights.SemiBold,
                 FontSize = 11,
                 Foreground = SectionHeaderBrush
-            }
-        });
+            },
+            Content = contentPanel,
+            Margin = new Thickness(0, 2, 0, 0),
+            Padding = new Thickness(0),
+            Foreground = SectionHeaderBrush,
+            Background = new SolidColorBrush(Color.FromArgb(0x18, 0x4F, 0xA3, 0xFF)),
+            BorderBrush = PropSeparatorBrush,
+            BorderThickness = new Thickness(0, 0, 0, 1)
+        };
+        PropertiesContent.Children.Add(expander);
+        _currentPropertySection = contentPanel;
     }
 
     private void AddPropertyRow(string label, string value, bool isCode = false)
@@ -1067,7 +1127,8 @@ public partial class PlanViewerControl : UserControl
         Grid.SetColumn(valueBlock, 1);
         grid.Children.Add(valueBlock);
 
-        PropertiesContent.Children.Add(grid);
+        var target = _currentPropertySection ?? PropertiesContent;
+        target.Children.Add(grid);
     }
 
     private void CloseProperties_Click(object sender, RoutedEventArgs e)

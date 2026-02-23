@@ -38,8 +38,8 @@ namespace PerformanceMonitorDashboard.Controls
         private DatabaseService? _databaseService;
         private Action<string>? _statusCallback;
 
-        /// <summary>Raised when user wants to view a plan in the Plan Viewer tab. Args: (planXml, label)</summary>
-        public event Action<string, string>? ViewPlanRequested;
+        /// <summary>Raised when user wants to view a plan in the Plan Viewer tab. Args: (planXml, label, queryText)</summary>
+        public event Action<string, string, string?>? ViewPlanRequested;
 
         private Popup? _filterPopup;
         private ColumnFilterPopup? _filterPopupContent;
@@ -718,38 +718,45 @@ namespace PerformanceMonitorDashboard.Controls
             if (item == null) return;
 
             string? planXml = null;
+            string? queryText = null;
             string label = "Estimated Plan";
 
             switch (item)
             {
                 case QuerySnapshotItem snap when !string.IsNullOrEmpty(snap.QueryPlan):
                     planXml = snap.QueryPlan;
+                    queryText = snap.QueryText;
                     label = $"Est Plan - SPID {snap.SessionId}";
                     break;
                 case LiveQueryItem live when !string.IsNullOrEmpty(live.LiveQueryPlan):
                     planXml = live.LiveQueryPlan;
+                    queryText = live.QueryText;
                     label = $"Plan - SPID {live.SessionId}";
                     break;
                 case LiveQueryItem live when !string.IsNullOrEmpty(live.QueryPlan):
                     planXml = live.QueryPlan;
+                    queryText = live.QueryText;
                     label = $"Est Plan - SPID {live.SessionId}";
                     break;
                 case QueryStatsItem stats when !string.IsNullOrEmpty(stats.QueryPlanXml):
                     planXml = stats.QueryPlanXml;
+                    queryText = stats.QueryText;
                     label = $"Est Plan - {stats.QueryHash}";
                     break;
                 case ProcedureStatsItem proc when !string.IsNullOrEmpty(proc.QueryPlanXml):
                     planXml = proc.QueryPlanXml;
+                    queryText = proc.ObjectName;
                     label = $"Est Plan - {proc.ProcedureName}";
                     break;
                 case QueryStoreItem qs when !string.IsNullOrEmpty(qs.QueryPlanXml):
                     planXml = qs.QueryPlanXml;
+                    queryText = qs.QueryText;
                     label = $"Est Plan - QS {qs.QueryId}";
                     break;
             }
 
             if (planXml != null)
-                ViewPlanRequested?.Invoke(planXml, label);
+                ViewPlanRequested?.Invoke(planXml, label, queryText);
         }
 
         private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
@@ -829,7 +836,7 @@ namespace PerformanceMonitorDashboard.Controls
 
                 if (!string.IsNullOrEmpty(actualPlanXml))
                 {
-                    ViewPlanRequested?.Invoke(actualPlanXml, label);
+                    ViewPlanRequested?.Invoke(actualPlanXml, label, queryText);
                     _statusCallback?.Invoke("Actual plan captured successfully.");
                 }
                 else

@@ -2236,6 +2236,47 @@ public partial class ServerTab : UserControl
         SavePlanFile(row.LiveQueryPlan, $"ActualPlan_Session{row.SessionId}");
     }
 
+    private void OpenPlanTab(string planXml, string label, string? queryText = null)
+    {
+        var viewer = new PlanViewerControl();
+        viewer.LoadPlan(planXml, label, queryText);
+
+        var header = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        header.Children.Add(new TextBlock
+        {
+            Text = label.Length > 30 ? label[..30] + "\u2026" : label,
+            VerticalAlignment = System.Windows.VerticalAlignment.Center,
+            ToolTip = label
+        });
+        var closeBtn = new Button
+        {
+            Style = (Style)FindResource("TabCloseButton")
+        };
+        header.Children.Add(closeBtn);
+
+        var tab = new TabItem { Header = header, Content = viewer };
+        closeBtn.Tag = tab;
+        closeBtn.Click += ClosePlanTab_Click;
+
+        PlanTabControl.Items.Add(tab);
+        PlanTabControl.SelectedItem = tab;
+        PlanEmptyState.Visibility = Visibility.Collapsed;
+        PlanTabControl.Visibility = Visibility.Visible;
+    }
+
+    private void ClosePlanTab_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button btn && btn.Tag is TabItem tab)
+        {
+            PlanTabControl.Items.Remove(tab);
+            if (PlanTabControl.Items.Count == 0)
+            {
+                PlanTabControl.Visibility = Visibility.Collapsed;
+                PlanEmptyState.Visibility = Visibility.Visible;
+            }
+        }
+    }
+
     private async void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem menuItem) return;
@@ -2243,18 +2284,21 @@ public partial class ServerTab : UserControl
         if (grid?.CurrentItem == null) return;
 
         string? planXml = null;
+        string? queryText = null;
         string label = "Estimated Plan";
 
         switch (grid.CurrentItem)
         {
             case QuerySnapshotRow snap:
                 planXml = snap.LiveQueryPlan ?? snap.QueryPlan;
+                queryText = snap.QueryText;
                 label = snap.LiveQueryPlan != null
                     ? $"Plan - SPID {snap.SessionId}"
                     : $"Est Plan - SPID {snap.SessionId}";
                 break;
             case QueryStatsRow stats:
                 planXml = stats.QueryPlan;
+                queryText = stats.QueryText;
                 label = $"Est Plan - {stats.QueryHash}";
                 // Fetch on demand if not already loaded
                 if (string.IsNullOrEmpty(planXml))
@@ -2266,6 +2310,7 @@ public partial class ServerTab : UserControl
                 break;
             case ProcedureStatsRow proc:
                 label = $"Est Plan - {proc.FullName}";
+                queryText = proc.FullName;
                 try
                 {
                     var connStr = _server.GetConnectionString(_credentialService);
@@ -2276,6 +2321,7 @@ public partial class ServerTab : UserControl
                 break;
             case QueryStoreRow qs:
                 label = $"Est Plan - QS {qs.QueryId}";
+                queryText = qs.QueryText;
                 if (qs.PlanId > 0)
                 {
                     try
@@ -2290,7 +2336,7 @@ public partial class ServerTab : UserControl
 
         if (!string.IsNullOrEmpty(planXml))
         {
-            PlanViewerContent.LoadPlan(planXml, label);
+            OpenPlanTab(planXml, label, queryText);
             PlanViewerTabItem.IsSelected = true;
         }
     }
@@ -2378,7 +2424,7 @@ public partial class ServerTab : UserControl
 
             if (!string.IsNullOrEmpty(actualPlanXml))
             {
-                PlanViewerContent.LoadPlan(actualPlanXml, label);
+                OpenPlanTab(actualPlanXml, label, queryText);
                 PlanViewerTabItem.IsSelected = true;
             }
             else

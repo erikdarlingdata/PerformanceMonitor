@@ -7,6 +7,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -27,8 +28,9 @@
                     <Button Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
                             ToolTip="Save plan as .sqlplan file"/>
                     <Separator Margin="12,4"/>
-                    <TextBlock Text="Statement:" VerticalAlignment="Center"
-                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
+                    <TextBlock x:Name="StatementLabel" Text="Statement:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"
+                               Visibility="Collapsed"/>
                     <ComboBox x:Name="StatementSelector" MinWidth="200" Height="28"
                               SelectionChanged="StatementSelector_Changed"
                               Visibility="Collapsed"/>
@@ -75,8 +77,23 @@
             </StackPanel>
         </Border>
 
+        <!-- Query Text (collapsible) -->
+        <Expander Grid.Row="3" x:Name="QueryTextExpander" Header="  Query Text"
+                  IsExpanded="False" Visibility="Collapsed"
+                  Foreground="{DynamicResource ForegroundBrush}"
+                  Background="{DynamicResource BackgroundDarkBrush}"
+                  BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+            <TextBox x:Name="QueryTextBox" IsReadOnly="True"
+                     FontFamily="Consolas" FontSize="11"
+                     Background="{DynamicResource BackgroundLightBrush}"
+                     Foreground="{DynamicResource ForegroundBrush}"
+                     BorderThickness="0" TextWrapping="Wrap"
+                     MaxHeight="200" VerticalScrollBarVisibility="Auto"
+                     Padding="8,4"/>
+        </Expander>
+
         <!-- Plan Canvas + Properties Panel -->
-        <Grid Grid.Row="3">
+        <Grid Grid.Row="4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
