@@ -90,6 +90,14 @@
                         <ComboBoxItem Content="Last 7 days"/>
                     </ComboBox>
                 </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="Connection timeout:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
+                    <TextBox x:Name="ConnectionTimeoutBox" Width="50" Text="5" VerticalAlignment="Center"/>
+                    <TextBlock Text="seconds (5–60, increase for VPN/remote connections)"
+                               FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                </StackPanel>
             </StackPanel>
         </Border>
 

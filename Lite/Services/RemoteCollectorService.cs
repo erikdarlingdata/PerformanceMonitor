@@ -78,9 +78,9 @@ public partial class RemoteCollectorService
     private const int CommandTimeoutSeconds = 30;
 
     /// <summary>
-    /// Connection timeout for SQL Server connections in seconds.
+    /// Connection timeout for SQL Server connections in seconds. Read from App settings each call.
     /// </summary>
-    private const int ConnectionTimeoutSeconds = 5;
+    private static int ConnectionTimeoutSeconds => App.ConnectionTimeoutSeconds;
 
     /// <summary>
     /// Per-call timing fields set by each collector method.

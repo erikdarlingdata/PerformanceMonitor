@@ -31,9 +31,9 @@ public class ServerManager
     private readonly ConcurrentDictionary<string, ServerConnectionStatus> _connectionStatuses;
 
     /// <summary>
-    /// Timeout in seconds for connectivity checks. Kept short to avoid blocking UI.
+    /// Timeout in seconds for connectivity checks. Read from App settings each call.
     /// </summary>
-    private const int ConnectionCheckTimeoutSeconds = 5;
+    private static int ConnectionCheckTimeoutSeconds => App.ConnectionTimeoutSeconds;
 
     public ServerManager(string configDirectory, ILogger<ServerManager>? logger = null)
     {

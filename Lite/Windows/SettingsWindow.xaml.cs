@@ -37,6 +37,7 @@ public partial class SettingsWindow : Window
         LoadMcpSettings();
         UpdateMcpStatus();
         LoadDefaultTimeRange();
+        LoadConnectionTimeout();
         LoadAlertSettings();
         LoadSmtpSettings();
     }
@@ -108,6 +109,7 @@ public partial class SettingsWindow : Window
         _scheduleManager.SaveSchedules();
         bool mcpChanged = SaveMcpSettings();
         SaveDefaultTimeRange();
+        SaveConnectionTimeout();
         SaveAlertSettings();
         SaveSmtpSettings();
 
@@ -217,6 +219,43 @@ public partial class SettingsWindow : Window
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
         Clipboard.SetDataObject(command, false);
         McpStatusText.Text = "Copied to clipboard!";
+    }
+
+    private void LoadConnectionTimeout()
+    {
+        ConnectionTimeoutBox.Text = App.ConnectionTimeoutSeconds.ToString();
+    }
+
+    private void SaveConnectionTimeout()
+    {
+        if (int.TryParse(ConnectionTimeoutBox.Text, out var timeout) && timeout >= 5 && timeout <= 60)
+        {
+            App.ConnectionTimeoutSeconds = timeout;
+        }
+
+        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
+        try
+        {
+            JsonNode? root;
+            if (File.Exists(settingsPath))
+            {
+                var json = File.ReadAllText(settingsPath);
+                root = JsonNode.Parse(json) ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["connection_timeout_seconds"] = App.ConnectionTimeoutSeconds;
+
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(settingsPath, root.ToJsonString(options));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save connection timeout: {ex.Message}");
+        }
     }
 
     private void LoadAlertSettings()
