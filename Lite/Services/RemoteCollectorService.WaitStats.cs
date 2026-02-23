@@ -22,19 +22,15 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class RemoteCollectorService
 {
-    private HashSet<string>? _ignoredWaitTypes;
+    private readonly Lazy<HashSet<string>> _ignoredWaitTypes;
 
     /// <summary>
-    /// Gets the set of wait types to ignore during collection.
+    /// Loads the set of wait types to ignore during collection.
+    /// Thread-safe via Lazy&lt;T&gt; (multiple server tasks call this in parallel).
     /// </summary>
-    private HashSet<string> GetIgnoredWaitTypes()
+    private HashSet<string> LoadIgnoredWaitTypes()
     {
-        if (_ignoredWaitTypes != null)
-        {
-            return _ignoredWaitTypes;
-        }
-
-        _ignoredWaitTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var waits = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var configPath = Path.Combine(App.ConfigDirectory, "ignored_wait_types.json");
         if (File.Exists(configPath))
@@ -51,7 +47,7 @@ public partial class RemoteCollectorService
                         var waitType = wait.GetString();
                         if (!string.IsNullOrEmpty(waitType))
                         {
-                            _ignoredWaitTypes.Add(waitType);
+                            waits.Add(waitType);
                         }
                     }
                 }
@@ -62,7 +58,7 @@ public partial class RemoteCollectorService
             }
         }
 
-        return _ignoredWaitTypes;
+        return waits;
     }
 
     /// <summary>
@@ -82,7 +78,7 @@ FROM sys.dm_os_wait_stats AS ws
 WHERE ws.wait_time_ms > 0
 OPTION(RECOMPILE);";
 
-        var ignoredWaits = GetIgnoredWaitTypes();
+        var ignoredWaits = _ignoredWaitTypes.Value;
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
         var rowsCollected = 0;

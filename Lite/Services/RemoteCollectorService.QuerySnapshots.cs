@@ -157,7 +157,7 @@ OPTION(MAXDOP 1, RECOMPILE);";
                        .AppendValue(reader.IsDBNull(21) ? (string?)null : reader.GetString(21))                /* host_name */
                        .AppendValue(reader.IsDBNull(22) ? (string?)null : reader.GetString(22))                /* program_name */
                        .AppendValue(reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)))            /* open_transaction_count */
-                       .AppendValue(reader.IsDBNull(24) ? 0m : reader.GetDecimal(24))                          /* percent_complete */
+                       .AppendValue(reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)))        /* percent_complete */
                        .EndRow();
 
                     rowsCollected++;

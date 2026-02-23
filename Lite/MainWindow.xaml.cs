@@ -354,7 +354,7 @@ public partial class MainWindow : Window
         else
         {
             CollectorHealthText.Text = $"Collectors: {health.TotalCollectors} OK";
-            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
+            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush");
             CollectorHealthText.ToolTip = null;
         }
     }

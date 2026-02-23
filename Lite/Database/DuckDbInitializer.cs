@@ -522,7 +522,7 @@ public class DuckDbInitializer
                 if (hasParquetFiles)
                 {
                     var globPath = parquetGlob.Replace("\\", "/");
-                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
+                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
                 }
                 else
                 {

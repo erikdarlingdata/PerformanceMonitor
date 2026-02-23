@@ -112,6 +112,7 @@ public partial class RemoteCollectorService
         _scheduleManager = scheduleManager;
         _logger = logger;
         _deltaCalculator = new DeltaCalculator(logger);
+        _ignoredWaitTypes = new Lazy<HashSet<string>>(LoadIgnoredWaitTypes);
     }
 
     /// <summary>

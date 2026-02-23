@@ -2344,7 +2344,7 @@ public partial class ServerTab : UserControl
                     HostName = reader.IsDBNull(21) ? "" : reader.GetString(21),
                     ProgramName = reader.IsDBNull(22) ? "" : reader.GetString(22),
                     OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
-                    PercentComplete = reader.IsDBNull(24) ? 0m : reader.GetDecimal(24),
+                    PercentComplete = reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)),
                     CollectionTime = snapshotTime
                 });
             }
