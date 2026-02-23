@@ -70,6 +70,7 @@ CROSS APPLY
 LEFT JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 
 UNION ALL
 
@@ -115,6 +116,7 @@ CROSS APPLY
 LEFT JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 
 UNION ALL
 
@@ -147,6 +149,7 @@ CROSS APPLY
 LEFT JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ) AS combined
 ORDER BY total_elapsed_time DESC
 OPTION(RECOMPILE);' AS nvarchar(max));
@@ -178,6 +181,7 @@ SELECT TOP (150)
     plan_handle = CONVERT(varchar(64), s.plan_handle, 1)
 FROM sys.dm_exec_procedure_stats AS s
 WHERE s.database_id = DB_ID()
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ORDER BY s.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 

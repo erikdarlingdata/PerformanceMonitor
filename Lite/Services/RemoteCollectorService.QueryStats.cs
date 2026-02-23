@@ -34,7 +34,7 @@ public partial class RemoteCollectorService
         const string standardQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (50)
+SELECT TOP (200)
     database_name = d.name,
     query_hash = CONVERT(varchar(64), qs.query_hash, 1),
     query_plan_hash = CONVERT(varchar(64), qs.query_plan_hash, 1),
@@ -85,6 +85,7 @@ CROSS APPLY
 INNER JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 2, 3, 4, 32761, 32767, ISNULL(DB_ID(N'PerformanceMonitor'), 0))
+AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
@@ -93,7 +94,7 @@ OPTION(RECOMPILE);";
         const string azureSqlDbQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (50)
+SELECT TOP (200)
     database_name = DB_NAME(),
     query_hash = CONVERT(varchar(64), qs.query_hash, 1),
     query_plan_hash = CONVERT(varchar(64), qs.query_plan_hash, 1),
@@ -134,6 +135,7 @@ SELECT TOP (50)
         END
 FROM sys.dm_exec_query_stats AS qs
 OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+WHERE qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
