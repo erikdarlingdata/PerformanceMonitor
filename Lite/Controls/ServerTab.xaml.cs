@@ -1839,7 +1839,7 @@ public partial class ServerTab : UserControl
             && boundCol.Binding is System.Windows.Data.Binding binding)
         {
             var prop = item.GetType().GetProperty(binding.Path.Path);
-            return prop?.GetValue(item)?.ToString() ?? "";
+            return FormatForExport(prop?.GetValue(item));
         }
 
         /* DataGridTemplateColumn — instantiate the template and find a TextBlock binding */
@@ -1852,12 +1852,20 @@ public partial class ServerTab : UserControl
                 if (textBinding != null)
                 {
                     var prop = item.GetType().GetProperty(textBinding.Path.Path);
-                    return prop?.GetValue(item)?.ToString() ?? "";
+                    return FormatForExport(prop?.GetValue(item));
                 }
             }
         }
 
         return "";
+    }
+
+    private static string FormatForExport(object? value)
+    {
+        if (value == null) return "";
+        if (value is IFormattable formattable)
+            return formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
+        return value.ToString() ?? "";
     }
 
     private void CopyCell_Click(object sender, RoutedEventArgs e)
@@ -2010,14 +2018,15 @@ public partial class ServerTab : UserControl
         if (dialog.ShowDialog() != true) return;
 
         var sb = new StringBuilder();
+        var sep = App.CsvSeparator;
 
         /* Header */
         var headers = new List<string>();
         foreach (var col in grid.Columns)
         {
-            headers.Add(CsvEscape(col.Header?.ToString() ?? ""));
+            headers.Add(CsvEscape(col.Header?.ToString() ?? "", sep));
         }
-        sb.AppendLine(string.Join(",", headers));
+        sb.AppendLine(string.Join(sep, headers));
 
         /* Rows */
         foreach (var item in grid.Items)
@@ -2025,9 +2034,9 @@ public partial class ServerTab : UserControl
             var values = new List<string>();
             foreach (var col in grid.Columns)
             {
-                values.Add(CsvEscape(GetCellValue(col, item)));
+                values.Add(CsvEscape(GetCellValue(col, item), sep));
             }
-            sb.AppendLine(string.Join(",", values));
+            sb.AppendLine(string.Join(sep, values));
         }
 
         try
@@ -2637,9 +2646,9 @@ public partial class ServerTab : UserControl
         }
     }
 
-    private static string CsvEscape(string value)
+    private static string CsvEscape(string value, string separator)
     {
-        if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
+        if (value.Contains(separator, StringComparison.Ordinal) || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
         {
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         }

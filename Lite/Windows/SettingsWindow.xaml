@@ -98,6 +98,18 @@
                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                VerticalAlignment="Center" Margin="6,0,0,0"/>
                 </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="CSV separator:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="CsvSeparatorCombo" Width="140" VerticalAlignment="Center">
+                        <ComboBoxItem Content="Comma (,)" Tag=","/>
+                        <ComboBoxItem Content="Semicolon (;)" Tag=";"/>
+                        <ComboBoxItem Content="Tab" Tag="&#x9;"/>
+                    </ComboBox>
+                    <TextBlock Text="auto-detected from locale"
+                               FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
+                </StackPanel>
             </StackPanel>
         </Border>
 

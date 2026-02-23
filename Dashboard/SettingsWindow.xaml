@@ -67,6 +67,20 @@
                             </ComboBox>
                         </StackPanel>
 
+                        <!-- CSV Export Section -->
+                        <TextBlock Text="CSV Export" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                            <TextBlock Text="Separator:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <ComboBox x:Name="CsvSeparatorComboBox" Width="140">
+                                <ComboBoxItem Content="Comma (,)" Tag=","/>
+                                <ComboBoxItem Content="Semicolon (;)" Tag=";"/>
+                                <ComboBoxItem Content="Tab" Tag="&#x9;"/>
+                            </ComboBox>
+                            <TextBlock Text="auto-detected from locale" FontSize="11" FontStyle="Italic"
+                                       Foreground="Gray" VerticalAlignment="Center" Margin="8,0,0,0"
+                                       x:Name="CsvSeparatorHint"/>
+                        </StackPanel>
+
                         <!-- Navigation Section -->
                         <TextBlock Text="Navigation" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
                         <CheckBox x:Name="FocusServerTabCheckBox"

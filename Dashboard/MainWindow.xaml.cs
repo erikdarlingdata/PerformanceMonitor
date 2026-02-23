@@ -137,6 +137,10 @@ namespace PerformanceMonitorDashboard
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            // Sync CSV separator from preferences
+            var startupPrefs = _preferencesService.GetPreferences();
+            TabHelpers.CsvSeparator = startupPrefs.CsvSeparator;
+
             LoadServerList();
             InitializeNotificationService();
             OpenNocTab();

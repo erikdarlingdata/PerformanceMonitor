@@ -68,6 +68,15 @@ public partial class App : Application
     /* Connection settings */
     public static int ConnectionTimeoutSeconds { get; set; } = 5;
 
+    /* CSV export settings */
+    public static string CsvSeparator { get; set; } = GetDefaultCsvSeparator();
+
+    private static string GetDefaultCsvSeparator()
+    {
+        /* Auto-detect: use semicolon when the locale's decimal separator is a comma (Italian, German, French, etc.) */
+        return System.Globalization.CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator == "," ? ";" : ",";
+    }
+
     /* System tray settings */
     public static bool MinimizeToTray { get; set; } = true;
 
@@ -229,6 +238,13 @@ public partial class App : Application
             {
                 var timeout = v.GetInt32();
                 if (timeout >= 5 && timeout <= 60) ConnectionTimeoutSeconds = timeout;
+            }
+
+            /* CSV export settings */
+            if (root.TryGetProperty("csv_separator", out v))
+            {
+                var sep = v.GetString();
+                if (sep == "," || sep == ";" || sep == "\t") CsvSeparator = sep;
             }
 
             /* System tray settings */

@@ -86,6 +86,21 @@ namespace PerformanceMonitorDashboard
                 DefaultTimeRangeComboBox.SelectedIndex = 4; // 24 hours
             }
 
+            // CSV separator
+            foreach (ComboBoxItem item in CsvSeparatorComboBox.Items)
+            {
+                if (item.Tag != null && item.Tag.ToString() == prefs.CsvSeparator)
+                {
+                    CsvSeparatorComboBox.SelectedItem = item;
+                    break;
+                }
+            }
+
+            if (CsvSeparatorComboBox.SelectedItem == null)
+            {
+                CsvSeparatorComboBox.SelectedIndex = 0; // Comma
+            }
+
             // Navigation settings
             FocusServerTabCheckBox.IsChecked = prefs.FocusServerTabOnClick;
 
@@ -458,6 +473,13 @@ namespace PerformanceMonitorDashboard
             if (DefaultTimeRangeComboBox.SelectedItem is ComboBoxItem rangeItem && rangeItem.Tag != null)
             {
                 prefs.DefaultHoursBack = int.Parse(rangeItem.Tag.ToString()!, CultureInfo.InvariantCulture);
+            }
+
+            // Save CSV separator
+            if (CsvSeparatorComboBox.SelectedItem is ComboBoxItem csvItem && csvItem.Tag != null)
+            {
+                prefs.CsvSeparator = csvItem.Tag.ToString()!;
+                TabHelpers.CsvSeparator = prefs.CsvSeparator;
             }
 
             // Save navigation settings

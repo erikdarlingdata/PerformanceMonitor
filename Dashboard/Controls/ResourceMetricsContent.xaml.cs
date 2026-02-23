@@ -1336,8 +1336,9 @@ namespace PerformanceMonitorDashboard.Controls
                         {
                             var sb = new StringBuilder();
 
-                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c)));
-                            sb.AppendLine(string.Join(",", headers));
+                            var sep = TabHelpers.CsvSeparator;
+                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c), sep));
+                            sb.AppendLine(string.Join(sep, headers));
 
                             foreach (var item in grid.Items)
                             {
@@ -1348,11 +1349,10 @@ namespace PerformanceMonitorDashboard.Controls
                                     if (binding != null)
                                     {
                                         var prop = item.GetType().GetProperty(binding.Path.Path);
-                                        var value = prop?.GetValue(item)?.ToString() ?? string.Empty;
-                                        values.Add(TabHelpers.EscapeCsvField(value));
+                                        values.Add(TabHelpers.EscapeCsvField(TabHelpers.FormatForExport(prop?.GetValue(item)), sep));
                                     }
                                 }
-                                sb.AppendLine(string.Join(",", values));
+                                sb.AppendLine(string.Join(sep, values));
                             }
 
                             File.WriteAllText(dialog.FileName, sb.ToString());

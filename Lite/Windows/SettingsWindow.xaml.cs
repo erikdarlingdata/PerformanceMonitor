@@ -11,6 +11,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
@@ -38,6 +39,7 @@ public partial class SettingsWindow : Window
         UpdateMcpStatus();
         LoadDefaultTimeRange();
         LoadConnectionTimeout();
+        LoadCsvSeparator();
         LoadAlertSettings();
         LoadSmtpSettings();
     }
@@ -110,6 +112,7 @@ public partial class SettingsWindow : Window
         bool mcpChanged = SaveMcpSettings();
         SaveDefaultTimeRange();
         SaveConnectionTimeout();
+        SaveCsvSeparator();
         SaveAlertSettings();
         SaveSmtpSettings();
 
@@ -255,6 +258,52 @@ public partial class SettingsWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("Settings", $"Failed to save connection timeout: {ex.Message}");
+        }
+    }
+
+    private void LoadCsvSeparator()
+    {
+        foreach (ComboBoxItem item in CsvSeparatorCombo.Items)
+        {
+            if (item.Tag?.ToString() == App.CsvSeparator)
+            {
+                CsvSeparatorCombo.SelectedItem = item;
+                break;
+            }
+        }
+        if (CsvSeparatorCombo.SelectedItem == null)
+            CsvSeparatorCombo.SelectedIndex = 0;
+    }
+
+    private void SaveCsvSeparator()
+    {
+        if (CsvSeparatorCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string sep)
+        {
+            App.CsvSeparator = sep;
+        }
+
+        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
+        try
+        {
+            JsonNode? root;
+            if (File.Exists(settingsPath))
+            {
+                var json = File.ReadAllText(settingsPath);
+                root = JsonNode.Parse(json) ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["csv_separator"] = App.CsvSeparator;
+
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(settingsPath, root.ToJsonString(options));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save CSV separator: {ex.Message}");
         }
     }
 

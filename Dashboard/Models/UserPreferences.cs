@@ -100,6 +100,14 @@ namespace PerformanceMonitorDashboard.Models
         public bool McpEnabled { get; set; } = false;
         public int McpPort { get; set; } = 5150;
 
+        // CSV export settings
+        public string CsvSeparator { get; set; } = GetDefaultCsvSeparator();
+
+        private static string GetDefaultCsvSeparator()
+        {
+            return System.Globalization.CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator == "," ? ";" : ",";
+        }
+
         // Navigation settings
         public bool FocusServerTabOnClick { get; set; } = true;
 

@@ -404,16 +404,17 @@ namespace PerformanceMonitorDashboard.Controls
                         try
                         {
                             var sb = new StringBuilder();
+                            var sep = TabHelpers.CsvSeparator;
                             var headers = dataGrid.Columns
                                 .OfType<DataGridBoundColumn>()
-                                .Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c)))
+                                .Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c), sep))
                                 .ToList();
-                            sb.AppendLine(string.Join(",", headers));
+                            sb.AppendLine(string.Join(sep, headers));
 
                             foreach (var item in dataGrid.Items)
                             {
                                 var values = TabHelpers.GetRowValues(dataGrid, item);
-                                sb.AppendLine(string.Join(",", values.Select(v => TabHelpers.EscapeCsvField(v))));
+                                sb.AppendLine(string.Join(sep, values.Select(v => TabHelpers.EscapeCsvField(v, sep))));
                             }
 
                             File.WriteAllText(saveFileDialog.FileName, sb.ToString());
