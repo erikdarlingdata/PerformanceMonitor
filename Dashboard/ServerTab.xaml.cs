@@ -119,6 +119,11 @@ namespace PerformanceMonitorDashboard
             ConfigChangesTab.Initialize(_databaseService);
             MemoryTab.Initialize(_databaseService);
             PerformanceTab.Initialize(_databaseService, s => StatusText.Text = s);
+            PerformanceTab.ViewPlanRequested += (planXml, label) =>
+            {
+                PlanViewerContent.LoadPlan(planXml, label);
+                PlanViewerTabItem.IsSelected = true;
+            };
             SystemEventsContent.Initialize(_databaseService);
             ResourceMetricsContent.Initialize(_databaseService);
 

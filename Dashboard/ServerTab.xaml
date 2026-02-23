@@ -410,6 +410,11 @@
                 <controls:QueryPerformanceContent x:Name="PerformanceTab"/>
             </TabItem>
 
+            <!-- Plan Viewer Tab -->
+            <TabItem Header="Plan Viewer" x:Name="PlanViewerTabItem">
+                <controls:PlanViewerControl x:Name="PlanViewerContent"/>
+            </TabItem>
+
             <!-- Resource Metrics Tab -->
             <TabItem x:Name="ResourceMetricsTabItem">
                 <TabItem.Header>

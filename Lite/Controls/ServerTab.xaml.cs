@@ -2235,6 +2235,62 @@ public partial class ServerTab : UserControl
         SavePlanFile(row.LiveQueryPlan, $"ActualPlan_Session{row.SessionId}");
     }
 
+    private async void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem) return;
+        var grid = FindParentDataGrid(menuItem);
+        if (grid?.CurrentItem == null) return;
+
+        string? planXml = null;
+        string label = "Estimated Plan";
+
+        switch (grid.CurrentItem)
+        {
+            case QuerySnapshotRow snap:
+                planXml = snap.QueryPlan;
+                label = $"Est Plan - SPID {snap.SessionId}";
+                break;
+            case QueryStatsRow stats:
+                planXml = stats.QueryPlan;
+                label = $"Est Plan - {stats.QueryHash}";
+                // Fetch on demand if not already loaded
+                if (string.IsNullOrEmpty(planXml))
+                    planXml = await FetchPlanByHash(stats.QueryHash);
+                break;
+            case QueryStatsHistoryRow hist:
+                planXml = hist.QueryPlan;
+                label = "Est Plan - History";
+                break;
+        }
+
+        if (!string.IsNullOrEmpty(planXml))
+        {
+            PlanViewerContent.LoadPlan(planXml, label);
+            PlanViewerTabItem.IsSelected = true;
+        }
+    }
+
+    private async Task<string?> FetchPlanByHash(string queryHash)
+    {
+        if (string.IsNullOrEmpty(queryHash)) return null;
+
+        // Try DuckDB cache first
+        try
+        {
+            var plan = await _dataService.GetCachedQueryPlanAsync(_serverId, queryHash);
+            if (!string.IsNullOrEmpty(plan)) return plan;
+        }
+        catch { }
+
+        // Fall back to live server
+        try
+        {
+            var connStr = _server.GetConnectionString(_credentialService);
+            return await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash);
+        }
+        catch { return null; }
+    }
+
     private async void LiveSnapshot_Click(object sender, RoutedEventArgs e)
     {
         LiveSnapshotButton.IsEnabled = false;

@@ -1,7 +1,8 @@
 <UserControl x:Class="PerformanceMonitorLite.Controls.ServerTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF">
+             xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
+             xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls">
     <UserControl.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -16,6 +17,9 @@
                 <MenuItem Header="Copy Repro Script" Click="CopyReproScript_Click"/>
                 <Separator/>
                 <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+                <Separator/>
+                <MenuItem Header="View Estimated Plan" Click="ViewEstimatedPlan_Click"/>
+                <MenuItem Header="View Actual Plan" IsEnabled="False" ToolTip="Coming soon — executes query to capture actual plan"/>
             </ContextMenu>
 
             <Style x:Key="GridRowStyle" TargetType="DataGridRow">
@@ -532,6 +536,11 @@
                         </TabItem>
                     </TabControl>
                 </Grid>
+            </TabItem>
+
+            <!-- Plan Viewer Tab -->
+            <TabItem Header="Plan Viewer" x:Name="PlanViewerTabItem">
+                <controls:PlanViewerControl x:Name="PlanViewerContent"/>
             </TabItem>
 
             <!-- CPU Tab -->

@@ -37,6 +37,9 @@ namespace PerformanceMonitorDashboard.Controls
         private DatabaseService? _databaseService;
         private Action<string>? _statusCallback;
 
+        /// <summary>Raised when user wants to view a plan in the Plan Viewer tab. Args: (planXml, label)</summary>
+        public event Action<string, string>? ViewPlanRequested;
+
         private Popup? _filterPopup;
         private ColumnFilterPopup? _filterPopupContent;
 
@@ -706,6 +709,54 @@ namespace PerformanceMonitorDashboard.Controls
                     File.WriteAllText(saveFileDialog.FileName, item.LiveQueryPlan);
                 }
             }
+        }
+
+        private void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
+        {
+            var item = GetContextMenuDataItem(sender);
+            if (item == null) return;
+
+            string? planXml = null;
+            string label = "Estimated Plan";
+
+            switch (item)
+            {
+                case QuerySnapshotItem snap when !string.IsNullOrEmpty(snap.QueryPlan):
+                    planXml = snap.QueryPlan;
+                    label = $"Est Plan - SPID {snap.SessionId}";
+                    break;
+                case LiveQueryItem live when !string.IsNullOrEmpty(live.QueryPlan):
+                    planXml = live.QueryPlan;
+                    label = $"Est Plan - SPID {live.SessionId}";
+                    break;
+                case QueryStatsItem stats when !string.IsNullOrEmpty(stats.QueryPlanXml):
+                    planXml = stats.QueryPlanXml;
+                    label = $"Est Plan - {stats.QueryHash}";
+                    break;
+                case ProcedureStatsItem proc when !string.IsNullOrEmpty(proc.QueryPlanXml):
+                    planXml = proc.QueryPlanXml;
+                    label = $"Est Plan - {proc.ProcedureName}";
+                    break;
+                case QueryStoreItem qs when !string.IsNullOrEmpty(qs.QueryPlanXml):
+                    planXml = qs.QueryPlanXml;
+                    label = $"Est Plan - QS {qs.QueryId}";
+                    break;
+            }
+
+            if (planXml != null)
+                ViewPlanRequested?.Invoke(planXml, label);
+        }
+
+        private static object? GetContextMenuDataItem(object sender)
+        {
+            if (sender is not MenuItem menuItem) return null;
+            var contextMenu = menuItem.Parent as ContextMenu;
+
+            // Context menu is on a DataGridRow — get its DataContext
+            if (contextMenu?.PlacementTarget is DataGridRow row)
+                return row.DataContext;
+
+            return null;
         }
 
         #endregion

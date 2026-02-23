@@ -31,6 +31,9 @@
                 <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="📊"/></MenuItem.Icon>
                 </MenuItem>
+                <Separator/>
+                <MenuItem Header="View Estimated Plan" Click="ViewEstimatedPlan_Click"/>
+                <MenuItem Header="View Actual Plan" IsEnabled="False" ToolTip="Coming soon — executes query to capture actual plan"/>
             </ContextMenu>
 
             <Style x:Key="DefaultRowStyle" TargetType="DataGridRow">
