@@ -1443,8 +1443,8 @@ namespace PerformanceMonitorDashboard.Services
                     var connection = tc.Connection;
 
                     var timeFilter = fromDate.HasValue && toDate.HasValue
-                        ? "AND   qsd.collection_time >= @from_date AND qsd.collection_time <= @to_date"
-                        : "AND   qsd.collection_time >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
+                        ? "AND   qsd.server_last_execution_time >= @from_date AND qsd.server_last_execution_time <= @to_date"
+                        : "AND   qsd.server_last_execution_time >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
 
                     string query = $@"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
