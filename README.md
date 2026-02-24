@@ -4,7 +4,9 @@ Free, open-source SQL Server performance monitoring in two editions. Built for D
 
 **Supported SQL Servers:** SQL Server 2016, 2017, 2019, 2022, 2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite only)
 
-**Dashboard/Lite requires:** Windows 10 or later, Windows Server 2016 or later
+**Dashboard/Lite requires:** Windows 10 or later, Windows Server 2016 or later | [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
+
+**Download ready-to-run executables from the [Releases page](https://github.com/erikdarlingdata/PerformanceMonitor/releases).** No build steps required — download the `.zip` for the edition you want, extract it to any folder, and run the `.exe` inside. See [Getting Started](#getting-started) for setup details.
 
 ---
 
@@ -92,6 +94,19 @@ A single WPF desktop application that monitors SQL Server instances remotely. Qu
 | Dashboard | Separate app | Built-in |
 | Portability | Server-bound | Single executable |
 | MCP server (LLM integration) | Built into Dashboard (27 tools) | Built-in (31 tools) |
+
+---
+
+## Getting Started
+
+1. Install the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) if you don't already have it (look for ".NET Desktop Runtime 8.0.x" — not the ASP.NET Core or Server runtime)
+2. Go to the [Releases page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) and download the `.zip` for the edition you want:
+   - **`PerformanceMonitorLite`** — standalone desktop app, no server install needed
+   - **`PerformanceMonitorInstaller`** — sets up the PerformanceMonitor database and SQL Agent jobs on your server
+   - **`PerformanceMonitorDashboard`** — desktop app that connects to the database created by the Installer
+3. Extract the `.zip` to any folder and run the `.exe` inside
+
+For the **Full Edition**, run the Installer first (see below), then open the Dashboard. For the **Lite Edition**, just run the app — no installation step required.
 
 ---
 
