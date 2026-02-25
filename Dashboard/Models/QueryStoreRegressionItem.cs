@@ -18,6 +18,11 @@ namespace PerformanceMonitorDashboard.Models
         public decimal BaselineReads { get; set; }
         public decimal RecentReads { get; set; }
         public decimal IoRegressionPercent { get; set; }
+        public decimal AdditionalDurationMs { get; set; }
+        public long BaselineExecCount { get; set; }
+        public long RecentExecCount { get; set; }
+        public int BaselinePlanCount { get; set; }
+        public int RecentPlanCount { get; set; }
         public string Severity { get; set; } = string.Empty;
         public string QueryTextSample { get; set; } = string.Empty;
         public DateTime? LastExecutionTime { get; set; }

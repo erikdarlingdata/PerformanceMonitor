@@ -183,6 +183,7 @@ namespace PerformanceMonitorDashboard
             };
 
             int colorIndex = 0;
+            var scatterSeries = new List<(ScottPlot.Plottables.Scatter Scatter, string Label)>();
 
             foreach (var planGroup in planGroups)
             {
@@ -197,10 +198,12 @@ namespace PerformanceMonitorDashboard
                 var color = colors[colorIndex % colors.Length];
                 var scatter = HistoryChart.Plot.Add.Scatter(dates, values);
                 scatter.Color = color;
-                scatter.LegendText = $"Plan {planGroup.Key}";
+                var label = $"Plan {planGroup.Key}";
+                scatter.LegendText = label;
 
-                // Sparse data: show only markers to avoid misleading interpolated lines
-                if (dates.Length <= 10)
+                // Sparse data: use total dataset size, not per-plan size, since
+                // data is split across plan groups
+                if (_historyData.Count <= 1)
                 {
                     scatter.LineWidth = 0;
                     scatter.MarkerSize = 8;
@@ -211,6 +214,7 @@ namespace PerformanceMonitorDashboard
                     scatter.MarkerSize = 4;
                 }
 
+                scatterSeries.Add((scatter, label));
                 colorIndex++;
             }
 
@@ -228,8 +232,8 @@ namespace PerformanceMonitorDashboard
             else
                 _chartHover.Unit = unit;
             _chartHover.Clear();
-            foreach (var p in HistoryChart.Plot.GetPlottables().OfType<ScottPlot.Plottables.Scatter>())
-                _chartHover.Add(p, p.LegendText ?? "");
+            foreach (var (s, l) in scatterSeries)
+                _chartHover.Add(s, l);
 
             // Update legend text
             ChartLegendText.Text = planGroups.Count > 1

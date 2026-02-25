@@ -183,7 +183,7 @@ namespace PerformanceMonitorDashboard
             scatter.Color = color;
 
             // Sparse data: show only markers to avoid misleading interpolated lines
-            if (dates.Length <= 10)
+            if (dates.Length <= 1)
             {
                 scatter.LineWidth = 0;
                 scatter.MarkerSize = 8;
