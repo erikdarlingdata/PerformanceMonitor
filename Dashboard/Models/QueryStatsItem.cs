@@ -34,6 +34,8 @@ namespace PerformanceMonitorDashboard.Models
         public long? AvgLogicalReads { get; set; }
         public long? AvgLogicalWrites { get; set; }
         public long? AvgPhysicalReads { get; set; }
+        public long? MinPhysicalReads { get; set; }
+        public long? MaxPhysicalReads { get; set; }
         public long? AvgRows { get; set; }
         public long? MinRows { get; set; }
         public long? MaxRows { get; set; }

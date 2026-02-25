@@ -786,6 +786,8 @@ namespace PerformanceMonitorDashboard.Services
             avg_logical_writes = SUM(pl.total_logical_writes) / NULLIF(SUM(pl.execution_count), 0),
             total_physical_reads = SUM(pl.total_physical_reads),
             avg_physical_reads = SUM(pl.total_physical_reads) / NULLIF(SUM(pl.execution_count), 0),
+            min_physical_reads = MIN(pl.min_physical_reads),
+            max_physical_reads = MAX(pl.max_physical_reads),
             total_rows = SUM(pl.total_rows),
             avg_rows = SUM(pl.total_rows) / NULLIF(SUM(pl.execution_count), 0),
             min_rows = MIN(pl.min_rows),
@@ -849,22 +851,24 @@ namespace PerformanceMonitorDashboard.Services
                             AvgLogicalWrites = reader.IsDBNull(18) ? null : reader.GetInt64(18),
                             TotalPhysicalReads = reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
                             AvgPhysicalReads = reader.IsDBNull(20) ? null : reader.GetInt64(20),
-                            TotalRows = reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
-                            AvgRows = reader.IsDBNull(22) ? null : reader.GetInt64(22),
-                            MinRows = reader.IsDBNull(23) ? null : reader.GetInt64(23),
-                            MaxRows = reader.IsDBNull(24) ? null : reader.GetInt64(24),
-                            MinDop = reader.IsDBNull(25) ? null : reader.GetInt16(25),
-                            MaxDop = reader.IsDBNull(26) ? null : reader.GetInt16(26),
-                            MinGrantKb = reader.IsDBNull(27) ? null : reader.GetInt64(27),
-                            MaxGrantKb = reader.IsDBNull(28) ? null : reader.GetInt64(28),
-                            TotalSpills = reader.IsDBNull(29) ? 0 : reader.GetInt64(29),
-                            MinSpills = reader.IsDBNull(30) ? null : reader.GetInt64(30),
-                            MaxSpills = reader.IsDBNull(31) ? null : reader.GetInt64(31),
-                            QueryText = reader.IsDBNull(32) ? null : reader.GetString(32),
-                            QueryPlanXml = reader.IsDBNull(33) ? null : reader.GetString(33),
-                            QueryPlanHash = reader.IsDBNull(34) ? null : reader.GetString(34),
-                            SqlHandle = reader.IsDBNull(35) ? null : reader.GetString(35),
-                            PlanHandle = reader.IsDBNull(36) ? null : reader.GetString(36)
+                            MinPhysicalReads = reader.IsDBNull(21) ? null : reader.GetInt64(21),
+                            MaxPhysicalReads = reader.IsDBNull(22) ? null : reader.GetInt64(22),
+                            TotalRows = reader.IsDBNull(23) ? 0 : reader.GetInt64(23),
+                            AvgRows = reader.IsDBNull(24) ? null : reader.GetInt64(24),
+                            MinRows = reader.IsDBNull(25) ? null : reader.GetInt64(25),
+                            MaxRows = reader.IsDBNull(26) ? null : reader.GetInt64(26),
+                            MinDop = reader.IsDBNull(27) ? null : reader.GetInt16(27),
+                            MaxDop = reader.IsDBNull(28) ? null : reader.GetInt16(28),
+                            MinGrantKb = reader.IsDBNull(29) ? null : reader.GetInt64(29),
+                            MaxGrantKb = reader.IsDBNull(30) ? null : reader.GetInt64(30),
+                            TotalSpills = reader.IsDBNull(31) ? 0 : reader.GetInt64(31),
+                            MinSpills = reader.IsDBNull(32) ? null : reader.GetInt64(32),
+                            MaxSpills = reader.IsDBNull(33) ? null : reader.GetInt64(33),
+                            QueryText = reader.IsDBNull(34) ? null : reader.GetString(34),
+                            QueryPlanXml = reader.IsDBNull(35) ? null : reader.GetString(35),
+                            QueryPlanHash = reader.IsDBNull(36) ? null : reader.GetString(36),
+                            SqlHandle = reader.IsDBNull(37) ? null : reader.GetString(37),
+                            PlanHandle = reader.IsDBNull(38) ? null : reader.GetString(38)
                         });
                     }
 
@@ -1098,7 +1102,16 @@ namespace PerformanceMonitorDashboard.Services
             is_forced_plan = MAX(CONVERT(tinyint, qsd.is_forced_plan)),
             compatibility_level = MAX(qsd.compatibility_level),
             query_sql_text = CONVERT(nvarchar(max), MAX(qsd.query_sql_text)),
-            query_plan_hash = CONVERT(nvarchar(20), MAX(qsd.query_plan_hash), 1)
+            query_plan_hash = CONVERT(nvarchar(20), MAX(qsd.query_plan_hash), 1),
+            force_failure_count = SUM(qsd.force_failure_count),
+            last_force_failure_reason_desc = MAX(qsd.last_force_failure_reason_desc),
+            plan_forcing_type = MAX(qsd.plan_forcing_type),
+            min_clr_time_ms = MIN(qsd.min_clr_time) / 1000.0,
+            max_clr_time_ms = MAX(qsd.max_clr_time) / 1000.0,
+            min_num_physical_io_reads = MIN(qsd.min_num_physical_io_reads),
+            max_num_physical_io_reads = MAX(qsd.max_num_physical_io_reads),
+            min_log_bytes_used = MIN(qsd.min_log_bytes_used),
+            max_log_bytes_used = MAX(qsd.max_log_bytes_used)
         FROM collect.query_store_data AS qsd
         WHERE (
             (@useCustomDates = 0 AND qsd.server_last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
@@ -1172,7 +1185,16 @@ namespace PerformanceMonitorDashboard.Services
                             IsForcedPlan = !reader.IsDBNull(35) && reader.GetByte(35) == 1,
                             CompatibilityLevel = reader.IsDBNull(36) ? null : reader.GetInt16(36),
                             QuerySqlText = reader.IsDBNull(37) ? null : reader.GetString(37),
-                            QueryPlanHash = reader.IsDBNull(38) ? null : reader.GetString(38)
+                            QueryPlanHash = reader.IsDBNull(38) ? null : reader.GetString(38),
+                            ForceFailureCount = reader.IsDBNull(39) ? null : reader.GetInt64(39),
+                            LastForceFailureReasonDesc = reader.IsDBNull(40) ? null : reader.GetString(40),
+                            PlanForcingType = reader.IsDBNull(41) ? null : reader.GetString(41),
+                            MinClrTimeMs = reader.IsDBNull(42) ? null : Convert.ToDouble(reader.GetValue(42), CultureInfo.InvariantCulture),
+                            MaxClrTimeMs = reader.IsDBNull(43) ? null : Convert.ToDouble(reader.GetValue(43), CultureInfo.InvariantCulture),
+                            MinNumPhysicalIoReads = reader.IsDBNull(44) ? null : reader.GetInt64(44),
+                            MaxNumPhysicalIoReads = reader.IsDBNull(45) ? null : reader.GetInt64(45),
+                            MinLogBytesUsed = reader.IsDBNull(46) ? null : reader.GetInt64(46),
+                            MaxLogBytesUsed = reader.IsDBNull(47) ? null : reader.GetInt64(47)
                             // QueryPlanXml is fetched on-demand via GetQueryStorePlanXmlAsync
                         });
                     }

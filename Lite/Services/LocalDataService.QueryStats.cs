@@ -61,6 +61,14 @@ SELECT
     MAX(max_worker_time) AS max_worker_time,
     MIN(min_elapsed_time) AS min_elapsed_time,
     MAX(max_elapsed_time) AS max_elapsed_time,
+    MIN(min_physical_reads) AS min_physical_reads,
+    MAX(max_physical_reads) AS max_physical_reads,
+    MIN(min_rows) AS min_rows,
+    MAX(max_rows) AS max_rows,
+    MIN(min_grant_kb) AS min_grant_kb,
+    MAX(max_grant_kb) AS max_grant_kb,
+    MIN(min_spills) AS min_spills,
+    MAX(max_spills) AS max_spills,
     MAX(query_plan_hash) AS query_plan_hash,
     MAX(sql_handle) AS sql_handle,
     MAX(plan_handle) AS plan_handle,
@@ -105,11 +113,19 @@ LIMIT $4";
                 MaxCpuUs = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
                 MinElapsedUs = reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
                 MaxElapsedUs = reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
-                QueryPlanHash = reader.IsDBNull(16) ? "" : reader.GetString(16),
-                SqlHandle = reader.IsDBNull(17) ? "" : reader.GetString(17),
-                PlanHandle = reader.IsDBNull(18) ? "" : reader.GetString(18),
-                QueryText = reader.IsDBNull(19) ? "" : reader.GetString(19),
-                QueryPlan = reader.IsDBNull(20) ? null : reader.GetString(20)
+                MinPhysicalReads = reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
+                MaxPhysicalReads = reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
+                MinRows = reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
+                MaxRows = reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
+                MinGrantKb = reader.IsDBNull(20) ? 0 : reader.GetInt64(20),
+                MaxGrantKb = reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
+                MinSpills = reader.IsDBNull(22) ? 0 : reader.GetInt64(22),
+                MaxSpills = reader.IsDBNull(23) ? 0 : reader.GetInt64(23),
+                QueryPlanHash = reader.IsDBNull(24) ? "" : reader.GetString(24),
+                SqlHandle = reader.IsDBNull(25) ? "" : reader.GetString(25),
+                PlanHandle = reader.IsDBNull(26) ? "" : reader.GetString(26),
+                QueryText = reader.IsDBNull(27) ? "" : reader.GetString(27),
+                QueryPlan = reader.IsDBNull(28) ? null : reader.GetString(28)
             });
         }
 
@@ -386,7 +402,15 @@ SELECT
     MAX(max_worker_time) AS max_worker_time,
     MIN(min_elapsed_time) AS min_elapsed_time,
     MAX(max_elapsed_time) AS max_elapsed_time,
+    MIN(min_logical_reads) AS min_logical_reads,
+    MAX(max_logical_reads) AS max_logical_reads,
+    MIN(min_physical_reads) AS min_physical_reads,
+    MAX(max_physical_reads) AS max_physical_reads,
+    MIN(min_logical_writes) AS min_logical_writes,
+    MAX(max_logical_writes) AS max_logical_writes,
     SUM(total_spills) AS total_spills,
+    MIN(min_spills) AS min_spills,
+    MAX(max_spills) AS max_spills,
     MAX(sql_handle) AS sql_handle,
     MAX(plan_handle) AS plan_handle
 FROM v_procedure_stats
@@ -425,9 +449,17 @@ LIMIT $4";
                 MaxWorkerTimeUs = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 MinElapsedTimeUs = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
                 MaxElapsedTimeUs = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                TotalSpills = reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
-                SqlHandle = reader.IsDBNull(15) ? "" : reader.GetString(15),
-                PlanHandle = reader.IsDBNull(16) ? "" : reader.GetString(16)
+                MinLogicalReads = reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
+                MaxLogicalReads = reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
+                MinPhysicalReads = reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
+                MaxPhysicalReads = reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
+                MinLogicalWrites = reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
+                MaxLogicalWrites = reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
+                TotalSpills = reader.IsDBNull(20) ? 0 : reader.GetInt64(20),
+                MinSpills = reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
+                MaxSpills = reader.IsDBNull(22) ? 0 : reader.GetInt64(22),
+                SqlHandle = reader.IsDBNull(23) ? "" : reader.GetString(23),
+                PlanHandle = reader.IsDBNull(24) ? "" : reader.GetString(24)
             });
         }
 
@@ -603,6 +635,14 @@ public class QueryStatsRow
     public long MaxCpuUs { get; set; }
     public long MinElapsedUs { get; set; }
     public long MaxElapsedUs { get; set; }
+    public long MinPhysicalReads { get; set; }
+    public long MaxPhysicalReads { get; set; }
+    public long MinRows { get; set; }
+    public long MaxRows { get; set; }
+    public long MinGrantKb { get; set; }
+    public long MaxGrantKb { get; set; }
+    public long MinSpills { get; set; }
+    public long MaxSpills { get; set; }
     public string QueryPlanHash { get; set; } = "";
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
@@ -636,7 +676,15 @@ public class ProcedureStatsRow
     public long MaxWorkerTimeUs { get; set; }
     public long MinElapsedTimeUs { get; set; }
     public long MaxElapsedTimeUs { get; set; }
+    public long MinLogicalReads { get; set; }
+    public long MaxLogicalReads { get; set; }
+    public long MinPhysicalReads { get; set; }
+    public long MaxPhysicalReads { get; set; }
+    public long MinLogicalWrites { get; set; }
+    public long MaxLogicalWrites { get; set; }
     public long TotalSpills { get; set; }
+    public long MinSpills { get; set; }
+    public long MaxSpills { get; set; }
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
     public string FullName => string.IsNullOrEmpty(SchemaName) ? ObjectName : $"{SchemaName}.{ObjectName}";

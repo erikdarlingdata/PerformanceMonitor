@@ -86,6 +86,44 @@ WITH
     WHERE cl.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
     GROUP BY
         cl.collector_name
+),
+    /*
+    Count consecutive recent failures per collector.
+    If the last 5+ runs are all errors, the collector is
+    actively broken regardless of 7-day failure percentage.
+    */
+    recent_failures AS
+(
+    SELECT
+        collector_name = r.collector_name,
+        consecutive_failures =
+            MIN
+            (
+                CASE
+                    WHEN r.collection_status <> N'ERROR'
+                    THEN r.rn
+                    ELSE NULL
+                END
+            )
+    FROM
+    (
+        SELECT
+            cl.collector_name,
+            cl.collection_status,
+            rn = ROW_NUMBER() OVER
+            (
+                PARTITION BY
+                    cl.collector_name
+                ORDER BY
+                    cl.collection_time DESC
+            )
+        FROM config.collection_log AS cl
+        WHERE cl.collection_status NOT IN (N'CONFIG_CHANGE', N'TABLE_MISSING', N'TABLE_CREATED', N'SKIPPED')
+        AND   cl.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+    ) AS r
+    WHERE r.rn <= 20
+    GROUP BY
+        r.collector_name
 )
 SELECT
     collector_name = cs.collector_name,
@@ -99,6 +137,12 @@ SELECT
             THEN N'NEVER_RUN'
             WHEN DATEDIFF(HOUR, cs.last_success_time, SYSDATETIME()) > 24
             THEN N'STALE'
+            WHEN rf.consecutive_failures IS NULL
+            THEN N'FAILING'
+            WHEN rf.consecutive_failures > 5
+            THEN N'FAILING'
+            WHEN rf.consecutive_failures > 3
+            THEN N'WARNING'
             WHEN cs.failed_runs * 100.0 / NULLIF(cs.total_runs, 0) > 50
             THEN N'FAILING'
             WHEN cs.failed_runs * 100.0 / NULLIF(cs.total_runs, 0) > 10
@@ -115,7 +159,9 @@ SELECT
     failed_runs_7d = cs.failed_runs,
     avg_duration_ms = CONVERT(integer, cs.avg_duration_ms),
     total_rows_collected_7d = cs.total_rows_collected
-FROM collector_stats AS cs;
+FROM collector_stats AS cs
+LEFT JOIN recent_failures AS rf
+    ON cs.collector_name = rf.collector_name;
 GO
 
 /*

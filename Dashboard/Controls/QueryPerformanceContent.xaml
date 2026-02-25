@@ -727,6 +727,22 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MinPhysicalReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinPhysicalReads" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Min Phys Reads" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MaxPhysicalReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxPhysicalReads" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Max Phys Reads" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding TotalLogicalWrites, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
@@ -1348,6 +1364,14 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MinMemoryMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinMemoryMb" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Min Mem (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding MaxMemoryMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
@@ -1361,6 +1385,14 @@
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgTempdbMb" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Avg TempDB (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MinTempdbMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinTempdbMb" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Min TempDB (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
@@ -1401,6 +1433,62 @@
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastForceFailureReasonDesc" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Force Fail Reason" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding PlanForcingType}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PlanForcingType" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Forcing Type" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MinClrTimeMs, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinClrTimeMs" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Min CLR (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MaxClrTimeMs, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxClrTimeMs" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Max CLR (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MinNumPhysicalIoReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinNumPhysicalIoReads" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Min Phys IO Reads" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MaxNumPhysicalIoReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxNumPhysicalIoReads" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Max Phys IO Reads" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MinLogBytesUsed, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinLogBytesUsed" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Min Log Bytes" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding MaxLogBytesUsed, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxLogBytesUsed" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Max Log Bytes" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
