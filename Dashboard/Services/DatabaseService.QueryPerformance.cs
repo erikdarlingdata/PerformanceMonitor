@@ -2911,5 +2911,143 @@ OPTION(MAXDOP 1, RECOMPILE);";
 
             return items;
         }
+
+        public async Task<List<WaitingTaskTrendItem>> GetWaitingTaskTrendAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            var items = new List<WaitingTaskTrendItem>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query;
+            if (fromDate.HasValue && toDate.HasValue)
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    SELECT
+                        wt.collection_time,
+                        wt.wait_type,
+                        total_wait_ms = SUM(wt.wait_duration_ms)
+                    FROM collect.waiting_tasks AS wt
+                    WHERE wt.collection_time >= @from_date
+                    AND   wt.collection_time <= @to_date
+                    AND   wt.wait_type IS NOT NULL
+                    GROUP BY
+                        wt.collection_time,
+                        wt.wait_type
+                    ORDER BY
+                        wt.collection_time,
+                        wt.wait_type;";
+            }
+            else
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    SELECT
+                        wt.collection_time,
+                        wt.wait_type,
+                        total_wait_ms = SUM(wt.wait_duration_ms)
+                    FROM collect.waiting_tasks AS wt
+                    WHERE wt.collection_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())
+                    AND   wt.wait_type IS NOT NULL
+                    GROUP BY
+                        wt.collection_time,
+                        wt.wait_type
+                    ORDER BY
+                        wt.collection_time,
+                        wt.wait_type;";
+            }
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
+            if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+            if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                items.Add(new WaitingTaskTrendItem
+                {
+                    CollectionTime = reader.GetDateTime(0),
+                    WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    TotalWaitMs = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture)
+                });
+            }
+
+            return items;
+        }
+
+        public async Task<List<BlockedSessionTrendItem>> GetBlockedSessionTrendAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            var items = new List<BlockedSessionTrendItem>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query;
+            if (fromDate.HasValue && toDate.HasValue)
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    SELECT
+                        wt.collection_time,
+                        wt.database_name,
+                        blocked_count = COUNT(*)
+                    FROM collect.waiting_tasks AS wt
+                    WHERE wt.blocking_session_id > 0
+                    AND   wt.collection_time >= @from_date
+                    AND   wt.collection_time <= @to_date
+                    AND   wt.database_name IS NOT NULL
+                    GROUP BY
+                        wt.collection_time,
+                        wt.database_name
+                    ORDER BY
+                        wt.collection_time,
+                        wt.database_name;";
+            }
+            else
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    SELECT
+                        wt.collection_time,
+                        wt.database_name,
+                        blocked_count = COUNT(*)
+                    FROM collect.waiting_tasks AS wt
+                    WHERE wt.blocking_session_id > 0
+                    AND   wt.collection_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())
+                    AND   wt.database_name IS NOT NULL
+                    GROUP BY
+                        wt.collection_time,
+                        wt.database_name
+                    ORDER BY
+                        wt.collection_time,
+                        wt.database_name;";
+            }
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
+            if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+            if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                items.Add(new BlockedSessionTrendItem
+                {
+                    CollectionTime = reader.GetDateTime(0),
+                    DatabaseName = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    BlockedCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture)
+                });
+            }
+
+            return items;
+        }
     }
 }

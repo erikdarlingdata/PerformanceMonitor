@@ -550,6 +550,38 @@
                         </Grid>
                     </TabItem>
 
+                    <!-- Current Waits Sub-Tab -->
+                    <TabItem Header="Current Waits">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <Border Grid.Row="0" BorderBrush="LightGray" BorderThickness="1" Margin="5,5,5,2">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="Wait Duration by Wait Type" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="CurrentWaitsDurationChart"/>
+                                </Grid>
+                            </Border>
+
+                            <Border Grid.Row="1" BorderBrush="LightGray" BorderThickness="1" Margin="5,2,5,5">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="Blocked Sessions by Database" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5"/>
+                                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="CurrentWaitsBlockedChart"/>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                    </TabItem>
+
                     <!-- Blocking Sub-Tab -->
                     <TabItem Header="Blocking">
                         <Grid>

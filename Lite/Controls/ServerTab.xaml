@@ -771,6 +771,20 @@
                                 </Border>
                             </Grid>
                         </TabItem>
+                        <TabItem Header="Current Waits">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <Border Grid.Row="0" Margin="0,0,0,4">
+                                    <ScottPlot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
+                                </Border>
+                                <Border Grid.Row="1" Margin="0,4,0,0">
+                                    <ScottPlot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
+                                </Border>
+                            </Grid>
+                        </TabItem>
                         <TabItem Header="Blocked Process Reports">
                             <DataGrid x:Name="BlockedProcessReportGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"

@@ -32,7 +32,6 @@ SELECT /* PerformanceMonitorLite */
     wait_type = wt.wait_type,
     wait_duration_ms = wt.wait_duration_ms,
     blocking_session_id = wt.blocking_session_id,
-    resource_description = wt.resource_description,
     database_name = DB_NAME(er.database_id)
 FROM sys.dm_os_waiting_tasks AS wt
 LEFT JOIN sys.dm_exec_requests AS er
@@ -73,8 +72,7 @@ OPTION(RECOMPILE);";
                     var waitType = reader.IsDBNull(1) ? null : reader.GetString(1);
                     var waitDurationMs = reader.IsDBNull(2) ? 0L : reader.GetInt64(2);
                     var blockingSessionId = reader.IsDBNull(3) ? (short?)null : reader.GetInt16(3);
-                    var resourceDescription = reader.IsDBNull(4) ? null : reader.GetString(4);
-                    var databaseName = reader.IsDBNull(5) ? null : reader.GetString(5);
+                    var databaseName = reader.IsDBNull(4) ? null : reader.GetString(4);
 
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())
@@ -85,7 +83,7 @@ OPTION(RECOMPILE);";
                        .AppendValue(waitType)
                        .AppendValue(waitDurationMs)
                        .AppendValue(blockingSessionId.HasValue ? (int?)blockingSessionId.Value : null)
-                       .AppendValue(resourceDescription)
+                       .AppendValue((string?)null) /* resource_description — no longer collected */
                        .AppendValue(databaseName)
                        .EndRow();
 

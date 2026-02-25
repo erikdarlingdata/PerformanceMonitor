@@ -60,6 +60,8 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _memoryClerksHover;
     private Helpers.ChartHoverHelper? _memoryGrantSizingHover;
     private Helpers.ChartHoverHelper? _memoryGrantActivityHover;
+    private Helpers.ChartHoverHelper? _currentWaitsDurationHover;
+    private Helpers.ChartHoverHelper? _currentWaitsBlockedHover;
 
     /* Memory clerks picker */
     private List<SelectableItem> _memoryClerkItems = new();
@@ -174,6 +176,8 @@ public partial class ServerTab : UserControl
         _memoryClerksHover = new Helpers.ChartHoverHelper(MemoryClerksChart, "MB");
         _memoryGrantSizingHover = new Helpers.ChartHoverHelper(MemoryGrantSizingChart, "MB");
         _memoryGrantActivityHover = new Helpers.ChartHoverHelper(MemoryGrantActivityChart, "");
+        _currentWaitsDurationHover = new Helpers.ChartHoverHelper(CurrentWaitsDurationChart, "ms");
+        _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -510,10 +514,13 @@ public partial class ServerTab : UserControl
             var procDurationTrendTask = SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var queryStoreDurationTrendTask = SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var executionCountTrendTask = SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var currentWaitsDurationTask = SafeQueryAsync(() => _dataService.GetWaitingTaskTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var currentWaitsBlockedTask = SafeQueryAsync(() => _dataService.GetBlockedSessionTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
             await System.Threading.Tasks.Task.WhenAll(
                 lockWaitTrendTask, blockingTrendTask, deadlockTrendTask,
-                queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask);
+                queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask,
+                currentWaitsDurationTask, currentWaitsBlockedTask);
 
             loadSw.Stop();
 
@@ -563,6 +570,8 @@ public partial class ServerTab : UserControl
             UpdateLockWaitTrendChart(lockWaitTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateBlockingTrendChart(blockingTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateDeadlockTrendChart(deadlockTrendTask.Result, hoursBack, fromDate, toDate);
+            UpdateCurrentWaitsDurationChart(currentWaitsDurationTask.Result, hoursBack, fromDate, toDate);
+            UpdateCurrentWaitsBlockedChart(currentWaitsBlockedTask.Result, hoursBack, fromDate, toDate);
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result);
             UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result);
@@ -1190,6 +1199,138 @@ public partial class ServerTab : UserControl
         SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(DeadlockTrendChart);
         DeadlockTrendChart.Refresh();
+    }
+
+    /* ========== Current Waits Charts ========== */
+
+    private void UpdateCurrentWaitsDurationChart(List<WaitingTaskTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(CurrentWaitsDurationChart);
+        ApplyDarkTheme(CurrentWaitsDurationChart);
+
+        DateTime rangeStart, rangeEnd;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
+        }
+        else
+        {
+            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeStart = rangeEnd.AddHours(-hoursBack);
+        }
+
+        _currentWaitsDurationHover?.Clear();
+        if (data.Count == 0)
+        {
+            var zeroLine = CurrentWaitsDurationChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Current Waits";
+            zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
+            zeroLine.MarkerSize = 0;
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            ReapplyAxisColors(CurrentWaitsDurationChart);
+            CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+            SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, 1);
+            ShowChartLegend(CurrentWaitsDurationChart);
+            CurrentWaitsDurationChart.Refresh();
+            return;
+        }
+
+        var grouped = data.GroupBy(d => d.WaitType).OrderBy(g => g.Key).ToList();
+        double globalMax = 0;
+
+        for (int i = 0; i < grouped.Count; i++)
+        {
+            var group = grouped[i];
+            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
+            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
+
+            var plot = CurrentWaitsDurationChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = group.Key;
+            plot.LineWidth = 2;
+            plot.MarkerSize = 5;
+            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+            _currentWaitsDurationHover?.Add(plot, group.Key);
+
+            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+        }
+
+        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        ReapplyAxisColors(CurrentWaitsDurationChart);
+        CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+        SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, globalMax > 0 ? globalMax : 1);
+        ShowChartLegend(CurrentWaitsDurationChart);
+        CurrentWaitsDurationChart.Refresh();
+    }
+
+    private void UpdateCurrentWaitsBlockedChart(List<BlockedSessionTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(CurrentWaitsBlockedChart);
+        ApplyDarkTheme(CurrentWaitsBlockedChart);
+
+        DateTime rangeStart, rangeEnd;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
+        }
+        else
+        {
+            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeStart = rangeEnd.AddHours(-hoursBack);
+        }
+
+        _currentWaitsBlockedHover?.Clear();
+        if (data.Count == 0)
+        {
+            var zeroLine = CurrentWaitsBlockedChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Blocked Sessions";
+            zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
+            zeroLine.MarkerSize = 0;
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            ReapplyAxisColors(CurrentWaitsBlockedChart);
+            CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+            SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, 1);
+            ShowChartLegend(CurrentWaitsBlockedChart);
+            CurrentWaitsBlockedChart.Refresh();
+            return;
+        }
+
+        var grouped = data.GroupBy(d => d.DatabaseName).OrderBy(g => g.Key).ToList();
+        double globalMax = 0;
+
+        for (int i = 0; i < grouped.Count; i++)
+        {
+            var group = grouped[i];
+            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
+            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
+
+            var plot = CurrentWaitsBlockedChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = group.Key;
+            plot.LineWidth = 2;
+            plot.MarkerSize = 5;
+            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+            _currentWaitsBlockedHover?.Add(plot, group.Key);
+
+            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+        }
+
+        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        ReapplyAxisColors(CurrentWaitsBlockedChart);
+        CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+        SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, globalMax > 0 ? globalMax : 1);
+        ShowChartLegend(CurrentWaitsBlockedChart);
+        CurrentWaitsBlockedChart.Refresh();
     }
 
     /* ========== Performance Trend Charts ========== */

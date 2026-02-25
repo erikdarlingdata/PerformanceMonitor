@@ -79,6 +79,8 @@ namespace PerformanceMonitorDashboard
         private Helpers.ChartHoverHelper? _deadlocksHover;
         private Helpers.ChartHoverHelper? _deadlockWaitTimeHover;
         private Helpers.ChartHoverHelper? _collectorDurationHover;
+        private Helpers.ChartHoverHelper? _currentWaitsDurationHover;
+        private Helpers.ChartHoverHelper? _currentWaitsBlockedHover;
 
         public ServerTab(ServerConnection serverConnection, int utcOffsetMinutes = 0)
         {
@@ -94,6 +96,8 @@ namespace PerformanceMonitorDashboard
             _deadlocksHover = new Helpers.ChartHoverHelper(BlockingStatsDeadlocksChart, "events");
             _deadlockWaitTimeHover = new Helpers.ChartHoverHelper(BlockingStatsDeadlockWaitTimeChart, "ms");
             _collectorDurationHover = new Helpers.ChartHoverHelper(CollectorDurationChart, "ms");
+            _currentWaitsDurationHover = new Helpers.ChartHoverHelper(CurrentWaitsDurationChart, "ms");
+            _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
 
             _serverConnection = serverConnection;
             UtcOffsetMinutes = utcOffsetMinutes;
@@ -1332,6 +1336,8 @@ namespace PerformanceMonitorDashboard
                 var deadlocksTask = _databaseService.GetDeadlocksAsync();
                 var blockingStatsTask = _databaseService.GetBlockingDeadlockStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
                 var lockWaitStatsTask = _databaseService.GetLockWaitStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                var currentWaitsDurationTask = _databaseService.GetWaitingTaskTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                var currentWaitsBlockedTask = _databaseService.GetBlockedSessionTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
 
                 var performanceTask = PerformanceTab.RefreshAllDataAsync();
                 var memoryTask = MemoryTab.RefreshAllDataAsync();
@@ -1347,7 +1353,7 @@ namespace PerformanceMonitorDashboard
 
                 // Wait for everything to complete before _isRefreshing resets
                 await Task.WhenAll(
-                    healthTask, durationLogsTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask,
+                    healthTask, durationLogsTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask, currentWaitsDurationTask, currentWaitsBlockedTask,
                     performanceTask, memoryTask, resourceOverviewTask, runningJobsTask,
                     resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, currentConfigTask, configChangesTask, systemEventsTask);
 
@@ -1390,6 +1396,10 @@ namespace PerformanceMonitorDashboard
                     var lockWaitStats = await lockWaitStatsTask;
                     LoadBlockingStatsCharts(blockingStats, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
                     LoadLockWaitStatsChart(lockWaitStats, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                    var currentWaitsDuration = await currentWaitsDurationTask;
+                    var currentWaitsBlocked = await currentWaitsBlockedTask;
+                    LoadCurrentWaitsDurationChart(currentWaitsDuration, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                    LoadCurrentWaitsBlockedChart(currentWaitsBlocked, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
                 }
                 catch (Exception blockingStatsEx)
                 {
@@ -1671,7 +1681,9 @@ namespace PerformanceMonitorDashboard
 
                 var blockingStatsTask = _databaseService.GetBlockingDeadlockStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
                 var lockWaitStatsTask = _databaseService.GetLockWaitStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
-                await Task.WhenAll(blockingStatsTask, lockWaitStatsTask);
+                var currentWaitsDurationTask = _databaseService.GetWaitingTaskTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                var currentWaitsBlockedTask = _databaseService.GetBlockedSessionTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                await Task.WhenAll(blockingStatsTask, lockWaitStatsTask, currentWaitsDurationTask, currentWaitsBlockedTask);
 
                 var data = await blockingStatsTask;
                 var lockWaitStats = await lockWaitStatsTask;
@@ -1679,6 +1691,8 @@ namespace PerformanceMonitorDashboard
                 // Load charts with explicit time range for proper axis scaling
                 LoadBlockingStatsCharts(data, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
                 LoadLockWaitStatsChart(lockWaitStats, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                LoadCurrentWaitsDurationChart(await currentWaitsDurationTask, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                LoadCurrentWaitsBlockedChart(await currentWaitsBlockedTask, _blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
                 StatusText.Text = $"Loaded {data.Count} blocking/deadlock stats records";
             }
             catch (Exception ex)
@@ -1933,6 +1947,120 @@ namespace PerformanceMonitorDashboard
             LockWaitStatsChart.Plot.Legend.FontSize = 12;
             LockChartVerticalAxis(LockWaitStatsChart);
             LockWaitStatsChart.Refresh();
+        }
+
+        private void LoadCurrentWaitsDurationChart(List<WaitingTaskTrendItem> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+        {
+            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
+            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+            double xMin = rangeStart.ToOADate();
+            double xMax = rangeEnd.ToOADate();
+
+            if (_legendPanels.TryGetValue(CurrentWaitsDurationChart, out var existingPanel) && existingPanel != null)
+            {
+                CurrentWaitsDurationChart.Plot.Axes.Remove(existingPanel);
+                _legendPanels[CurrentWaitsDurationChart] = null;
+            }
+            CurrentWaitsDurationChart.Plot.Clear();
+            _currentWaitsDurationHover?.Clear();
+            ApplyDarkModeToChart(CurrentWaitsDurationChart);
+
+            var waitTypes = data.Select(d => d.WaitType).Distinct().OrderBy(w => w).ToList();
+            var colors = TabHelpers.ChartColors;
+
+            int colorIndex = 0;
+            foreach (var waitType in waitTypes)
+            {
+                var waitTypeData = data.Where(d => d.WaitType == waitType).OrderBy(d => d.CollectionTime).ToList();
+                if (waitTypeData.Count > 0)
+                {
+                    var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
+                        waitTypeData.Select(d => d.CollectionTime),
+                        waitTypeData.Select(d => (double)d.TotalWaitMs));
+
+                    var scatter = CurrentWaitsDurationChart.Plot.Add.Scatter(xs, ys);
+                    scatter.LineWidth = 2;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = colors[colorIndex % colors.Length];
+                    scatter.LegendText = waitType;
+                    _currentWaitsDurationHover?.Add(scatter, waitType);
+                    colorIndex++;
+                }
+            }
+
+            if (data.Count == 0)
+            {
+                double xCenter = xMin + (xMax - xMin) / 2;
+                var noDataText = CurrentWaitsDurationChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
+                noDataText.LabelFontSize = 14;
+                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+            }
+
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
+            CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+            _legendPanels[CurrentWaitsDurationChart] = CurrentWaitsDurationChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+            CurrentWaitsDurationChart.Plot.Legend.FontSize = 12;
+            LockChartVerticalAxis(CurrentWaitsDurationChart);
+            CurrentWaitsDurationChart.Refresh();
+        }
+
+        private void LoadCurrentWaitsBlockedChart(List<BlockedSessionTrendItem> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+        {
+            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
+            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+            double xMin = rangeStart.ToOADate();
+            double xMax = rangeEnd.ToOADate();
+
+            if (_legendPanels.TryGetValue(CurrentWaitsBlockedChart, out var existingPanel) && existingPanel != null)
+            {
+                CurrentWaitsBlockedChart.Plot.Axes.Remove(existingPanel);
+                _legendPanels[CurrentWaitsBlockedChart] = null;
+            }
+            CurrentWaitsBlockedChart.Plot.Clear();
+            _currentWaitsBlockedHover?.Clear();
+            ApplyDarkModeToChart(CurrentWaitsBlockedChart);
+
+            var databases = data.Select(d => d.DatabaseName).Distinct().OrderBy(d => d).ToList();
+            var colors = TabHelpers.ChartColors;
+
+            int colorIndex = 0;
+            foreach (var db in databases)
+            {
+                var dbData = data.Where(d => d.DatabaseName == db).OrderBy(d => d.CollectionTime).ToList();
+                if (dbData.Count > 0)
+                {
+                    var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
+                        dbData.Select(d => d.CollectionTime),
+                        dbData.Select(d => (double)d.BlockedCount));
+
+                    var scatter = CurrentWaitsBlockedChart.Plot.Add.Scatter(xs, ys);
+                    scatter.LineWidth = 2;
+                    scatter.MarkerSize = 5;
+                    scatter.Color = colors[colorIndex % colors.Length];
+                    scatter.LegendText = db;
+                    _currentWaitsBlockedHover?.Add(scatter, db);
+                    colorIndex++;
+                }
+            }
+
+            if (data.Count == 0)
+            {
+                double xCenter = xMin + (xMax - xMin) / 2;
+                var noDataText = CurrentWaitsBlockedChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
+                noDataText.LabelFontSize = 14;
+                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+            }
+
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(xMin, xMax);
+            CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+            _legendPanels[CurrentWaitsBlockedChart] = CurrentWaitsBlockedChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+            CurrentWaitsBlockedChart.Plot.Legend.FontSize = 12;
+            LockChartVerticalAxis(CurrentWaitsBlockedChart);
+            CurrentWaitsBlockedChart.Refresh();
         }
 
         // ====================================================================
