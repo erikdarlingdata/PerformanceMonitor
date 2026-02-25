@@ -62,7 +62,7 @@
                         <ComboBoxItem Content="Avg Logical Writes" Tag="AvgLogicalWrites"/>
                         <ComboBoxItem Content="Avg Physical Reads" Tag="AvgPhysicalReads"/>
                         <ComboBoxItem Content="Avg Spills" Tag="AvgSpills"/>
-                        <ComboBoxItem Content="Execution Count Delta" Tag="ExecutionCountDelta"/>
+                        <ComboBoxItem Content="Executions Per Interval" Tag="IntervalExecutions"/>
                     </ComboBox>
                 </StackPanel>
 
@@ -127,11 +127,11 @@
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
 
-                <!-- Execution Count -->
-                <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                <!-- Execution Count (per-interval, computed from cumulative counter) -->
+                <DataGridTextColumn Binding="{Binding IntervalExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
-                            <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecutionCount" Click="Filter_Click" Margin="0,0,4,0"/>
+                            <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IntervalExecutions" Click="Filter_Click" Margin="0,0,4,0"/>
                             <TextBlock Text="Exec Count" FontWeight="Bold" VerticalAlignment="Center"/>
                         </StackPanel>
                     </DataGridTextColumn.Header>

@@ -22,6 +22,7 @@ namespace PerformanceMonitorDashboard.Models
         // Execution count
         public long ExecutionCount { get; set; }
         public long? ExecutionCountDelta { get; set; }
+        public long IntervalExecutions { get; set; }
 
         // Worker time (CPU) - microseconds in database
         public long TotalWorkerTime { get; set; }

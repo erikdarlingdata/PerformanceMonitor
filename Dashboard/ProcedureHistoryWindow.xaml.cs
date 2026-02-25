@@ -30,6 +30,8 @@ namespace PerformanceMonitorDashboard
         private readonly string _databaseName;
         private readonly int _objectId;
         private readonly string _objectName;
+        private readonly string? _schemaName;
+        private readonly string? _procedureName;
         private readonly int _hoursBack;
         private readonly DateTime? _fromDate;
         private readonly DateTime? _toDate;
@@ -48,7 +50,9 @@ namespace PerformanceMonitorDashboard
             string objectName,
             int hoursBack = 24,
             DateTime? fromDate = null,
-            DateTime? toDate = null)
+            DateTime? toDate = null,
+            string? schemaName = null,
+            string? procedureName = null)
         {
             InitializeComponent();
 
@@ -56,6 +60,8 @@ namespace PerformanceMonitorDashboard
             _databaseName = databaseName;
             _objectId = objectId;
             _objectName = objectName;
+            _schemaName = schemaName;
+            _procedureName = procedureName;
             _hoursBack = hoursBack;
             _fromDate = fromDate;
             _toDate = toDate;
@@ -92,7 +98,33 @@ namespace PerformanceMonitorDashboard
         {
             try
             {
-                _historyData = await _databaseService.GetProcedureStatsHistoryAsync(_databaseName, _objectId, _hoursBack, _fromDate, _toDate);
+                _historyData = !string.IsNullOrEmpty(_schemaName) && !string.IsNullOrEmpty(_procedureName)
+                    ? await _databaseService.GetProcedureStatsHistoryAsync(_databaseName, _schemaName, _procedureName, _hoursBack, _fromDate, _toDate)
+                    : await _databaseService.GetProcedureStatsHistoryAsync(_databaseName, _objectId, _hoursBack, _fromDate, _toDate);
+
+                // Compute per-interval executions. DMV counters are cumulative and reset on plan
+                // eviction, so we walk oldest→newest, detecting lifetime boundaries by CachedTime.
+                // Data arrives sorted by CollectionTime DESC, so walk from end to start.
+                for (int i = _historyData.Count - 1; i >= 0; i--)
+                {
+                    var item = _historyData[i];
+                    if (i == _historyData.Count - 1)
+                    {
+                        item.IntervalExecutions = item.ExecutionCount;
+                    }
+                    else
+                    {
+                        var olderItem = _historyData[i + 1];
+                        if (item.CachedTime != olderItem.CachedTime)
+                        {
+                            item.IntervalExecutions = item.ExecutionCount;
+                        }
+                        else
+                        {
+                            item.IntervalExecutions = Math.Max(0, item.ExecutionCount - olderItem.ExecutionCount);
+                        }
+                    }
+                }
 
                 _unfilteredData = _historyData;
                 _filters.Clear();
@@ -101,8 +133,7 @@ namespace PerformanceMonitorDashboard
 
                 if (_historyData.Count > 0)
                 {
-                    var totalExecutions = _historyData.Max(h => h.ExecutionCount);
-                    var latestExecDelta = _historyData.FirstOrDefault()?.ExecutionCountDelta ?? 0;
+                    var totalExecutions = _historyData.Sum(h => h.IntervalExecutions);
                     var avgCpu = _historyData.Where(h => h.AvgWorkerTimeMs.HasValue).Select(h => h.AvgWorkerTimeMs ?? 0).DefaultIfEmpty(0).Average();
                     var avgDuration = _historyData.Where(h => h.AvgElapsedTimeMs.HasValue).Select(h => h.AvgElapsedTimeMs ?? 0).DefaultIfEmpty(0).Average();
                     var firstSample = _historyData.Min(h => h.CollectionTime);
@@ -178,7 +209,7 @@ namespace PerformanceMonitorDashboard
                 "AvgLogicalWrites" => item.AvgLogicalWrites ?? 0,
                 "AvgPhysicalReads" => item.AvgPhysicalReads ?? 0,
                 "AvgSpills" => item.AvgSpills ?? 0,
-                "ExecutionCountDelta" => item.ExecutionCountDelta ?? 0,
+                "IntervalExecutions" => item.IntervalExecutions,
                 _ => item.AvgElapsedTimeMs ?? 0
             };
         }

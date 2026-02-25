@@ -22,6 +22,7 @@ namespace PerformanceMonitorDashboard.Models
 
         // Cumulative values
         public long ExecutionCount { get; set; }
+        public long IntervalExecutions { get; set; }
         public long TotalWorkerTime { get; set; }
         public long MinWorkerTime { get; set; }
         public long MaxWorkerTime { get; set; }

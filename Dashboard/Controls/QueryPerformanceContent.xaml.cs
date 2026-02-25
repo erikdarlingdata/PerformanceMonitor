@@ -1226,7 +1226,9 @@ namespace PerformanceMonitorDashboard.Controls
                     item.FullObjectName ?? item.ObjectName ?? $"ObjectId_{item.ObjectId}",
                     _procStatsHoursBack,
                     _procStatsFromDate,
-                    _procStatsToDate
+                    _procStatsToDate,
+                    item.SchemaName,
+                    item.ProcedureName
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();

@@ -699,60 +699,121 @@ namespace PerformanceMonitorDashboard.Services
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Use summary view which aggregates by database_name + query_hash
+                    // Aggregate inline from collect.query_stats with time filter applied
+                    // BEFORE the GROUP BY so counts/averages reflect only the selected time range.
+                    // Uses a CTE to first get MAX per plan lifetime (creation_time), then SUM across
+                    // lifetimes. This handles plan eviction correctly — when a plan is evicted and
+                    // re-cached, the cumulative counter resets, so MAX alone undercounts.
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-        SELECT
-            qs.database_name,
-            qs.query_hash,
-            qs.object_type,
-            qs.object_name,
-            qs.first_execution_time,
-            qs.last_execution_time,
-            qs.execution_count,
-            qs.total_worker_time,
-            qs.avg_worker_time_ms,
-            qs.min_worker_time_ms,
-            qs.max_worker_time_ms,
-            qs.total_elapsed_time,
-            qs.avg_elapsed_time_ms,
-            qs.min_elapsed_time_ms,
-            qs.max_elapsed_time_ms,
-            qs.total_logical_reads,
-            qs.avg_logical_reads,
-            qs.total_logical_writes,
-            qs.avg_logical_writes,
-            qs.total_physical_reads,
-            qs.avg_physical_reads,
-            qs.total_rows,
-            qs.avg_rows,
-            qs.min_rows,
-            qs.max_rows,
-            qs.min_dop,
-            qs.max_dop,
-            qs.min_grant_kb,
-            qs.max_grant_kb,
-            qs.total_spills,
-            qs.min_spills,
-            qs.max_spills,
-            qs.query_text,
-            qs.query_plan_xml,
-            qs.query_plan_hash,
-            qs.sql_handle,
-            qs.plan_handle
-        FROM report.query_stats_summary AS qs
-        WHERE (
-            (@useCustomDates = 0 AND qs.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
-            OR
-            (@useCustomDates = 1 AND
-                ((qs.first_execution_time >= @fromDate AND qs.first_execution_time <= @toDate)
-                OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
-                OR (qs.first_execution_time <= @fromDate AND qs.last_execution_time >= @toDate)))
+        WITH per_lifetime AS
+        (
+            SELECT
+                database_name = qs.database_name,
+                query_hash = qs.query_hash,
+                object_type = MAX(qs.object_type),
+                schema_name = MAX(qs.schema_name),
+                object_name = MAX(qs.object_name),
+                first_execution_time = MIN(qs.creation_time),
+                last_execution_time = MAX(qs.last_execution_time),
+                execution_count = MAX(qs.execution_count),
+                total_worker_time = MAX(qs.total_worker_time),
+                min_worker_time = MIN(qs.min_worker_time),
+                max_worker_time = MAX(qs.max_worker_time),
+                total_elapsed_time = MAX(qs.total_elapsed_time),
+                min_elapsed_time = MIN(qs.min_elapsed_time),
+                max_elapsed_time = MAX(qs.max_elapsed_time),
+                total_logical_reads = MAX(qs.total_logical_reads),
+                total_logical_writes = MAX(qs.total_logical_writes),
+                total_physical_reads = MAX(qs.total_physical_reads),
+                min_physical_reads = MIN(qs.min_physical_reads),
+                max_physical_reads = MAX(qs.max_physical_reads),
+                total_rows = MAX(qs.total_rows),
+                min_rows = MIN(qs.min_rows),
+                max_rows = MAX(qs.max_rows),
+                min_dop = MIN(qs.min_dop),
+                max_dop = MAX(qs.max_dop),
+                min_grant_kb = MIN(qs.min_grant_kb),
+                max_grant_kb = MAX(qs.max_grant_kb),
+                total_spills = MAX(qs.total_spills),
+                min_spills = MIN(qs.min_spills),
+                max_spills = MAX(qs.max_spills),
+                query_text = MAX(qs.query_text),
+                query_plan_text = MAX(qs.query_plan_text),
+                query_plan_hash = MAX(qs.query_plan_hash),
+                sql_handle = MAX(qs.sql_handle),
+                plan_handle = MAX(qs.plan_handle)
+            FROM collect.query_stats AS qs
+            WHERE (
+                (@useCustomDates = 0 AND qs.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
+                OR
+                (@useCustomDates = 1 AND
+                    ((qs.creation_time >= @fromDate AND qs.creation_time <= @toDate)
+                    OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
+                    OR (qs.creation_time <= @fromDate AND qs.last_execution_time >= @toDate)))
+            )
+            AND qs.query_text NOT LIKE N'WAITFOR%'
+            GROUP BY
+                qs.database_name,
+                qs.query_hash,
+                qs.creation_time
         )
-        AND qs.query_text NOT LIKE N'WAITFOR%'
+        SELECT
+            database_name = pl.database_name,
+            query_hash = CONVERT(nvarchar(20), pl.query_hash, 1),
+            object_type = MAX(pl.object_type),
+            object_name =
+                CASE MAX(pl.object_type)
+                    WHEN 'STATEMENT'
+                    THEN N'Adhoc'
+                    ELSE QUOTENAME(MAX(pl.schema_name)) + N'.' + QUOTENAME(MAX(pl.object_name))
+                END,
+            first_execution_time = MIN(pl.first_execution_time),
+            last_execution_time = MAX(pl.last_execution_time),
+            execution_count = SUM(pl.execution_count),
+            total_worker_time = SUM(pl.total_worker_time),
+            avg_worker_time_ms = SUM(pl.total_worker_time) / 1000.0 / NULLIF(SUM(pl.execution_count), 0),
+            min_worker_time_ms = MIN(pl.min_worker_time) / 1000.0,
+            max_worker_time_ms = MAX(pl.max_worker_time) / 1000.0,
+            total_elapsed_time = SUM(pl.total_elapsed_time),
+            avg_elapsed_time_ms = SUM(pl.total_elapsed_time) / 1000.0 / NULLIF(SUM(pl.execution_count), 0),
+            min_elapsed_time_ms = MIN(pl.min_elapsed_time) / 1000.0,
+            max_elapsed_time_ms = MAX(pl.max_elapsed_time) / 1000.0,
+            total_logical_reads = SUM(pl.total_logical_reads),
+            avg_logical_reads = SUM(pl.total_logical_reads) / NULLIF(SUM(pl.execution_count), 0),
+            total_logical_writes = SUM(pl.total_logical_writes),
+            avg_logical_writes = SUM(pl.total_logical_writes) / NULLIF(SUM(pl.execution_count), 0),
+            total_physical_reads = SUM(pl.total_physical_reads),
+            avg_physical_reads = SUM(pl.total_physical_reads) / NULLIF(SUM(pl.execution_count), 0),
+            total_rows = SUM(pl.total_rows),
+            avg_rows = SUM(pl.total_rows) / NULLIF(SUM(pl.execution_count), 0),
+            min_rows = MIN(pl.min_rows),
+            max_rows = MAX(pl.max_rows),
+            min_dop = MIN(pl.min_dop),
+            max_dop = MAX(pl.max_dop),
+            min_grant_kb = MIN(pl.min_grant_kb),
+            max_grant_kb = MAX(pl.max_grant_kb),
+            total_spills = SUM(pl.total_spills),
+            min_spills = MIN(pl.min_spills),
+            max_spills = MAX(pl.max_spills),
+            query_text = CONVERT(nvarchar(max), MAX(pl.query_text)),
+            query_plan_xml = MAX(pl.query_plan_text),
+            query_plan_hash = CONVERT(nvarchar(20), MAX(pl.query_plan_hash), 1),
+            sql_handle = CONVERT(nvarchar(130), MAX(pl.sql_handle), 1),
+            plan_handle = CONVERT(nvarchar(130), MAX(pl.plan_handle), 1)
+        FROM per_lifetime AS pl
+        GROUP BY
+            pl.database_name,
+            pl.query_hash
         ORDER BY
-            qs.avg_worker_time_ms DESC;";
+            avg_worker_time_ms DESC
+        OPTION
+        (
+            HASH GROUP,
+            HASH JOIN,
+            USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
+        );";
 
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
@@ -819,59 +880,113 @@ namespace PerformanceMonitorDashboard.Services
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Use summary view which aggregates by database_name + schema_name + object_name
+                    // Aggregate inline from collect.procedure_stats with time filter applied
+                    // BEFORE the GROUP BY so counts/averages reflect only the selected time range.
+                    // Uses a CTE to first get MAX per plan lifetime (cached_time), then SUM across
+                    // lifetimes. This handles plan eviction correctly — when a plan is evicted and
+                    // re-cached, the cumulative counter resets, so MAX alone undercounts.
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-        SELECT
-            ps.database_name,
-            ps.object_id,
-            ps.object_name,
-            ps.schema_name,
-            ps.procedure_name,
-            ps.object_type,
-            ps.type_desc,
-            ps.first_cached_time,
-            ps.last_execution_time,
-            ps.execution_count,
-            ps.total_worker_time,
-            ps.avg_worker_time_ms,
-            ps.min_worker_time_ms,
-            ps.max_worker_time_ms,
-            ps.total_elapsed_time,
-            ps.avg_elapsed_time_ms,
-            ps.min_elapsed_time_ms,
-            ps.max_elapsed_time_ms,
-            ps.total_logical_reads,
-            ps.avg_logical_reads,
-            ps.min_logical_reads,
-            ps.max_logical_reads,
-            ps.total_logical_writes,
-            ps.avg_logical_writes,
-            ps.min_logical_writes,
-            ps.max_logical_writes,
-            ps.total_physical_reads,
-            ps.avg_physical_reads,
-            ps.min_physical_reads,
-            ps.max_physical_reads,
-            ps.total_spills,
-            ps.avg_spills,
-            ps.min_spills,
-            ps.max_spills,
-            ps.query_plan_xml,
-            ps.sql_handle,
-            ps.plan_handle
-        FROM report.procedure_stats_summary AS ps
-        WHERE (
-            (@useCustomDates = 0 AND ps.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
-            OR
-            (@useCustomDates = 1 AND
-                ((ps.first_cached_time >= @fromDate AND ps.first_cached_time <= @toDate)
-                OR (ps.last_execution_time >= @fromDate AND ps.last_execution_time <= @toDate)
-                OR (ps.first_cached_time <= @fromDate AND ps.last_execution_time >= @toDate)))
+        WITH per_lifetime AS
+        (
+            SELECT
+                database_name = ps.database_name,
+                schema_name = ps.schema_name,
+                object_name = ps.object_name,
+                object_id = MAX(ps.object_id),
+                object_type = MAX(ps.object_type),
+                type_desc = MAX(ps.type_desc),
+                first_cached_time = MIN(ps.cached_time),
+                last_execution_time = MAX(ps.last_execution_time),
+                execution_count = MAX(ps.execution_count),
+                total_worker_time = MAX(ps.total_worker_time),
+                min_worker_time = MIN(ps.min_worker_time),
+                max_worker_time = MAX(ps.max_worker_time),
+                total_elapsed_time = MAX(ps.total_elapsed_time),
+                min_elapsed_time = MIN(ps.min_elapsed_time),
+                max_elapsed_time = MAX(ps.max_elapsed_time),
+                total_logical_reads = MAX(ps.total_logical_reads),
+                min_logical_reads = MIN(ps.min_logical_reads),
+                max_logical_reads = MAX(ps.max_logical_reads),
+                total_logical_writes = MAX(ps.total_logical_writes),
+                min_logical_writes = MIN(ps.min_logical_writes),
+                max_logical_writes = MAX(ps.max_logical_writes),
+                total_physical_reads = MAX(ps.total_physical_reads),
+                min_physical_reads = MIN(ps.min_physical_reads),
+                max_physical_reads = MAX(ps.max_physical_reads),
+                total_spills = MAX(ps.total_spills),
+                min_spills = MIN(ps.min_spills),
+                max_spills = MAX(ps.max_spills),
+                query_plan_text = MAX(ps.query_plan_text),
+                sql_handle = MAX(ps.sql_handle),
+                plan_handle = MAX(ps.plan_handle)
+            FROM collect.procedure_stats AS ps
+            WHERE (
+                (@useCustomDates = 0 AND ps.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
+                OR
+                (@useCustomDates = 1 AND
+                    ((ps.cached_time >= @fromDate AND ps.cached_time <= @toDate)
+                    OR (ps.last_execution_time >= @fromDate AND ps.last_execution_time <= @toDate)
+                    OR (ps.cached_time <= @fromDate AND ps.last_execution_time >= @toDate)))
+            )
+            GROUP BY
+                ps.database_name,
+                ps.schema_name,
+                ps.object_name,
+                ps.cached_time
         )
+        SELECT
+            database_name = pl.database_name,
+            object_id = MAX(pl.object_id),
+            object_name = QUOTENAME(pl.schema_name) + N'.' + QUOTENAME(pl.object_name),
+            schema_name = pl.schema_name,
+            procedure_name = pl.object_name,
+            object_type = MAX(pl.object_type),
+            type_desc = MAX(pl.type_desc),
+            first_cached_time = MIN(pl.first_cached_time),
+            last_execution_time = MAX(pl.last_execution_time),
+            execution_count = SUM(pl.execution_count),
+            total_worker_time = SUM(pl.total_worker_time),
+            avg_worker_time_ms = SUM(pl.total_worker_time) / 1000.0 / NULLIF(SUM(pl.execution_count), 0),
+            min_worker_time_ms = MIN(pl.min_worker_time) / 1000.0,
+            max_worker_time_ms = MAX(pl.max_worker_time) / 1000.0,
+            total_elapsed_time = SUM(pl.total_elapsed_time),
+            avg_elapsed_time_ms = SUM(pl.total_elapsed_time) / 1000.0 / NULLIF(SUM(pl.execution_count), 0),
+            min_elapsed_time_ms = MIN(pl.min_elapsed_time) / 1000.0,
+            max_elapsed_time_ms = MAX(pl.max_elapsed_time) / 1000.0,
+            total_logical_reads = SUM(pl.total_logical_reads),
+            avg_logical_reads = SUM(pl.total_logical_reads) / NULLIF(SUM(pl.execution_count), 0),
+            min_logical_reads = MIN(pl.min_logical_reads),
+            max_logical_reads = MAX(pl.max_logical_reads),
+            total_logical_writes = SUM(pl.total_logical_writes),
+            avg_logical_writes = SUM(pl.total_logical_writes) / NULLIF(SUM(pl.execution_count), 0),
+            min_logical_writes = MIN(pl.min_logical_writes),
+            max_logical_writes = MAX(pl.max_logical_writes),
+            total_physical_reads = SUM(pl.total_physical_reads),
+            avg_physical_reads = SUM(pl.total_physical_reads) / NULLIF(SUM(pl.execution_count), 0),
+            min_physical_reads = MIN(pl.min_physical_reads),
+            max_physical_reads = MAX(pl.max_physical_reads),
+            total_spills = SUM(pl.total_spills),
+            avg_spills = SUM(pl.total_spills) / NULLIF(SUM(pl.execution_count), 0),
+            min_spills = MIN(pl.min_spills),
+            max_spills = MAX(pl.max_spills),
+            query_plan_xml = MAX(pl.query_plan_text),
+            sql_handle = CONVERT(nvarchar(130), MAX(pl.sql_handle), 1),
+            plan_handle = CONVERT(nvarchar(130), MAX(pl.plan_handle), 1)
+        FROM per_lifetime AS pl
+        GROUP BY
+            pl.database_name,
+            pl.schema_name,
+            pl.object_name
         ORDER BY
-            ps.avg_worker_time_ms DESC;";
+            avg_worker_time_ms DESC
+        OPTION
+        (
+            HASH GROUP,
+            HASH JOIN,
+            USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
+        );";
 
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
@@ -938,63 +1053,67 @@ namespace PerformanceMonitorDashboard.Services
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Use summary view which aggregates by database_name + query_id (no plan_id)
+                    // Aggregate inline from collect.query_store_data with time filter applied
+                    // BEFORE the GROUP BY so counts/averages reflect only the selected time range.
                     // Note: query_plan_xml is NOT fetched here for performance - use GetQueryStorePlanXmlAsync on demand
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         SELECT
-            qss.database_name,
-            qss.query_id,
-            qss.execution_type_desc,
-            qss.module_name,
-            qss.first_execution_time,
-            qss.last_execution_time,
-            qss.execution_count,
-            qss.plan_count,
-            qss.avg_duration_ms,
-            qss.min_duration_ms,
-            qss.max_duration_ms,
-            qss.avg_cpu_time_ms,
-            qss.min_cpu_time_ms,
-            qss.max_cpu_time_ms,
-            qss.avg_logical_reads,
-            qss.min_logical_reads,
-            qss.max_logical_reads,
-            qss.avg_logical_writes,
-            qss.min_logical_writes,
-            qss.max_logical_writes,
-            qss.avg_physical_reads,
-            qss.min_physical_reads,
-            qss.max_physical_reads,
-            qss.min_dop,
-            qss.max_dop,
-            qss.avg_memory_pages,
-            qss.min_memory_pages,
-            qss.max_memory_pages,
-            qss.avg_rowcount,
-            qss.min_rowcount,
-            qss.max_rowcount,
-            qss.avg_tempdb_pages,
-            qss.min_tempdb_pages,
-            qss.max_tempdb_pages,
-            qss.plan_type,
-            qss.is_forced_plan,
-            qss.compatibility_level,
-            qss.query_sql_text,
-            qss.query_plan_hash
-        FROM report.query_store_summary AS qss
+            database_name = qsd.database_name,
+            query_id = qsd.query_id,
+            execution_type_desc = MAX(qsd.execution_type_desc),
+            module_name = MAX(qsd.module_name),
+            first_execution_time = MIN(qsd.server_first_execution_time),
+            last_execution_time = MAX(qsd.server_last_execution_time),
+            execution_count = SUM(qsd.count_executions),
+            plan_count = COUNT_BIG(DISTINCT qsd.plan_id),
+            avg_duration_ms = SUM(qsd.avg_duration * qsd.count_executions) / 1000.0 / NULLIF(SUM(qsd.count_executions), 0),
+            min_duration_ms = MIN(qsd.min_duration) / 1000.0,
+            max_duration_ms = MAX(qsd.max_duration) / 1000.0,
+            avg_cpu_time_ms = SUM(qsd.avg_cpu_time * qsd.count_executions) / 1000.0 / NULLIF(SUM(qsd.count_executions), 0),
+            min_cpu_time_ms = MIN(qsd.min_cpu_time) / 1000.0,
+            max_cpu_time_ms = MAX(qsd.max_cpu_time) / 1000.0,
+            avg_logical_reads = SUM(qsd.avg_logical_io_reads * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_logical_reads = MIN(qsd.min_logical_io_reads),
+            max_logical_reads = MAX(qsd.max_logical_io_reads),
+            avg_logical_writes = SUM(qsd.avg_logical_io_writes * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_logical_writes = MIN(qsd.min_logical_io_writes),
+            max_logical_writes = MAX(qsd.max_logical_io_writes),
+            avg_physical_reads = SUM(qsd.avg_physical_io_reads * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_physical_reads = MIN(qsd.min_physical_io_reads),
+            max_physical_reads = MAX(qsd.max_physical_io_reads),
+            min_dop = MIN(qsd.min_dop),
+            max_dop = MAX(qsd.max_dop),
+            avg_memory_pages = SUM(qsd.avg_query_max_used_memory * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_memory_pages = MIN(qsd.min_query_max_used_memory),
+            max_memory_pages = MAX(qsd.max_query_max_used_memory),
+            avg_rowcount = SUM(qsd.avg_rowcount * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_rowcount = MIN(qsd.min_rowcount),
+            max_rowcount = MAX(qsd.max_rowcount),
+            avg_tempdb_pages = SUM(ISNULL(qsd.avg_tempdb_space_used, 0) * qsd.count_executions) / NULLIF(SUM(qsd.count_executions), 0),
+            min_tempdb_pages = MIN(qsd.min_tempdb_space_used),
+            max_tempdb_pages = MAX(qsd.max_tempdb_space_used),
+            plan_type = MAX(qsd.plan_type),
+            is_forced_plan = MAX(CONVERT(tinyint, qsd.is_forced_plan)),
+            compatibility_level = MAX(qsd.compatibility_level),
+            query_sql_text = CONVERT(nvarchar(max), MAX(qsd.query_sql_text)),
+            query_plan_hash = CONVERT(nvarchar(20), MAX(qsd.query_plan_hash), 1)
+        FROM collect.query_store_data AS qsd
         WHERE (
-            (@useCustomDates = 0 AND qss.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
+            (@useCustomDates = 0 AND qsd.server_last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
             OR
             (@useCustomDates = 1 AND
-                ((qss.first_execution_time >= @fromDate AND qss.first_execution_time <= @toDate)
-                OR (qss.last_execution_time >= @fromDate AND qss.last_execution_time <= @toDate)
-                OR (qss.first_execution_time <= @fromDate AND qss.last_execution_time >= @toDate)))
+                ((qsd.server_first_execution_time >= @fromDate AND qsd.server_first_execution_time <= @toDate)
+                OR (qsd.server_last_execution_time >= @fromDate AND qsd.server_last_execution_time <= @toDate)
+                OR (qsd.server_first_execution_time <= @fromDate AND qsd.server_last_execution_time >= @toDate)))
         )
-        AND qss.query_sql_text NOT LIKE N'WAITFOR%'
+        AND qsd.query_sql_text NOT LIKE N'WAITFOR%'
+        GROUP BY
+            qsd.database_name,
+            qsd.query_id
         ORDER BY
-            qss.avg_cpu_time_ms DESC
+            avg_cpu_time_ms DESC
         OPTION
         (
             HASH GROUP,
@@ -1619,6 +1738,123 @@ namespace PerformanceMonitorDashboard.Services
 
                     command.Parameters.Add(new SqlParameter("@database_name", SqlDbType.NVarChar, 128) { Value = databaseName });
                     command.Parameters.Add(new SqlParameter("@object_id", SqlDbType.Int) { Value = objectId });
+
+                    if (fromDate.HasValue && toDate.HasValue)
+                    {
+                        command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+                        command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+                    }
+                    else
+                    {
+                        command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = hoursBack });
+                    }
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        items.Add(new ProcedureExecutionHistoryItem
+                        {
+                            CollectionId = reader.GetInt64(0),
+                            CollectionTime = reader.GetDateTime(1),
+                            ServerStartTime = reader.GetDateTime(2),
+                            ObjectType = reader.GetString(3),
+                            TypeDesc = reader.IsDBNull(4) ? null : reader.GetString(4),
+                            CachedTime = reader.GetDateTime(5),
+                            LastExecutionTime = reader.GetDateTime(6),
+                            ExecutionCount = reader.GetInt64(7),
+                            TotalWorkerTime = reader.GetInt64(8),
+                            MinWorkerTime = reader.GetInt64(9),
+                            MaxWorkerTime = reader.GetInt64(10),
+                            TotalElapsedTime = reader.GetInt64(11),
+                            MinElapsedTime = reader.GetInt64(12),
+                            MaxElapsedTime = reader.GetInt64(13),
+                            TotalLogicalReads = reader.GetInt64(14),
+                            MinLogicalReads = reader.GetInt64(15),
+                            MaxLogicalReads = reader.GetInt64(16),
+                            TotalPhysicalReads = reader.GetInt64(17),
+                            MinPhysicalReads = reader.GetInt64(18),
+                            MaxPhysicalReads = reader.GetInt64(19),
+                            TotalLogicalWrites = reader.GetInt64(20),
+                            MinLogicalWrites = reader.GetInt64(21),
+                            MaxLogicalWrites = reader.GetInt64(22),
+                            TotalSpills = reader.IsDBNull(23) ? null : reader.GetInt64(23),
+                            MinSpills = reader.IsDBNull(24) ? null : reader.GetInt64(24),
+                            MaxSpills = reader.IsDBNull(25) ? null : reader.GetInt64(25),
+                            ExecutionCountDelta = reader.IsDBNull(26) ? null : reader.GetInt64(26),
+                            TotalWorkerTimeDelta = reader.IsDBNull(27) ? null : reader.GetInt64(27),
+                            TotalElapsedTimeDelta = reader.IsDBNull(28) ? null : reader.GetInt64(28),
+                            TotalLogicalReadsDelta = reader.IsDBNull(29) ? null : reader.GetInt64(29),
+                            TotalPhysicalReadsDelta = reader.IsDBNull(30) ? null : reader.GetInt64(30),
+                            TotalLogicalWritesDelta = reader.IsDBNull(31) ? null : reader.GetInt64(31),
+                            SampleIntervalSeconds = reader.IsDBNull(32) ? null : reader.GetInt32(32)
+                        });
+                    }
+
+                    return items;
+                }
+
+                public async Task<List<ProcedureExecutionHistoryItem>> GetProcedureStatsHistoryAsync(string databaseName, string schemaName, string procedureName, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+                {
+                    var items = new List<ProcedureExecutionHistoryItem>();
+
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    var timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "AND   ps.collection_time >= @from_date AND ps.collection_time <= @to_date"
+                        : "AND   ps.collection_time >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
+
+                    string query = $@"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT
+            ps.collection_id,
+            ps.collection_time,
+            ps.server_start_time,
+            ps.object_type,
+            ps.type_desc,
+            ps.cached_time,
+            ps.last_execution_time,
+            ps.execution_count,
+            ps.total_worker_time,
+            ps.min_worker_time,
+            ps.max_worker_time,
+            ps.total_elapsed_time,
+            ps.min_elapsed_time,
+            ps.max_elapsed_time,
+            ps.total_logical_reads,
+            ps.min_logical_reads,
+            ps.max_logical_reads,
+            ps.total_physical_reads,
+            ps.min_physical_reads,
+            ps.max_physical_reads,
+            ps.total_logical_writes,
+            ps.min_logical_writes,
+            ps.max_logical_writes,
+            ps.total_spills,
+            ps.min_spills,
+            ps.max_spills,
+            ps.execution_count_delta,
+            ps.total_worker_time_delta,
+            ps.total_elapsed_time_delta,
+            ps.total_logical_reads_delta,
+            ps.total_physical_reads_delta,
+            ps.total_logical_writes_delta,
+            ps.sample_interval_seconds
+        FROM collect.procedure_stats AS ps
+        WHERE ps.database_name = @database_name
+        AND   ps.schema_name = @schema_name
+        AND   ps.object_name = @object_name
+        {timeFilter}
+        ORDER BY
+            ps.collection_time DESC;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 120;
+
+                    command.Parameters.Add(new SqlParameter("@database_name", SqlDbType.NVarChar, 128) { Value = databaseName });
+                    command.Parameters.Add(new SqlParameter("@schema_name", SqlDbType.NVarChar, 128) { Value = schemaName });
+                    command.Parameters.Add(new SqlParameter("@object_name", SqlDbType.NVarChar, 128) { Value = procedureName });
 
                     if (fromDate.HasValue && toDate.HasValue)
                     {
