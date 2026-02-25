@@ -699,45 +699,60 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void DownloadCurrentActiveEstPlan_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is Button button && button.DataContext is LiveQueryItem item && !string.IsNullOrEmpty(item.QueryPlan))
+            if (sender is not Button button || button.DataContext is not LiveQueryItem item) return;
+
+            if (string.IsNullOrEmpty(item.QueryPlan))
             {
-                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-                var defaultFileName = $"estimated_plan_{item.SessionId}_{timestamp}.sqlplan";
+                MessageBox.Show("No estimated plan is available for this query.", "No Plan Available",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
 
-                var saveFileDialog = new SaveFileDialog
-                {
-                    FileName = defaultFileName,
-                    DefaultExt = ".sqlplan",
-                    Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
-                    Title = "Save Query Plan"
-                };
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            var defaultFileName = $"estimated_plan_{item.SessionId}_{timestamp}.sqlplan";
 
-                if (saveFileDialog.ShowDialog() == true)
-                {
-                    File.WriteAllText(saveFileDialog.FileName, item.QueryPlan);
-                }
+            var saveFileDialog = new SaveFileDialog
+            {
+                FileName = defaultFileName,
+                DefaultExt = ".sqlplan",
+                Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
+                Title = "Save Query Plan"
+            };
+
+            if (saveFileDialog.ShowDialog() == true)
+            {
+                File.WriteAllText(saveFileDialog.FileName, item.QueryPlan);
             }
         }
 
         private void DownloadCurrentActiveLivePlan_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is Button button && button.DataContext is LiveQueryItem item && !string.IsNullOrEmpty(item.LiveQueryPlan))
+            if (sender is not Button button || button.DataContext is not LiveQueryItem item) return;
+
+            if (string.IsNullOrEmpty(item.LiveQueryPlan))
             {
-                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-                var defaultFileName = $"live_plan_{item.SessionId}_{timestamp}.sqlplan";
+                MessageBox.Show(
+                    "No live query plan is available for this session. The query may have completed before the plan could be captured.",
+                    "No Plan Available",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
 
-                var saveFileDialog = new SaveFileDialog
-                {
-                    FileName = defaultFileName,
-                    DefaultExt = ".sqlplan",
-                    Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
-                    Title = "Save Live Query Plan"
-                };
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            var defaultFileName = $"live_plan_{item.SessionId}_{timestamp}.sqlplan";
 
-                if (saveFileDialog.ShowDialog() == true)
-                {
-                    File.WriteAllText(saveFileDialog.FileName, item.LiveQueryPlan);
-                }
+            var saveFileDialog = new SaveFileDialog
+            {
+                FileName = defaultFileName,
+                DefaultExt = ".sqlplan",
+                Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
+                Title = "Save Live Query Plan"
+            };
+
+            if (saveFileDialog.ShowDialog() == true)
+            {
+                File.WriteAllText(saveFileDialog.FileName, item.LiveQueryPlan);
             }
         }
 
@@ -798,7 +813,17 @@ namespace PerformanceMonitorDashboard.Controls
             }
 
             if (planXml != null)
+            {
                 ViewPlanRequested?.Invoke(planXml, label, queryText);
+            }
+            else
+            {
+                MessageBox.Show(
+                    "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.",
+                    "No Plan Available",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
         }
 
         private async void GetActualPlan_Click(object sender, RoutedEventArgs e)

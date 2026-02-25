@@ -2649,13 +2649,35 @@ public partial class ServerTab : UserControl
 
     private void DownloadSnapshotPlan_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row || row.QueryPlan == null) return;
+        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row) return;
+
+        if (row.QueryPlan == null)
+        {
+            MessageBox.Show(
+                "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.",
+                "No Plan Available",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
         SavePlanFile(row.QueryPlan, $"EstimatedPlan_Session{row.SessionId}");
     }
 
     private void DownloadSnapshotLivePlan_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row || row.LiveQueryPlan == null) return;
+        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row) return;
+
+        if (row.LiveQueryPlan == null)
+        {
+            MessageBox.Show(
+                "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.",
+                "No Plan Available",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
         SavePlanFile(row.LiveQueryPlan, $"ActualPlan_Session{row.SessionId}");
     }
 
@@ -2785,6 +2807,14 @@ public partial class ServerTab : UserControl
         {
             OpenPlanTab(planXml, label, queryText);
             PlanViewerTabItem.IsSelected = true;
+        }
+        else
+        {
+            MessageBox.Show(
+                "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.",
+                "No Plan Available",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
         }
     }
 

@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Media;
 using Microsoft.Win32;
 using PerformanceMonitorDashboard.Models;
@@ -982,11 +983,56 @@ namespace PerformanceMonitorDashboard.Controls
                 LoadServerTrendsTempdbChart(await tempdbTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
                 LoadServerTrendsMemoryChart(await memoryTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
                 LoadServerTrendsPerfmonChart(await perfmonTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
+
+                try
+                {
+                    var pressure = await _databaseService.GetCpuPressureAsync();
+                    UpdateCpuSchedulerStatus(pressure);
+                }
+                catch (Exception pressureEx)
+                {
+                    Logger.Error($"Error loading CPU scheduler pressure: {pressureEx.Message}", pressureEx);
+                }
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading server trends: {ex.Message}", ex);
             }
+        }
+
+        private void UpdateCpuSchedulerStatus(CpuPressureItem? pressure)
+        {
+            if (pressure == null)
+            {
+                CpuSchedulerStatusText.Text = "";
+                return;
+            }
+
+            CpuSchedulerStatusText.Inlines.Clear();
+
+            var summary = $"Schedulers: {pressure.TotalSchedulers} | " +
+                          $"Workers: {pressure.TotalWorkers:N0}/{pressure.MaxWorkers:N0} ({pressure.WorkerUtilizationPercent:F1}%) | " +
+                          $"Runnable: {pressure.TotalRunnableTasks} ({pressure.AvgRunnableTasksPerScheduler:F2}/sched) | " +
+                          $"Active: {pressure.TotalActiveRequests} | " +
+                          $"Queued: {pressure.TotalQueuedRequests} | ";
+
+            CpuSchedulerStatusText.Inlines.Add(new Run(summary));
+
+            var levelText = pressure.PressureLevel;
+            var levelRun = new Run(levelText);
+
+            if (levelText.Contains("CRITICAL") || levelText.Contains("HIGH"))
+            {
+                levelRun.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x44, 0x44));
+                levelRun.FontWeight = FontWeights.Bold;
+            }
+            else if (levelText.Contains("MEDIUM"))
+            {
+                levelRun.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0xA5, 0x00));
+                levelRun.FontWeight = FontWeights.Bold;
+            }
+
+            CpuSchedulerStatusText.Inlines.Add(levelRun);
         }
 
         private void LoadServerTrendsCpuChart(IEnumerable<CpuSpikeItem> cpuData, int hoursBack, DateTime? fromDate, DateTime? toDate)

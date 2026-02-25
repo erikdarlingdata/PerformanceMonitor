@@ -445,6 +445,17 @@ namespace PerformanceMonitorDashboard
 
             /* Set server UTC offset for chart axis bounds */
             var connStatus = _serverManager.GetConnectionStatus(server.Id);
+            if (!connStatus.UtcOffsetMinutes.HasValue)
+            {
+                /* Background check hasn't run yet — fetch offset synchronously so
+                   the first tab open doesn't default to local timezone. */
+                try
+                {
+                    _serverManager.CheckConnectionAsync(server.Id).GetAwaiter().GetResult();
+                    connStatus = _serverManager.GetConnectionStatus(server.Id);
+                }
+                catch { /* Fall through to local offset default */ }
+            }
             var utcOffset = connStatus.UtcOffsetMinutes ?? (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
             Helpers.ServerTimeHelper.UtcOffsetMinutes = utcOffset;
 
