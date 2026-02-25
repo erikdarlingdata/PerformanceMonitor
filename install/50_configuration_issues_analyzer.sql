@@ -385,7 +385,7 @@ BEGIN
             message,
             investigate_query
         )
-        /*Available memory pressure warning*/
+        /*Available memory pressure warning — low available memory for grants (<100MB)*/
         SELECT
             severity = N'WARNING',
             problem_area = N'Memory Grant Pressure',
@@ -397,7 +397,8 @@ BEGIN
                 N'. Available: ' + CONVERT(nvarchar(20), mgs.available_memory_mb) + N' MB.',
             investigate_query = N'SELECT * FROM collect.memory_grant_stats WHERE collection_time >= DATEADD(HOUR, -1, SYSDATETIME()) ORDER BY collection_time DESC;'
         FROM collect.memory_grant_stats AS mgs
-        WHERE mgs.available_memory_pressure_warning = 1
+        WHERE mgs.available_memory_mb < 100
+        AND   mgs.granted_memory_mb > 0
         AND   mgs.collection_time >= DATEADD(MINUTE, -5, SYSDATETIME())
         AND   NOT EXISTS
               (
@@ -412,7 +413,7 @@ BEGIN
 
         UNION ALL
 
-        /*Waiter count warning*/
+        /*Waiter count warning — high number of queries waiting for memory grants (>10)*/
         SELECT
             severity = N'WARNING',
             problem_area = N'Memory Grant Pressure',
@@ -424,7 +425,7 @@ BEGIN
                 N'. Waiters: ' + CONVERT(nvarchar(10), mgs.waiter_count) + N'.',
             investigate_query = N'SELECT * FROM collect.memory_grant_stats WHERE collection_time >= DATEADD(HOUR, -1, SYSDATETIME()) ORDER BY collection_time DESC;'
         FROM collect.memory_grant_stats AS mgs
-        WHERE mgs.waiter_count_warning = 1
+        WHERE mgs.waiter_count > 10
         AND   mgs.collection_time >= DATEADD(MINUTE, -5, SYSDATETIME())
         AND   NOT EXISTS
               (
@@ -439,7 +440,7 @@ BEGIN
 
         UNION ALL
 
-        /*Timeout error warning - CRITICAL severity*/
+        /*Timeout error warning — queries timing out waiting for memory (delta > 0), CRITICAL severity*/
         SELECT
             severity = N'CRITICAL',
             problem_area = N'Memory Grant Pressure',
@@ -448,10 +449,10 @@ BEGIN
             message =
                 N'CRITICAL: Queries timing out waiting for memory grants at ' +
                 CONVERT(nvarchar(30), mgs.collection_time, 121) +
-                N'. Timeout errors: ' + CONVERT(nvarchar(10), mgs.timeout_error_count) + N'.',
+                N'. Timeout errors: ' + CONVERT(nvarchar(10), ISNULL(mgs.timeout_error_count_delta, 0)) + N'.',
             investigate_query = N'SELECT * FROM collect.memory_grant_stats WHERE collection_time >= DATEADD(HOUR, -1, SYSDATETIME()) ORDER BY collection_time DESC;'
         FROM collect.memory_grant_stats AS mgs
-        WHERE mgs.timeout_error_warning = 1
+        WHERE ISNULL(mgs.timeout_error_count_delta, 0) > 0
         AND   mgs.collection_time >= DATEADD(MINUTE, -5, SYSDATETIME())
         AND   NOT EXISTS
               (
@@ -466,7 +467,7 @@ BEGIN
 
         UNION ALL
 
-        /*Forced grant warning*/
+        /*Forced grant warning — queries forced to run with insufficient memory (delta > 0)*/
         SELECT
             severity = N'WARNING',
             problem_area = N'Memory Grant Pressure',
@@ -475,11 +476,11 @@ BEGIN
             message =
                 N'Queries forced to run with insufficient memory at ' +
                 CONVERT(nvarchar(30), mgs.collection_time, 121) +
-                N'. Forced grants: ' + CONVERT(nvarchar(10), mgs.forced_grant_count) +
+                N'. Forced grants: ' + CONVERT(nvarchar(10), ISNULL(mgs.forced_grant_count_delta, 0)) +
                 N'. These queries will spill to tempdb.',
             investigate_query = N'SELECT * FROM collect.memory_grant_stats WHERE collection_time >= DATEADD(HOUR, -1, SYSDATETIME()) ORDER BY collection_time DESC;'
         FROM collect.memory_grant_stats AS mgs
-        WHERE mgs.forced_grant_warning = 1
+        WHERE ISNULL(mgs.forced_grant_count_delta, 0) > 0
         AND   mgs.collection_time >= DATEADD(MINUTE, -5, SYSDATETIME())
         AND   NOT EXISTS
               (

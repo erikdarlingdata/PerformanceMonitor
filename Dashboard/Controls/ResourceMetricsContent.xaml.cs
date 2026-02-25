@@ -86,6 +86,8 @@ namespace PerformanceMonitorDashboard.Controls
         private Helpers.ChartHoverHelper? _spinlockStatsHover;
         private Helpers.ChartHoverHelper? _fileIoReadHover;
         private Helpers.ChartHoverHelper? _fileIoWriteHover;
+        private Helpers.ChartHoverHelper? _fileIoReadThroughputHover;
+        private Helpers.ChartHoverHelper? _fileIoWriteThroughputHover;
         private Helpers.ChartHoverHelper? _perfmonHover;
         private Helpers.ChartHoverHelper? _waitStatsHover;
         private Helpers.ChartHoverHelper? _tempdbStatsHover;
@@ -111,6 +113,8 @@ namespace PerformanceMonitorDashboard.Controls
             _spinlockStatsHover = new Helpers.ChartHoverHelper(SpinlockStatsChart, "collisions/sec");
             _fileIoReadHover = new Helpers.ChartHoverHelper(UserDbReadLatencyChart, "ms");
             _fileIoWriteHover = new Helpers.ChartHoverHelper(UserDbWriteLatencyChart, "ms");
+            _fileIoReadThroughputHover = new Helpers.ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
+            _fileIoWriteThroughputHover = new Helpers.ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
             _perfmonHover = new Helpers.ChartHoverHelper(PerfmonCountersChart, "");
             _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsDetailChart, "ms/sec");
             _tempdbStatsHover = new Helpers.ChartHoverHelper(TempdbStatsChart, "MB");
@@ -146,6 +150,10 @@ namespace PerformanceMonitorDashboard.Controls
             // File I/O Latency charts
             TabHelpers.SetupChartContextMenu(UserDbReadLatencyChart, "UserDB_Read_Latency", "collect.file_io_stats");
             TabHelpers.SetupChartContextMenu(UserDbWriteLatencyChart, "UserDB_Write_Latency", "collect.file_io_stats");
+
+            // File I/O Throughput charts
+            TabHelpers.SetupChartContextMenu(FileIoReadThroughputChart, "UserDB_Read_Throughput", "collect.file_io_stats");
+            TabHelpers.SetupChartContextMenu(FileIoWriteThroughputChart, "UserDB_Write_Throughput", "collect.file_io_stats");
             TabHelpers.SetupChartContextMenu(TempDbLatencyChart, "TempDB_Latency", "collect.file_io_stats");
 
             // Server Utilization Trends charts
@@ -225,6 +233,7 @@ namespace PerformanceMonitorDashboard.Controls
                     RefreshTempdbStatsAsync(),
                     RefreshSessionStatsAsync(),
                     LoadFileIoLatencyChartsAsync(),
+                    LoadFileIoThroughputChartsAsync(),
                     RefreshServerTrendsAsync(),
                     RefreshPerfmonCountersTabAsync(),
                     RefreshWaitStatsDetailTabAsync()
@@ -837,11 +846,11 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Load User DB data only - TempDB latency moved to TempDB Stats tab
             var userDbData = await _databaseService.GetFileIoLatencyTimeSeriesAsync(isTempDb: false, _fileIoHoursBack, _fileIoFromDate, _fileIoToDate);
-            LoadFileIoChart(UserDbReadLatencyChart, userDbData, d => d.ReadLatencyMs, "Read Latency (ms)", colors, xMin, xMax, _fileIoReadHover);
-            LoadFileIoChart(UserDbWriteLatencyChart, userDbData, d => d.WriteLatencyMs, "Write Latency (ms)", colors, xMin, xMax, _fileIoWriteHover);
+            LoadFileIoChart(UserDbReadLatencyChart, userDbData, d => d.ReadLatencyMs, "Read Latency (ms)", colors, xMin, xMax, _fileIoReadHover, d => d.ReadQueuedLatencyMs);
+            LoadFileIoChart(UserDbWriteLatencyChart, userDbData, d => d.WriteLatencyMs, "Write Latency (ms)", colors, xMin, xMax, _fileIoWriteHover, d => d.WriteQueuedLatencyMs);
         }
 
-        private void LoadFileIoChart(ScottPlot.WPF.WpfPlot chart, List<FileIoLatencyTimeSeriesItem> data, Func<FileIoLatencyTimeSeriesItem, decimal> latencySelector, string yLabel, ScottPlot.Color[] colors, double xMin, double xMax, Helpers.ChartHoverHelper? hover = null)
+        private void LoadFileIoChart(ScottPlot.WPF.WpfPlot chart, List<FileIoLatencyTimeSeriesItem> data, Func<FileIoLatencyTimeSeriesItem, decimal> latencySelector, string yLabel, ScottPlot.Color[] colors, double xMin, double xMax, Helpers.ChartHoverHelper? hover = null, Func<FileIoLatencyTimeSeriesItem, decimal>? queuedSelector = null)
         {
             DateTime rangeStart = DateTime.FromOADate(xMin);
             DateTime rangeEnd = DateTime.FromOADate(xMax);
@@ -855,6 +864,9 @@ namespace PerformanceMonitorDashboard.Controls
             chart.Plot.Clear();
             TabHelpers.ApplyDarkModeToChart(chart);
             hover?.Clear();
+
+            // Check if any queued data exists (only render overlay if there's real data)
+            bool hasQueuedData = queuedSelector != null && data != null && data.Any(d => queuedSelector(d) > 0);
 
             if (data != null && data.Count > 0)
             {
@@ -879,12 +891,30 @@ namespace PerformanceMonitorDashboard.Controls
                         var scatter = chart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
                         scatter.MarkerSize = 5;
-                        scatter.Color = colors[colorIndex % colors.Length];
+                        var color = colors[colorIndex % colors.Length];
+                        scatter.Color = color;
 
                         // Use just the filename for legend (not database.filename which is redundant)
                         var fileName = fileData.First().FileName;
                         scatter.LegendText = fileName;
                         hover?.Add(scatter, fileName);
+
+                        // Add queued I/O overlay as dashed line with same color
+                        if (hasQueuedData)
+                        {
+                            var queuedValues = fileData.Select(d => (double)queuedSelector!(d));
+                            if (queuedValues.Any(v => v > 0))
+                            {
+                                var (qxs, qys) = TabHelpers.FillTimeSeriesGaps(timePoints, queuedValues);
+                                var queuedScatter = chart.Plot.Add.Scatter(qxs, qys);
+                                queuedScatter.LineWidth = 2;
+                                queuedScatter.MarkerSize = 0;
+                                queuedScatter.Color = color;
+                                queuedScatter.LinePattern = ScottPlot.LinePattern.Dashed;
+                                queuedScatter.LegendText = $"{fileName} (queued)";
+                                hover?.Add(queuedScatter, $"{fileName} (queued)");
+                            }
+                        }
 
                         colorIndex++;
                     }
@@ -911,6 +941,22 @@ namespace PerformanceMonitorDashboard.Controls
             chart.Plot.YLabel(yLabel);
             TabHelpers.LockChartVerticalAxis(chart);
             chart.Refresh();
+        }
+
+        private async Task LoadFileIoThroughputChartsAsync()
+        {
+            if (_databaseService == null) return;
+
+            DateTime rangeEnd = _fileIoToDate ?? Helpers.ServerTimeHelper.ServerNow;
+            DateTime rangeStart = _fileIoFromDate ?? rangeEnd.AddHours(-_fileIoHoursBack);
+            double xMin = rangeStart.ToOADate();
+            double xMax = rangeEnd.ToOADate();
+
+            var colors = TabHelpers.ChartColors;
+
+            var throughputData = await _databaseService.GetFileIoThroughputTimeSeriesAsync(isTempDb: false, _fileIoHoursBack, _fileIoFromDate, _fileIoToDate);
+            LoadFileIoChart(FileIoReadThroughputChart, throughputData, d => d.ReadThroughputMbPerSec, "Read Throughput (MB/s)", colors, xMin, xMax, _fileIoReadThroughputHover);
+            LoadFileIoChart(FileIoWriteThroughputChart, throughputData, d => d.WriteThroughputMbPerSec, "Write Throughput (MB/s)", colors, xMin, xMax, _fileIoWriteThroughputHover);
         }
 
         #endregion

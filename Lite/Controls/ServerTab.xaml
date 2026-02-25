@@ -716,18 +716,39 @@
             <!-- File I/O Tab -->
             <TabItem Header="File I/O">
                 <Grid Margin="8">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
+                    <TabControl Background="Transparent" BorderThickness="0">
+                        <!-- File I/O Latency sub-tab -->
+                        <TabItem Header="File I/O Latency">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <Border Grid.Row="0" Margin="0,0,0,4">
+                                    <ScottPlot:WpfPlot x:Name="FileIoReadChart"/>
+                                </Border>
+                                <Border Grid.Row="1" Margin="0,4,0,0">
+                                    <ScottPlot:WpfPlot x:Name="FileIoWriteChart"/>
+                                </Border>
+                            </Grid>
+                        </TabItem>
 
-                    <Border Grid.Row="0" Margin="0,0,0,4">
-                        <ScottPlot:WpfPlot x:Name="FileIoReadChart"/>
-                    </Border>
-
-                    <Border Grid.Row="1" Margin="0,4,0,0">
-                        <ScottPlot:WpfPlot x:Name="FileIoWriteChart"/>
-                    </Border>
+                        <!-- File I/O Throughput sub-tab -->
+                        <TabItem Header="File I/O Throughput">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <Border Grid.Row="0" Margin="0,0,0,4">
+                                    <ScottPlot:WpfPlot x:Name="FileIoReadThroughputChart"/>
+                                </Border>
+                                <Border Grid.Row="1" Margin="0,4,0,0">
+                                    <ScottPlot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
+                                </Border>
+                            </Grid>
+                        </TabItem>
+                    </TabControl>
                 </Grid>
             </TabItem>
 

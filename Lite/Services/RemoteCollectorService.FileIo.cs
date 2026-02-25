@@ -47,6 +47,8 @@ SELECT
     write_bytes = vfs.num_of_bytes_written,
     io_stall_read_ms = vfs.io_stall_read_ms,
     io_stall_write_ms = vfs.io_stall_write_ms,
+    io_stall_queued_read_ms = vfs.io_stall_queued_read_ms,
+    io_stall_queued_write_ms = vfs.io_stall_queued_write_ms,
     database_id = vfs.database_id,
     file_id = vfs.file_id
 FROM sys.dm_io_virtual_file_stats(DB_ID(), NULL) AS vfs
@@ -68,6 +70,8 @@ SELECT
     write_bytes = vfs.num_of_bytes_written,
     io_stall_read_ms = vfs.io_stall_read_ms,
     io_stall_write_ms = vfs.io_stall_write_ms,
+    io_stall_queued_read_ms = vfs.io_stall_queued_read_ms,
+    io_stall_queued_write_ms = vfs.io_stall_queued_write_ms,
     database_id = vfs.database_id,
     file_id = vfs.file_id
 FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
@@ -96,7 +100,8 @@ OPTION(RECOMPILE);";
         var fileStats = new List<(
             string DatabaseName, string FileName, string FileType, string PhysicalName,
             decimal SizeMb, long NumOfReads, long NumOfWrites, long ReadBytes, long WriteBytes,
-            long IoStallReadMs, long IoStallWriteMs, int DatabaseId, int FileId)>();
+            long IoStallReadMs, long IoStallWriteMs, long IoStallQueuedReadMs, long IoStallQueuedWriteMs,
+            int DatabaseId, int FileId)>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -112,8 +117,10 @@ OPTION(RECOMPILE);";
                 WriteBytes: reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
                 IoStallReadMs: reader.IsDBNull(9) ? 0L : reader.GetInt64(9),
                 IoStallWriteMs: reader.IsDBNull(10) ? 0L : reader.GetInt64(10),
-                DatabaseId: reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
-                FileId: reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetValue(12))
+                IoStallQueuedReadMs: reader.IsDBNull(11) ? 0L : reader.GetInt64(11),
+                IoStallQueuedWriteMs: reader.IsDBNull(12) ? 0L : reader.GetInt64(12),
+                DatabaseId: reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
+                FileId: reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14))
             ));
         }
         sqlSw.Stop();
@@ -136,6 +143,8 @@ OPTION(RECOMPILE);";
                     var deltaWriteBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_write_bytes", deltaKey, stat.WriteBytes);
                     var deltaStallReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_read", deltaKey, stat.IoStallReadMs);
                     var deltaStallWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_write", deltaKey, stat.IoStallWriteMs);
+                    var deltaStallQueuedReadMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_queued_read", deltaKey, stat.IoStallQueuedReadMs);
+                    var deltaStallQueuedWriteMs = _deltaCalculator.CalculateDelta(serverId, "file_io_stall_queued_write", deltaKey, stat.IoStallQueuedWriteMs);
 
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())
@@ -153,12 +162,16 @@ OPTION(RECOMPILE);";
                        .AppendValue(stat.WriteBytes)
                        .AppendValue(stat.IoStallReadMs)
                        .AppendValue(stat.IoStallWriteMs)
+                       .AppendValue(stat.IoStallQueuedReadMs)
+                       .AppendValue(stat.IoStallQueuedWriteMs)
                        .AppendValue(deltaReads)
                        .AppendValue(deltaWrites)
                        .AppendValue(deltaReadBytes)
                        .AppendValue(deltaWriteBytes)
                        .AppendValue(deltaStallReadMs)
                        .AppendValue(deltaStallWriteMs)
+                       .AppendValue(deltaStallQueuedReadMs)
+                       .AppendValue(deltaStallQueuedWriteMs)
                        .EndRow();
 
                     rowsCollected++;

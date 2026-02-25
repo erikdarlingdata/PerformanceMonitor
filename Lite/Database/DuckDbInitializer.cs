@@ -68,7 +68,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 14;
+    internal const int CurrentSchemaVersion = 15;
 
     private readonly string _archivePath;
 
@@ -462,6 +462,15 @@ public class DuckDbInitializer
                     Must drop/recreate because column layout is completely different. */
             _logger?.LogInformation("Running migration to v14: rebuilding memory_grant_stats for resource semaphore schema");
             await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS memory_grant_stats");
+        }
+
+        if (fromVersion < 15)
+        {
+            /* v15: Added queued I/O columns (io_stall_queued_read_ms, io_stall_queued_write_ms)
+                    and their delta counterparts to file_io_stats for latency overlay charts.
+                    Must drop/recreate because DuckDB appender writes by position. */
+            _logger?.LogInformation("Running migration to v15: rebuilding file_io_stats for queued I/O columns");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS file_io_stats");
         }
     }
 

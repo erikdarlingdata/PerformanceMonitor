@@ -49,6 +49,8 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _tempDbFileIoHover;
     private Helpers.ChartHoverHelper? _fileIoReadHover;
     private Helpers.ChartHoverHelper? _fileIoWriteHover;
+    private Helpers.ChartHoverHelper? _fileIoReadThroughputHover;
+    private Helpers.ChartHoverHelper? _fileIoWriteThroughputHover;
     private Helpers.ChartHoverHelper? _collectorDurationHover;
     private Helpers.ChartHoverHelper? _queryDurationTrendHover;
     private Helpers.ChartHoverHelper? _procDurationTrendHover;
@@ -163,6 +165,8 @@ public partial class ServerTab : UserControl
         _tempDbFileIoHover = new Helpers.ChartHoverHelper(TempDbFileIoChart, "ms");
         _fileIoReadHover = new Helpers.ChartHoverHelper(FileIoReadChart, "ms");
         _fileIoWriteHover = new Helpers.ChartHoverHelper(FileIoWriteChart, "ms");
+        _fileIoReadThroughputHover = new Helpers.ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
+        _fileIoWriteThroughputHover = new Helpers.ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
         _collectorDurationHover = new Helpers.ChartHoverHelper(CollectorDurationChart, "ms");
         _queryDurationTrendHover = new Helpers.ChartHoverHelper(QueryDurationTrendChart, "ms/sec");
         _procDurationTrendHover = new Helpers.ChartHoverHelper(ProcDurationTrendChart, "ms/sec");
@@ -475,6 +479,7 @@ public partial class ServerTab : UserControl
             var procStatsTask = _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
             var fileIoTask = _dataService.GetLatestFileIoStatsAsync(_serverId);
             var fileIoTrendTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate);
+            var fileIoThroughputTask = _dataService.GetFileIoThroughputTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var tempDbTask = _dataService.GetTempDbTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var tempDbFileIoTask = _dataService.GetTempDbFileIoTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var deadlockTask = _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate);
@@ -496,7 +501,7 @@ public partial class ServerTab : UserControl
             /* Core data tasks */
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
-                queryStatsTask, procStatsTask, fileIoTask, fileIoTrendTask, tempDbTask, tempDbFileIoTask,
+                queryStatsTask, procStatsTask, fileIoTask, fileIoTrendTask, fileIoThroughputTask, tempDbTask, tempDbFileIoTask,
                 deadlockTask, blockedProcessTask, waitTypesTask, memoryClerkTypesTask, perfmonCountersTask,
                 queryStoreTask, memoryGrantTrendTask, memoryGrantChartTask,
                 serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
@@ -560,6 +565,7 @@ public partial class ServerTab : UserControl
             UpdateTempDbChart(tempDbTask.Result);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result);
             UpdateFileIoCharts(fileIoTrendTask.Result);
+            UpdateFileIoThroughputCharts(fileIoThroughputTask.Result);
             UpdateLockWaitTrendChart(lockWaitTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateBlockingTrendChart(blockingTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateDeadlockTrendChart(deadlockTrendTask.Result, hoursBack, fromDate, toDate);
@@ -917,15 +923,17 @@ public partial class ServerTab : UserControl
 
         if (data.Count == 0) { FileIoReadChart.Refresh(); FileIoWriteChart.Refresh(); return; }
 
-        /* Group by database, limit to top 12 by total stall */
+        /* Group by file, limit to top 10 by total stall */
         var databases = data
-            .GroupBy(d => d.DatabaseName)
+            .GroupBy(d => $"{d.DatabaseName}.{d.FileName}")
             .OrderByDescending(g => g.Sum(d => d.AvgReadLatencyMs + d.AvgWriteLatencyMs))
-            .Take(12)
+            .Take(10)
             .ToList();
 
         double readMax = 0, writeMax = 0;
         int colorIdx = 0;
+
+        bool hasQueuedData = data.Any(d => d.AvgQueuedReadLatencyMs > 0 || d.AvgQueuedWriteLatencyMs > 0);
 
         foreach (var dbGroup in databases)
         {
@@ -953,6 +961,31 @@ public partial class ServerTab : UserControl
                 _fileIoWriteHover?.Add(writePlot, dbGroup.Key);
                 writeMax = Math.Max(writeMax, writeLatency.Max());
             }
+
+            /* Queued I/O overlay — dashed lines showing queue wait portion of latency */
+            if (hasQueuedData)
+            {
+                var queuedReadLatency = points.Select(d => d.AvgQueuedReadLatencyMs).ToArray();
+                var queuedWriteLatency = points.Select(d => d.AvgQueuedWriteLatencyMs).ToArray();
+
+                if (queuedReadLatency.Any(v => v > 0))
+                {
+                    var qReadPlot = FileIoReadChart.Plot.Add.Scatter(times, queuedReadLatency);
+                    qReadPlot.LegendText = $"{dbGroup.Key} (queued)";
+                    qReadPlot.Color = color;
+                    qReadPlot.LinePattern = ScottPlot.LinePattern.Dashed;
+                    _fileIoReadHover?.Add(qReadPlot, $"{dbGroup.Key} (queued)");
+                }
+
+                if (queuedWriteLatency.Any(v => v > 0))
+                {
+                    var qWritePlot = FileIoWriteChart.Plot.Add.Scatter(times, queuedWriteLatency);
+                    qWritePlot.LegendText = $"{dbGroup.Key} (queued)";
+                    qWritePlot.Color = color;
+                    qWritePlot.LinePattern = ScottPlot.LinePattern.Dashed;
+                    _fileIoWriteHover?.Add(qWritePlot, $"{dbGroup.Key} (queued)");
+                }
+            }
         }
 
         FileIoReadChart.Plot.Axes.DateTimeTicksBottom();
@@ -968,6 +1001,70 @@ public partial class ServerTab : UserControl
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
         ShowChartLegend(FileIoWriteChart);
         FileIoWriteChart.Refresh();
+    }
+
+    private void UpdateFileIoThroughputCharts(List<FileIoThroughputPoint> data)
+    {
+        ClearChart(FileIoReadThroughputChart);
+        ClearChart(FileIoWriteThroughputChart);
+        _fileIoReadThroughputHover?.Clear();
+        _fileIoWriteThroughputHover?.Clear();
+        ApplyDarkTheme(FileIoReadThroughputChart);
+        ApplyDarkTheme(FileIoWriteThroughputChart);
+
+        if (data.Count == 0) { FileIoReadThroughputChart.Refresh(); FileIoWriteThroughputChart.Refresh(); return; }
+
+        /* Group by file label, limit to top 10 by total throughput */
+        var files = data
+            .GroupBy(d => d.FileLabel)
+            .OrderByDescending(g => g.Sum(d => d.ReadMbPerSec + d.WriteMbPerSec))
+            .Take(10)
+            .ToList();
+
+        double readMax = 0, writeMax = 0;
+        int colorIdx = 0;
+
+        foreach (var fileGroup in files)
+        {
+            var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
+            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var readThroughput = points.Select(d => d.ReadMbPerSec).ToArray();
+            var writeThroughput = points.Select(d => d.WriteMbPerSec).ToArray();
+            var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
+            colorIdx++;
+
+            if (readThroughput.Length > 0)
+            {
+                var readPlot = FileIoReadThroughputChart.Plot.Add.Scatter(times, readThroughput);
+                readPlot.LegendText = fileGroup.Key;
+                readPlot.Color = color;
+                _fileIoReadThroughputHover?.Add(readPlot, fileGroup.Key);
+                readMax = Math.Max(readMax, readThroughput.Max());
+            }
+
+            if (writeThroughput.Length > 0)
+            {
+                var writePlot = FileIoWriteThroughputChart.Plot.Add.Scatter(times, writeThroughput);
+                writePlot.LegendText = fileGroup.Key;
+                writePlot.Color = color;
+                _fileIoWriteThroughputHover?.Add(writePlot, fileGroup.Key);
+                writeMax = Math.Max(writeMax, writeThroughput.Max());
+            }
+        }
+
+        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(FileIoReadThroughputChart);
+        FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
+        SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
+        ShowChartLegend(FileIoReadThroughputChart);
+        FileIoReadThroughputChart.Refresh();
+
+        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(FileIoWriteThroughputChart);
+        FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
+        SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
+        ShowChartLegend(FileIoWriteThroughputChart);
+        FileIoWriteThroughputChart.Refresh();
     }
 
     /* ========== Blocking/Deadlock Trend Charts ========== */

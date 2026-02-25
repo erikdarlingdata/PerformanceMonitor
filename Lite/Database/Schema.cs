@@ -148,12 +148,16 @@ CREATE TABLE IF NOT EXISTS file_io_stats (
     write_bytes BIGINT,
     io_stall_read_ms BIGINT,
     io_stall_write_ms BIGINT,
+    io_stall_queued_read_ms BIGINT,
+    io_stall_queued_write_ms BIGINT,
     delta_reads BIGINT,
     delta_writes BIGINT,
     delta_read_bytes BIGINT,
     delta_write_bytes BIGINT,
     delta_stall_read_ms BIGINT,
-    delta_stall_write_ms BIGINT
+    delta_stall_write_ms BIGINT,
+    delta_stall_queued_read_ms BIGINT,
+    delta_stall_queued_write_ms BIGINT
 )";
 
     public const string CreateMemoryStatsTable = @"

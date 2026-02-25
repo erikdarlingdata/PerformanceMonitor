@@ -201,38 +201,77 @@
             </Grid>
         </TabItem>
 
-        <!-- File I/O Latency Sub-Tab - User DB only, TempDB moved to TempDB Stats -->
-        <TabItem Header="File I/O Latency">
-            <Grid Margin="5">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-
-                <!-- User DB Read Latency -->
-                <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,2">
-                    <Grid>
+        <!-- File I/O Sub-Tab -->
+        <TabItem Header="File I/O">
+            <TabControl Background="Transparent" BorderThickness="0">
+                <!-- File I/O Latency sub-tab -->
+                <TabItem Header="File I/O Latency">
+                    <Grid Margin="5">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <TextBlock Grid.Row="0" Text="User DB Read Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot x:Name="UserDbReadLatencyChart" Grid.Row="1"/>
-                    </Grid>
-                </Border>
 
-                <!-- User DB Write Latency -->
-                <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
-                    <Grid>
+                        <!-- User DB Read Latency -->
+                        <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,2">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Read Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="UserDbReadLatencyChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- User DB Write Latency -->
+                        <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Write Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="UserDbWriteLatencyChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </TabItem>
+
+                <!-- File I/O Throughput sub-tab -->
+                <TabItem Header="File I/O Throughput">
+                    <Grid Margin="5">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <TextBlock Grid.Row="0" Text="User DB Write Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot x:Name="UserDbWriteLatencyChart" Grid.Row="1"/>
+
+                        <!-- User DB Read Throughput -->
+                        <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,2">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Read Throughput (MB/s)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="FileIoReadThroughputChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- User DB Write Throughput -->
+                        <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Write Throughput (MB/s)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="FileIoWriteThroughputChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
                     </Grid>
-                </Border>
-            </Grid>
+                </TabItem>
+            </TabControl>
         </TabItem>
 
         <!-- Perfmon Counters Sub-Tab -->

@@ -20,5 +20,9 @@ namespace PerformanceMonitorDashboard.Models
         public decimal WriteLatencyMs { get; set; }
         public long ReadCount { get; set; }
         public long WriteCount { get; set; }
+        public decimal ReadQueuedLatencyMs { get; set; }
+        public decimal WriteQueuedLatencyMs { get; set; }
+        public decimal ReadThroughputMbPerSec { get; set; }
+        public decimal WriteThroughputMbPerSec { get; set; }
     }
 }
