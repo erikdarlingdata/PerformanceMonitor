@@ -1417,7 +1417,8 @@
             <DataGrid x:Name="QueryStoreRegressionsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
                       RowHeight="35" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
-                      RowStyle="{DynamicResource DefaultRowStyle}">
+                      RowStyle="{DynamicResource DefaultRowStyle}"
+                      MouseDoubleClick="QueryStoreRegressionsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding LastExecutionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
                         <DataGridTextColumn.Header>
@@ -1448,6 +1449,46 @@
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryId" Click="QsRegressionsFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Query ID" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding AdditionalDurationMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdditionalDurationMs" Click="QsRegressionsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Total Impact (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding BaselineExecCount, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExecCount" Click="QsRegressionsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Base Execs" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding RecentExecCount, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExecCount" Click="QsRegressionsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Recent Execs" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding BaselinePlanCount}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselinePlanCount" Click="QsRegressionsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Base Plans" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding RecentPlanCount}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentPlanCount" Click="QsRegressionsFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Recent Plans" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>

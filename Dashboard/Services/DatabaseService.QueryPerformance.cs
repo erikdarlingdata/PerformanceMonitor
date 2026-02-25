@@ -1284,9 +1284,12 @@ namespace PerformanceMonitorDashboard.Services
                     var connection = tc.Connection;
 
                     /*
-                    report.query_store_regressions is now an inline TVF requiring parameters:
-                    - @start_date: divides baseline from recent (baseline = data BEFORE this date)
-                    - @end_date: end of recent period (recent = data between start_date and end_date)
+                    report.query_store_regressions inline TVF:
+                    - Bounded baseline (mirror window before @start_date, same duration as recent)
+                    - Weighted averages (execution-count weighted)
+                    - Multi-metric detection (duration, CPU, or reads >25%)
+                    - Absolute minimums (baseline >= 1ms duration or >= 100 reads)
+                    - Ranked by additional_duration_ms (total extra time = delta * exec count)
                     */
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -1303,17 +1306,22 @@ namespace PerformanceMonitorDashboard.Services
             qsr.baseline_reads,
             qsr.recent_reads,
             qsr.io_regression_percent,
+            qsr.additional_duration_ms,
+            qsr.baseline_exec_count,
+            qsr.recent_exec_count,
+            qsr.baseline_plan_count,
+            qsr.recent_plan_count,
             qsr.severity,
             qsr.query_text_sample,
             qsr.last_execution_time
         FROM report.query_store_regressions(@start_date, @end_date) AS qsr
         ORDER BY
-            qsr.duration_regression_percent DESC;";
+            qsr.additional_duration_ms DESC;";
 
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
 
-                    /*Calculate the time window - baseline is everything before start_date, recent is start_date to end_date*/
+                    /*Calculate the time window - baseline is mirror window before start_date, recent is start_date to end_date*/
                     DateTime startDate;
                     DateTime endDate;
 
@@ -1337,7 +1345,6 @@ namespace PerformanceMonitorDashboard.Services
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
-                        /*Use Convert.ToDecimal for robustness - TVF may return bigint or decimal depending on query store aggregations*/
                         items.Add(new QueryStoreRegressionItem
                         {
                             DatabaseName = reader.GetString(0),
@@ -1351,9 +1358,14 @@ namespace PerformanceMonitorDashboard.Services
                             BaselineReads = reader.IsDBNull(8) ? 0 : Convert.ToDecimal(reader.GetValue(8), CultureInfo.InvariantCulture),
                             RecentReads = reader.IsDBNull(9) ? 0 : Convert.ToDecimal(reader.GetValue(9), CultureInfo.InvariantCulture),
                             IoRegressionPercent = reader.IsDBNull(10) ? 0 : Convert.ToDecimal(reader.GetValue(10), CultureInfo.InvariantCulture),
-                            Severity = reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
-                            QueryTextSample = reader.IsDBNull(12) ? string.Empty : reader.GetString(12),
-                            LastExecutionTime = reader.IsDBNull(13) ? null : reader.GetDateTime(13)
+                            AdditionalDurationMs = reader.IsDBNull(11) ? 0 : Convert.ToDecimal(reader.GetValue(11), CultureInfo.InvariantCulture),
+                            BaselineExecCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+                            RecentExecCount = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
+                            BaselinePlanCount = reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14)),
+                            RecentPlanCount = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15)),
+                            Severity = reader.IsDBNull(16) ? string.Empty : reader.GetString(16),
+                            QueryTextSample = reader.IsDBNull(17) ? string.Empty : reader.GetString(17),
+                            LastExecutionTime = reader.IsDBNull(18) ? null : reader.GetDateTime(18)
                         });
                     }
         

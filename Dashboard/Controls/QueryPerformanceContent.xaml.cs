@@ -1200,6 +1200,38 @@ namespace PerformanceMonitorDashboard.Controls
             }
         }
 
+        private void QueryStoreRegressionsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
+            if (_databaseService == null) return;
+
+            if (QueryStoreRegressionsDataGrid.SelectedItem is QueryStoreRegressionItem item)
+            {
+                if (string.IsNullOrEmpty(item.DatabaseName) || item.QueryId <= 0)
+                {
+                    MessageBox.Show(
+                        "Unable to show history: missing database name or query ID.",
+                        "Information",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information
+                    );
+                    return;
+                }
+
+                var historyWindow = new QueryExecutionHistoryWindow(
+                    _databaseService,
+                    item.DatabaseName,
+                    item.QueryId,
+                    "Query Store",
+                    _queryStoreHoursBack,
+                    _queryStoreFromDate,
+                    _queryStoreToDate
+                );
+                historyWindow.Owner = Window.GetWindow(this);
+                historyWindow.ShowDialog();
+            }
+        }
+
         private void ProcStatsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
             if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
