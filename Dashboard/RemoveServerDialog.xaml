@@ -23,9 +23,9 @@
         <!-- Drop database checkbox -->
         <CheckBox Grid.Row="1" x:Name="DropDatabaseCheckBox" Margin="0,0,0,5"
                   Foreground="{DynamicResource ForegroundBrush}">
-            <TextBlock Text="Also drop the PerformanceMonitor database on this server" TextWrapping="Wrap"/>
+            <TextBlock Text="Also drop the PerformanceMonitor database and SQL Agent jobs on this server" TextWrapping="Wrap"/>
         </CheckBox>
-        <TextBlock Grid.Row="2" Text="Warning: all collected monitoring data on the server will be permanently deleted."
+        <TextBlock Grid.Row="2" Text="Warning: all collected monitoring data and scheduled collection jobs on the server will be permanently deleted."
                    FontSize="11" Foreground="{DynamicResource ErrorBrush}" Margin="20,0,0,15"
                    TextWrapping="Wrap" Visibility="{Binding ElementName=DropDatabaseCheckBox, Path=IsChecked, Converter={StaticResource BoolToVisibilityConverter}}"/>
 

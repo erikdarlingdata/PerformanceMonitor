@@ -152,6 +152,17 @@ namespace PerformanceMonitorDashboard.Services
             using var connection = new SqlConnection(builder.ConnectionString);
             await connection.OpenAsync();
 
+            // Remove SQL Agent jobs before dropping the database
+            using var jobCmd = new SqlCommand(@"
+                IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Collection')
+                    EXEC msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Collection', @delete_unused_schedule = 1;
+                IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Data Retention')
+                    EXEC msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Data Retention', @delete_unused_schedule = 1;
+                IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Hung Job Monitor')
+                    EXEC msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Hung Job Monitor', @delete_unused_schedule = 1;", connection);
+            jobCmd.CommandTimeout = 30;
+            await jobCmd.ExecuteNonQueryAsync();
+
             // Close active connections before dropping
             using var killCmd = new SqlCommand(@"
                 IF DB_ID('PerformanceMonitor') IS NOT NULL
@@ -162,7 +173,7 @@ namespace PerformanceMonitorDashboard.Services
             killCmd.CommandTimeout = 30;
             await killCmd.ExecuteNonQueryAsync();
 
-            Logger.Info($"Dropped PerformanceMonitor database on '{server.DisplayName}'");
+            Logger.Info($"Dropped PerformanceMonitor database and Agent jobs on '{server.DisplayName}'");
         }
 
         public void UpdateLastConnected(string id)

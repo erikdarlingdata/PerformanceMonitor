@@ -40,12 +40,18 @@ namespace PerformanceMonitorInstallerGui
         private static readonly SolidColorBrush WarningBrush = new(Color.FromRgb(0xFF, 0xC1, 0x07)); // Yellow
 
         /*
-        Cached version string
+        Cached version strings
+        Display version includes git hash suffix for UI/logs
+        Assembly version is clean (e.g. "2.0.0.0") for upgrade version comparison
         */
         private static readonly string AppVersion =
             Assembly.GetExecutingAssembly()
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+            ?? "Unknown";
+
+        private static readonly string AppAssemblyVersion =
+            Assembly.GetExecutingAssembly().GetName().Version?.ToString()
             ?? "Unknown";
 
         private static readonly char[] NewLineChars = { '\r', '\n' };
@@ -260,7 +266,7 @@ namespace PerformanceMonitorInstallerGui
                             var upgrades = InstallationService.GetApplicableUpgrades(
                                 _monitorRootDirectory,
                                 _installedVersion,
-                                AppVersion);
+                                AppAssemblyVersion);
                             if (upgrades.Count > 0)
                             {
                                 LogMessage($"Found {upgrades.Count} upgrade(s) to apply", "Warning");
@@ -377,7 +383,7 @@ namespace PerformanceMonitorInstallerGui
                         _monitorRootDirectory,
                         _connectionString,
                         _installedVersion,
-                        AppVersion,
+                        AppAssemblyVersion,
                         progress,
                         cancellationToken);
 

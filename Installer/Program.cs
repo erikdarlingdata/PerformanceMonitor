@@ -649,7 +649,7 @@ END";
                         */
                         if (resetSchedule && fileName.StartsWith("04_", StringComparison.Ordinal))
                         {
-                            sqlContent = "TRUNCATE TABLE config.collection_schedule;\nGO\n" + sqlContent;
+                            sqlContent = "TRUNCATE TABLE [PerformanceMonitor].[config].[collection_schedule];\nGO\n" + sqlContent;
                             Console.Write("(resetting schedule) ");
                         }
 
@@ -1155,17 +1155,22 @@ END";
                 return upgradeFolders;
             }
 
-            /*Parse current version - if invalid, skip upgrades*/
-            if (!Version.TryParse(currentVersion, out var current))
+            /*Parse current version - if invalid, skip upgrades
+              Normalize to 3-part (Major.Minor.Build) to avoid Revision mismatch:
+              folder names use 3-part "1.3.0" but DB stores 4-part "1.3.0.0"
+              Version(1,3,0).Revision=-1 which breaks >= comparison with Version(1,3,0,0)*/
+            if (!Version.TryParse(currentVersion, out var currentRaw))
             {
                 return upgradeFolders;
             }
+            var current = new Version(currentRaw.Major, currentRaw.Minor, currentRaw.Build);
 
             /*Parse target version - if invalid, skip upgrades*/
-            if (!Version.TryParse(targetVersion, out var target))
+            if (!Version.TryParse(targetVersion, out var targetRaw))
             {
                 return upgradeFolders;
             }
+            var target = new Version(targetRaw.Major, targetRaw.Minor, targetRaw.Build);
 
             /*
             Find all upgrade folders matching pattern: {from}-to-{to}
