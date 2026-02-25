@@ -47,7 +47,7 @@ jobs:
         run: dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
 
       - name: Publish GUI Installer
-        run: dotnet publish InstallerGui/InstallerGui.csproj -c Release -r win-x64 --self-contained
+        run: dotnet publish InstallerGui/InstallerGui.csproj -c Release
 
       - name: Package release artifacts
         if: github.event_name == 'release'
