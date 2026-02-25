@@ -36,6 +36,7 @@ namespace PerformanceMonitorDashboard
         private readonly DateTime? _fromDate;
         private readonly DateTime? _toDate;
         private List<ProcedureExecutionHistoryItem> _historyData = new();
+        private ChartHoverHelper? _chartHover;
 
         // Filter state
         private Dictionary<string, ColumnFilterState> _filters = new();
@@ -188,13 +189,32 @@ namespace PerformanceMonitorDashboard
             var color = ScottPlot.Color.FromHex("#4FC3F7");
             var scatter = HistoryChart.Plot.Add.Scatter(dates, values);
             scatter.Color = color;
-            scatter.LineWidth = 2;
-            scatter.MarkerSize = 6;
+
+            // Sparse data: show only markers to avoid misleading interpolated lines
+            if (dates.Length <= 10)
+            {
+                scatter.LineWidth = 0;
+                scatter.MarkerSize = 8;
+            }
+            else
+            {
+                scatter.LineWidth = 2;
+                scatter.MarkerSize = 4;
+            }
 
             HistoryChart.Plot.Axes.DateTimeTicksBottom();
             Helpers.TabHelpers.ReapplyAxisColors(HistoryChart);
             HistoryChart.Plot.YLabel(metricLabel);
             HistoryChart.Plot.XLabel("Collection Time");
+
+            // Hover tooltip
+            var unit = metricTag.Contains("Ms") ? "ms" : "";
+            if (_chartHover == null)
+                _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            else
+                _chartHover.Unit = unit;
+            _chartHover.Clear();
+            _chartHover.Add(scatter, metricLabel);
 
             HistoryChart.Refresh();
         }

@@ -35,6 +35,7 @@ namespace PerformanceMonitorDashboard
         private readonly DateTime? _toDate;
         private List<QueryExecutionHistoryItem> _historyData = new();
         private ScottPlot.IPanel? _legendPanel;
+        private ChartHoverHelper? _chartHover;
 
         // Filter state
         private Dictionary<string, ColumnFilterState> _filters = new();
@@ -181,7 +182,6 @@ namespace PerformanceMonitorDashboard
                 ScottPlot.Color.FromHex("#A1887F")
             };
 
-            var legendParts = new List<string>();
             int colorIndex = 0;
 
             foreach (var planGroup in planGroups)
@@ -197,11 +197,20 @@ namespace PerformanceMonitorDashboard
                 var color = colors[colorIndex % colors.Length];
                 var scatter = HistoryChart.Plot.Add.Scatter(dates, values);
                 scatter.Color = color;
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 6;
                 scatter.LegendText = $"Plan {planGroup.Key}";
 
-                legendParts.Add($"Plan {planGroup.Key}");
+                // Sparse data: show only markers to avoid misleading interpolated lines
+                if (dates.Length <= 10)
+                {
+                    scatter.LineWidth = 0;
+                    scatter.MarkerSize = 8;
+                }
+                else
+                {
+                    scatter.LineWidth = 2;
+                    scatter.MarkerSize = 4;
+                }
+
                 colorIndex++;
             }
 
@@ -211,6 +220,16 @@ namespace PerformanceMonitorDashboard
             HistoryChart.Plot.XLabel("Collection Time");
             _legendPanel = HistoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
             HistoryChart.Plot.Legend.FontSize = 12;
+
+            // Hover tooltip
+            var unit = metricTag.Contains("Ms") ? "ms" : "";
+            if (_chartHover == null)
+                _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            else
+                _chartHover.Unit = unit;
+            _chartHover.Clear();
+            foreach (var p in HistoryChart.Plot.GetPlottables().OfType<ScottPlot.Plottables.Scatter>())
+                _chartHover.Add(p, p.LegendText ?? "");
 
             // Update legend text
             ChartLegendText.Text = planGroups.Count > 1
