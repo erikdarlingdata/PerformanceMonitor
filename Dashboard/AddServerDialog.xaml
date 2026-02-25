@@ -26,7 +26,6 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Header -->
@@ -110,14 +109,6 @@
                                   IsChecked="False"
                                   Foreground="{DynamicResource ForegroundBrush}"
                                   ToolTip="When checked, accepts any server certificate without validation.&#x0a;Uncheck for stricter security (requires valid certificate)."/>
-
-                        <!-- Enable Data Collection -->
-                        <CheckBox x:Name="IsEnabledCheckBox"
-                                  Content="Enable data collection for this server"
-                                  IsChecked="True"
-                                  Foreground="{DynamicResource ForegroundBrush}"
-                                  Margin="0,10,0,0"
-                                  ToolTip="When checked, the Dashboard expects data to be collected for this server. Uncheck to save without verifying connectivity."/>
                     </StackPanel>
                 </Border>
             </StackPanel>
@@ -130,7 +121,7 @@
 
         <!-- Buttons -->
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
-            <Button Content="Test Connection" Width="120" Height="30" Margin="0,0,10,0" Click="TestConnection_Click"/>
+            <Button x:Name="TestConnectionButton" Content="Test Connection" Width="120" Height="30" Margin="0,0,10,0" Click="TestConnection_Click"/>
             <Button x:Name="SaveButton" Content="Save" Width="80" Height="30" Margin="0,0,10,0" Click="Save_Click" IsDefault="True"/>
             <Button Content="Cancel" Width="80" Height="30" Click="Cancel_Click" IsCancel="True"/>
         </StackPanel>
