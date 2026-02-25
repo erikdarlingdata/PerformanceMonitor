@@ -49,7 +49,16 @@ SELECT
     MAX(query_plan_hash) AS query_plan_hash,
     MAX(CASE WHEN is_forced_plan THEN TRUE ELSE FALSE END) AS is_forced_plan,
     MAX(plan_forcing_type) AS plan_forcing_type,
-    MAX(query_plan_text) AS query_plan_text
+    MAX(query_plan_text) AS query_plan_text,
+    MAX(execution_type_desc) AS execution_type_desc,
+    MIN(first_execution_time) AS first_execution_time,
+    AVG(CAST(avg_clr_time_us AS DOUBLE)) / 1000.0 AS avg_clr_time_ms,
+    AVG(CAST(avg_tempdb_space_used AS DOUBLE)) AS avg_tempdb_space_used,
+    AVG(CAST(avg_log_bytes_used AS DOUBLE)) AS avg_log_bytes_used,
+    MAX(plan_type) AS plan_type,
+    MAX(force_failure_count) AS force_failure_count,
+    MAX(last_force_failure_reason) AS last_force_failure_reason,
+    MAX(compatibility_level) AS compatibility_level
 FROM v_query_store_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -89,7 +98,16 @@ LIMIT $4";
                 QueryPlanHash = reader.IsDBNull(16) ? "" : reader.GetString(16),
                 IsForcedPlan = !reader.IsDBNull(17) && reader.GetBoolean(17),
                 PlanForcingType = reader.IsDBNull(18) ? "" : reader.GetString(18),
-                QueryPlanText = reader.IsDBNull(19) ? null : reader.GetString(19)
+                QueryPlanText = reader.IsDBNull(19) ? null : reader.GetString(19),
+                ExecutionTypeDesc = reader.IsDBNull(20) ? "" : reader.GetString(20),
+                FirstExecutionTime = reader.IsDBNull(21) ? (DateTime?)null : reader.GetDateTime(21),
+                AvgClrTimeMs = reader.IsDBNull(22) ? 0 : ToDouble(reader.GetValue(22)),
+                AvgTempdbSpaceUsed = reader.IsDBNull(23) ? 0 : ToDouble(reader.GetValue(23)),
+                AvgLogBytesUsed = reader.IsDBNull(24) ? 0 : ToDouble(reader.GetValue(24)),
+                PlanType = reader.IsDBNull(25) ? "" : reader.GetString(25),
+                ForceFailureCount = reader.IsDBNull(26) ? 0 : Convert.ToInt64(reader.GetValue(26)),
+                LastForceFailureReason = reader.IsDBNull(27) ? "" : reader.GetString(27),
+                CompatibilityLevel = reader.IsDBNull(28) ? 0 : Convert.ToInt32(reader.GetValue(28))
             });
         }
 
@@ -291,7 +309,17 @@ public class QueryStoreRow
     public bool IsForcedPlan { get; set; }
     public string PlanForcingType { get; set; } = "";
     public string? QueryPlanText { get; set; }
+    public string ExecutionTypeDesc { get; set; } = "";
+    public DateTime? FirstExecutionTime { get; set; }
+    public double AvgClrTimeMs { get; set; }
+    public double AvgTempdbSpaceUsed { get; set; }
+    public double AvgLogBytesUsed { get; set; }
+    public string PlanType { get; set; } = "";
+    public long ForceFailureCount { get; set; }
+    public string LastForceFailureReason { get; set; } = "";
+    public int CompatibilityLevel { get; set; }
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlanText);
+    public string FirstExecutionTimeLocal => ServerTimeHelper.FormatServerTime(FirstExecutionTime);
     public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;
     public double TotalDurationMs => TotalExecutions * AvgDurationMs;

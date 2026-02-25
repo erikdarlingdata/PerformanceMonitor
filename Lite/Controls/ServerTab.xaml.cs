@@ -661,20 +661,28 @@ public partial class ServerTab : UserControl
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";
+            AvailablePhysicalMemoryText.Text = "--";
             TotalServerMemoryText.Text = "--";
             TargetServerMemoryText.Text = "--";
             BufferPoolText.Text = "--";
             PlanCacheText.Text = "--";
+            TotalPageFileText.Text = "--";
+            AvailablePageFileText.Text = "--";
             MemoryStateText.Text = "--";
+            SqlMemoryModelText.Text = "--";
             return;
         }
 
         PhysicalMemoryText.Text = FormatMb(stats.TotalPhysicalMemoryMb);
+        AvailablePhysicalMemoryText.Text = FormatMb(stats.AvailablePhysicalMemoryMb);
         TotalServerMemoryText.Text = FormatMb(stats.TotalServerMemoryMb);
         TargetServerMemoryText.Text = FormatMb(stats.TargetServerMemoryMb);
         BufferPoolText.Text = FormatMb(stats.BufferPoolMb);
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
+        TotalPageFileText.Text = FormatMb(stats.TotalPageFileMb);
+        AvailablePageFileText.Text = FormatMb(stats.AvailablePageFileMb);
         MemoryStateText.Text = stats.SystemMemoryState;
+        SqlMemoryModelText.Text = stats.SqlMemoryModel;
     }
 
     private static string FormatMb(double mb)

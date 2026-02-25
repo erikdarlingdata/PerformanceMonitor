@@ -387,6 +387,15 @@ SELECT
     MIN(min_elapsed_time) AS min_elapsed_time,
     MAX(max_elapsed_time) AS max_elapsed_time,
     SUM(total_spills) AS total_spills,
+    MIN(min_logical_reads) AS min_logical_reads,
+    MAX(max_logical_reads) AS max_logical_reads,
+    MIN(min_physical_reads) AS min_physical_reads,
+    MAX(max_physical_reads) AS max_physical_reads,
+    MIN(min_logical_writes) AS min_logical_writes,
+    MAX(max_logical_writes) AS max_logical_writes,
+    MIN(min_spills) AS min_spills,
+    MAX(max_spills) AS max_spills,
+    MAX(cached_time) AS cached_time,
     MAX(sql_handle) AS sql_handle,
     MAX(plan_handle) AS plan_handle
 FROM v_procedure_stats
@@ -426,8 +435,17 @@ LIMIT $4";
                 MinElapsedTimeUs = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
                 MaxElapsedTimeUs = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
                 TotalSpills = reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
-                SqlHandle = reader.IsDBNull(15) ? "" : reader.GetString(15),
-                PlanHandle = reader.IsDBNull(16) ? "" : reader.GetString(16)
+                MinLogicalReads = reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
+                MaxLogicalReads = reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
+                MinPhysicalReads = reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
+                MaxPhysicalReads = reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
+                MinLogicalWrites = reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
+                MaxLogicalWrites = reader.IsDBNull(20) ? 0 : reader.GetInt64(20),
+                MinSpills = reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
+                MaxSpills = reader.IsDBNull(22) ? 0 : reader.GetInt64(22),
+                CachedTime = reader.IsDBNull(23) ? (DateTime?)null : reader.GetDateTime(23),
+                SqlHandle = reader.IsDBNull(24) ? "" : reader.GetString(24),
+                PlanHandle = reader.IsDBNull(25) ? "" : reader.GetString(25)
             });
         }
 
@@ -637,6 +655,15 @@ public class ProcedureStatsRow
     public long MinElapsedTimeUs { get; set; }
     public long MaxElapsedTimeUs { get; set; }
     public long TotalSpills { get; set; }
+    public long MinLogicalReads { get; set; }
+    public long MaxLogicalReads { get; set; }
+    public long MinPhysicalReads { get; set; }
+    public long MaxPhysicalReads { get; set; }
+    public long MinLogicalWrites { get; set; }
+    public long MaxLogicalWrites { get; set; }
+    public long MinSpills { get; set; }
+    public long MaxSpills { get; set; }
+    public DateTime? CachedTime { get; set; }
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
     public string FullName => string.IsNullOrEmpty(SchemaName) ? ObjectName : $"{SchemaName}.{ObjectName}";
@@ -649,6 +676,7 @@ public class ProcedureStatsRow
     public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
     public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
     public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
+    public string CachedTimeFormatted => CachedTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
 }
 
 public class QueryStatsHistoryRow
