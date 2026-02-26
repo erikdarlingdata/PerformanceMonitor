@@ -141,13 +141,9 @@ public class DuckDbInitializer
 
             var existingVersion = await GetSchemaVersionAsync(connection);
 
-            if (existingVersion < CurrentSchemaVersion)
-            {
-                _logger?.LogInformation("Schema upgrade needed: v{Old} -> v{New}", existingVersion, CurrentSchemaVersion);
-                await RunMigrationsAsync(connection, existingVersion);
-                await SetSchemaVersionAsync(connection, CurrentSchemaVersion);
-            }
-
+            /* Create tables first (IF NOT EXISTS) so migrations can ALTER them safely.
+               After an archive-and-reset the database is empty — running ALTER TABLE
+               before CREATE TABLE would fail on nonexistent tables. */
             foreach (var tableStatement in Schema.GetAllTableStatements())
             {
                 await ExecuteNonQueryAsync(connection, tableStatement);
@@ -156,6 +152,13 @@ public class DuckDbInitializer
             foreach (var indexStatement in Schema.GetAllIndexStatements())
             {
                 await ExecuteNonQueryAsync(connection, indexStatement);
+            }
+
+            if (existingVersion < CurrentSchemaVersion)
+            {
+                _logger?.LogInformation("Schema upgrade needed: v{Old} -> v{New}", existingVersion, CurrentSchemaVersion);
+                await RunMigrationsAsync(connection, existingVersion);
+                await SetSchemaVersionAsync(connection, CurrentSchemaVersion);
             }
 
             _logger?.LogInformation("Database initialization complete. Schema version: {Version}", CurrentSchemaVersion);

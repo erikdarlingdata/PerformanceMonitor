@@ -641,7 +641,7 @@ namespace PerformanceMonitorDashboard.Services
                 {
                     results.Add(new LongRunningQueryInfo
                     {
-                        SessionId = reader.GetInt32(0),
+                        SessionId = Convert.ToInt32(reader.GetValue(0)),
                         DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                         QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
                         ProgramName = reader.IsDBNull(3) ? "" : reader.GetString(3),
