@@ -16,10 +16,13 @@ Free, open-source SQL Server performance monitoring in two editions. Built for D
 ![Dashboard landing page with server health cards](Screenshots/Screenshot%20Dashboard%20landing%20page%20with%20server%20health%20cards.jpg)
 
 ### Full Dashboard — Resource Overview
-![Full Dashboard with charts](Screenshots/Screenshot%20Full%20Dashboard%20with%20charts.jpg)
+![Full Dashboard — Resource Overview](Screenshots/Full%20Dashboard%20%E2%80%94%20Resource%20Overview.jpg)
 
 ### Lite Edition — Query Performance
-![Lite Edition main window](Screenshots/Screenshot%20Lite%20Edition%20main%20window.jpg)
+![Lite Edition — Query Performance](Screenshots/Lite%20Edition%20%E2%80%94%20Query%20Performance.jpg)
+
+### Graphical Plan Viewer
+![Graphical plan viewer with missing index suggestions and operator analysis](Screenshots/New%20Query%20Plan%20Viewer.jpg)
 
 ### Alert Notifications
 ![Alert notification](Screenshots/Screenshot%20alert%20notification%20or%20email.jpg)
