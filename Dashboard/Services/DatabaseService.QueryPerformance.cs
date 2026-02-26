@@ -1455,7 +1455,7 @@ namespace PerformanceMonitorDashboard.Services
                     WHEN avg_writes > 100000 THEN N'High write volume - review update/delete patterns'
                     ELSE N'Review execution plan for optimization opportunities'
                 END,
-            sample_query_text = CONVERT(nvarchar(500), sample_query_text),
+            sample_query_text,
             last_execution
         FROM query_patterns
         WHERE executions > 1

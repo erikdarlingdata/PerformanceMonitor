@@ -812,6 +812,16 @@ namespace PerformanceMonitorDashboard.Controls
                     break;
             }
 
+            if (planXml == null && item is LongRunningQueryPatternItem)
+            {
+                MessageBox.Show(
+                    "Query trace patterns are aggregated data with no cached plan. Use 'Get Actual Plan' to generate one.",
+                    "No Cached Plan",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
             if (planXml != null)
             {
                 ViewPlanRequested?.Invoke(planXml, label, queryText);
@@ -874,6 +884,11 @@ namespace PerformanceMonitorDashboard.Controls
                         reg.QueryPlanXml = await _databaseService.GetQueryStorePlanXmlAsync(reg.DatabaseName, reg.QueryId);
                     planXml = reg.QueryPlanXml;
                     label = $"Actual Plan - QS {reg.QueryId}";
+                    break;
+                case LongRunningQueryPatternItem lrq:
+                    queryText = lrq.SampleQueryText;
+                    databaseName = lrq.DatabaseName;
+                    label = $"Actual Plan - Pattern";
                     break;
             }
 

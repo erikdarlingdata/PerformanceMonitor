@@ -133,28 +133,66 @@
 
         <!-- Memory Clerks Sub-Tab -->
         <TabItem Header="Memory Clerks">
-            <!-- Chart + Summary Panel (grid removed) -->
             <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5">
                 <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Top Memory Clerks Over Time" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryClerksChart"/>
-                    <!-- Summary Panel (excludes buffer pool) -->
-                    <Border Grid.Row="2" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,8">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                            <TextBlock Text="Non-BP Total:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryClerksTotalText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Top Non-BP Clerk:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryClerksTopText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                        </StackPanel>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Clerk Type Picker -->
+                    <Border Grid.Column="0" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0" Padding="8">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="Select Memory Clerks" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+                                <Button Content="Top Clerks" Click="MemoryClerkSelectTop_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
+                                <Button Content="Clear All" Click="MemoryClerkClearAll_Click" Padding="6,2" FontSize="11"/>
+                                <TextBlock x:Name="MemoryClerkCountText" Text="0 selected" FontSize="10" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                            </StackPanel>
+                            <TextBox Grid.Row="2" x:Name="MemoryClerkSearchBox" TextChanged="MemoryClerkSearch_TextChanged"
+                                     Margin="0,0,0,4" Padding="4,2"/>
+                            <ListBox Grid.Row="3" x:Name="MemoryClerksList" Background="Transparent" BorderThickness="0">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                  Checked="MemoryClerk_CheckChanged" Unchecked="MemoryClerk_CheckChanged"
+                                                  Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
+                                            <TextBlock Text="{Binding DisplayName}"/>
+                                        </CheckBox>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
                     </Border>
-                    <TextBlock x:Name="MemoryClerksNoDataMessage" Grid.Row="1" Style="{StaticResource EmptyStateMessage}"
-                               Text="No memory clerk data in selected time range"/>
-                    <controls:LoadingOverlay x:Name="MemoryClerksLoading" Grid.Row="1"/>
+
+                    <!-- Chart + Summary -->
+                    <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="Memory Clerks Over Time" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
+                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryClerksChart"/>
+                        <!-- Summary Panel (excludes buffer pool) -->
+                        <Border Grid.Row="2" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,8">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <TextBlock Text="Non-BP Total:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryClerksTotalText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                                <TextBlock Text="Top Non-BP Clerk:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="MemoryClerksTopText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock x:Name="MemoryClerksNoDataMessage" Grid.Row="1" Style="{StaticResource EmptyStateMessage}"
+                                   Text="No memory clerk data in selected time range"/>
+                        <controls:LoadingOverlay x:Name="MemoryClerksLoading" Grid.Row="1"/>
+                    </Grid>
                 </Grid>
             </Border>
         </TabItem>

@@ -6,118 +6,46 @@
              mc:Ignorable="d"
              d:DesignHeight="450" d:DesignWidth="800"
              Loaded="OnLoaded">
-    <TabControl>
-        <!-- Default Trace Events Sub-Tab -->
-        <TabItem Header="Default Trace Events">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10" Background="{DynamicResource BackgroundLightBrush}">
-                    <TextBlock Text="Event Filter:" VerticalAlignment="Center" Margin="5,0" FontWeight="Bold"/>
-                    <ComboBox x:Name="DefaultTraceEventsFilterCombo" Width="200" Margin="2,0" SelectionChanged="DefaultTraceEventsFilter_Changed">
-                        <ComboBoxItem Content="All Events" Tag="" IsSelected="True"/>
-                        <ComboBoxItem Content="Object:Altered" Tag="%Object:Altered%"/>
-                        <ComboBoxItem Content="Object:Created" Tag="%Object:Created%"/>
-                        <ComboBoxItem Content="Object:Deleted" Tag="%Object:Deleted%"/>
-                        <ComboBoxItem Content="Audit%" Tag="Audit%"/>
-                        <ComboBoxItem Content="Database%" Tag="Database%"/>
-                        <ComboBoxItem Content="ErrorLog" Tag="%ErrorLog%"/>
-                        <ComboBoxItem Content="Security%" Tag="Security%"/>
-                    </ComboBox>
-                    <Separator Margin="10,0" Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"/>
-                    <Button Content="Refresh" Click="DefaultTraceEvents_Refresh_Click" Margin="5,0" Padding="10,4" Style="{DynamicResource SuccessButton}"/>
-                </StackPanel>
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10" Background="{DynamicResource BackgroundLightBrush}">
+            <TextBlock Text="Event Filter:" VerticalAlignment="Center" Margin="5,0" FontWeight="Bold"/>
+            <ComboBox x:Name="DefaultTraceEventsFilterCombo" Width="200" Margin="2,0" SelectionChanged="DefaultTraceEventsFilter_Changed">
+                <ComboBoxItem Content="All Events" Tag="" IsSelected="True"/>
+                <ComboBoxItem Content="Auto Grow/Shrink" Tag="%Auto %"/>
+                <ComboBoxItem Content="Audit Events" Tag="Audit%"/>
+                <ComboBoxItem Content="Config Changes" Tag="%Configuration Change%"/>
+                <ComboBoxItem Content="ErrorLog" Tag="%ErrorLog%"/>
+                <ComboBoxItem Content="Memory Changes" Tag="%Memory Change%"/>
+                <ComboBoxItem Content="Object:Altered" Tag="%Object:Altered%"/>
+                <ComboBoxItem Content="Object:Created" Tag="%Object:Created%"/>
+                <ComboBoxItem Content="Object:Deleted" Tag="%Object:Deleted%"/>
+            </ComboBox>
+            <Separator Margin="10,0" Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"/>
+            <Button Content="Refresh" Click="DefaultTraceEvents_Refresh_Click" Margin="5,0" Padding="10,4" Style="{DynamicResource SuccessButton}"/>
+        </StackPanel>
 
-                <Grid Grid.Row="1">
-                <DataGrid x:Name="DefaultTraceEventsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                          GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
-                          ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
-                            <DataGridTextColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTime" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTextColumn.Header>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding EventName}" Width="150">
-                            <DataGridTextColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Event Name" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTextColumn.Header>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
-                            <DataGridTextColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTextColumn.Header>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding ObjectName}" Width="150">
-                            <DataGridTextColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ObjectName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Object Name" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTextColumn.Header>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding LoginName}" Width="120">
-                            <DataGridTextColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LoginName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Login" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTextColumn.Header>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding TextData}" Width="300">
-                            <DataGridTextColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TextData" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Text Data" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTextColumn.Header>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding Severity}" Width="60">
-                            <DataGridTextColumn.Header>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DataGridTextColumn.Header>
-                        </DataGridTextColumn>
-                    </DataGrid.Columns>
-                </DataGrid>
-                <TextBlock x:Name="DefaultTraceEventsNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
-                </Grid>
-            </Grid>
-        </TabItem>
-
-        <!-- Trace Analysis Sub-Tab -->
-        <TabItem Header="Trace Analysis">
-            <Grid>
-            <DataGrid x:Name="TraceAnalysisDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+        <Grid Grid.Row="1">
+            <DataGrid x:Name="DefaultTraceEventsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTime" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding EventName}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventName" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Event Name" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -125,68 +53,86 @@
                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LoginName}" Width="100">
+                    <DataGridTextColumn Binding="{Binding ObjectName}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LoginName" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ObjectName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Object Name" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding LoginName}" Width="120">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LoginName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Login" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding DurationMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                    <DataGridTextColumn Binding="{Binding HostName}" Width="120">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HostName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Host" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding ApplicationName}" Width="150">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ApplicationName" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Application" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Binding="{Binding DurationMs, StringFormat='{}{0:N1}'}" Width="90">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding CpuMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
+                    <DataGridTextColumn Binding="{Binding GrowthMb, StringFormat='{}{0:N2}'}" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuMs" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrowthMb" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Growth (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding Reads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                    <DataGridTextColumn Binding="{Binding TextData}" Width="300">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Reads" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Reads (pages)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TextData" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Text Data" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding Writes, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                    <DataGridTextColumn Binding="{Binding Severity}" Width="60">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Writes" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Writes (pages)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTemplateColumn Width="400">
-                        <DataGridTemplateColumn.Header>
+                    <DataGridTextColumn Binding="{Binding Spid}" Width="60">
+                        <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlText" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="SQL Text" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Spid" Click="DefaultTraceFilter_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="SPID" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
-                        </DataGridTemplateColumn.Header>
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding SqlText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding SqlText}"/>
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
                 </DataGrid.Columns>
             </DataGrid>
-            <TextBlock x:Name="TraceAnalysisNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
-            </Grid>
-        </TabItem>
-    </TabControl>
+            <TextBlock x:Name="DefaultTraceEventsNoDataMessage" Style="{DynamicResource NoDataMessage}"/>
+        </Grid>
+    </Grid>
 </UserControl>

@@ -62,6 +62,10 @@ namespace PerformanceMonitorDashboard.Controls
         // Legend panel references for edge-based legends (ScottPlot issue #4717 workaround)
         private Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
 
+        // Memory Clerks picker state
+        private List<SelectableItem> _memoryClerkItems = new();
+        private bool _isUpdatingMemoryClerkSelection;
+
         // Chart hover tooltips
         private Helpers.ChartHoverHelper? _memoryStatsOverviewHover;
         private Helpers.ChartHoverHelper? _memoryGrantSizingHover;
@@ -423,15 +427,12 @@ namespace PerformanceMonitorDashboard.Controls
                 var data = await _databaseService.GetMemoryGrantStatsAsync(_memoryGrantsHoursBack, _memoryGrantsFromDate, _memoryGrantsToDate);
                 var dataList = data.ToList();
 
-                // Filter to rows with active grants for charting
-                var filtered = dataList.Where(d => (d.GrantedMemoryMb ?? 0) > 0).ToList();
-
-                bool hasData = filtered.Count > 0;
+                bool hasData = dataList.Count > 0;
                 MemoryGrantSizingNoData.Visibility = hasData ? Visibility.Collapsed : Visibility.Visible;
                 MemoryGrantActivityNoData.Visibility = hasData ? Visibility.Collapsed : Visibility.Visible;
 
                 // Aggregate across resource_semaphore_id within each pool
-                var aggregated = filtered
+                var aggregated = dataList
                     .GroupBy(d => new { d.CollectionTime, d.PoolId })
                     .Select(g => new PoolGrantPoint
                     {
@@ -613,17 +614,15 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
-                // Only show loading overlay on initial load (no existing chart data)
                 if (!MemoryClerksChart.Plot.GetPlottables().Any())
                 {
                     MemoryClerksLoading.IsLoading = true;
                     MemoryClerksNoDataMessage.Visibility = Visibility.Collapsed;
                 }
 
-                var data = await _databaseService.GetMemoryClerksTopNAsync(5, _memoryClerksHoursBack, _memoryClerksFromDate, _memoryClerksToDate);
-                var dataList = data.ToList();
-                MemoryClerksNoDataMessage.Visibility = dataList.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                LoadMemoryClerksChart(dataList, _memoryClerksHoursBack, _memoryClerksFromDate, _memoryClerksToDate);
+                var clerkTypes = await _databaseService.GetDistinctMemoryClerkTypesAsync(_memoryClerksHoursBack, _memoryClerksFromDate, _memoryClerksToDate);
+                PopulateMemoryClerkPicker(clerkTypes);
+                await UpdateMemoryClerksChartFromPickerAsync();
             }
             catch (Exception ex)
             {
@@ -635,85 +634,160 @@ namespace PerformanceMonitorDashboard.Controls
             }
         }
 
-        private void LoadMemoryClerksChart(List<MemoryClerksItem> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+        private void PopulateMemoryClerkPicker(List<string> clerkTypes)
         {
-            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
-            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
-            double xMin = rangeStart.ToOADate();
-            double xMax = rangeEnd.ToOADate();
-
-            if (_legendPanels.TryGetValue(MemoryClerksChart, out var existingPanel) && existingPanel != null)
+            var previouslySelected = new HashSet<string>(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
+            var topClerks = previouslySelected.Count == 0 ? new HashSet<string>(clerkTypes.Take(5)) : null;
+            _memoryClerkItems = clerkTypes.Select(c => new SelectableItem
             {
-                MemoryClerksChart.Plot.Axes.Remove(existingPanel);
-                _legendPanels[MemoryClerksChart] = null;
-            }
-            MemoryClerksChart.Plot.Clear();
-            _memoryClerksHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(MemoryClerksChart);
+                DisplayName = c,
+                IsSelected = previouslySelected.Contains(c) || (topClerks != null && topClerks.Contains(c))
+            }).ToList();
+            RefreshMemoryClerkListOrder();
+        }
 
-            var dataList = data ?? new List<MemoryClerksItem>();
-            if (dataList.Count > 0)
+        private void RefreshMemoryClerkListOrder()
+        {
+            if (_memoryClerkItems == null) return;
+            _memoryClerkItems = _memoryClerkItems
+                .OrderByDescending(x => x.IsSelected)
+                .ThenBy(x => x.DisplayName)
+                .ToList();
+            ApplyMemoryClerkFilter();
+            UpdateMemoryClerkCount();
+        }
+
+        private void UpdateMemoryClerkCount()
+        {
+            if (_memoryClerkItems == null || MemoryClerkCountText == null) return;
+            int count = _memoryClerkItems.Count(x => x.IsSelected);
+            MemoryClerkCountText.Text = $"{count} selected";
+        }
+
+        private void ApplyMemoryClerkFilter()
+        {
+            var search = MemoryClerkSearchBox?.Text?.Trim() ?? "";
+            MemoryClerksList.ItemsSource = null;
+            if (string.IsNullOrEmpty(search))
+                MemoryClerksList.ItemsSource = _memoryClerkItems;
+            else
+                MemoryClerksList.ItemsSource = _memoryClerkItems.Where(i => i.DisplayName.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+
+        private void MemoryClerkSearch_TextChanged(object sender, TextChangedEventArgs e) => ApplyMemoryClerkFilter();
+
+        private void MemoryClerkSelectTop_Click(object sender, RoutedEventArgs e)
+        {
+            _isUpdatingMemoryClerkSelection = true;
+            var topClerks = new HashSet<string>(_memoryClerkItems.Take(5).Select(x => x.DisplayName));
+            foreach (var item in _memoryClerkItems)
+                item.IsSelected = topClerks.Contains(item.DisplayName);
+            _isUpdatingMemoryClerkSelection = false;
+            RefreshMemoryClerkListOrder();
+            _ = UpdateMemoryClerksChartFromPickerAsync();
+        }
+
+        private void MemoryClerkClearAll_Click(object sender, RoutedEventArgs e)
+        {
+            _isUpdatingMemoryClerkSelection = true;
+            var visible = (MemoryClerksList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _memoryClerkItems;
+            foreach (var item in visible) item.IsSelected = false;
+            _isUpdatingMemoryClerkSelection = false;
+            RefreshMemoryClerkListOrder();
+            _ = UpdateMemoryClerksChartFromPickerAsync();
+        }
+
+        private void MemoryClerk_CheckChanged(object sender, RoutedEventArgs e)
+        {
+            if (_isUpdatingMemoryClerkSelection) return;
+            RefreshMemoryClerkListOrder();
+            _ = UpdateMemoryClerksChartFromPickerAsync();
+        }
+
+        private async System.Threading.Tasks.Task UpdateMemoryClerksChartFromPickerAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
             {
-                // Get all unique time points for gap filling
-                // Get top 5 clerk types by total pages
-                var topClerks = dataList.GroupBy(d => d.ClerkType)
-                    .Select(g => new { ClerkType = g.Key, TotalPages = g.Sum(x => x.PagesKb ?? 0) })
-                    .OrderByDescending(x => x.TotalPages)
-                    .Take(5)
-                    .Select(x => x.ClerkType)
-                    .ToList();
+                var selected = _memoryClerkItems.Where(i => i.IsSelected).Take(20).ToList();
 
-                var colors = TabHelpers.ChartColors;
-                int colorIndex = 0;
-
-                foreach (var clerkType in topClerks)
+                if (_legendPanels.TryGetValue(MemoryClerksChart, out var existingPanel) && existingPanel != null)
                 {
-                    var clerkData = dataList.Where(d => d.ClerkType == clerkType)
-                        .OrderBy(d => d.CollectionTime)
-                        .ToList();
+                    MemoryClerksChart.Plot.Axes.Remove(existingPanel);
+                    _legendPanels[MemoryClerksChart] = null;
+                }
+                MemoryClerksChart.Plot.Clear();
+                _memoryClerksHover?.Clear();
+                TabHelpers.ApplyDarkModeToChart(MemoryClerksChart);
 
-                    if (clerkData.Count >= 1)
+                DateTime rangeEnd = _memoryClerksToDate ?? Helpers.ServerTimeHelper.ServerNow;
+                DateTime rangeStart = _memoryClerksFromDate ?? rangeEnd.AddHours(-_memoryClerksHoursBack);
+                double xMin = rangeStart.ToOADate();
+                double xMax = rangeEnd.ToOADate();
+
+                if (selected.Count > 0)
+                {
+                    var selectedTypes = selected.Select(s => s.DisplayName).ToList();
+                    var data = await _databaseService.GetMemoryClerksByTypesAsync(selectedTypes, _memoryClerksHoursBack, _memoryClerksFromDate, _memoryClerksToDate);
+                    var dataList = data.ToList();
+
+                    MemoryClerksNoDataMessage.Visibility = dataList.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+                    if (dataList.Count > 0)
                     {
-                        var timePoints = clerkData.Select(d => d.CollectionTime);
-                        var values = clerkData.Select(d => (double)d.PagesMb);
-                        var (xs, ys) = TabHelpers.FillTimeSeriesGaps(timePoints, values);
+                        var colors = TabHelpers.ChartColors;
+                        int colorIndex = 0;
 
-                        var scatter = MemoryClerksChart.Plot.Add.Scatter(xs, ys);
-                        scatter.LineWidth = 2;
-                        scatter.MarkerSize = 5;
-                        scatter.Color = colors[colorIndex % colors.Length];
-                        var label = clerkType.Length > 20 ? clerkType.Substring(0, 20) + "..." : clerkType;
-                        scatter.LegendText = label;
-                        _memoryClerksHover?.Add(scatter, label);
-                        colorIndex++;
+                        foreach (var clerkType in selectedTypes)
+                        {
+                            var clerkData = dataList.Where(d => d.ClerkType == clerkType)
+                                .OrderBy(d => d.CollectionTime)
+                                .ToList();
+
+                            if (clerkData.Count >= 1)
+                            {
+                                var timePoints = clerkData.Select(d => d.CollectionTime);
+                                var values = clerkData.Select(d => (double)d.PagesMb);
+                                var (xs, ys) = TabHelpers.FillTimeSeriesGaps(timePoints, values);
+
+                                var scatter = MemoryClerksChart.Plot.Add.Scatter(xs, ys);
+                                scatter.LineWidth = 2;
+                                scatter.MarkerSize = 5;
+                                scatter.Color = colors[colorIndex % colors.Length];
+                                var label = clerkType.Length > 20 ? clerkType.Substring(0, 20) + "..." : clerkType;
+                                scatter.LegendText = label;
+                                _memoryClerksHover?.Add(scatter, label);
+                                colorIndex++;
+                            }
+                        }
+
+                        _legendPanels[MemoryClerksChart] = MemoryClerksChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+                        MemoryClerksChart.Plot.Legend.FontSize = 12;
                     }
+
+                    UpdateMemoryClerksSummaryPanel(dataList);
+                }
+                else
+                {
+                    MemoryClerksNoDataMessage.Visibility = Visibility.Collapsed;
+                    MemoryClerksTotalText.Text = "N/A";
+                    MemoryClerksTopText.Text = "N/A";
                 }
 
-                _legendPanels[MemoryClerksChart] = MemoryClerksChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                MemoryClerksChart.Plot.Legend.FontSize = 12;
+                MemoryClerksChart.Plot.Axes.DateTimeTicksBottom();
+                MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
+                MemoryClerksChart.Plot.YLabel("MB");
+                MemoryClerksChart.Plot.Axes.AutoScaleY();
+                var clerksLimits = MemoryClerksChart.Plot.Axes.GetLimits();
+                MemoryClerksChart.Plot.Axes.SetLimitsY(0, clerksLimits.Top * 1.05);
+                TabHelpers.LockChartVerticalAxis(MemoryClerksChart);
+                MemoryClerksChart.Refresh();
             }
-            else
+            catch (Exception ex)
             {
-                double xCenter = xMin + (xMax - xMin) / 2;
-                var noDataText = MemoryClerksChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-                noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
-                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+                Logger.Error($"Error updating memory clerks chart: {ex.Message}");
             }
-
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottom();
-            MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            MemoryClerksChart.Plot.YLabel("MB");
-            // Fixed negative space for legend
-            MemoryClerksChart.Plot.Axes.AutoScaleY();
-            var clerksLimits = MemoryClerksChart.Plot.Axes.GetLimits();
-            MemoryClerksChart.Plot.Axes.SetLimitsY(0, clerksLimits.Top * 1.05);
-
-            TabHelpers.LockChartVerticalAxis(MemoryClerksChart);
-            MemoryClerksChart.Refresh();
-
-            // Update summary panel
-            UpdateMemoryClerksSummaryPanel(dataList);
         }
 
         private void UpdateMemoryClerksSummaryPanel(List<MemoryClerksItem> dataList)
@@ -725,23 +799,19 @@ namespace PerformanceMonitorDashboard.Controls
                 return;
             }
 
-            // Get the latest collection time's data, excluding buffer pool
             var latestTime = dataList.Max(d => d.CollectionTime);
             var latestData = dataList
                 .Where(d => d.CollectionTime == latestTime)
                 .Where(d => d.ClerkType == null || !d.ClerkType.Contains("BUFFERPOOL", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            // Total non-buffer pool memory
             var totalMb = latestData.Sum(d => d.PagesMb);
             MemoryClerksTotalText.Text = string.Format(CultureInfo.CurrentCulture, "{0:N0} MB", totalMb);
 
-            // Top non-buffer pool clerk by size
             var topClerk = latestData.OrderByDescending(d => d.PagesMb).FirstOrDefault();
             if (topClerk != null)
             {
                 var name = topClerk.ClerkType ?? "Unknown";
-                // Remove MEMORYCLERK_ prefix for readability
                 if (name.StartsWith("MEMORYCLERK_", StringComparison.OrdinalIgnoreCase))
                     name = name.Substring(12);
                 if (name.Length > 20) name = name.Substring(0, 20) + "...";

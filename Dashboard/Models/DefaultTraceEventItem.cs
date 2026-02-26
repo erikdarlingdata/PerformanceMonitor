@@ -28,5 +28,11 @@ namespace PerformanceMonitorDashboard.Models
         public long? EventSequence { get; set; }
         public bool? IsSystem { get; set; }
         public int? RequestId { get; set; }
+        public long? DurationUs { get; set; }
+        public DateTime? EndTime { get; set; }
+
+        // Display helpers
+        public decimal? DurationMs => DurationUs.HasValue ? DurationUs.Value / 1000.0m : null;
+        public decimal? GrowthMb => IntegerData.HasValue ? IntegerData.Value * 8.0m / 1024.0m : null;
     }
 }
