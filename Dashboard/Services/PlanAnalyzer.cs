@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitorDashboard.Models;
 
 namespace PerformanceMonitorDashboard.Services;
@@ -11,6 +12,23 @@ namespace PerformanceMonitorDashboard.Services;
 /// </summary>
 public static class PlanAnalyzer
 {
+    private static readonly Regex FunctionInPredicateRegex = new(
+        @"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex LeadingWildcardLikeRegex = new(
+        @"\blike\b[^'""]*?N?'%",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex CaseInPredicateRegex = new(
+        @"\bCASE\s+(WHEN\b|$)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Matches CTE definitions: WITH name AS ( or , name AS (
+    private static readonly Regex CteDefinitionRegex = new(
+        @"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     public static void Analyze(ParsedPlan plan)
     {
         foreach (var batch in plan.Batches)
@@ -20,7 +38,7 @@ public static class PlanAnalyzer
                 AnalyzeStatement(stmt);
 
                 if (stmt.RootNode != null)
-                    AnalyzeNodeTree(stmt.RootNode);
+                    AnalyzeNodeTree(stmt.RootNode, stmt);
             }
         }
     }
@@ -78,18 +96,88 @@ public static class PlanAnalyzer
                     Severity = grant.GrantWaitTimeMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                 });
             }
+
+            // Large memory grant with sort/hash guidance
+            if (grant.GrantedMemoryKB > 102400 && stmt.RootNode != null)
+            {
+                var consumers = new List<string>();
+                FindMemoryConsumers(stmt.RootNode, consumers);
+
+                var grantMB = grant.GrantedMemoryKB / 1024.0;
+                var guidance = consumers.Count > 0
+                    ? $" Memory consumers: {string.Join(", ", consumers)}. Check whether these operators are processing more rows than necessary."
+                    : "";
+
+                stmt.PlanWarnings.Add(new PlanWarning
+                {
+                    WarningType = "Large Memory Grant",
+                    Message = $"Query granted {grantMB:F0} MB of memory.{guidance}",
+                    Severity = grantMB >= 512 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
+                });
+            }
+        }
+
+        // Rule 18: Compile memory exceeded (early abort)
+        if (stmt.StatementOptmEarlyAbortReason == "MemoryLimitExceeded")
+        {
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Compile Memory Exceeded",
+                Message = "Optimization was aborted early because the compile memory limit was exceeded. The plan may be suboptimal. Simplify the query or break it into smaller parts.",
+                Severity = PlanWarningSeverity.Critical
+            });
+        }
+
+        // Rule 19: High compile CPU
+        if (stmt.CompileCPUMs >= 1000)
+        {
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "High Compile CPU",
+                Message = $"Query took {stmt.CompileCPUMs:N0}ms of CPU to compile. Complex queries with many joins or subqueries can cause excessive compile time.",
+                Severity = stmt.CompileCPUMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 20: Local variables without RECOMPILE
+        if (stmt.Parameters.Count > 0)
+        {
+            var unsnifffedParams = stmt.Parameters
+                .Where(p => string.IsNullOrEmpty(p.CompiledValue))
+                .ToList();
+
+            if (unsnifffedParams.Count > 0)
+            {
+                var hasRecompile = stmt.StatementText.Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
+                if (!hasRecompile)
+                {
+                    var names = string.Join(", ", unsnifffedParams.Select(p => p.Name));
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Local Variables",
+                        Message = $"Parameters without compiled values detected: {names}. These are likely local variables, which cause the optimizer to use density-based (\"unknown\") estimates. Consider using OPTION (RECOMPILE) or rewriting with parameters.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
+        }
+
+        // Rule 21: CTE referenced multiple times
+        if (!string.IsNullOrEmpty(stmt.StatementText))
+        {
+            DetectMultiReferenceCte(stmt);
         }
     }
 
-    private static void AnalyzeNodeTree(PlanNode node)
+    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt)
     {
-        AnalyzeNode(node);
+        AnalyzeNode(node, stmt);
 
         foreach (var child in node.Children)
-            AnalyzeNodeTree(child);
+            AnalyzeNodeTree(child, stmt);
     }
 
-    private static void AnalyzeNode(PlanNode node)
+    private static void AnalyzeNode(PlanNode node, PlanStatement stmt)
     {
         // Rule 1: Filter operators — rows survived the tree just to be discarded
         if (node.PhysicalOp == "Filter" && !string.IsNullOrEmpty(node.Predicate))
@@ -198,10 +286,20 @@ public static class PlanAnalyzer
             });
         }
 
-        // Rule 11: Scan with residual predicate (not spools)
-        if (node.PhysicalOp.Contains("Scan", StringComparison.OrdinalIgnoreCase) &&
-            !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrEmpty(node.Predicate))
+        // Rule 12: Non-SARGable predicate on scan
+        var nonSargableReason = DetectNonSargablePredicate(node);
+        if (nonSargableReason != null)
+        {
+            node.Warnings.Add(new PlanWarning
+            {
+                WarningType = "Non-SARGable Predicate",
+                Message = $"{nonSargableReason} prevents index seek, forcing a scan. Fix the predicate or add a computed column with an index. Predicate: {Truncate(node.Predicate!, 200)}",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 11: Scan with residual predicate (skip if non-SARGable already flagged)
+        if (nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate))
         {
             node.Warnings.Add(new PlanWarning
             {
@@ -210,6 +308,283 @@ public static class PlanAnalyzer
                 Severity = PlanWarningSeverity.Warning
             });
         }
+
+        // Rule 13: Mismatched data types (GetRangeWithMismatchedTypes)
+        if (node.PhysicalOp == "Compute Scalar" &&
+            !string.IsNullOrEmpty(node.DefinedValues) &&
+            node.DefinedValues.Contains("GetRangeWithMismatchedTypes", StringComparison.OrdinalIgnoreCase))
+        {
+            node.Warnings.Add(new PlanWarning
+            {
+                WarningType = "Data Type Mismatch",
+                Message = "Implicit conversion due to mismatched data types. The column type does not match the parameter or literal type, forcing SQL Server to convert values at runtime. Fix the parameter type to match the column.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 14: Lazy Table Spool unfavorable rebind/rewind ratio
+        if (node.LogicalOp == "Lazy Spool")
+        {
+            var rebinds = node.HasActualStats ? (double)node.ActualRebinds : node.EstimateRebinds;
+            var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
+            var source = node.HasActualStats ? "actual" : "estimated";
+
+            if (rebinds > 100 && (rewinds == 0 || rebinds * 2 >= rewinds))
+            {
+                var severity = rebinds > rewinds
+                    ? PlanWarningSeverity.Critical
+                    : PlanWarningSeverity.Warning;
+
+                var ratio = rewinds > 0
+                    ? $"{rewinds / rebinds:F1}x more rewinds (cache hits) than rebinds (cache misses)"
+                    : "no rewinds (cache hits) at all";
+
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Lazy Spool Ineffective",
+                    Message = $"Lazy spool has unfavorable rebind/rewind ratio ({source}): {rebinds:N0} rebinds, {rewinds:N0} rewinds — {ratio}. The spool cache is not providing significant benefit.",
+                    Severity = severity
+                });
+            }
+        }
+
+        // Rule 15: Join OR clause (Concatenation + Constant Scan pattern)
+        // Pattern: Concatenation → Compute Scalar → Constant Scan (one per OR branch)
+        if (node.PhysicalOp == "Concatenation")
+        {
+            var constantScanBranches = node.Children
+                .Count(c => c.PhysicalOp == "Constant Scan" ||
+                            c.Children.Any(gc => gc.PhysicalOp == "Constant Scan"));
+
+            if (constantScanBranches >= 2 && HasJoinAncestor(node))
+            {
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Join OR Clause",
+                    Message = $"OR clause expansion in a join predicate. SQL Server rewrote the OR as {constantScanBranches} separate branches (Concatenation of Constant Scans), each evaluated independently. This pattern often causes excessive inner-side executions.",
+                    Severity = PlanWarningSeverity.Warning
+                });
+            }
+        }
+
+        // Rule 16: Nested Loops high inner-side execution count
+        if (node.PhysicalOp == "Nested Loops" &&
+            node.LogicalOp.Contains("Join", StringComparison.OrdinalIgnoreCase) &&
+            node.Children.Count >= 2)
+        {
+            var innerChild = node.Children[1];
+
+            if (innerChild.HasActualStats && innerChild.ActualExecutions > 1000)
+            {
+                var dop = stmt.DegreeOfParallelism > 0 ? stmt.DegreeOfParallelism : 1;
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Nested Loops High Executions",
+                    Message = $"Nested Loops inner side executed {innerChild.ActualExecutions:N0} times (DOP {dop}). A Hash Join or Merge Join may be more efficient for this row count.",
+                    Severity = innerChild.ActualExecutions > 100000
+                        ? PlanWarningSeverity.Critical
+                        : PlanWarningSeverity.Warning
+                });
+            }
+            else if (!innerChild.HasActualStats && innerChild.EstimateRebinds > 1000)
+            {
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Nested Loops High Executions",
+                    Message = $"Nested Loops inner side estimated to execute {innerChild.EstimateRebinds + 1:N0} times. A Hash Join or Merge Join may be more efficient for this row count.",
+                    Severity = innerChild.EstimateRebinds > 100000
+                        ? PlanWarningSeverity.Critical
+                        : PlanWarningSeverity.Warning
+                });
+            }
+        }
+
+        // Rule 17: Many-to-many Merge Join
+        if (node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase))
+        {
+            node.Warnings.Add(new PlanWarning
+            {
+                WarningType = "Many-to-Many Merge Join",
+                Message = "Many-to-many Merge Join requires a worktable to handle duplicate values. This can be expensive with large numbers of duplicates.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 22: Table variables (Object name starts with @)
+        if (!string.IsNullOrEmpty(node.ObjectName) &&
+            node.ObjectName.Contains("@"))
+        {
+            node.Warnings.Add(new PlanWarning
+            {
+                WarningType = "Table Variable",
+                Message = "Table variable detected. Table variables have no statistics, so the optimizer always estimates 1 row regardless of actual cardinality. Consider using a temp table (#table) for better estimates.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 23: Table-valued functions
+        if (node.LogicalOp == "Table-valued function")
+        {
+            var funcName = node.ObjectName ?? node.PhysicalOp;
+            node.Warnings.Add(new PlanWarning
+            {
+                WarningType = "Table-Valued Function",
+                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics and a fixed estimate of 1 row (pre-2017) or 100 rows (2017+). Consider inlining the logic or using an inline TVF.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 24: Top above a scan (linear search pattern)
+        if (node.PhysicalOp == "Top" && node.Children.Count > 0)
+        {
+            // Walk through pass-through operators (Compute Scalar, etc.)
+            var child = node.Children[0];
+            while (child.PhysicalOp == "Compute Scalar" && child.Children.Count > 0)
+                child = child.Children[0];
+
+            if (IsRowstoreScan(child))
+            {
+                var predInfo = !string.IsNullOrEmpty(child.Predicate)
+                    ? " The scan has a residual predicate, so it may read many rows before the Top is satisfied."
+                    : "";
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Top Above Scan",
+                    Message = $"Top operator reads from {child.PhysicalOp} (Node {child.NodeId}).{predInfo} An index supporting the filter and ordering may convert this to a seek.",
+                    Severity = PlanWarningSeverity.Warning
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true for rowstore scan operators (Index Scan, Clustered Index Scan,
+    /// Table Scan). Excludes columnstore scans, spools, and constant scans.
+    /// </summary>
+    private static bool IsRowstoreScan(PlanNode node)
+    {
+        return node.PhysicalOp.Contains("Scan", StringComparison.OrdinalIgnoreCase) &&
+               !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase) &&
+               !node.PhysicalOp.Contains("Constant", StringComparison.OrdinalIgnoreCase) &&
+               !node.PhysicalOp.Contains("Columnstore", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Detects non-SARGable patterns in scan predicates.
+    /// Returns a description of the issue, or null if the predicate is fine.
+    /// </summary>
+    private static string? DetectNonSargablePredicate(PlanNode node)
+    {
+        if (string.IsNullOrEmpty(node.Predicate))
+            return null;
+
+        // Only check rowstore scan operators — columnstore is designed to be scanned
+        if (!IsRowstoreScan(node))
+            return null;
+
+        var predicate = node.Predicate;
+
+        // CONVERT_IMPLICIT — most common non-SARGable pattern
+        if (predicate.Contains("CONVERT_IMPLICIT", StringComparison.OrdinalIgnoreCase))
+            return "Implicit conversion (CONVERT_IMPLICIT)";
+
+        // ISNULL / COALESCE wrapping column
+        if (Regex.IsMatch(predicate, @"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase))
+            return "ISNULL/COALESCE wrapping column";
+
+        // Common function calls on columns
+        var funcMatch = FunctionInPredicateRegex.Match(predicate);
+        if (funcMatch.Success)
+        {
+            var funcName = funcMatch.Groups[1].Value.ToUpperInvariant();
+            if (funcName != "CONVERT_IMPLICIT")
+                return $"Function call ({funcName}) on column";
+        }
+
+        // CASE expression in predicate
+        if (CaseInPredicateRegex.IsMatch(predicate))
+            return "CASE expression in predicate";
+
+        // Leading wildcard LIKE
+        if (LeadingWildcardLikeRegex.IsMatch(predicate))
+            return "Leading wildcard LIKE pattern";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Detects CTEs that are referenced more than once in the statement text.
+    /// Each reference re-executes the CTE since SQL Server does not materialize them.
+    /// </summary>
+    private static void DetectMultiReferenceCte(PlanStatement stmt)
+    {
+        var text = stmt.StatementText;
+        var cteMatches = CteDefinitionRegex.Matches(text);
+        if (cteMatches.Count == 0)
+            return;
+
+        foreach (Match match in cteMatches)
+        {
+            var cteName = match.Groups[1].Value;
+            if (string.IsNullOrEmpty(cteName))
+                continue;
+
+            // Count references as FROM/JOIN targets after the CTE definition
+            var refPattern = new Regex(
+                $@"\b(FROM|JOIN)\s+{Regex.Escape(cteName)}\b",
+                RegexOptions.IgnoreCase);
+            var refCount = refPattern.Matches(text).Count;
+
+            if (refCount > 1)
+            {
+                stmt.PlanWarnings.Add(new PlanWarning
+                {
+                    WarningType = "CTE Multiple References",
+                    Message = $"CTE \"{cteName}\" is referenced {refCount} times. SQL Server does not materialize CTEs — each reference re-executes the entire CTE query. Consider materializing into a temp table.",
+                    Severity = PlanWarningSeverity.Warning
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks whether a node has a join operator as an ancestor.
+    /// </summary>
+    private static bool HasJoinAncestor(PlanNode node)
+    {
+        var ancestor = node.Parent;
+        while (ancestor != null)
+        {
+            if (ancestor.LogicalOp.Contains("Join", StringComparison.OrdinalIgnoreCase))
+                return true;
+            ancestor = ancestor.Parent;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Finds Sort and Hash Match operators in the tree that consume memory.
+    /// </summary>
+    private static void FindMemoryConsumers(PlanNode node, List<string> consumers)
+    {
+        if (node.PhysicalOp.Contains("Sort", StringComparison.OrdinalIgnoreCase) &&
+            !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase))
+        {
+            var rows = node.HasActualStats
+                ? $"{node.ActualRows:N0} actual rows"
+                : $"{node.EstimateRows:N0} estimated rows";
+            consumers.Add($"Sort (Node {node.NodeId}, {rows})");
+        }
+        else if (node.PhysicalOp.Contains("Hash", StringComparison.OrdinalIgnoreCase))
+        {
+            var rows = node.HasActualStats
+                ? $"{node.ActualRows:N0} actual rows"
+                : $"{node.EstimateRows:N0} estimated rows";
+            consumers.Add($"Hash Match (Node {node.NodeId}, {rows})");
+        }
+
+        foreach (var child in node.Children)
+            FindMemoryConsumers(child, consumers);
     }
 
     private static string Truncate(string value, int maxLength)
