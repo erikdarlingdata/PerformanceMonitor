@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main, dev]
   release:
-    types: [created]
+    types: [created, published]
 
 permissions:
   contents: write
