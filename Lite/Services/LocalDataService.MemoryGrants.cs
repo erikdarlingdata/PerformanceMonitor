@@ -82,7 +82,6 @@ FROM memory_grant_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   granted_memory_mb > 0
 GROUP BY collection_time, pool_id
 ORDER BY collection_time, pool_id";
 

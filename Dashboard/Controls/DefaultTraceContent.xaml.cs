@@ -28,20 +28,12 @@ namespace PerformanceMonitorDashboard.Controls
         private DateTime? _defaultTraceEventsToDate;
         private string? _defaultTraceEventsFilter;
 
-        private int _traceAnalysisHoursBack = 24;
-        private DateTime? _traceAnalysisFromDate;
-        private DateTime? _traceAnalysisToDate;
-
-        // Popup filter state (shared popup, per-grid filter dictionaries)
+        // Popup filter state
         private Popup? _filterPopup;
         private ColumnFilterPopup? _filterPopupContent;
-        private string? _activeFilterGrid;
 
         private readonly Dictionary<string, ColumnFilterState> _defaultTraceFilters = new();
         private List<DefaultTraceEventItem>? _defaultTraceUnfilteredData;
-
-        private readonly Dictionary<string, ColumnFilterState> _traceAnalysisFilters = new();
-        private List<TraceAnalysisItem>? _traceAnalysisUnfilteredData;
 
         public DefaultTraceContent()
         {
@@ -58,28 +50,19 @@ namespace PerformanceMonitorDashboard.Controls
             _defaultTraceEventsHoursBack = hoursBack;
             _defaultTraceEventsFromDate = fromDate;
             _defaultTraceEventsToDate = toDate;
-
-            _traceAnalysisHoursBack = hoursBack;
-            _traceAnalysisFromDate = fromDate;
-            _traceAnalysisToDate = toDate;
         }
 
         public async Task RefreshAllDataAsync()
         {
             if (_databaseService == null) return;
 
-            await Task.WhenAll(
-                RefreshDefaultTraceEventsAsync(),
-                RefreshTraceAnalysisAsync()
-            );
+            await RefreshDefaultTraceEventsAsync();
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
             TabHelpers.AutoSizeColumnMinWidths(DefaultTraceEventsDataGrid);
-            TabHelpers.AutoSizeColumnMinWidths(TraceAnalysisDataGrid);
             TabHelpers.FreezeColumns(DefaultTraceEventsDataGrid, 1);
-            TabHelpers.FreezeColumns(TraceAnalysisDataGrid, 1);
         }
 
         #region Default Trace Events
@@ -130,43 +113,12 @@ namespace PerformanceMonitorDashboard.Controls
 
         #endregion
 
-        #region Trace Analysis
-
-        private async Task RefreshTraceAnalysisAsync()
-        {
-            if (_databaseService == null) return;
-
-            try
-            {
-                var data = await _databaseService.GetTraceAnalysisAsync(_traceAnalysisHoursBack, _traceAnalysisFromDate, _traceAnalysisToDate);
-                _traceAnalysisUnfilteredData = data;
-                _traceAnalysisFilters.Clear();
-                TraceAnalysisDataGrid.ItemsSource = data;
-                TraceAnalysisNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                UpdateFilterButtonStyles(TraceAnalysisDataGrid, _traceAnalysisFilters);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Error loading trace analysis: {ex.Message}");
-            }
-        }
-
-        #endregion
-
         #region Popup Filter Infrastructure
 
         private void DefaultTraceFilter_Click(object sender, RoutedEventArgs e)
         {
-            _activeFilterGrid = "DefaultTrace";
             if (sender is Button button && button.Tag is string columnName)
                 ShowFilterPopup(button, columnName, _defaultTraceFilters);
-        }
-
-        private void TraceAnalysisFilter_Click(object sender, RoutedEventArgs e)
-        {
-            _activeFilterGrid = "TraceAnalysis";
-            if (sender is Button button && button.Tag is string columnName)
-                ShowFilterPopup(button, columnName, _traceAnalysisFilters);
         }
 
         private void ShowFilterPopup(Button button, string columnName, Dictionary<string, ColumnFilterState> filters)
@@ -197,26 +149,12 @@ namespace PerformanceMonitorDashboard.Controls
             if (_filterPopup != null)
                 _filterPopup.IsOpen = false;
 
-            switch (_activeFilterGrid)
-            {
-                case "DefaultTrace":
-                    if (e.FilterState.IsActive)
-                        _defaultTraceFilters[e.FilterState.ColumnName] = e.FilterState;
-                    else
-                        _defaultTraceFilters.Remove(e.FilterState.ColumnName);
-                    ApplyFilters(_defaultTraceFilters, _defaultTraceUnfilteredData, DefaultTraceEventsDataGrid, DefaultTraceEventsNoDataMessage);
-                    UpdateFilterButtonStyles(DefaultTraceEventsDataGrid, _defaultTraceFilters);
-                    break;
-
-                case "TraceAnalysis":
-                    if (e.FilterState.IsActive)
-                        _traceAnalysisFilters[e.FilterState.ColumnName] = e.FilterState;
-                    else
-                        _traceAnalysisFilters.Remove(e.FilterState.ColumnName);
-                    ApplyFilters(_traceAnalysisFilters, _traceAnalysisUnfilteredData, TraceAnalysisDataGrid, TraceAnalysisNoDataMessage);
-                    UpdateFilterButtonStyles(TraceAnalysisDataGrid, _traceAnalysisFilters);
-                    break;
-            }
+            if (e.FilterState.IsActive)
+                _defaultTraceFilters[e.FilterState.ColumnName] = e.FilterState;
+            else
+                _defaultTraceFilters.Remove(e.FilterState.ColumnName);
+            ApplyFilters(_defaultTraceFilters, _defaultTraceUnfilteredData, DefaultTraceEventsDataGrid, DefaultTraceEventsNoDataMessage);
+            UpdateFilterButtonStyles(DefaultTraceEventsDataGrid, _defaultTraceFilters);
         }
 
         private void FilterPopup_FilterCleared(object? sender, EventArgs e)

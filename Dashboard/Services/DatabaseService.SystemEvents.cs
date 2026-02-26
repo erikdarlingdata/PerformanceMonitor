@@ -64,7 +64,9 @@ namespace PerformanceMonitorDashboard.Services
             dte.state,
             dte.event_sequence,
             dte.is_system,
-            dte.request_id
+            dte.request_id,
+            dte.duration_us,
+            dte.end_time
         FROM collect.default_trace_events AS dte
         {dateFilter}{eventFilter}
         ORDER BY
@@ -116,7 +118,9 @@ namespace PerformanceMonitorDashboard.Services
                             State = reader.IsDBNull(20) ? null : reader.GetInt32(20),
                             EventSequence = reader.IsDBNull(21) ? null : reader.GetInt64(21),
                             IsSystem = reader.IsDBNull(22) ? null : reader.GetBoolean(22),
-                            RequestId = reader.IsDBNull(23) ? null : reader.GetInt32(23)
+                            RequestId = reader.IsDBNull(23) ? null : reader.GetInt32(23),
+                            DurationUs = reader.IsDBNull(24) ? null : reader.GetInt64(24),
+                            EndTime = reader.IsDBNull(25) ? null : reader.GetDateTime(25)
                         });
                     }
         

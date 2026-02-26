@@ -619,11 +619,13 @@ BEGIN
         event_sequence bigint NULL,
         is_system bit NULL,
         request_id integer NULL,
-        CONSTRAINT 
-            PK_default_trace_events 
+        duration_us bigint NULL,
+        end_time datetime2(7) NULL,
+        CONSTRAINT
+            PK_default_trace_events
         PRIMARY KEY
-            (collection_time, event_id) 
-        WITH 
+            (collection_time, event_id)
+        WITH
             (DATA_COMPRESSION = PAGE)
     );
 

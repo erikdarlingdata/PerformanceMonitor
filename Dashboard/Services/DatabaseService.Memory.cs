@@ -466,6 +466,150 @@ namespace PerformanceMonitorDashboard.Services
             return items;
         }
 
+        /// <summary>
+        /// Gets distinct memory clerk types ordered by total pages descending.
+        /// </summary>
+        public async Task<List<string>> GetDistinctMemoryClerkTypesAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            var items = new List<string>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string dateFilter = fromDate.HasValue && toDate.HasValue
+                ? "WHERE mcs.collection_time >= @fromDate AND mcs.collection_time <= @toDate"
+                : "WHERE mcs.collection_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME())";
+
+            string query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT
+            mcs.clerk_type
+        FROM collect.memory_clerks_stats AS mcs
+        {dateFilter}
+        GROUP BY
+            mcs.clerk_type
+        ORDER BY
+            SUM(mcs.pages_kb) DESC;";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+
+            if (fromDate.HasValue && toDate.HasValue)
+            {
+                command.Parameters.Add(new SqlParameter("@fromDate", SqlDbType.DateTime2) { Value = fromDate.Value });
+                command.Parameters.Add(new SqlParameter("@toDate", SqlDbType.DateTime2) { Value = toDate.Value });
+            }
+            else
+            {
+                command.Parameters.Add(new SqlParameter("@hoursBack", SqlDbType.Int) { Value = hoursBack });
+            }
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                items.Add(reader.GetString(0));
+            }
+
+            return items;
+        }
+
+        /// <summary>
+        /// Gets memory clerk stats for specific clerk types.
+        /// </summary>
+        public async Task<List<MemoryClerksItem>> GetMemoryClerksByTypesAsync(List<string> clerkTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            var items = new List<MemoryClerksItem>();
+            if (clerkTypes == null || clerkTypes.Count == 0) return items;
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string dateFilter = fromDate.HasValue && toDate.HasValue
+                ? "mcs.collection_time >= @fromDate AND mcs.collection_time <= @toDate"
+                : "mcs.collection_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME())";
+
+            // Build parameterized IN list
+            var paramNames = new List<string>();
+            for (int i = 0; i < clerkTypes.Count; i++)
+                paramNames.Add($"@ct{i}");
+
+            string query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT
+            mcs.collection_id,
+            mcs.collection_time,
+            mcs.clerk_type,
+            mcs.memory_node_id,
+            mcs.pages_kb,
+            mcs.virtual_memory_reserved_kb,
+            mcs.virtual_memory_committed_kb,
+            mcs.awe_allocated_kb,
+            mcs.shared_memory_reserved_kb,
+            mcs.shared_memory_committed_kb,
+            mcs.pages_kb_delta,
+            mcs.virtual_memory_reserved_kb_delta,
+            mcs.virtual_memory_committed_kb_delta,
+            mcs.awe_allocated_kb_delta,
+            mcs.shared_memory_reserved_kb_delta,
+            mcs.shared_memory_committed_kb_delta,
+            mcs.sample_interval_seconds,
+            percent_of_total = CONVERT(decimal(5,2), 0),
+            concern_level = N'NORMAL',
+            clerk_description = N''
+        FROM collect.memory_clerks_stats AS mcs
+        WHERE {dateFilter}
+        AND   mcs.clerk_type IN ({string.Join(", ", paramNames)})
+        ORDER BY
+            mcs.collection_time DESC,
+            mcs.pages_kb DESC;";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+
+            if (fromDate.HasValue && toDate.HasValue)
+            {
+                command.Parameters.Add(new SqlParameter("@fromDate", SqlDbType.DateTime2) { Value = fromDate.Value });
+                command.Parameters.Add(new SqlParameter("@toDate", SqlDbType.DateTime2) { Value = toDate.Value });
+            }
+            else
+            {
+                command.Parameters.Add(new SqlParameter("@hoursBack", SqlDbType.Int) { Value = hoursBack });
+            }
+
+            for (int i = 0; i < clerkTypes.Count; i++)
+                command.Parameters.Add(new SqlParameter($"@ct{i}", SqlDbType.NVarChar, 256) { Value = clerkTypes[i] });
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                items.Add(new MemoryClerksItem
+                {
+                    CollectionId = reader.GetInt64(0),
+                    CollectionTime = reader.GetDateTime(1),
+                    ClerkType = reader.GetString(2),
+                    MemoryNodeId = reader.GetInt16(3),
+                    PagesKb = reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                    VirtualMemoryReservedKb = reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                    VirtualMemoryCommittedKb = reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                    AweAllocatedKb = reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                    SharedMemoryReservedKb = reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                    SharedMemoryCommittedKb = reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                    PagesKbDelta = reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                    VirtualMemoryReservedKbDelta = reader.IsDBNull(11) ? null : reader.GetInt64(11),
+                    VirtualMemoryCommittedKbDelta = reader.IsDBNull(12) ? null : reader.GetInt64(12),
+                    AweAllocatedKbDelta = reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                    SharedMemoryReservedKbDelta = reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                    SharedMemoryCommittedKbDelta = reader.IsDBNull(15) ? null : reader.GetInt64(15),
+                    SampleIntervalSeconds = reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                    PercentOfTotal = reader.IsDBNull(17) ? null : reader.GetDecimal(17),
+                    ConcernLevel = reader.GetString(18),
+                    ClerkDescription = reader.GetString(19)
+                });
+            }
+
+            return items;
+        }
+
                 public async Task<List<PlanCacheStatsItem>> GetPlanCacheStatsAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
                 {
                     var items = new List<PlanCacheStatsItem>();

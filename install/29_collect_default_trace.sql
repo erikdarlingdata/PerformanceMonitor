@@ -31,6 +31,9 @@ ALTER PROCEDURE
     @include_memory_events bit = 1, /*include Server Memory Change events*/
     @include_autogrow_events bit = 1, /*include Database Auto Grow/Shrink events*/
     @include_config_events bit = 1, /*include configuration change events*/
+    @include_errorlog_events bit = 1, /*include ErrorLog events*/
+    @include_object_events bit = 1, /*include Object Created/Altered/Deleted events*/
+    @include_audit_events bit = 1, /*include Security Audit events*/
     @debug bit = 0 /*prints additional diagnostic information*/
 )
 WITH RECOMPILE
@@ -321,7 +324,9 @@ BEGIN
             state,
             event_sequence,
             is_system,
-            request_id
+            request_id,
+            duration_us,
+            end_time
         )
         SELECT
             collection_time = @collection_start_time,
@@ -347,7 +352,9 @@ BEGIN
             state = ft.State,
             event_sequence = ft.EventSequence,
             is_system = ft.IsSystem,
-            request_id = ft.RequestID
+            request_id = ft.RequestID,
+            duration_us = ft.Duration,
+            end_time = ft.EndTime
         FROM sys.traces AS st
         CROSS APPLY sys.fn_trace_gettable
         (
@@ -370,19 +377,36 @@ BEGIN
             /*Server Memory Change events*/
             (@include_memory_events = 1 AND te.name LIKE N'%Server Memory Change%')
             OR
-            /*Database Auto Grow/Shrink events*/
-            (@include_autogrow_events = 1 AND 
-             (te.name LIKE N'%Data File Auto Grow%' OR 
+            /*Database Auto Grow/Shrink events (only collect if duration > 1 second)*/
+            (@include_autogrow_events = 1 AND
+             ISNULL(ft.Duration, 0) > 1000000 AND
+             (te.name LIKE N'%Data File Auto Grow%' OR
               te.name LIKE N'%Log File Auto Grow%' OR
-              te.name LIKE N'%Data File Auto Shrink%' OR 
+              te.name LIKE N'%Data File Auto Shrink%' OR
               te.name LIKE N'%Log File Auto Shrink%'))
             OR
             /*Configuration change events*/
-            (@include_config_events = 1 AND 
+            (@include_config_events = 1 AND
              (te.name LIKE N'%Server Configuration Change%' OR
               te.name LIKE N'%Database Configuration Change%' OR
               te.name LIKE N'%Alter Database%'))
-
+            OR
+            /*ErrorLog events*/
+            (@include_errorlog_events = 1 AND te.name = N'ErrorLog')
+            OR
+            /*Object DDL events (exclude tempdb and auto-stats)*/
+            (@include_object_events = 1 AND
+             ISNULL(ft.DatabaseID, 0) <> 2 AND
+             ISNULL(ft.ObjectName, N'') NOT LIKE N'[_]WA[_]%' AND
+             (te.name = N'Object:Created' OR
+              te.name = N'Object:Altered' OR
+              te.name = N'Object:Deleted'))
+            OR
+            /*Security Audit events*/
+            (@include_audit_events = 1 AND
+             (te.name = N'Audit Change Audit Event' OR
+              te.name = N'Audit DBCC Event' OR
+              te.name = N'Audit Server Alter Trace Event'))
         )
         /*
         Avoid duplicates by checking if we've already processed this event
@@ -443,6 +467,9 @@ BEGIN
             include_memory_events = @include_memory_events,
             include_autogrow_events = @include_autogrow_events,
             include_config_events = @include_config_events,
+            include_errorlog_events = @include_errorlog_events,
+            include_object_events = @include_object_events,
+            include_audit_events = @include_audit_events,
             success = 1;
 
     END TRY
