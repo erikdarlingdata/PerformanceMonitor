@@ -109,6 +109,23 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartContextMenus();
             Loaded += OnLoaded;
 
+            // Apply dark theme immediately so charts don't flash white before data loads
+            TabHelpers.ApplyDarkModeToChart(LatchStatsChart);
+            TabHelpers.ApplyDarkModeToChart(SpinlockStatsChart);
+            TabHelpers.ApplyDarkModeToChart(TempdbStatsChart);
+            TabHelpers.ApplyDarkModeToChart(TempDbLatencyChart);
+            TabHelpers.ApplyDarkModeToChart(SessionStatsChart);
+            TabHelpers.ApplyDarkModeToChart(UserDbReadLatencyChart);
+            TabHelpers.ApplyDarkModeToChart(UserDbWriteLatencyChart);
+            TabHelpers.ApplyDarkModeToChart(FileIoReadThroughputChart);
+            TabHelpers.ApplyDarkModeToChart(FileIoWriteThroughputChart);
+            TabHelpers.ApplyDarkModeToChart(PerfmonCountersChart);
+            TabHelpers.ApplyDarkModeToChart(WaitStatsDetailChart);
+            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsCpuChart);
+            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsTempdbChart);
+            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsMemoryChart);
+            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsPerfmonChart);
+
             _sessionStatsHover = new Helpers.ChartHoverHelper(SessionStatsChart, "sessions");
             _latchStatsHover = new Helpers.ChartHoverHelper(LatchStatsChart, "ms/sec");
             _spinlockStatsHover = new Helpers.ChartHoverHelper(SpinlockStatsChart, "collisions/sec");
