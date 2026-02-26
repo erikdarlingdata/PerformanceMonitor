@@ -12,11 +12,19 @@
                 <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
             <ContextMenu x:Key="DataGridContextMenu">
-                <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
-                <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
-                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
+                </MenuItem>
                 <Separator/>
-                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
+                </MenuItem>
             </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>

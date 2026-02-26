@@ -1848,7 +1848,9 @@ RETURN
             query_id = qsd.query_id,
             avg_duration_ms = AVG(qsd.avg_duration / 1000.0),
             avg_cpu_time_ms = AVG(qsd.avg_cpu_time / 1000.0),
-            avg_logical_io_reads = AVG(qsd.avg_logical_io_reads)
+            avg_logical_io_reads = AVG(qsd.avg_logical_io_reads),
+            exec_count = SUM(qsd.count_executions),
+            plan_count = COUNT(DISTINCT qsd.plan_id)
         FROM collect.query_store_data AS qsd
         WHERE qsd.server_last_execution_time < @start_date
         GROUP BY
@@ -1864,6 +1866,8 @@ RETURN
             avg_duration_ms = AVG(qsd.avg_duration / 1000.0),
             avg_cpu_time_ms = AVG(qsd.avg_cpu_time / 1000.0),
             avg_logical_io_reads = AVG(qsd.avg_logical_io_reads),
+            exec_count = SUM(qsd.count_executions),
+            plan_count = COUNT(DISTINCT qsd.plan_id),
             last_execution_time = MAX(qsd.server_last_execution_time)
         FROM collect.query_store_data AS qsd
         WHERE qsd.server_last_execution_time >= @start_date
@@ -1887,6 +1891,12 @@ RETURN
         recent_reads = r.avg_logical_io_reads,
         io_regression_percent =
             CONVERT(decimal(10,2), (r.avg_logical_io_reads - b.avg_logical_io_reads) * 100.0 / NULLIF(b.avg_logical_io_reads, 0)),
+        additional_duration_ms =
+            CONVERT(decimal(18,2), (r.avg_duration_ms - b.avg_duration_ms) * r.exec_count),
+        baseline_exec_count = b.exec_count,
+        recent_exec_count = r.exec_count,
+        baseline_plan_count = b.plan_count,
+        recent_plan_count = r.plan_count,
         severity =
             CASE
                 WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 100 THEN N'CRITICAL'
@@ -1894,7 +1904,7 @@ RETURN
                 WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 25 THEN N'MEDIUM'
                 ELSE N'LOW'
             END,
-        query_text_sample = CONVERT(nvarchar(500), r.query_text_sample),
+        query_text_sample = r.query_text_sample,
         last_execution_time = r.last_execution_time
     FROM recent_performance AS r
     JOIN baseline_performance AS b
@@ -1902,7 +1912,7 @@ RETURN
       AND b.query_id = r.query_id
     WHERE (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25
     ORDER BY
-        (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) DESC
+        additional_duration_ms DESC
 );
 GO
 
