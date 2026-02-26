@@ -89,6 +89,7 @@ A single WPF desktop application that monitors SQL Server instances remotely. Qu
 | Agent job monitoring | Duration vs historical avg/p95 | Duration vs historical avg/p95 |
 | Data storage | SQL Server (on target) | DuckDB + Parquet (local) |
 | Execution plans | Collected and stored | Download on demand |
+| Graphical plan viewer | Built-in with analysis rules | Built-in with analysis rules |
 | Community tools (sp_WhoIsActive, sp_BlitzLock) | Installed automatically | Not needed |
 | Alerts (tray + email) | Blocking, deadlocks, CPU | Blocking, deadlocks, CPU |
 | Dashboard | Separate app | Built-in |
@@ -130,7 +131,9 @@ PerformanceMonitorInstaller.exe YourServerName --reinstall
 PerformanceMonitorInstaller.exe YourServerName sa YourPassword --reinstall
 ```
 
-The installer automatically tests the connection, executes SQL scripts, downloads community dependencies, creates SQL Agent jobs, and runs initial data collection. A GUI installer (`InstallerGui/`) is also available with the same functionality.
+The installer automatically tests the connection, detects existing installations and applies upgrade scripts if needed, executes SQL scripts, downloads community dependencies, creates SQL Agent jobs, and runs initial data collection.
+
+A GUI installer (`PerformanceMonitorInstallerGui.exe`) is also included in the release with the same functionality — same upgrade detection, same scripts, same results, with a graphical interface.
 
 ### CLI Installer Options
 
@@ -139,6 +142,7 @@ The installer automatically tests the connection, executes SQL scripts, download
 | `SERVER` | SQL Server instance name (positional, required) |
 | `USERNAME PASSWORD` | SQL Authentication credentials (positional, optional) |
 | `--reinstall` | Drop existing database and perform clean install |
+| `--reset-schedule` | Reset collection schedule to recommended defaults during upgrade |
 | `--encrypt=optional\|mandatory\|strict` | Connection encryption level (default: mandatory) |
 | `--trust-cert` | Trust server certificate without validation (default: require valid cert) |
 
@@ -273,6 +277,7 @@ Data starts flowing within 1-5 minutes depending on collector schedules.
 ### Lite Data Storage
 
 - **Hot data** in DuckDB (7-90 days, configurable)
+- **Automatic maintenance** — when DuckDB reaches 512 MB, all data is archived to Parquet and the database reinitializes, keeping inserts fast and preventing bloat
 - **Archive** to Parquet with ZSTD compression (~10x reduction, 30-180 days configurable)
 - Typical size: ~50-200 MB per server per week
 
@@ -296,10 +301,10 @@ All configuration lives in the `config/` folder:
 | Tab | Contents |
 |-----|----------|
 | **Overview** | Resource overview, daily summary, critical issues, server config changes, database config changes, trace flag changes, collection health |
-| **Performance** | Performance trends, expensive queries, active queries, query stats, procedure stats, Query Store, Query Store regressions, query trace patterns |
-| **Resource Metrics** | Server trends, wait stats, TempDB, file I/O latency, perfmon counters, default trace events, trace analysis, session stats, latch stats, spinlock stats |
+| **Performance** | Performance trends, expensive queries, active queries (with interactive "Run Now"), query stats, procedure stats, Query Store, Query Store regressions, query trace patterns, graphical plan viewer with analysis rules |
+| **Resource Metrics** | Server trends, wait stats, TempDB, file I/O latency & throughput, perfmon counters (with auto-select packs), CPU scheduler pressure, default trace events, trace analysis, session stats, latch stats, spinlock stats |
 | **Memory** | Memory overview, grants, clerks, plan cache, memory pressure events |
-| **Locking** | Blocking chains, deadlocks, blocking/deadlock trends |
+| **Locking** | Blocking chains, deadlocks, blocking/deadlock trends, current waits |
 | **System Events** | Corruption events, contention, errors, I/O issues, scheduler issues, memory conditions |
 
 Plus a NOC-style landing page with server health cards (green/yellow/red severity indicators).
@@ -308,15 +313,15 @@ Plus a NOC-style landing page with server health cards (green/yellow/red severit
 
 | Tab | Contents |
 |-----|----------|
-| **Active Queries** | Running queries with session details, wait types, blocking, DOP, memory grants |
+| **Active Queries** | Running queries with session details, wait types, blocking, DOP, memory grants, interactive "Run Now" button, graphical plan viewer with analysis rules |
 | **Wait Stats** | Filterable wait statistics chart with delta calculations |
-| **CPU** | SQL Server CPU vs Other Processes over time |
-| **Memory** | Physical memory overview, SQL Server memory trend, memory clerk breakdown |
+| **CPU** | SQL Server CPU vs Other Processes over time, CPU scheduler pressure |
+| **Memory** | Physical memory overview, SQL Server memory trend, memory clerk breakdown, memory grant details |
 | **Queries** | Performance trends, top queries and procedures by duration, Query Store integration |
-| **File I/O** | Read/write I/O trends per database file |
+| **File I/O** | Read/write I/O trends, file-level latency & throughput per database file |
 | **TempDB** | Space usage breakdown and TempDB file I/O |
-| **Blocking** | Blocking/deadlock trends, blocked process reports, deadlock history |
-| **Perfmon** | Selectable SQL Server performance counters over time |
+| **Blocking** | Blocking/deadlock trends, blocked process reports, deadlock history, current waits |
+| **Perfmon** | Selectable SQL Server performance counters with auto-select packs (General Throughput, Memory Pressure, CPU/Compilation, I/O Pressure, TempDB Pressure, Lock/Blocking) |
 | **Configuration** | Server configuration, database configuration, scoped configuration, trace flags |
 
 Both editions feature auto-refresh, configurable time ranges, right-click CSV export, system tray integration, and dark theme.
@@ -518,8 +523,8 @@ dotnet build Lite/PerformanceMonitorLite.csproj
 # CLI Installer (self-contained)
 dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
 
-# GUI Installer
-dotnet publish InstallerGui/InstallerGui.csproj -c Release -r win-x64 --self-contained
+# GUI Installer (self-contained)
+dotnet publish InstallerGui/InstallerGui.csproj -c Release
 ```
 
 ---

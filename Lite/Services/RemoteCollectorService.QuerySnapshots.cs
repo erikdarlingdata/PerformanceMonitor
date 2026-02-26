@@ -70,7 +70,7 @@ SELECT /* PerformanceMonitorLite */
 FROM sys.dm_exec_requests AS der
 JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
-OUTER APPLY sys.dm_exec_sql_text(der.plan_handle) AS dest
+OUTER APPLY sys.dm_exec_sql_text(COALESCE(der.sql_handle, der.plan_handle)) AS dest
 OUTER APPLY sys.dm_exec_text_query_plan(der.plan_handle, der.statement_start_offset, der.statement_end_offset) AS deqp
 {1}
 WHERE der.session_id <> @@SPID

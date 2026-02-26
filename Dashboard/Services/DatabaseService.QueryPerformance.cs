@@ -2882,7 +2882,7 @@ SELECT
 FROM sys.dm_exec_requests AS der
 JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
-OUTER APPLY sys.dm_exec_sql_text(der.plan_handle) AS dest
+OUTER APPLY sys.dm_exec_sql_text(COALESCE(der.sql_handle, der.plan_handle)) AS dest
 OUTER APPLY sys.dm_exec_text_query_plan(der.plan_handle, der.statement_start_offset, der.statement_end_offset) AS deqp
 OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs
 WHERE der.session_id <> @@SPID
@@ -2919,7 +2919,7 @@ OPTION(MAXDOP 1, RECOMPILE);";
                     Reads = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
                     Writes = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
                     LogicalReads = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
-                    GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0m : reader.GetDecimal(16),
+                    GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0m : Convert.ToDecimal(reader.GetValue(16)),
                     TransactionIsolationLevel = reader.IsDBNull(17) ? null : reader.GetString(17),
                     Dop = reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)),
                     ParallelWorkerCount = reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)),
@@ -2927,7 +2927,7 @@ OPTION(MAXDOP 1, RECOMPILE);";
                     HostName = reader.IsDBNull(21) ? null : reader.GetString(21),
                     ProgramName = reader.IsDBNull(22) ? null : reader.GetString(22),
                     OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
-                    PercentComplete = reader.IsDBNull(24) ? 0m : reader.GetDecimal(24)
+                    PercentComplete = reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24))
                 });
             }
 
