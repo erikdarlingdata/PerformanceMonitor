@@ -11,6 +11,13 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+            <ContextMenu x:Key="DataGridContextMenu">
+                <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
+                <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
+                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+                <Separator/>
+                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+            </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>
     <Grid Margin="16">
@@ -32,7 +39,8 @@
                   SelectionMode="Single"
                   Background="Transparent" BorderThickness="0"
                   HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                  MouseDoubleClick="ServersGrid_MouseDoubleClick">
+                  MouseDoubleClick="ServersGrid_MouseDoubleClick"
+                  ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayName}" Width="150"/>
                 <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="200"/>

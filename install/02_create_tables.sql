@@ -19,6 +19,15 @@ USE PerformanceMonitor;
 GO
 
 /*
+Cleanup: session_wait_stats removed in v1.4
+*/
+IF OBJECT_ID(N'report.session_wait_analysis', N'V') IS NOT NULL DROP VIEW report.session_wait_analysis;
+IF OBJECT_ID(N'collect.session_wait_stats_collector', N'P') IS NOT NULL DROP PROCEDURE collect.session_wait_stats_collector;
+IF OBJECT_ID(N'collect.session_wait_stats', N'U') IS NOT NULL DROP TABLE collect.session_wait_stats;
+IF OBJECT_ID(N'config.collection_schedule', N'U') IS NOT NULL DELETE FROM config.collection_schedule WHERE collector_name = N'session_wait_stats_collector';
+GO
+
+/*
 Collection tables for the 7 core collectors
 */
 
@@ -681,6 +690,7 @@ BEGIN
     (
         collection_id bigint IDENTITY NOT NULL,
         collection_time datetime2(7) NOT NULL DEFAULT SYSDATETIME(),
+        server_start_time datetime2(7) NOT NULL,
         resource_semaphore_id smallint NOT NULL,
         pool_id integer NOT NULL,
         target_memory_mb decimal(19,2) NULL,
@@ -693,16 +703,15 @@ BEGIN
         waiter_count integer NULL,
         timeout_error_count bigint NULL,
         forced_grant_count bigint NULL,
-        /*Pressure warnings*/
-        available_memory_pressure_warning bit NULL,
-        waiter_count_warning bit NULL,
-        timeout_error_warning bit NULL,
-        forced_grant_warning bit NULL,
-        CONSTRAINT 
-        PK_memory_grant_stats 
-        PRIMARY KEY CLUSTERED 
-            (collection_time, collection_id) 
-        WITH 
+        /*Delta columns calculated by framework*/
+        timeout_error_count_delta bigint NULL,
+        forced_grant_count_delta bigint NULL,
+        sample_interval_seconds integer NULL,
+        CONSTRAINT
+        PK_memory_grant_stats
+        PRIMARY KEY CLUSTERED
+            (collection_time, collection_id)
+        WITH
             (DATA_COMPRESSION = PAGE)
     );
 
@@ -1275,49 +1284,6 @@ BEGIN
     );
 
     PRINT 'Created collect.waiting_tasks table';
-END;
-
-/*
-Table: collect.session_wait_stats
-Purpose: Captures per-session wait statistics from sys.dm_exec_session_wait_stats
-Collection Frequency: Every 60 seconds (alongside query snapshots)
-Type: Snapshot (resets on session end)
-Dependencies: None
-Notes: Correlates with query_snapshots to show waits for specific sessions
-       Requires SQL Server 2016 SP1 or later
-*/
-IF OBJECT_ID(N'collect.session_wait_stats', N'U') IS NULL
-BEGIN
-    CREATE TABLE
-        collect.session_wait_stats
-    (
-        collection_id bigint IDENTITY NOT NULL,
-        collection_time datetime2(7) NOT NULL
-            DEFAULT SYSDATETIME(),
-        session_id integer NOT NULL,
-        wait_type nvarchar(60) NOT NULL,
-        waiting_tasks_count bigint NOT NULL,
-        wait_time_ms bigint NOT NULL,
-        max_wait_time_ms bigint NOT NULL,
-        signal_wait_time_ms bigint NOT NULL,
-        /*Session context for correlation*/
-        database_id integer NULL,
-        database_name sysname NULL,
-        login_name nvarchar(128) NULL,
-        host_name nvarchar(128) NULL,
-        program_name nvarchar(128) NULL,
-        /*Query context if executing*/
-        sql_handle varbinary(64) NULL,
-        query_text nvarchar(max) NULL,
-        CONSTRAINT
-            PK_session_wait_stats
-        PRIMARY KEY CLUSTERED
-            (collection_time, collection_id)
-        WITH
-            (DATA_COMPRESSION = PAGE)
-    );
-
-    PRINT 'Created collect.session_wait_stats table';
 END;
 
 /*

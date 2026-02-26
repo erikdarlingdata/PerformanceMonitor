@@ -113,6 +113,55 @@ LIMIT $3";
 
         return items;
     }
+
+    /// <summary>
+    /// Gets collection log entries for a specific collector on a server.
+    /// </summary>
+    public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, int hoursBack = 168)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT
+    collector_name,
+    collection_time,
+    duration_ms,
+    sql_duration_ms,
+    duckdb_duration_ms,
+    rows_collected,
+    status,
+    error_message,
+    server_name
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = $2
+AND   collection_time >= $3
+ORDER BY collection_time DESC";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+
+        var items = new List<CollectionLogRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectionLogRow
+            {
+                CollectorName = reader.GetString(0),
+                CollectionTime = reader.GetDateTime(1),
+                DurationMs = reader.IsDBNull(2) ? null : (int?)Convert.ToInt32(reader.GetValue(2)),
+                SqlDurationMs = reader.IsDBNull(3) ? null : (int?)Convert.ToInt32(reader.GetValue(3)),
+                DuckDbDurationMs = reader.IsDBNull(4) ? null : (int?)Convert.ToInt32(reader.GetValue(4)),
+                RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
+                Status = reader.GetString(6),
+                ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
+            });
+        }
+
+        return items;
+    }
 }
 
 public class CollectionLogRow

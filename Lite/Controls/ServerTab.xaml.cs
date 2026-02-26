@@ -11,13 +11,17 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Controls.Primitives;
+using System.ComponentModel;
+using System.Windows.Data;
 using System.Windows.Threading;
+using Microsoft.Data.SqlClient;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
@@ -45,13 +49,25 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _tempDbFileIoHover;
     private Helpers.ChartHoverHelper? _fileIoReadHover;
     private Helpers.ChartHoverHelper? _fileIoWriteHover;
+    private Helpers.ChartHoverHelper? _fileIoReadThroughputHover;
+    private Helpers.ChartHoverHelper? _fileIoWriteThroughputHover;
     private Helpers.ChartHoverHelper? _collectorDurationHover;
     private Helpers.ChartHoverHelper? _queryDurationTrendHover;
     private Helpers.ChartHoverHelper? _procDurationTrendHover;
     private Helpers.ChartHoverHelper? _queryStoreDurationTrendHover;
     private Helpers.ChartHoverHelper? _executionCountTrendHover;
+    private Helpers.ChartHoverHelper? _lockWaitTrendHover;
     private Helpers.ChartHoverHelper? _blockingTrendHover;
     private Helpers.ChartHoverHelper? _deadlockTrendHover;
+    private Helpers.ChartHoverHelper? _memoryClerksHover;
+    private Helpers.ChartHoverHelper? _memoryGrantSizingHover;
+    private Helpers.ChartHoverHelper? _memoryGrantActivityHover;
+    private Helpers.ChartHoverHelper? _currentWaitsDurationHover;
+    private Helpers.ChartHoverHelper? _currentWaitsBlockedHover;
+
+    /* Memory clerks picker */
+    private List<SelectableItem> _memoryClerkItems = new();
+    private bool _isUpdatingMemoryClerkSelection;
 
     /* Column filtering */
     private Popup? _filterPopup;
@@ -70,15 +86,12 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<CollectorHealthRow>? _collectionHealthFilterMgr;
     private DataGridFilterManager<CollectionLogRow>? _collectionLogFilterMgr;
+    private DateTime? _dailySummaryDate; // null = today
+    private CancellationTokenSource? _actualPlanCts;
 
-    private static readonly HashSet<string> _defaultPerfmonCounters = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Batch Requests/sec",
-        "Deadlocks/sec",
-        "Query Optimizations/sec",
-        "SQL Compilations/sec",
-        "SQL Re-Compilations/sec"
-    };
+    private static readonly HashSet<string> _defaultPerfmonCounters = new(
+        Helpers.PerfmonPacks.Packs["General Throughput"],
+        StringComparer.OrdinalIgnoreCase);
 
     private static readonly string[] SeriesColors = new[]
     {
@@ -136,6 +149,15 @@ public partial class ServerTab : UserControl
         /* Initialize column filter managers */
         InitializeFilterManagers();
 
+        /* Fix DataGrid copy — StackPanel headers copy as type name without this */
+        foreach (var grid in new DataGrid[] { QuerySnapshotsGrid, QueryStatsGrid, ProcedureStatsGrid,
+            QueryStoreGrid, BlockedProcessReportGrid, DeadlockGrid, RunningJobsGrid,
+            ServerConfigGrid, DatabaseConfigGrid, DatabaseScopedConfigGrid, TraceFlagsGrid,
+            CollectionHealthGrid, CollectionLogGrid })
+        {
+            grid.CopyingRowClipboardContent += Helpers.DataGridClipboardBehavior.FixHeaderCopy;
+        }
+
         /* Chart hover tooltips */
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
         _perfmonHover = new Helpers.ChartHoverHelper(PerfmonChart, "");
@@ -145,13 +167,46 @@ public partial class ServerTab : UserControl
         _tempDbFileIoHover = new Helpers.ChartHoverHelper(TempDbFileIoChart, "ms");
         _fileIoReadHover = new Helpers.ChartHoverHelper(FileIoReadChart, "ms");
         _fileIoWriteHover = new Helpers.ChartHoverHelper(FileIoWriteChart, "ms");
+        _fileIoReadThroughputHover = new Helpers.ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
+        _fileIoWriteThroughputHover = new Helpers.ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
         _collectorDurationHover = new Helpers.ChartHoverHelper(CollectorDurationChart, "ms");
         _queryDurationTrendHover = new Helpers.ChartHoverHelper(QueryDurationTrendChart, "ms/sec");
         _procDurationTrendHover = new Helpers.ChartHoverHelper(ProcDurationTrendChart, "ms/sec");
         _queryStoreDurationTrendHover = new Helpers.ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec");
         _executionCountTrendHover = new Helpers.ChartHoverHelper(ExecutionCountTrendChart, "/sec");
+        _lockWaitTrendHover = new Helpers.ChartHoverHelper(LockWaitTrendChart, "ms/sec");
         _blockingTrendHover = new Helpers.ChartHoverHelper(BlockingTrendChart, "incidents");
         _deadlockTrendHover = new Helpers.ChartHoverHelper(DeadlockTrendChart, "deadlocks");
+        _memoryClerksHover = new Helpers.ChartHoverHelper(MemoryClerksChart, "MB");
+        _memoryGrantSizingHover = new Helpers.ChartHoverHelper(MemoryGrantSizingChart, "MB");
+        _memoryGrantActivityHover = new Helpers.ChartHoverHelper(MemoryGrantActivityChart, "");
+        _currentWaitsDurationHover = new Helpers.ChartHoverHelper(CurrentWaitsDurationChart, "ms");
+        _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
+
+        /* Chart context menus (right-click save/export) */
+        Helpers.ContextMenuHelper.SetupChartContextMenu(WaitStatsChart, "Wait_Stats");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(QueryDurationTrendChart, "Query_Duration_Trends");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadChart, "File_IO_Read_Latency");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteChart, "File_IO_Write_Latency");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadThroughputChart, "File_IO_Read_Throughput");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteThroughputChart, "File_IO_Write_Throughput");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbChart, "TempDB_Stats");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbFileIoChart, "TempDB_File_IO");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(LockWaitTrendChart, "Lock_Wait_Trends");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(BlockingTrendChart, "Blocking_Trends");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(DeadlockTrendChart, "Deadlock_Trends");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(PerfmonChart, "Perfmon_Counters");
+        Helpers.ContextMenuHelper.SetupChartContextMenu(CollectorDurationChart, "Collector_Duration");
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -449,18 +504,21 @@ public partial class ServerTab : UserControl
             var cpuTask = _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate);
             var memoryTask = _dataService.GetLatestMemoryStatsAsync(_serverId);
             var memoryTrendTask = _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate);
-            var queryStatsTask = _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate);
-            var procStatsTask = _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate);
+            var queryStatsTask = _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
+            var procStatsTask = _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
             var fileIoTask = _dataService.GetLatestFileIoStatsAsync(_serverId);
             var fileIoTrendTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate);
+            var fileIoThroughputTask = _dataService.GetFileIoThroughputTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var tempDbTask = _dataService.GetTempDbTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var tempDbFileIoTask = _dataService.GetTempDbFileIoTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var deadlockTask = _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate);
             var blockedProcessTask = _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate);
             var waitTypesTask = _dataService.GetDistinctWaitTypesAsync(_serverId, hoursBack, fromDate, toDate);
+            var memoryClerkTypesTask = _dataService.GetDistinctMemoryClerkTypesAsync(_serverId, hoursBack, fromDate, toDate);
             var perfmonCountersTask = _dataService.GetDistinctPerfmonCountersAsync(_serverId, hoursBack, fromDate, toDate);
             var queryStoreTask = _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate);
             var memoryGrantTrendTask = _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate);
+            var memoryGrantChartTask = _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate);
             var serverConfigTask = SafeQueryAsync(() => _dataService.GetLatestServerConfigAsync(_serverId));
             var databaseConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseConfigAsync(_serverId));
             var databaseScopedConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseScopedConfigAsync(_serverId));
@@ -468,26 +526,31 @@ public partial class ServerTab : UserControl
             var runningJobsTask = SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId));
             var collectionHealthTask = SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId));
             var collectionLogTask = SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack));
+            var dailySummaryTask = _dataService.GetDailySummaryAsync(_serverId, _dailySummaryDate);
             /* Core data tasks */
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
-                queryStatsTask, procStatsTask, fileIoTask, fileIoTrendTask, tempDbTask, tempDbFileIoTask,
-                deadlockTask, blockedProcessTask, waitTypesTask, perfmonCountersTask,
-                queryStoreTask, memoryGrantTrendTask,
+                queryStatsTask, procStatsTask, fileIoTask, fileIoTrendTask, fileIoThroughputTask, tempDbTask, tempDbFileIoTask,
+                deadlockTask, blockedProcessTask, waitTypesTask, memoryClerkTypesTask, perfmonCountersTask,
+                queryStoreTask, memoryGrantTrendTask, memoryGrantChartTask,
                 serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
-                runningJobsTask, collectionHealthTask, collectionLogTask);
+                runningJobsTask, collectionHealthTask, collectionLogTask, dailySummaryTask);
 
             /* Trend chart tasks - run separately so failures don't kill the whole refresh */
+            var lockWaitTrendTask = SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var blockingTrendTask = SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var deadlockTrendTask = SafeQueryAsync(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var queryDurationTrendTask = SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var procDurationTrendTask = SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var queryStoreDurationTrendTask = SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var executionCountTrendTask = SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var currentWaitsDurationTask = SafeQueryAsync(() => _dataService.GetWaitingTaskTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var currentWaitsBlockedTask = SafeQueryAsync(() => _dataService.GetBlockedSessionTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
             await System.Threading.Tasks.Task.WhenAll(
-                blockingTrendTask, deadlockTrendTask,
-                queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask);
+                lockWaitTrendTask, blockingTrendTask, deadlockTrendTask,
+                queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask,
+                currentWaitsDurationTask, currentWaitsBlockedTask);
 
             loadSw.Stop();
 
@@ -502,11 +565,15 @@ public partial class ServerTab : UserControl
 
             /* Update grids (via filter managers to preserve active filters) */
             _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
+            LiveSnapshotIndicator.Text = "";
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
+            SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
             _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(deadlockTask.Result));
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
+            SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
             _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
             _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
@@ -514,6 +581,11 @@ public partial class ServerTab : UserControl
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
+            var dailySummary = await dailySummaryTask;
+            DailySummaryGrid.ItemsSource = dailySummary != null
+                ? new List<DailySummaryRow> { dailySummary } : null;
+            DailySummaryNoData.Visibility = dailySummary == null
+                ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
             UpdateCollectorDurationChart(collectionLogTask.Result);
 
             /* Update memory summary */
@@ -525,19 +597,26 @@ public partial class ServerTab : UserControl
             UpdateTempDbChart(tempDbTask.Result);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result);
             UpdateFileIoCharts(fileIoTrendTask.Result);
+            UpdateFileIoThroughputCharts(fileIoThroughputTask.Result);
+            UpdateLockWaitTrendChart(lockWaitTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateBlockingTrendChart(blockingTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateDeadlockTrendChart(deadlockTrendTask.Result, hoursBack, fromDate, toDate);
+            UpdateCurrentWaitsDurationChart(currentWaitsDurationTask.Result, hoursBack, fromDate, toDate);
+            UpdateCurrentWaitsBlockedChart(currentWaitsBlockedTask.Result, hoursBack, fromDate, toDate);
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result);
             UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result);
             UpdateExecutionCountTrendChart(executionCountTrendTask.Result);
+            UpdateMemoryGrantCharts(memoryGrantChartTask.Result);
 
             /* Populate pickers (preserve selections) */
             PopulateWaitTypePicker(waitTypesTask.Result);
+            PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             PopulatePerfmonPicker(perfmonCountersTask.Result);
 
             /* Update picker-driven charts */
             await UpdateWaitStatsChartFromPickerAsync();
+            await UpdateMemoryClerksChartFromPickerAsync();
             await UpdatePerfmonChartFromPickerAsync();
 
             ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss}";
@@ -584,20 +663,28 @@ public partial class ServerTab : UserControl
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";
+            AvailablePhysicalMemoryText.Text = "--";
             TotalServerMemoryText.Text = "--";
             TargetServerMemoryText.Text = "--";
             BufferPoolText.Text = "--";
             PlanCacheText.Text = "--";
+            TotalPageFileText.Text = "--";
+            AvailablePageFileText.Text = "--";
             MemoryStateText.Text = "--";
+            SqlMemoryModelText.Text = "--";
             return;
         }
 
         PhysicalMemoryText.Text = FormatMb(stats.TotalPhysicalMemoryMb);
+        AvailablePhysicalMemoryText.Text = FormatMb(stats.AvailablePhysicalMemoryMb);
         TotalServerMemoryText.Text = FormatMb(stats.TotalServerMemoryMb);
         TargetServerMemoryText.Text = FormatMb(stats.TargetServerMemoryMb);
         BufferPoolText.Text = FormatMb(stats.BufferPoolMb);
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
+        TotalPageFileText.Text = FormatMb(stats.TotalPageFileMb);
+        AvailablePageFileText.Text = FormatMb(stats.AvailablePageFileMb);
         MemoryStateText.Text = stats.SystemMemoryState;
+        SqlMemoryModelText.Text = stats.SqlMemoryModel;
     }
 
     private static string FormatMb(double mb)
@@ -695,6 +782,96 @@ public partial class ServerTab : UserControl
         MemoryChart.Refresh();
     }
 
+    private void UpdateMemoryGrantCharts(List<MemoryGrantChartPoint> data)
+    {
+        ClearChart(MemoryGrantSizingChart);
+        ClearChart(MemoryGrantActivityChart);
+        _memoryGrantSizingHover?.Clear();
+        _memoryGrantActivityHover?.Clear();
+        ApplyDarkTheme(MemoryGrantSizingChart);
+        ApplyDarkTheme(MemoryGrantActivityChart);
+
+        if (data.Count == 0)
+        {
+            MemoryGrantSizingChart.Refresh();
+            MemoryGrantActivityChart.Refresh();
+            return;
+        }
+
+        var poolIds = data.Select(d => d.PoolId).Distinct().OrderBy(p => p).ToList();
+        int colorIndex = 0;
+
+        /* Chart 1: Memory Grant Sizing — Available, Granted, Used MB per pool */
+        double sizingMax = 0;
+        var sizingMetrics = new (string Name, Func<MemoryGrantChartPoint, double> Selector)[]
+        {
+            ("Available MB", d => d.AvailableMemoryMb),
+            ("Granted MB", d => d.GrantedMemoryMb),
+            ("Used MB", d => d.UsedMemoryMb)
+        };
+
+        foreach (var poolId in poolIds)
+        {
+            var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
+            var times = poolData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+
+            foreach (var metric in sizingMetrics)
+            {
+                var values = poolData.Select(d => metric.Selector(d)).ToArray();
+                var plot = MemoryGrantSizingChart.Plot.Add.Scatter(times, values);
+                var label = $"Pool {poolId}: {metric.Name}";
+                plot.LegendText = label;
+                plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
+                _memoryGrantSizingHover?.Add(plot, label);
+                if (values.Length > 0) sizingMax = Math.Max(sizingMax, values.Max());
+                colorIndex++;
+            }
+        }
+
+        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(MemoryGrantSizingChart);
+        MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
+        SetChartYLimitsWithLegendPadding(MemoryGrantSizingChart, 0, sizingMax > 0 ? sizingMax : 100);
+        ShowChartLegend(MemoryGrantSizingChart);
+        MemoryGrantSizingChart.Refresh();
+
+        /* Chart 2: Memory Grant Activity — Grantees, Waiters, Timeouts, Forced per pool */
+        double activityMax = 0;
+        colorIndex = 0;
+        var activityMetrics = new (string Name, Func<MemoryGrantChartPoint, double> Selector)[]
+        {
+            ("Grantees", d => d.GranteeCount),
+            ("Waiters", d => d.WaiterCount),
+            ("Timeouts", d => d.TimeoutErrorCountDelta),
+            ("Forced Grants", d => d.ForcedGrantCountDelta)
+        };
+
+        foreach (var poolId in poolIds)
+        {
+            var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
+            var times = poolData.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+
+            foreach (var metric in activityMetrics)
+            {
+                var values = poolData.Select(d => metric.Selector(d)).ToArray();
+                var plot = MemoryGrantActivityChart.Plot.Add.Scatter(times, values);
+                var label = $"Pool {poolId}: {metric.Name}";
+                plot.LegendText = label;
+                plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
+                _memoryGrantActivityHover?.Add(plot, label);
+                if (values.Length > 0) activityMax = Math.Max(activityMax, values.Max());
+                colorIndex++;
+            }
+        }
+
+        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(MemoryGrantActivityChart);
+        MemoryGrantActivityChart.Plot.YLabel("Count");
+        SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
+        ShowChartLegend(MemoryGrantActivityChart);
+        MemoryGrantActivityChart.Refresh();
+    }
+
     private void UpdateTempDbChart(List<TempDbRow> data)
     {
         ClearChart(TempDbChart);
@@ -788,15 +965,17 @@ public partial class ServerTab : UserControl
 
         if (data.Count == 0) { FileIoReadChart.Refresh(); FileIoWriteChart.Refresh(); return; }
 
-        /* Group by database, limit to top 12 by total stall */
+        /* Group by file, limit to top 10 by total stall */
         var databases = data
-            .GroupBy(d => d.DatabaseName)
+            .GroupBy(d => $"{d.DatabaseName}.{d.FileName}")
             .OrderByDescending(g => g.Sum(d => d.AvgReadLatencyMs + d.AvgWriteLatencyMs))
-            .Take(12)
+            .Take(10)
             .ToList();
 
         double readMax = 0, writeMax = 0;
         int colorIdx = 0;
+
+        bool hasQueuedData = data.Any(d => d.AvgQueuedReadLatencyMs > 0 || d.AvgQueuedWriteLatencyMs > 0);
 
         foreach (var dbGroup in databases)
         {
@@ -824,6 +1003,31 @@ public partial class ServerTab : UserControl
                 _fileIoWriteHover?.Add(writePlot, dbGroup.Key);
                 writeMax = Math.Max(writeMax, writeLatency.Max());
             }
+
+            /* Queued I/O overlay — dashed lines showing queue wait portion of latency */
+            if (hasQueuedData)
+            {
+                var queuedReadLatency = points.Select(d => d.AvgQueuedReadLatencyMs).ToArray();
+                var queuedWriteLatency = points.Select(d => d.AvgQueuedWriteLatencyMs).ToArray();
+
+                if (queuedReadLatency.Any(v => v > 0))
+                {
+                    var qReadPlot = FileIoReadChart.Plot.Add.Scatter(times, queuedReadLatency);
+                    qReadPlot.LegendText = $"{dbGroup.Key} (queued)";
+                    qReadPlot.Color = color;
+                    qReadPlot.LinePattern = ScottPlot.LinePattern.Dashed;
+                    _fileIoReadHover?.Add(qReadPlot, $"{dbGroup.Key} (queued)");
+                }
+
+                if (queuedWriteLatency.Any(v => v > 0))
+                {
+                    var qWritePlot = FileIoWriteChart.Plot.Add.Scatter(times, queuedWriteLatency);
+                    qWritePlot.LegendText = $"{dbGroup.Key} (queued)";
+                    qWritePlot.Color = color;
+                    qWritePlot.LinePattern = ScottPlot.LinePattern.Dashed;
+                    _fileIoWriteHover?.Add(qWritePlot, $"{dbGroup.Key} (queued)");
+                }
+            }
         }
 
         FileIoReadChart.Plot.Axes.DateTimeTicksBottom();
@@ -841,7 +1045,133 @@ public partial class ServerTab : UserControl
         FileIoWriteChart.Refresh();
     }
 
+    private void UpdateFileIoThroughputCharts(List<FileIoThroughputPoint> data)
+    {
+        ClearChart(FileIoReadThroughputChart);
+        ClearChart(FileIoWriteThroughputChart);
+        _fileIoReadThroughputHover?.Clear();
+        _fileIoWriteThroughputHover?.Clear();
+        ApplyDarkTheme(FileIoReadThroughputChart);
+        ApplyDarkTheme(FileIoWriteThroughputChart);
+
+        if (data.Count == 0) { FileIoReadThroughputChart.Refresh(); FileIoWriteThroughputChart.Refresh(); return; }
+
+        /* Group by file label, limit to top 10 by total throughput */
+        var files = data
+            .GroupBy(d => d.FileLabel)
+            .OrderByDescending(g => g.Sum(d => d.ReadMbPerSec + d.WriteMbPerSec))
+            .Take(10)
+            .ToList();
+
+        double readMax = 0, writeMax = 0;
+        int colorIdx = 0;
+
+        foreach (var fileGroup in files)
+        {
+            var points = fileGroup.OrderBy(d => d.CollectionTime).ToList();
+            var times = points.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var readThroughput = points.Select(d => d.ReadMbPerSec).ToArray();
+            var writeThroughput = points.Select(d => d.WriteMbPerSec).ToArray();
+            var color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
+            colorIdx++;
+
+            if (readThroughput.Length > 0)
+            {
+                var readPlot = FileIoReadThroughputChart.Plot.Add.Scatter(times, readThroughput);
+                readPlot.LegendText = fileGroup.Key;
+                readPlot.Color = color;
+                _fileIoReadThroughputHover?.Add(readPlot, fileGroup.Key);
+                readMax = Math.Max(readMax, readThroughput.Max());
+            }
+
+            if (writeThroughput.Length > 0)
+            {
+                var writePlot = FileIoWriteThroughputChart.Plot.Add.Scatter(times, writeThroughput);
+                writePlot.LegendText = fileGroup.Key;
+                writePlot.Color = color;
+                _fileIoWriteThroughputHover?.Add(writePlot, fileGroup.Key);
+                writeMax = Math.Max(writeMax, writeThroughput.Max());
+            }
+        }
+
+        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(FileIoReadThroughputChart);
+        FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
+        SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
+        ShowChartLegend(FileIoReadThroughputChart);
+        FileIoReadThroughputChart.Refresh();
+
+        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(FileIoWriteThroughputChart);
+        FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
+        SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
+        ShowChartLegend(FileIoWriteThroughputChart);
+        FileIoWriteThroughputChart.Refresh();
+    }
+
     /* ========== Blocking/Deadlock Trend Charts ========== */
+
+    private void UpdateLockWaitTrendChart(List<LockWaitTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(LockWaitTrendChart);
+        ApplyDarkTheme(LockWaitTrendChart);
+
+        DateTime rangeStart, rangeEnd;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
+        }
+        else
+        {
+            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeStart = rangeEnd.AddHours(-hoursBack);
+        }
+
+        _lockWaitTrendHover?.Clear();
+        if (data.Count == 0)
+        {
+            var zeroLine = LockWaitTrendChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Lock Waits";
+            zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
+            zeroLine.MarkerSize = 0;
+            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+            LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            ReapplyAxisColors(LockWaitTrendChart);
+            LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+            SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, 1);
+            ShowChartLegend(LockWaitTrendChart);
+            LockWaitTrendChart.Refresh();
+            return;
+        }
+
+        var grouped = data.GroupBy(d => d.WaitType).ToList();
+        double globalMax = 0;
+
+        for (int i = 0; i < grouped.Count; i++)
+        {
+            var group = grouped[i];
+            var times = group.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = group.Select(t => t.WaitTimeMsPerSecond).ToArray();
+
+            var plot = LockWaitTrendChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = group.Key;
+            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+            _lockWaitTrendHover?.Add(plot, group.Key);
+
+            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+        }
+
+        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+        LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        ReapplyAxisColors(LockWaitTrendChart);
+        LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+        SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, globalMax > 0 ? globalMax : 1);
+        ShowChartLegend(LockWaitTrendChart);
+        LockWaitTrendChart.Refresh();
+    }
 
     private void UpdateBlockingTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
@@ -999,6 +1329,138 @@ public partial class ServerTab : UserControl
         SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(DeadlockTrendChart);
         DeadlockTrendChart.Refresh();
+    }
+
+    /* ========== Current Waits Charts ========== */
+
+    private void UpdateCurrentWaitsDurationChart(List<WaitingTaskTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(CurrentWaitsDurationChart);
+        ApplyDarkTheme(CurrentWaitsDurationChart);
+
+        DateTime rangeStart, rangeEnd;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
+        }
+        else
+        {
+            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeStart = rangeEnd.AddHours(-hoursBack);
+        }
+
+        _currentWaitsDurationHover?.Clear();
+        if (data.Count == 0)
+        {
+            var zeroLine = CurrentWaitsDurationChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Current Waits";
+            zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
+            zeroLine.MarkerSize = 0;
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            ReapplyAxisColors(CurrentWaitsDurationChart);
+            CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+            SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, 1);
+            ShowChartLegend(CurrentWaitsDurationChart);
+            CurrentWaitsDurationChart.Refresh();
+            return;
+        }
+
+        var grouped = data.GroupBy(d => d.WaitType).OrderBy(g => g.Key).ToList();
+        double globalMax = 0;
+
+        for (int i = 0; i < grouped.Count; i++)
+        {
+            var group = grouped[i];
+            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
+            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
+
+            var plot = CurrentWaitsDurationChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = group.Key;
+            plot.LineWidth = 2;
+            plot.MarkerSize = 5;
+            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+            _currentWaitsDurationHover?.Add(plot, group.Key);
+
+            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+        }
+
+        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        ReapplyAxisColors(CurrentWaitsDurationChart);
+        CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+        SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, globalMax > 0 ? globalMax : 1);
+        ShowChartLegend(CurrentWaitsDurationChart);
+        CurrentWaitsDurationChart.Refresh();
+    }
+
+    private void UpdateCurrentWaitsBlockedChart(List<BlockedSessionTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(CurrentWaitsBlockedChart);
+        ApplyDarkTheme(CurrentWaitsBlockedChart);
+
+        DateTime rangeStart, rangeEnd;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
+        }
+        else
+        {
+            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+            rangeStart = rangeEnd.AddHours(-hoursBack);
+        }
+
+        _currentWaitsBlockedHover?.Clear();
+        if (data.Count == 0)
+        {
+            var zeroLine = CurrentWaitsBlockedChart.Plot.Add.Scatter(
+                new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
+                new[] { 0.0, 0.0 });
+            zeroLine.LegendText = "Blocked Sessions";
+            zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
+            zeroLine.MarkerSize = 0;
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+            ReapplyAxisColors(CurrentWaitsBlockedChart);
+            CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+            SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, 1);
+            ShowChartLegend(CurrentWaitsBlockedChart);
+            CurrentWaitsBlockedChart.Refresh();
+            return;
+        }
+
+        var grouped = data.GroupBy(d => d.DatabaseName).OrderBy(g => g.Key).ToList();
+        double globalMax = 0;
+
+        for (int i = 0; i < grouped.Count; i++)
+        {
+            var group = grouped[i];
+            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
+            var times = ordered.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
+
+            var plot = CurrentWaitsBlockedChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = group.Key;
+            plot.LineWidth = 2;
+            plot.MarkerSize = 5;
+            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+            _currentWaitsBlockedHover?.Add(plot, group.Key);
+
+            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+        }
+
+        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        ReapplyAxisColors(CurrentWaitsBlockedChart);
+        CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+        SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, globalMax > 0 ? globalMax : 1);
+        ShowChartLegend(CurrentWaitsBlockedChart);
+        CurrentWaitsBlockedChart.Refresh();
     }
 
     /* ========== Performance Trend Charts ========== */
@@ -1282,12 +1744,185 @@ public partial class ServerTab : UserControl
         }
     }
 
+    /* ========== Memory Clerks Picker ========== */
+
+    private void PopulateMemoryClerkPicker(List<string> clerkTypes)
+    {
+        var previouslySelected = new HashSet<string>(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
+        var topClerks = previouslySelected.Count == 0 ? new HashSet<string>(clerkTypes.Take(5)) : null;
+        _memoryClerkItems = clerkTypes.Select(c => new SelectableItem
+        {
+            DisplayName = c,
+            IsSelected = previouslySelected.Contains(c) || (topClerks != null && topClerks.Contains(c))
+        }).ToList();
+        RefreshMemoryClerkListOrder();
+    }
+
+    private void RefreshMemoryClerkListOrder()
+    {
+        if (_memoryClerkItems == null) return;
+        _memoryClerkItems = _memoryClerkItems
+            .OrderByDescending(x => x.IsSelected)
+            .ThenBy(x => x.DisplayName)
+            .ToList();
+        ApplyMemoryClerkFilter();
+        UpdateMemoryClerkCount();
+    }
+
+    private void UpdateMemoryClerkCount()
+    {
+        if (_memoryClerkItems == null || MemoryClerkCountText == null) return;
+        int count = _memoryClerkItems.Count(x => x.IsSelected);
+        MemoryClerkCountText.Text = $"{count} selected";
+    }
+
+    private void ApplyMemoryClerkFilter()
+    {
+        var search = MemoryClerkSearchBox?.Text?.Trim() ?? "";
+        MemoryClerksList.ItemsSource = null;
+        if (string.IsNullOrEmpty(search))
+            MemoryClerksList.ItemsSource = _memoryClerkItems;
+        else
+            MemoryClerksList.ItemsSource = _memoryClerkItems.Where(i => i.DisplayName.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
+    private void MemoryClerkSearch_TextChanged(object sender, TextChangedEventArgs e) => ApplyMemoryClerkFilter();
+
+    private void MemoryClerkSelectTop_Click(object sender, RoutedEventArgs e)
+    {
+        _isUpdatingMemoryClerkSelection = true;
+        var topClerks = new HashSet<string>(_memoryClerkItems.Take(5).Select(x => x.DisplayName));
+        foreach (var item in _memoryClerkItems)
+        {
+            item.IsSelected = topClerks.Contains(item.DisplayName);
+        }
+        _isUpdatingMemoryClerkSelection = false;
+        RefreshMemoryClerkListOrder();
+        _ = UpdateMemoryClerksChartFromPickerAsync();
+    }
+
+    private void MemoryClerkClearAll_Click(object sender, RoutedEventArgs e)
+    {
+        _isUpdatingMemoryClerkSelection = true;
+        var visible = (MemoryClerksList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _memoryClerkItems;
+        foreach (var item in visible) item.IsSelected = false;
+        _isUpdatingMemoryClerkSelection = false;
+        RefreshMemoryClerkListOrder();
+        _ = UpdateMemoryClerksChartFromPickerAsync();
+    }
+
+    private void MemoryClerk_CheckChanged(object sender, RoutedEventArgs e)
+    {
+        if (_isUpdatingMemoryClerkSelection) return;
+        RefreshMemoryClerkListOrder();
+        _ = UpdateMemoryClerksChartFromPickerAsync();
+    }
+
+    private async System.Threading.Tasks.Task UpdateMemoryClerksChartFromPickerAsync()
+    {
+        try
+        {
+            var selected = _memoryClerkItems.Where(i => i.IsSelected).Take(20).ToList();
+
+            ClearChart(MemoryClerksChart);
+            ApplyDarkTheme(MemoryClerksChart);
+            _memoryClerksHover?.Clear();
+
+            if (selected.Count == 0)
+            {
+                MemoryClerksTotalText.Text = "--";
+                MemoryClerksTopText.Text = "--";
+                MemoryClerksChart.Refresh();
+                return;
+            }
+
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null;
+            DateTime? toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            double globalMax = 0;
+            double nonBpTotal = 0;
+            string topNonBpClerk = "";
+            double topNonBpMb = 0;
+
+            for (int i = 0; i < selected.Count; i++)
+            {
+                var trend = await _dataService.GetMemoryClerkTrendAsync(_serverId, selected[i].DisplayName, hoursBack, fromDate, toDate);
+                if (trend.Count == 0) continue;
+
+                var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+                var values = trend.Select(t => t.MemoryMb).ToArray();
+
+                var plot = MemoryClerksChart.Plot.Add.Scatter(times, values);
+                plot.LegendText = selected[i].DisplayName;
+                plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                _memoryClerksHover?.Add(plot, selected[i].DisplayName);
+
+                if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
+
+                /* Summary: use latest value, exclude buffer pool */
+                var latestMb = values.Last();
+                if (!selected[i].DisplayName.Contains("BUFFERPOOL", StringComparison.OrdinalIgnoreCase))
+                {
+                    nonBpTotal += latestMb;
+                    if (latestMb > topNonBpMb)
+                    {
+                        topNonBpMb = latestMb;
+                        topNonBpClerk = selected[i].DisplayName;
+                    }
+                }
+            }
+
+            MemoryClerksChart.Plot.Axes.DateTimeTicksBottom();
+            ReapplyAxisColors(MemoryClerksChart);
+            MemoryClerksChart.Plot.YLabel("Memory (MB)");
+            SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
+            ShowChartLegend(MemoryClerksChart);
+            MemoryClerksChart.Refresh();
+
+            /* Update summary panel */
+            MemoryClerksTotalText.Text = nonBpTotal >= 1024 ? $"{nonBpTotal / 1024:F1} GB" : $"{nonBpTotal:N0} MB";
+            if (!string.IsNullOrEmpty(topNonBpClerk))
+            {
+                var name = topNonBpClerk;
+                if (name.StartsWith("MEMORYCLERK_", StringComparison.OrdinalIgnoreCase))
+                    name = name.Substring(12);
+                MemoryClerksTopText.Text = topNonBpMb >= 1024 ? $"{name} ({topNonBpMb / 1024:F1} GB)" : $"{name} ({topNonBpMb:N0} MB)";
+            }
+            else
+            {
+                MemoryClerksTopText.Text = "--";
+            }
+        }
+        catch
+        {
+            /* Ignore chart update errors */
+        }
+    }
+
     /* ========== Perfmon Picker ========== */
 
     private bool _isUpdatingPerfmonSelection;
 
     private void PopulatePerfmonPicker(List<string> counters)
     {
+        /* Initialize pack ComboBox once */
+        if (PerfmonPackCombo.Items.Count == 0)
+        {
+            PerfmonPackCombo.ItemsSource = Helpers.PerfmonPacks.PackNames;
+            PerfmonPackCombo.SelectedItem = "General Throughput";
+        }
+
         var previouslySelected = new HashSet<string>(_perfmonCounterItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
         _perfmonCounterItems = counters.Select(c => new SelectableItem
         {
@@ -1296,6 +1931,50 @@ public partial class ServerTab : UserControl
                 || (previouslySelected.Count == 0 && _defaultPerfmonCounters.Contains(c))
         }).ToList();
         RefreshPerfmonListOrder();
+    }
+
+    private void PerfmonPack_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_perfmonCounterItems == null || _perfmonCounterItems.Count == 0) return;
+        if (PerfmonPackCombo.SelectedItem is not string pack) return;
+
+        _isUpdatingPerfmonSelection = true;
+
+        /* Clear search so all counters are visible */
+        if (PerfmonSearchBox != null)
+            PerfmonSearchBox.Text = "";
+
+        /* Uncheck everything first */
+        foreach (var item in _perfmonCounterItems)
+            item.IsSelected = false;
+
+        if (pack == Helpers.PerfmonPacks.AllCounters)
+        {
+            /* "All Counters" selects the General Throughput defaults */
+            foreach (var item in _perfmonCounterItems)
+            {
+                if (_defaultPerfmonCounters.Contains(item.DisplayName))
+                    item.IsSelected = true;
+            }
+        }
+        else if (Helpers.PerfmonPacks.Packs.TryGetValue(pack, out var packCounters))
+        {
+            var packSet = new HashSet<string>(packCounters, StringComparer.OrdinalIgnoreCase);
+            int count = 0;
+            foreach (var item in _perfmonCounterItems)
+            {
+                if (count >= 12) break;
+                if (packSet.Contains(item.DisplayName))
+                {
+                    item.IsSelected = true;
+                    count++;
+                }
+            }
+        }
+
+        _isUpdatingPerfmonSelection = false;
+        RefreshPerfmonListOrder();
+        _ = UpdatePerfmonChartFromPickerAsync();
     }
 
     private void RefreshPerfmonListOrder()
@@ -1573,7 +2252,7 @@ public partial class ServerTab : UserControl
             && boundCol.Binding is System.Windows.Data.Binding binding)
         {
             var prop = item.GetType().GetProperty(binding.Path.Path);
-            return prop?.GetValue(item)?.ToString() ?? "";
+            return FormatForExport(prop?.GetValue(item));
         }
 
         /* DataGridTemplateColumn — instantiate the template and find a TextBlock binding */
@@ -1586,12 +2265,20 @@ public partial class ServerTab : UserControl
                 if (textBinding != null)
                 {
                     var prop = item.GetType().GetProperty(textBinding.Path.Path);
-                    return prop?.GetValue(item)?.ToString() ?? "";
+                    return FormatForExport(prop?.GetValue(item));
                 }
             }
         }
 
         return "";
+    }
+
+    private static string FormatForExport(object? value)
+    {
+        if (value == null) return "";
+        if (value is IFormattable formattable)
+            return formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
+        return value.ToString() ?? "";
     }
 
     private void CopyCell_Click(object sender, RoutedEventArgs e)
@@ -1630,7 +2317,7 @@ public partial class ServerTab : UserControl
         /* Header */
         foreach (var col in grid.Columns)
         {
-            sb.Append(col.Header?.ToString() ?? "");
+            sb.Append(Helpers.DataGridClipboardBehavior.GetHeaderText(col));
             sb.Append('\t');
         }
         sb.AppendLine();
@@ -1744,14 +2431,15 @@ public partial class ServerTab : UserControl
         if (dialog.ShowDialog() != true) return;
 
         var sb = new StringBuilder();
+        var sep = App.CsvSeparator;
 
         /* Header */
         var headers = new List<string>();
         foreach (var col in grid.Columns)
         {
-            headers.Add(CsvEscape(col.Header?.ToString() ?? ""));
+            headers.Add(CsvEscape(col.Header?.ToString() ?? "", sep));
         }
-        sb.AppendLine(string.Join(",", headers));
+        sb.AppendLine(string.Join(sep, headers));
 
         /* Rows */
         foreach (var item in grid.Items)
@@ -1759,9 +2447,9 @@ public partial class ServerTab : UserControl
             var values = new List<string>();
             foreach (var col in grid.Columns)
             {
-                values.Add(CsvEscape(GetCellValue(col, item)));
+                values.Add(CsvEscape(GetCellValue(col, item), sep));
             }
-            sb.AppendLine(string.Join(",", values));
+            sb.AppendLine(string.Join(sep, values));
         }
 
         try
@@ -1808,6 +2496,50 @@ public partial class ServerTab : UserControl
     }
 
 
+    private void CollectionHealthGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
+
+        var window = new Windows.CollectionLogWindow(_dataService, _serverId, item.CollectorName);
+        window.Owner = Window.GetWindow(this);
+        window.ShowDialog();
+    }
+
+    private void DailySummaryToday_Click(object sender, RoutedEventArgs e)
+    {
+        _dailySummaryDate = null;
+        DailySummaryDatePicker.SelectedDate = null;
+        DailySummaryTodayButton.FontWeight = FontWeights.Bold;
+        DailySummaryIndicator.Text = "Showing: Today (UTC)";
+        DailySummaryRefresh_Click(sender, e);
+    }
+
+    private void DailySummaryDate_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (DailySummaryDatePicker.SelectedDate.HasValue)
+        {
+            _dailySummaryDate = DailySummaryDatePicker.SelectedDate.Value.Date;
+            DailySummaryTodayButton.FontWeight = FontWeights.Normal;
+            DailySummaryIndicator.Text = $"Showing: {_dailySummaryDate.Value:MMM d, yyyy}";
+        }
+    }
+
+    private async void DailySummaryRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var result = await _dataService.GetDailySummaryAsync(_serverId, _dailySummaryDate);
+            DailySummaryGrid.ItemsSource = result != null
+                ? new List<DailySummaryRow> { result } : null;
+            DailySummaryNoData.Visibility = result == null
+                ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("DailySummary", $"Error refreshing: {ex.Message}");
+        }
+    }
+
     private async void DownloadQueryStatsPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not QueryStatsRow row) return;
@@ -1817,14 +2549,36 @@ public partial class ServerTab : UserControl
         btn.Content = "...";
         try
         {
-            var connStr = _server.GetConnectionString(_credentialService);
-            var plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash);
+            string? plan = null;
+            var source = "collected data";
+
+            // Try DuckDB first
+            try
+            {
+                plan = await _dataService.GetCachedQueryPlanAsync(_serverId, row.QueryHash);
+            }
+            catch
+            {
+                // DuckDB lookup failed, fall through to live server
+            }
+
+            // Fall back to live server
             if (string.IsNullOrEmpty(plan))
             {
-                MessageBox.Show("No query plan found in the plan cache for this query hash. The plan may have been evicted.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                var connStr = _server.GetConnectionString(_credentialService);
+                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash);
+                source = "live server";
+            }
+
+            if (string.IsNullOrEmpty(plan))
+            {
+                MessageBox.Show("No query plan found in collected data or the live plan cache for this query hash.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
             SavePlanFile(plan, $"QueryPlan_{row.QueryHash}");
+            btn.Content = $"Saved ({source})";
+            return;
         }
         catch (Exception ex)
         {
@@ -1832,21 +2586,440 @@ public partial class ServerTab : UserControl
         }
         finally
         {
-            btn.Content = "Save";
+            if (btn.Content is "...")
+                btn.Content = "Download";
+            btn.IsEnabled = true;
+        }
+    }
+
+    private async void DownloadProcedurePlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.DataContext is not ProcedureStatsRow row) return;
+        if (string.IsNullOrEmpty(row.ObjectName)) return;
+
+        btn.IsEnabled = false;
+        btn.Content = "...";
+        try
+        {
+            string? plan = null;
+            var source = "collected data";
+
+            // Try DuckDB first — match by plan_handle in query_stats
+            if (!string.IsNullOrEmpty(row.PlanHandle))
+            {
+                try
+                {
+                    plan = await _dataService.GetCachedProcedurePlanAsync(_serverId, row.PlanHandle);
+                }
+                catch
+                {
+                    // DuckDB lookup failed, fall through to live server
+                }
+            }
+
+            // Fall back to live server
+            if (string.IsNullOrEmpty(plan))
+            {
+                var connStr = _server.GetConnectionString(_credentialService);
+                plan = await LocalDataService.FetchProcedurePlanOnDemandAsync(connStr, row.DatabaseName, row.SchemaName, row.ObjectName);
+                source = "live server";
+            }
+
+            if (string.IsNullOrEmpty(plan))
+            {
+                MessageBox.Show("No query plan found in collected data or the live plan cache for this procedure.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            SavePlanFile(plan, $"ProcPlan_{row.FullName}");
+            btn.Content = $"Saved ({source})";
+            return;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            if (btn.Content is "...")
+                btn.Content = "Download";
             btn.IsEnabled = true;
         }
     }
 
     private void DownloadSnapshotPlan_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row || row.QueryPlan == null) return;
+        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row) return;
+
+        if (row.QueryPlan == null)
+        {
+            MessageBox.Show(
+                "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.",
+                "No Plan Available",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
         SavePlanFile(row.QueryPlan, $"EstimatedPlan_Session{row.SessionId}");
     }
 
     private void DownloadSnapshotLivePlan_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row || row.LiveQueryPlan == null) return;
+        if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row) return;
+
+        if (row.LiveQueryPlan == null)
+        {
+            MessageBox.Show(
+                "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.",
+                "No Plan Available",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
         SavePlanFile(row.LiveQueryPlan, $"ActualPlan_Session{row.SessionId}");
+    }
+
+    private void ShowPlanLoading(string label)
+    {
+        PlanLoadingLabel.Text = $"Executing: {label}";
+        PlanEmptyState.Visibility = Visibility.Collapsed;
+        PlanTabControl.Visibility = Visibility.Collapsed;
+        PlanLoadingState.Visibility = Visibility.Visible;
+        PlanViewerTabItem.IsSelected = true;
+    }
+
+    private void HidePlanLoading()
+    {
+        PlanLoadingState.Visibility = Visibility.Collapsed;
+        if (PlanTabControl.Items.Count > 0)
+            PlanTabControl.Visibility = Visibility.Visible;
+        else
+            PlanEmptyState.Visibility = Visibility.Visible;
+    }
+
+    private void OpenPlanTab(string planXml, string label, string? queryText = null)
+    {
+        HidePlanLoading();
+        var viewer = new PlanViewerControl();
+        viewer.LoadPlan(planXml, label, queryText);
+
+        var header = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        header.Children.Add(new TextBlock
+        {
+            Text = label.Length > 30 ? label[..30] + "\u2026" : label,
+            VerticalAlignment = System.Windows.VerticalAlignment.Center,
+            ToolTip = label
+        });
+        var closeBtn = new Button
+        {
+            Style = (Style)FindResource("TabCloseButton")
+        };
+        header.Children.Add(closeBtn);
+
+        var tab = new TabItem { Header = header, Content = viewer };
+        closeBtn.Tag = tab;
+        closeBtn.Click += ClosePlanTab_Click;
+
+        PlanTabControl.Items.Add(tab);
+        PlanTabControl.SelectedItem = tab;
+        PlanEmptyState.Visibility = Visibility.Collapsed;
+        PlanTabControl.Visibility = Visibility.Visible;
+    }
+
+    private void ClosePlanTab_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button btn && btn.Tag is TabItem tab)
+        {
+            PlanTabControl.Items.Remove(tab);
+            if (PlanTabControl.Items.Count == 0)
+            {
+                PlanTabControl.Visibility = Visibility.Collapsed;
+                PlanEmptyState.Visibility = Visibility.Visible;
+            }
+        }
+    }
+
+    private void CancelPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        _actualPlanCts?.Cancel();
+    }
+
+    private async void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem) return;
+        var grid = FindParentDataGrid(menuItem);
+        if (grid?.CurrentItem == null) return;
+
+        string? planXml = null;
+        string? queryText = null;
+        string label = "Estimated Plan";
+
+        switch (grid.CurrentItem)
+        {
+            case QuerySnapshotRow snap:
+                planXml = snap.LiveQueryPlan ?? snap.QueryPlan;
+                queryText = snap.QueryText;
+                label = snap.LiveQueryPlan != null
+                    ? $"Plan - SPID {snap.SessionId}"
+                    : $"Est Plan - SPID {snap.SessionId}";
+                break;
+            case QueryStatsRow stats:
+                planXml = stats.QueryPlan;
+                queryText = stats.QueryText;
+                label = $"Est Plan - {stats.QueryHash}";
+                // Fetch on demand if not already loaded
+                if (string.IsNullOrEmpty(planXml))
+                    planXml = await FetchPlanByHash(stats.QueryHash);
+                break;
+            case QueryStatsHistoryRow hist:
+                planXml = hist.QueryPlan;
+                label = "Est Plan - History";
+                break;
+            case ProcedureStatsRow proc:
+                label = $"Est Plan - {proc.FullName}";
+                queryText = proc.FullName;
+                try
+                {
+                    var connStr = _server.GetConnectionString(_credentialService);
+                    planXml = await LocalDataService.FetchProcedurePlanOnDemandAsync(
+                        connStr, proc.DatabaseName, proc.SchemaName, proc.ObjectName);
+                }
+                catch { }
+                break;
+            case QueryStoreRow qs:
+                label = $"Est Plan - QS {qs.QueryId}";
+                queryText = qs.QueryText;
+                if (qs.PlanId > 0)
+                {
+                    try
+                    {
+                        var connStr = _server.GetConnectionString(_credentialService);
+                        planXml = await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId);
+                    }
+                    catch { }
+                }
+                break;
+        }
+
+        if (!string.IsNullOrEmpty(planXml))
+        {
+            OpenPlanTab(planXml, label, queryText);
+            PlanViewerTabItem.IsSelected = true;
+        }
+        else
+        {
+            MessageBox.Show(
+                "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.",
+                "No Plan Available",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+    }
+
+    private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem) return;
+        var grid = FindParentDataGrid(menuItem);
+        if (grid?.CurrentItem == null) return;
+
+        string? queryText = null;
+        string? databaseName = null;
+        string? planXml = null;
+        string? isolationLevel = null;
+        string label = "Actual Plan";
+
+        switch (grid.CurrentItem)
+        {
+            case QuerySnapshotRow snapshot:
+                queryText = snapshot.QueryText;
+                databaseName = snapshot.DatabaseName;
+                planXml = snapshot.LiveQueryPlan ?? snapshot.QueryPlan;
+                isolationLevel = snapshot.TransactionIsolationLevel;
+                label = $"Actual Plan - SPID {snapshot.SessionId}";
+                break;
+            case QueryStatsRow stats:
+                queryText = stats.QueryText;
+                databaseName = stats.DatabaseName;
+                label = $"Actual Plan - {stats.QueryHash}";
+                if (!string.IsNullOrEmpty(stats.QueryHash))
+                {
+                    try { planXml = await FetchPlanByHash(stats.QueryHash); }
+                    catch { }
+                }
+                break;
+            case QueryStoreRow qs:
+                queryText = qs.QueryText;
+                databaseName = qs.DatabaseName;
+                label = $"Actual Plan - QS {qs.QueryId}";
+                if (qs.PlanId > 0)
+                {
+                    try
+                    {
+                        var connStr = _server.GetConnectionString(_credentialService);
+                        planXml = await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId);
+                    }
+                    catch { }
+                }
+                break;
+        }
+
+        if (string.IsNullOrWhiteSpace(queryText))
+        {
+            MessageBox.Show("No query text available for this row.", "No Query Text",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var result = MessageBox.Show(
+            $"You are about to execute this query against {_server.ServerName} in database [{databaseName ?? "default"}].\n\n" +
+            "Make sure you understand what the query does before proceeding.\n" +
+            "The query will execute with SET STATISTICS XML ON to capture the actual plan.\n" +
+            "All data results will be discarded.",
+            "Get Actual Plan",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Warning);
+
+        if (result != MessageBoxResult.OK) return;
+
+        ShowPlanLoading(label);
+
+        _actualPlanCts?.Dispose();
+        _actualPlanCts = new CancellationTokenSource();
+
+        try
+        {
+            var connectionString = _server.GetConnectionString(_credentialService);
+
+            var actualPlanXml = await ActualPlanExecutor.ExecuteForActualPlanAsync(
+                connectionString,
+                databaseName ?? "",
+                queryText,
+                planXml,
+                isolationLevel,
+                isAzureSqlDb: false,
+                timeoutSeconds: 0,
+                _actualPlanCts.Token);
+
+            if (!string.IsNullOrEmpty(actualPlanXml))
+            {
+                OpenPlanTab(actualPlanXml, label, queryText);
+                PlanViewerTabItem.IsSelected = true;
+            }
+            else
+            {
+                MessageBox.Show("Query executed but no execution plan was captured.",
+                    "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            MessageBox.Show("The query was cancelled or timed out.",
+                "Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to get actual plan:\n\n{ex.Message}",
+                "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            HidePlanLoading();
+        }
+    }
+
+    private async Task<string?> FetchPlanByHash(string queryHash)
+    {
+        if (string.IsNullOrEmpty(queryHash)) return null;
+
+        // Try DuckDB cache first
+        try
+        {
+            var plan = await _dataService.GetCachedQueryPlanAsync(_serverId, queryHash);
+            if (!string.IsNullOrEmpty(plan)) return plan;
+        }
+        catch { }
+
+        // Fall back to live server
+        try
+        {
+            var connStr = _server.GetConnectionString(_credentialService);
+            return await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash);
+        }
+        catch { return null; }
+    }
+
+    private async void LiveSnapshot_Click(object sender, RoutedEventArgs e)
+    {
+        LiveSnapshotButton.IsEnabled = false;
+        LiveSnapshotIndicator.Text = "Querying...";
+
+        try
+        {
+            var connectionString = _server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                ConnectTimeout = 15
+            };
+
+            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: true);
+
+            await using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 30;
+
+            using var reader = await command.ExecuteReaderAsync();
+            var results = new List<QuerySnapshotRow>();
+            var snapshotTime = DateTime.UtcNow;
+
+            while (await reader.ReadAsync())
+            {
+                results.Add(new QuerySnapshotRow
+                {
+                    SessionId = Convert.ToInt32(reader.GetValue(0)),
+                    DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    QueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    LiveQueryPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString(),
+                    Status = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                    BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
+                    WaitType = reader.IsDBNull(8) ? "" : reader.GetString(8),
+                    WaitTimeMs = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                    WaitResource = reader.IsDBNull(10) ? "" : reader.GetString(10),
+                    CpuTimeMs = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11)),
+                    TotalElapsedTimeMs = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
+                    Reads = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
+                    Writes = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+                    LogicalReads = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
+                    GrantedQueryMemoryGb = reader.IsDBNull(16) ? 0 : Convert.ToDouble(reader.GetValue(16)),
+                    TransactionIsolationLevel = reader.IsDBNull(17) ? "" : reader.GetString(17),
+                    Dop = reader.IsDBNull(18) ? 0 : Convert.ToInt32(reader.GetValue(18)),
+                    ParallelWorkerCount = reader.IsDBNull(19) ? 0 : Convert.ToInt32(reader.GetValue(19)),
+                    LoginName = reader.IsDBNull(20) ? "" : reader.GetString(20),
+                    HostName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+                    ProgramName = reader.IsDBNull(22) ? "" : reader.GetString(22),
+                    OpenTransactionCount = reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)),
+                    PercentComplete = reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)),
+                    CollectionTime = snapshotTime
+                });
+            }
+
+            _querySnapshotsFilterMgr!.UpdateData(results);
+            LiveSnapshotIndicator.Text = $"LIVE at {DateTime.Now:HH:mm:ss} ({results.Count} queries)";
+        }
+        catch (Exception ex)
+        {
+            LiveSnapshotIndicator.Text = $"Error: {ex.Message}";
+            AppLogger.Error("ServerTab", $"Live snapshot failed: {ex.Message}");
+        }
+        finally
+        {
+            LiveSnapshotButton.IsEnabled = true;
+        }
     }
 
     private void SavePlanFile(string planXml, string defaultName)
@@ -1916,9 +3089,9 @@ public partial class ServerTab : UserControl
         }
     }
 
-    private static string CsvEscape(string value)
+    private static string CsvEscape(string value, string separator)
     {
-        if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
+        if (value.Contains(separator, StringComparison.Ordinal) || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
         {
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         }
@@ -2094,5 +3267,19 @@ public partial class ServerTab : UserControl
             current = VisualTreeHelper.GetParent(current);
         }
         return null;
+    }
+
+    private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+    {
+        foreach (var column in grid.Columns)
+        {
+            if (column is DataGridBoundColumn bc &&
+                bc.Binding is Binding b &&
+                b.Path.Path == bindingPath)
+            {
+                column.SortDirection = direction;
+                return;
+            }
+        }
     }
 }

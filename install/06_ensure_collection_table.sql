@@ -671,6 +671,7 @@ BEGIN
     (
         collection_id bigint IDENTITY NOT NULL,
         collection_time datetime2(7) NOT NULL DEFAULT SYSDATETIME(),
+        server_start_time datetime2(7) NOT NULL,
         resource_semaphore_id smallint NOT NULL,
         pool_id integer NOT NULL,
         target_memory_mb decimal(19,2) NULL,
@@ -683,16 +684,15 @@ BEGIN
         waiter_count integer NULL,
         timeout_error_count bigint NULL,
         forced_grant_count bigint NULL,
-        /*Pressure warnings*/
-        available_memory_pressure_warning bit NULL,
-        waiter_count_warning bit NULL,
-        timeout_error_warning bit NULL,
-        forced_grant_warning bit NULL,
-        CONSTRAINT 
-        PK_memory_grant_stats 
-        PRIMARY KEY CLUSTERED 
-            (collection_time, collection_id) 
-        WITH 
+        /*Delta columns calculated by framework*/
+        timeout_error_count_delta bigint NULL,
+        forced_grant_count_delta bigint NULL,
+        sample_interval_seconds integer NULL,
+        CONSTRAINT
+        PK_memory_grant_stats
+        PRIMARY KEY CLUSTERED
+            (collection_time, collection_id)
+        WITH
             (DATA_COMPRESSION = PAGE)
     );
         END;
@@ -1055,38 +1055,6 @@ BEGIN
             );
 
         END;
-        ELSE IF @table_name = N'session_wait_stats'
-        BEGIN
-            CREATE TABLE
-                collect.session_wait_stats
-            (
-                collection_id bigint IDENTITY NOT NULL,
-                collection_time datetime2(7) NOT NULL
-                    DEFAULT SYSDATETIME(),
-                session_id integer NOT NULL,
-                wait_type nvarchar(60) NOT NULL,
-                waiting_tasks_count bigint NOT NULL,
-                wait_time_ms bigint NOT NULL,
-                max_wait_time_ms bigint NOT NULL,
-                signal_wait_time_ms bigint NOT NULL,
-                /*Session context for correlation*/
-                database_id integer NULL,
-                database_name sysname NULL,
-                login_name nvarchar(128) NULL,
-                host_name nvarchar(128) NULL,
-                program_name nvarchar(128) NULL,
-                /*Query context if executing*/
-                sql_handle varbinary(64) NULL,
-                query_text nvarchar(max) NULL,
-                CONSTRAINT
-                    PK_session_wait_stats
-                PRIMARY KEY CLUSTERED
-                    (collection_time, collection_id)
-                WITH
-                    (DATA_COMPRESSION = PAGE)
-            );
-
-        END;
         ELSE IF @table_name = N'running_jobs'
         BEGIN
             CREATE TABLE
@@ -1117,7 +1085,7 @@ BEGIN
         END;
         ELSE
         BEGIN
-            SET @error_message = N'Unknown table name: ' + @table_name + N'. Valid table names are: wait_stats, query_stats, memory_stats, memory_pressure_events, deadlock_xml, blocked_process_xml, procedure_stats, query_snapshots, query_store_data, trace_analysis, default_trace_events, file_io_stats, memory_grant_stats, cpu_scheduler_stats, memory_clerks_stats, perfmon_stats, cpu_utilization_stats, blocking_deadlock_stats, latch_stats, spinlock_stats, tempdb_stats, plan_cache_stats, session_stats, waiting_tasks, session_wait_stats, running_jobs';
+            SET @error_message = N'Unknown table name: ' + @table_name + N'. Valid table names are: wait_stats, query_stats, memory_stats, memory_pressure_events, deadlock_xml, blocked_process_xml, procedure_stats, query_snapshots, query_store_data, trace_analysis, default_trace_events, file_io_stats, memory_grant_stats, cpu_scheduler_stats, memory_clerks_stats, perfmon_stats, cpu_utilization_stats, blocking_deadlock_stats, latch_stats, spinlock_stats, tempdb_stats, plan_cache_stats, session_stats, waiting_tasks, running_jobs';
             RAISERROR(@error_message, 16, 1);
             RETURN;
         END;

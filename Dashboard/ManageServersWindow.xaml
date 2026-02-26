@@ -8,6 +8,13 @@
         Background="{DynamicResource BackgroundBrush}">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
+        <ContextMenu x:Key="DataGridContextMenu">
+            <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
+            <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
+            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+            <Separator/>
+            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+        </ContextMenu>
     </Window.Resources>
     <Grid Margin="16">
         <Grid.RowDefinitions>
@@ -36,7 +43,8 @@
                       RowBackground="{DynamicResource BackgroundBrush}"
                       AlternatingRowBackground="{DynamicResource BackgroundLightBrush}"
                       BorderThickness="0"
-                      MouseDoubleClick="ServersDataGrid_MouseDoubleClick">
+                      MouseDoubleClick="ServersDataGrid_MouseDoubleClick"
+                  ContextMenu="{StaticResource DataGridContextMenu}">
                 <DataGrid.Columns>
                     <DataGridTemplateColumn Header="" Width="30" CanUserSort="False">
                         <DataGridTemplateColumn.CellTemplate>

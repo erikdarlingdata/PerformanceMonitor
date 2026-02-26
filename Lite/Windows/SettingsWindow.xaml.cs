@@ -11,6 +11,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
@@ -37,6 +38,8 @@ public partial class SettingsWindow : Window
         LoadMcpSettings();
         UpdateMcpStatus();
         LoadDefaultTimeRange();
+        LoadConnectionTimeout();
+        LoadCsvSeparator();
         LoadAlertSettings();
         LoadSmtpSettings();
     }
@@ -108,6 +111,8 @@ public partial class SettingsWindow : Window
         _scheduleManager.SaveSchedules();
         bool mcpChanged = SaveMcpSettings();
         SaveDefaultTimeRange();
+        SaveConnectionTimeout();
+        SaveCsvSeparator();
         SaveAlertSettings();
         SaveSmtpSettings();
 
@@ -217,6 +222,89 @@ public partial class SettingsWindow : Window
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
         Clipboard.SetDataObject(command, false);
         McpStatusText.Text = "Copied to clipboard!";
+    }
+
+    private void LoadConnectionTimeout()
+    {
+        ConnectionTimeoutBox.Text = App.ConnectionTimeoutSeconds.ToString();
+    }
+
+    private void SaveConnectionTimeout()
+    {
+        if (int.TryParse(ConnectionTimeoutBox.Text, out var timeout) && timeout >= 5 && timeout <= 60)
+        {
+            App.ConnectionTimeoutSeconds = timeout;
+        }
+
+        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
+        try
+        {
+            JsonNode? root;
+            if (File.Exists(settingsPath))
+            {
+                var json = File.ReadAllText(settingsPath);
+                root = JsonNode.Parse(json) ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["connection_timeout_seconds"] = App.ConnectionTimeoutSeconds;
+
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(settingsPath, root.ToJsonString(options));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save connection timeout: {ex.Message}");
+        }
+    }
+
+    private void LoadCsvSeparator()
+    {
+        foreach (ComboBoxItem item in CsvSeparatorCombo.Items)
+        {
+            if (item.Tag?.ToString() == App.CsvSeparator)
+            {
+                CsvSeparatorCombo.SelectedItem = item;
+                break;
+            }
+        }
+        if (CsvSeparatorCombo.SelectedItem == null)
+            CsvSeparatorCombo.SelectedIndex = 0;
+    }
+
+    private void SaveCsvSeparator()
+    {
+        if (CsvSeparatorCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string sep)
+        {
+            App.CsvSeparator = sep;
+        }
+
+        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
+        try
+        {
+            JsonNode? root;
+            if (File.Exists(settingsPath))
+            {
+                var json = File.ReadAllText(settingsPath);
+                root = JsonNode.Parse(json) ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["csv_separator"] = App.CsvSeparator;
+
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(settingsPath, root.ToJsonString(options));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save CSV separator: {ex.Message}");
+        }
     }
 
     private void LoadAlertSettings()
@@ -524,6 +612,11 @@ public partial class SettingsWindow : Window
             TestEmailButton.IsEnabled = true;
         }
     }
+
+    private void CopyCell_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyCell(sender);
+    private void CopyRow_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyRow(sender);
+    private void CopyAllRows_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyAllRows(sender);
+    private void ExportToCsv_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.ExportToCsv(sender, "schedules");
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)
     {

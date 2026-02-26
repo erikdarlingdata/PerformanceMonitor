@@ -96,7 +96,7 @@
 
         <!-- Status -->
         <TextBlock Grid.Row="9" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   VerticalAlignment="Bottom" Margin="0,0,0,8"/>
+                   TextWrapping="Wrap" VerticalAlignment="Bottom" Margin="0,0,0,8"/>
 
         <!-- Buttons -->
         <StackPanel Grid.Row="10" Orientation="Horizontal" HorizontalAlignment="Right">

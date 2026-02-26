@@ -109,6 +109,79 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// Gets the distinct memory clerk types collected for a server, ordered by total memory descending.
+    /// </summary>
+    public async Task<List<string>> GetDistinctMemoryClerkTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    clerk_type
+FROM v_memory_clerks
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY clerk_type
+ORDER BY SUM(memory_mb) DESC";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<string>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(reader.GetString(0));
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Gets memory clerk trend data for a single clerk type for charting.
+    /// </summary>
+    public async Task<List<MemoryClerkTrendPoint>> GetMemoryClerkTrendAsync(int serverId, string clerkType, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    collection_time,
+    memory_mb
+FROM v_memory_clerks
+WHERE server_id = $1
+AND   clerk_type = $2
+AND   collection_time >= $3
+AND   collection_time <= $4
+ORDER BY collection_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = clerkType });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<MemoryClerkTrendPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new MemoryClerkTrendPoint
+            {
+                CollectionTime = reader.GetDateTime(0),
+                MemoryMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1))
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Gets the latest memory clerk breakdown.
     /// </summary>
     public async Task<List<MemoryClerkRow>> GetLatestMemoryClerksAsync(int serverId)
@@ -171,4 +244,11 @@ public class MemoryClerkRow
     public string ClerkType { get; set; } = "";
     public double MemoryMb { get; set; }
     public string MemoryFormatted => MemoryMb >= 1024 ? $"{MemoryMb / 1024:F1} GB" : $"{MemoryMb:F1} MB";
+}
+
+public class MemoryClerkTrendPoint
+{
+    public DateTime CollectionTime { get; set; }
+    public string ClerkType { get; set; } = "";
+    public double MemoryMb { get; set; }
 }

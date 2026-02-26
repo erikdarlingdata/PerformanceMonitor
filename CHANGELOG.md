@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-02-25
+
+### Important
+
+- **Schema upgrade**: The `collect.memory_grant_stats` table gains new delta columns and drops unused warning columns. The `collect.session_wait_stats` table, its collector procedure, reporting view, and schedule entry are removed (zero UI coverage). Upgrade scripts run automatically via the CLI/GUI installer and use idempotent checks.
+
+### Added
+
+- **Graphical query plan viewer** — native ShowPlan rendering in both Dashboard and Lite with SSMS-parity operator icons, properties panel, tooltips, warning/parallelism badges, and tabbed plan display ([#220])
+- **Actual execution plan support** — execute queries with SET STATISTICS XML ON to capture actual plans, with loading indicator and confirmation dialog ([#233])
+- **PlanAnalyzer** — automated plan analysis with rules for missing indexes, eager spools, key lookups, implicit conversions, memory grants, and more
+- **Current Active Queries live snapshot** — real-time view of running queries with estimated/live plan download ([#149])
+- **Memory clerks tab** in Lite with picker-driven chart ([#145])
+- **Current Waits charts** in Blocking tab for both Dashboard and Lite ([#280])
+- **File I/O throughput charts** — read/write throughput trends, file-level latency breakdown, queued I/O overlay ([#281])
+- **Memory grant stats charts** — standardized collection with delta framework integration and trend visualization ([#281])
+- **CPU scheduler pressure status** — real-time scheduler, worker, runnable task counts with color-coded pressure level below CPU chart
+- **Collection log drill-down** and daily summary in Lite ([#138])
+- **Collector duration trends chart** in Dashboard Collection Health ([#138])
+- **Themed perfmon counter packs** — 14 new counters with organized themed groups ([#255])
+- **User-configurable connection timeout** setting ([#236])
+- **Per-collector retention** — uses per-collector retention from `config.collection_schedule` in data retention ([#237])
+- **Query identifiers** in drill-down windows — query hash, plan hash, SQL handle visible for identification ([#268])
+- **Trace pattern drill-down** with missing columns and query text tooltips ([#273])
+- **Query Store Regressions drill-down** with TVF rewrite for performance ([#274])
+- **CLI `--help` flag** for installer ([#111])
+- Sort arrows, right-aligned numerics, and initial sort indicators across all grids ([#110])
+- Copyable plan viewer properties ([#269])
+- Standardized chart save/export filenames between Dashboard and Lite ([#284])
+- Full Dashboard column parity for query_stats, procedure_stats, and query_store_stats
+- Min/max extremes surfaced in both apps — physical reads, rows, grant KB, spills, CLR time, log bytes ([#281])
+
+### Changed
+
+- Query Store detection uses `sys.database_query_store_options` instead of `sys.databases.is_query_store_on` for Azure SQL DB compatibility ([#287])
+- Config tab consolidation, DB drop on server remove, DuckDB-first plan lookups, procedure stats parity
+- Collector health status now detects consecutive recent failures — 5+ consecutive errors = FAILING, 3+ = WARNING
+- Plan buttons now show a MessageBox when no plan is available instead of silently doing nothing
+- CSV export uses locale-appropriate separators for non-US locales ([#240])
+- Query Store Regressions and Query Trace Patterns migrated to popup grid filtering ([#260])
+- NuGet packages updated; xUnit v3 migration
+
+### Fixed
+
+- **DuckDB file corruption** during maintenance — ReaderWriterLockSlim coordination, archive-all-and-reset at 512MB replaces compaction ([#218])
+- Archive view column mismatch, wait_stats thread-safety, and percent_complete type cast ([#234])
+- Collector health status bar text color ([#234])
+- View Plan for Query Store and Query Store Regressions tabs ([#261])
+- Query Store drill-down time filter alignment with main view ([#263])
+- Execution count mismatches between main views and drill-downs
+- Drill-down chart UX — sparse data markers, hover tooltips, window sizing ([#271])
+- Truncated status text in Add Server dialog ([#257])
+- Scrollbar visibility, self-filtering artifacts, missing columns, and context menus ([#245], [#246], [#247], [#248])
+- query_stats and procedure_stats collectors ignoring recent queries
+- Blank tooltips on warning and parallel badge icons
+- Missing chart context menu on File I/O Throughput charts in Lite
+
+### Removed
+
+- `collect.session_wait_stats` table, `collect.session_wait_stats_collector` procedure, `report.session_wait_analysis` view, and schedule entry — zero UI coverage, never surfaced in Dashboard or Lite ([#281])
+
 ## [1.3.0] - 2026-02-20
 
 ### Important
@@ -119,6 +180,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Delta normalization for per-second rate calculations
 - Dark theme UI
 
+[2.0.0]: https://github.com/erikdarlingdata/PerformanceMonitor/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/erikdarlingdata/PerformanceMonitor/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/erikdarlingdata/PerformanceMonitor/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/erikdarlingdata/PerformanceMonitor/compare/v1.0.0...v1.1.0
@@ -187,3 +249,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#206]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/206
 [#210]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/210
 [#214]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/214
+[#218]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/218
+[#220]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/220
+[#233]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/233
+[#234]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/234
+[#236]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/236
+[#237]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/237
+[#240]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/240
+[#245]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/245
+[#246]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/246
+[#247]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/247
+[#248]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/248
+[#255]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/255
+[#257]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/257
+[#260]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/260
+[#261]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/261
+[#263]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/263
+[#268]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/268
+[#269]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/269
+[#271]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/271
+[#273]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/273
+[#274]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/274
+[#280]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/280
+[#281]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/281
+[#284]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/284
+[#287]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/287

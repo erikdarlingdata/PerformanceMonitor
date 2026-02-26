@@ -13,6 +13,13 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+            <ContextMenu x:Key="DataGridContextMenu">
+                <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
+                <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
+                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+                <Separator/>
+                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+            </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -89,6 +96,26 @@
                         <ComboBoxItem Content="Last 24 hours"/>
                         <ComboBoxItem Content="Last 7 days"/>
                     </ComboBox>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="Connection timeout:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
+                    <TextBox x:Name="ConnectionTimeoutBox" Width="50" Text="5" VerticalAlignment="Center"/>
+                    <TextBlock Text="seconds (5–60, increase for VPN/remote connections)"
+                               FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="CSV separator:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="CsvSeparatorCombo" Width="140" VerticalAlignment="Center">
+                        <ComboBoxItem Content="Comma (,)" Tag=","/>
+                        <ComboBoxItem Content="Semicolon (;)" Tag=";"/>
+                        <ComboBoxItem Content="Tab" Tag="&#x9;"/>
+                    </ComboBox>
+                    <TextBlock Text="auto-detected from locale"
+                               FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
                 </StackPanel>
             </StackPanel>
         </Border>
@@ -237,7 +264,8 @@
                       CanUserAddRows="False" CanUserDeleteRows="False"
                       SelectionMode="Single"
                       Background="Transparent" BorderThickness="0"
-                      HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                      ContextMenu="{StaticResource DataGridContextMenu}">
                 <DataGrid.Columns>
                     <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}" Width="65"/>
                     <DataGridTextColumn Header="Collector" Binding="{Binding Name}" Width="160" IsReadOnly="True"/>

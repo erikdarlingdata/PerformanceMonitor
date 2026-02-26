@@ -29,23 +29,26 @@ public partial class RemoteCollectorService
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
         bool isAzureSqlDb = serverStatus.SqlEngineEdition == 5;
 
-        /* total_spills exists in dm_exec_procedure_stats and dm_exec_trigger_stats on all supported versions,
-           but does NOT exist in dm_exec_function_stats on any version. Use dynamic SQL to handle this. */
+        /* total_spills/min_spills/max_spills exist in dm_exec_procedure_stats and dm_exec_trigger_stats
+           on all supported versions, but do NOT exist in dm_exec_function_stats on any version.
+           Use dynamic SQL to handle this. */
         const string standardQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
-    @spills_col nvarchar(200) = N'total_spills = ISNULL(s.total_spills, 0),',
-    @fn_spills_col nvarchar(200) = N'total_spills = CONVERT(bigint, 0),',
+    @spills_cols nvarchar(400) = N'total_spills = ISNULL(s.total_spills, 0), min_spills = ISNULL(s.min_spills, 0), max_spills = ISNULL(s.max_spills, 0),',
+    @fn_spills_cols nvarchar(400) = N'total_spills = CONVERT(bigint, 0), min_spills = CONVERT(bigint, 0), max_spills = CONVERT(bigint, 0),',
     @sql nvarchar(max);
 
 SET @sql = CAST(N'
-SELECT TOP (150) * FROM (
+SELECT /* PerformanceMonitorLite */ TOP (150) * FROM (
 SELECT
     database_name = d.name,
     schema_name = OBJECT_SCHEMA_NAME(s.object_id, s.database_id),
     object_name = OBJECT_NAME(s.object_id, s.database_id),
     object_type = N''PROCEDURE'',
+    cached_time = s.cached_time,
+    last_execution_time = s.last_execution_time,
     execution_count = s.execution_count,
     total_worker_time = s.total_worker_time,
     total_elapsed_time = s.total_elapsed_time,
@@ -56,7 +59,13 @@ SELECT
     max_worker_time = s.max_worker_time,
     min_elapsed_time = s.min_elapsed_time,
     max_elapsed_time = s.max_elapsed_time,
-    ' AS nvarchar(max)) + @spills_col + N'
+    min_logical_reads = s.min_logical_reads,
+    max_logical_reads = s.max_logical_reads,
+    min_physical_reads = s.min_physical_reads,
+    max_physical_reads = s.max_physical_reads,
+    min_logical_writes = s.min_logical_writes,
+    max_logical_writes = s.max_logical_writes,
+    ' AS nvarchar(max)) + @spills_cols + N'
     sql_handle = CONVERT(varchar(64), s.sql_handle, 1),
     plan_handle = CONVERT(varchar(64), s.plan_handle, 1)
 FROM sys.dm_exec_procedure_stats AS s
@@ -70,6 +79,7 @@ CROSS APPLY
 LEFT JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 
 UNION ALL
 
@@ -90,6 +100,8 @@ SELECT
         END
     ),
     object_type = N''TRIGGER'',
+    cached_time = s.cached_time,
+    last_execution_time = s.last_execution_time,
     execution_count = s.execution_count,
     total_worker_time = s.total_worker_time,
     total_elapsed_time = s.total_elapsed_time,
@@ -100,7 +112,13 @@ SELECT
     max_worker_time = s.max_worker_time,
     min_elapsed_time = s.min_elapsed_time,
     max_elapsed_time = s.max_elapsed_time,
-    ' + @spills_col + CAST(N'
+    min_logical_reads = s.min_logical_reads,
+    max_logical_reads = s.max_logical_reads,
+    min_physical_reads = s.min_physical_reads,
+    max_physical_reads = s.max_physical_reads,
+    min_logical_writes = s.min_logical_writes,
+    max_logical_writes = s.max_logical_writes,
+    ' + @spills_cols + CAST(N'
     sql_handle = CONVERT(varchar(64), s.sql_handle, 1),
     plan_handle = CONVERT(varchar(64), s.plan_handle, 1)
 FROM sys.dm_exec_trigger_stats AS s
@@ -115,6 +133,7 @@ CROSS APPLY
 LEFT JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 
 UNION ALL
 
@@ -123,6 +142,8 @@ SELECT
     schema_name = OBJECT_SCHEMA_NAME(s.object_id, s.database_id),
     object_name = OBJECT_NAME(s.object_id, s.database_id),
     object_type = N''FUNCTION'',
+    cached_time = s.cached_time,
+    last_execution_time = s.last_execution_time,
     execution_count = s.execution_count,
     total_worker_time = s.total_worker_time,
     total_elapsed_time = s.total_elapsed_time,
@@ -133,7 +154,13 @@ SELECT
     max_worker_time = s.max_worker_time,
     min_elapsed_time = s.min_elapsed_time,
     max_elapsed_time = s.max_elapsed_time,
-    ' AS nvarchar(max)) + @fn_spills_col + CAST(N'
+    min_logical_reads = s.min_logical_reads,
+    max_logical_reads = s.max_logical_reads,
+    min_physical_reads = s.min_physical_reads,
+    max_physical_reads = s.max_physical_reads,
+    min_logical_writes = s.min_logical_writes,
+    max_logical_writes = s.max_logical_writes,
+    ' AS nvarchar(max)) + @fn_spills_cols + CAST(N'
     sql_handle = CONVERT(varchar(64), s.sql_handle, 1),
     plan_handle = CONVERT(varchar(64), s.plan_handle, 1)
 FROM sys.dm_exec_function_stats AS s
@@ -147,6 +174,7 @@ CROSS APPLY
 LEFT JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ) AS combined
 ORDER BY total_elapsed_time DESC
 OPTION(RECOMPILE);' AS nvarchar(max));
@@ -158,11 +186,13 @@ EXECUTE sys.sp_executesql @sql;";
         const string azureSqlDbQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (150)
+SELECT /* PerformanceMonitorLite */ TOP (150)
     database_name = DB_NAME(),
     schema_name = OBJECT_SCHEMA_NAME(s.object_id, s.database_id),
     object_name = OBJECT_NAME(s.object_id, s.database_id),
     object_type = N'PROCEDURE',
+    cached_time = s.cached_time,
+    last_execution_time = s.last_execution_time,
     execution_count = s.execution_count,
     total_worker_time = s.total_worker_time,
     total_elapsed_time = s.total_elapsed_time,
@@ -173,11 +203,20 @@ SELECT TOP (150)
     max_worker_time = s.max_worker_time,
     min_elapsed_time = s.min_elapsed_time,
     max_elapsed_time = s.max_elapsed_time,
+    min_logical_reads = s.min_logical_reads,
+    max_logical_reads = s.max_logical_reads,
+    min_physical_reads = s.min_physical_reads,
+    max_physical_reads = s.max_physical_reads,
+    min_logical_writes = s.min_logical_writes,
+    max_logical_writes = s.max_logical_writes,
     total_spills = ISNULL(s.total_spills, 0),
+    min_spills = ISNULL(s.min_spills, 0),
+    max_spills = ISNULL(s.max_spills, 0),
     sql_handle = CONVERT(varchar(64), s.sql_handle, 1),
     plan_handle = CONVERT(varchar(64), s.plan_handle, 1)
 FROM sys.dm_exec_procedure_stats AS s
 WHERE s.database_id = DB_ID()
+AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ORDER BY s.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 
@@ -208,26 +247,34 @@ OPTION(RECOMPILE);";
             {
                 while (await reader.ReadAsync(cancellationToken))
                 {
+                    /* Reader ordinals match SELECT column order:
+                       0=database_name, 1=schema_name, 2=object_name, 3=object_type,
+                       4=cached_time, 5=last_execution_time,
+                       6=execution_count, 7=total_worker_time, 8=total_elapsed_time,
+                       9=total_logical_reads, 10=total_physical_reads, 11=total_logical_writes,
+                       12=min_worker_time, 13=max_worker_time, 14=min_elapsed_time, 15=max_elapsed_time,
+                       16=min_logical_reads, 17=max_logical_reads, 18=min_physical_reads, 19=max_physical_reads,
+                       20=min_logical_writes, 21=max_logical_writes,
+                       22=total_spills, 23=min_spills, 24=max_spills,
+                       25=sql_handle, 26=plan_handle */
                     var dbName = reader.IsDBNull(0) ? "" : reader.GetString(0);
                     var schemaName = reader.IsDBNull(1) ? "" : reader.GetString(1);
                     var objectName = reader.IsDBNull(2) ? "" : reader.GetString(2);
                     var objectType = reader.IsDBNull(3) ? "" : reader.GetString(3);
-                    var execCount = reader.GetInt64(4);
-                    var workerTime = reader.GetInt64(5);
-                    var elapsedTime = reader.GetInt64(6);
-                    var logicalReads = reader.GetInt64(7);
-                    var physicalReads = reader.GetInt64(8);
-                    var logicalWrites = reader.GetInt64(9);
-                    var minWorkerTime = reader.GetInt64(10);
-                    var maxWorkerTime = reader.GetInt64(11);
-                    var minElapsedTime = reader.GetInt64(12);
-                    var maxElapsedTime = reader.GetInt64(13);
-                    var totalSpills = reader.GetInt64(14);
-                    var sqlHandle = reader.IsDBNull(15) ? (string?)null : reader.GetString(15);
-                    var planHandle = reader.IsDBNull(16) ? (string?)null : reader.GetString(16);
+                    var cachedTime = reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4);
+                    var lastExecTime = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
+                    var execCount = reader.GetInt64(6);
+                    var workerTime = reader.GetInt64(7);
+                    var elapsedTime = reader.GetInt64(8);
+                    var logicalReads = reader.GetInt64(9);
+                    var physicalReads = reader.GetInt64(10);
+                    var logicalWrites = reader.GetInt64(11);
+                    var sqlHandle = reader.IsDBNull(25) ? (string?)null : reader.GetString(25);
+                    var planHandle = reader.IsDBNull(26) ? (string?)null : reader.GetString(26);
 
-                    /* Delta key: database.schema.object */
-                    var deltaKey = $"{dbName}.{schemaName}.{objectName}";
+                    /* Delta key: plan_handle to prevent cross-contamination
+                       when multiple plans exist for the same object */
+                    var deltaKey = planHandle ?? $"{dbName}.{schemaName}.{objectName}";
                     var deltaExec = _deltaCalculator.CalculateDelta(serverId, "proc_stats_exec", deltaKey, execCount);
                     var deltaWorker = _deltaCalculator.CalculateDelta(serverId, "proc_stats_worker", deltaKey, workerTime);
                     var deltaElapsed = _deltaCalculator.CalculateDelta(serverId, "proc_stats_elapsed", deltaKey, elapsedTime);
@@ -235,34 +282,45 @@ OPTION(RECOMPILE);";
                     var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "proc_stats_writes", deltaKey, logicalWrites);
                     var deltaPhysReads = _deltaCalculator.CalculateDelta(serverId, "proc_stats_phys_reads", deltaKey, physicalReads);
 
+                    /* Appender column order must match DuckDB table definition exactly */
                     var row = appender.CreateRow();
-                    row.AppendValue(GenerateCollectionId())
-                       .AppendValue(collectionTime)
-                       .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
-                       .AppendValue(dbName)
-                       .AppendValue(schemaName)
-                       .AppendValue(objectName)
-                       .AppendValue(objectType)
-                       .AppendValue(execCount)
-                       .AppendValue(workerTime)
-                       .AppendValue(elapsedTime)
-                       .AppendValue(logicalReads)
-                       .AppendValue(physicalReads)
-                       .AppendValue(logicalWrites)
-                       .AppendValue(minWorkerTime)
-                       .AppendValue(maxWorkerTime)
-                       .AppendValue(minElapsedTime)
-                       .AppendValue(maxElapsedTime)
-                       .AppendValue(totalSpills)
-                       .AppendValue(sqlHandle)
-                       .AppendValue(planHandle)
-                       .AppendValue(deltaExec)
-                       .AppendValue(deltaWorker)
-                       .AppendValue(deltaElapsed)
-                       .AppendValue(deltaReads)
-                       .AppendValue(deltaWrites)
-                       .AppendValue(deltaPhysReads)
+                    row.AppendValue(GenerateCollectionId())                                     /* collection_id */
+                       .AppendValue(collectionTime)                                             /* collection_time */
+                       .AppendValue(serverId)                                                   /* server_id */
+                       .AppendValue(server.ServerName)                                          /* server_name */
+                       .AppendValue(dbName)                                                     /* database_name */
+                       .AppendValue(schemaName)                                                 /* schema_name */
+                       .AppendValue(objectName)                                                 /* object_name */
+                       .AppendValue(objectType)                                                 /* object_type */
+                       .AppendValue(cachedTime)                                                 /* cached_time */
+                       .AppendValue(lastExecTime)                                               /* last_execution_time */
+                       .AppendValue(execCount)                                                  /* execution_count */
+                       .AppendValue(workerTime)                                                 /* total_worker_time */
+                       .AppendValue(elapsedTime)                                                /* total_elapsed_time */
+                       .AppendValue(logicalReads)                                               /* total_logical_reads */
+                       .AppendValue(physicalReads)                                              /* total_physical_reads */
+                       .AppendValue(logicalWrites)                                              /* total_logical_writes */
+                       .AppendValue(reader.IsDBNull(12) ? 0L : reader.GetInt64(12))             /* min_worker_time */
+                       .AppendValue(reader.IsDBNull(13) ? 0L : reader.GetInt64(13))             /* max_worker_time */
+                       .AppendValue(reader.IsDBNull(14) ? 0L : reader.GetInt64(14))             /* min_elapsed_time */
+                       .AppendValue(reader.IsDBNull(15) ? 0L : reader.GetInt64(15))             /* max_elapsed_time */
+                       .AppendValue(reader.IsDBNull(16) ? 0L : reader.GetInt64(16))             /* min_logical_reads */
+                       .AppendValue(reader.IsDBNull(17) ? 0L : reader.GetInt64(17))             /* max_logical_reads */
+                       .AppendValue(reader.IsDBNull(18) ? 0L : reader.GetInt64(18))             /* min_physical_reads */
+                       .AppendValue(reader.IsDBNull(19) ? 0L : reader.GetInt64(19))             /* max_physical_reads */
+                       .AppendValue(reader.IsDBNull(20) ? 0L : reader.GetInt64(20))             /* min_logical_writes */
+                       .AppendValue(reader.IsDBNull(21) ? 0L : reader.GetInt64(21))             /* max_logical_writes */
+                       .AppendValue(reader.GetInt64(22))                                        /* total_spills */
+                       .AppendValue(reader.GetInt64(23))                                        /* min_spills */
+                       .AppendValue(reader.GetInt64(24))                                        /* max_spills */
+                       .AppendValue(sqlHandle)                                                  /* sql_handle */
+                       .AppendValue(planHandle)                                                 /* plan_handle */
+                       .AppendValue(deltaExec)                                                  /* delta_execution_count */
+                       .AppendValue(deltaWorker)                                                /* delta_worker_time */
+                       .AppendValue(deltaElapsed)                                               /* delta_elapsed_time */
+                       .AppendValue(deltaReads)                                                 /* delta_logical_reads */
+                       .AppendValue(deltaWrites)                                                /* delta_logical_writes */
+                       .AppendValue(deltaPhysReads)                                             /* delta_physical_reads */
                        .EndRow();
 
                     rowsCollected++;

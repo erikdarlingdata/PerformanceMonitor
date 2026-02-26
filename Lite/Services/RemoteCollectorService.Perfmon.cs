@@ -34,6 +34,10 @@ public partial class RemoteCollectorService
         "Readahead pages/sec",
         "Background writer pages/sec",
         "Lazy writes/sec",
+        "Full Scans/sec",
+        "Index Searches/sec",
+        "Page Splits/sec",
+        "Free list stalls/sec",
         "Non-Page latch waits",
         "Page IO latch waits",
         "Page latch waits",
@@ -47,6 +51,8 @@ public partial class RemoteCollectorService
         "Lock Waits/sec",
         "Number of Deadlocks/sec",
         "Lock waits",
+        "Processes blocked",
+        "Lock Timeouts/sec",
         /* Memory counters */
         "Granted Workspace Memory (KB)",
         "Lock Memory (KB)",
@@ -75,6 +81,15 @@ public partial class RemoteCollectorService
         "Log Flush Write Time (ms)",
         "Log buffer waits",
         "Log write waits",
+        /* TempDB counters */
+        "Version Store Size (KB)",
+        "Free Space in tempdb (KB)",
+        "Active Temp Tables",
+        "Version Generation rate (KB/s)",
+        "Version Cleanup rate (KB/s)",
+        "Temp Tables Creation Rate",
+        "Workfiles Created/sec",
+        "Worktables Created/sec",
         /* Wait counters */
         "Network IO waits",
         "Wait for the worker"

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
@@ -17,9 +18,57 @@ public class DuckDbInitializer
     private readonly ILogger<DuckDbInitializer>? _logger;
 
     /// <summary>
+    /// Coordinates UI readers with maintenance writers (CHECKPOINT, archive DELETEs, compaction).
+    /// Read locks allow unlimited concurrent UI queries. Write locks are exclusive and wait
+    /// for all readers to finish before proceeding.
+    /// </summary>
+    private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
+
+    /// <summary>
+    /// Acquires a read lock on the database. Multiple readers can hold this concurrently.
+    /// Dispose the returned object to release the lock.
+    /// </summary>
+    public IDisposable AcquireReadLock()
+    {
+        s_dbLock.EnterReadLock();
+        return new LockReleaser(s_dbLock, write: false);
+    }
+
+    /// <summary>
+    /// Acquires an exclusive write lock on the database. Blocks until all readers finish.
+    /// Dispose the returned object to release the lock.
+    /// </summary>
+    public IDisposable AcquireWriteLock()
+    {
+        s_dbLock.EnterWriteLock();
+        return new LockReleaser(s_dbLock, write: true);
+    }
+
+    private sealed class LockReleaser : IDisposable
+    {
+        private readonly ReaderWriterLockSlim _lock;
+        private readonly bool _write;
+        private bool _disposed;
+
+        public LockReleaser(ReaderWriterLockSlim rwLock, bool write)
+        {
+            _lock = rwLock;
+            _write = write;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (_write) _lock.ExitWriteLock();
+            else _lock.ExitReadLock();
+        }
+    }
+
+    /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 11;
+    internal const int CurrentSchemaVersion = 15;
 
     private readonly string _archivePath;
 
@@ -368,6 +417,61 @@ public class DuckDbInitializer
             _logger?.LogInformation("Running migration to v11: rebuilding database_config for expanded sys.databases columns");
             await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS database_config");
         }
+
+        if (fromVersion < 12)
+        {
+            /* v12: Added login_name, host_name, program_name, open_transaction_count,
+                    percent_complete columns to query_snapshots for Issue #149. */
+            _logger?.LogInformation("Running migration to v12: adding session columns to query_snapshots");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS login_name VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS host_name VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS program_name VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS open_transaction_count INTEGER");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS percent_complete DECIMAL(5,2)");
+            }
+            catch
+            {
+                /* Table doesn't exist yet — will be created with correct schema below */
+            }
+        }
+
+        if (fromVersion < 13)
+        {
+            /* v13: Full column parity with Dashboard for all three query/procedure collectors.
+                    query_stats: added creation_time, last_execution_time, total_clr_time,
+                      min/max physical_reads, rows, spills, memory grant columns (6), thread columns (4).
+                    procedure_stats: added cached_time, last_execution_time,
+                      min/max logical_reads, physical_reads, logical_writes, spills.
+                    query_store_stats: complete rebuild with all min/max columns, DOP, CLR,
+                      memory, tempdb, plan forcing, compilation metrics, version-gated columns.
+                    Must drop/recreate because DuckDB appender writes by position. */
+            _logger?.LogInformation("Running migration to v13: rebuilding query_stats, procedure_stats, query_store_stats for full Dashboard column parity");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS query_stats");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS procedure_stats");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS query_store_stats");
+        }
+
+        if (fromVersion < 14)
+        {
+            /* v14: Switched memory_grant_stats from per-session (dm_exec_query_memory_grants)
+                    to semaphore-level (dm_exec_query_resource_semaphores) for parity with Dashboard.
+                    Old schema had session_id, query_text, dop, etc. New schema has
+                    resource_semaphore_id, pool_id, and delta columns.
+                    Must drop/recreate because column layout is completely different. */
+            _logger?.LogInformation("Running migration to v14: rebuilding memory_grant_stats for resource semaphore schema");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS memory_grant_stats");
+        }
+
+        if (fromVersion < 15)
+        {
+            /* v15: Added queued I/O columns (io_stall_queued_read_ms, io_stall_queued_write_ms)
+                    and their delta counterparts to file_io_stats for latency overlay charts.
+                    Must drop/recreate because DuckDB appender writes by position. */
+            _logger?.LogInformation("Running migration to v15: rebuilding file_io_stats for queued I/O columns");
+            await ExecuteNonQueryAsync(connection, "DROP TABLE IF EXISTS file_io_stats");
+        }
     }
 
     /// <summary>
@@ -454,7 +558,7 @@ public class DuckDbInitializer
                 if (hasParquetFiles)
                 {
                     var globPath = parquetGlob.Replace("\\", "/");
-                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
+                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
                 }
                 else
                 {
@@ -491,6 +595,7 @@ public class DuckDbInitializer
     /// </summary>
     public async Task CheckpointAsync()
     {
+        using var writeLock = AcquireWriteLock();
         try
         {
             using var connection = CreateConnection();
@@ -546,147 +651,24 @@ public class DuckDbInitializer
     }
 
     /// <summary>
-    /// Compacts the database by exporting all tables to a fresh file and swapping.
-    /// DuckDB VACUUM does not reclaim space from append-fragmented files — only
-    /// export/reimport eliminates bloat. Typically takes 2-5 seconds for a 300MB database.
+    /// Deletes the database and WAL files, then reinitializes with fresh empty tables
+    /// and archive views pointing at the parquet files.
+    /// Acquires its own write lock — caller must NOT already hold the lock.
     /// </summary>
-    /// <returns>True if compaction was performed, false if skipped or failed.</returns>
-    public async Task<bool> CompactAsync()
+    public async Task ResetDatabaseAsync()
     {
-        if (!DatabaseExists())
-        {
-            return false;
-        }
+        using var writeLock = AcquireWriteLock();
 
-        var sizeBefore = GetDatabaseSizeMb();
-        var tempPath = _databasePath + ".compact";
-        var backupPath = _databasePath + ".precompact";
+        if (File.Exists(_databasePath))
+            File.Delete(_databasePath);
 
-        _logger?.LogInformation("Starting database compaction ({SizeMb:F0} MB)", sizeBefore);
+        var walPath = _databasePath + ".wal";
+        if (File.Exists(walPath))
+            File.Delete(walPath);
 
-        try
-        {
-            /* Export all data to a fresh database via ATTACH + CREATE TABLE AS */
-            if (File.Exists(tempPath)) File.Delete(tempPath);
-
-            using (var connection = CreateConnection())
-            {
-                await connection.OpenAsync();
-
-                /* Checkpoint first to flush WAL */
-                using (var cmd = connection.CreateCommand())
-                {
-                    cmd.CommandText = "CHECKPOINT";
-                    await cmd.ExecuteNonQueryAsync();
-                }
-
-                /* Attach the new database and copy all tables */
-                using (var cmd = connection.CreateCommand())
-                {
-                    cmd.CommandText = $"ATTACH '{tempPath.Replace("\\", "/")}' AS compact_db";
-                    await cmd.ExecuteNonQueryAsync();
-                }
-
-                /* Get all table names (exclude views) */
-                var tableNames = new List<string>();
-                using (var cmd = connection.CreateCommand())
-                {
-                    cmd.CommandText = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' AND table_type = 'BASE TABLE'";
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        tableNames.Add(reader.GetString(0));
-                    }
-                }
-
-                foreach (var table in tableNames)
-                {
-                    using var cmd = connection.CreateCommand();
-                    cmd.CommandText = $"CREATE TABLE compact_db.{table} AS SELECT * FROM main.{table}";
-                    await cmd.ExecuteNonQueryAsync();
-                }
-
-                using (var cmd = connection.CreateCommand())
-                {
-                    cmd.CommandText = "DETACH compact_db";
-                    await cmd.ExecuteNonQueryAsync();
-                }
-            }
-
-            /* Delete WAL files before swap — the old WAL belongs to the pre-compaction
-               database and would confuse the fresh compacted file on next open */
-            var walPath = _databasePath + ".wal";
-            if (File.Exists(walPath)) File.Delete(walPath);
-
-            var tempWalPath = tempPath + ".wal";
-            if (File.Exists(tempWalPath)) File.Delete(tempWalPath);
-
-            /* Atomically replace the database file with the compacted version.
-               File.Replace swaps in a single OS operation, eliminating any window
-               where _databasePath doesn't exist (unlike two separate File.Move calls).
-               Retry briefly if a UI connection still has the file open. */
-            if (File.Exists(backupPath)) File.Delete(backupPath);
-
-            const int maxSwapAttempts = 3;
-            for (int attempt = 1; attempt <= maxSwapAttempts; attempt++)
-            {
-                try
-                {
-                    File.Replace(tempPath, _databasePath, backupPath);
-                    break;
-                }
-                catch (IOException) when (attempt < maxSwapAttempts)
-                {
-                    _logger?.LogDebug("Compaction file swap attempt {Attempt}/{Max} failed (file in use), retrying in 500ms",
-                        attempt, maxSwapAttempts);
-                    await Task.Delay(500);
-                }
-            }
-
-            /* Recreate indexes and views on the fresh database */
-            using (var connection = CreateConnection())
-            {
-                await connection.OpenAsync();
-
-                foreach (var indexStatement in Schema.GetAllIndexStatements())
-                {
-                    try
-                    {
-                        using var cmd = connection.CreateCommand();
-                        cmd.CommandText = indexStatement;
-                        await cmd.ExecuteNonQueryAsync();
-                    }
-                    catch { /* Index may already exist from CREATE TABLE AS */ }
-                }
-            }
-
-            await CreateArchiveViewsAsync();
-
-            /* Clean up backup */
-            File.Delete(backupPath);
-
-            var sizeAfter = GetDatabaseSizeMb();
-            _logger?.LogInformation("Compaction complete: {Before:F0} MB -> {After:F0} MB ({Saved:F0} MB reclaimed)",
-                sizeBefore, sizeAfter, sizeBefore - sizeAfter);
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "Database compaction failed");
-
-            /* Restore from backup if the primary file was moved */
-            if (!File.Exists(_databasePath) && File.Exists(backupPath))
-            {
-                File.Move(backupPath, _databasePath);
-                _logger?.LogInformation("Restored database from pre-compaction backup");
-            }
-
-            /* Clean up temp file */
-            if (File.Exists(tempPath)) File.Delete(tempPath);
-
-            return false;
-        }
+        _logger?.LogInformation("Database files deleted, reinitializing");
+        await InitializeAsync();
     }
+
 
 }

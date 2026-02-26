@@ -1065,6 +1065,90 @@ BEGIN
             OPTION(RECOMPILE, HASH JOIN, HASH GROUP);';
         END;
 
+        /*
+        Memory Grant Stats Delta Calculation
+        */
+        ELSE IF @table_name = N'memory_grant_stats'
+        BEGIN
+            SET @sql = N'
+            WITH
+                current_collection AS
+            (
+                SELECT
+                    mgs.*,
+                    row_number =
+                        ROW_NUMBER() OVER
+                        (
+                            PARTITION BY
+                                mgs.resource_semaphore_id,
+                                mgs.pool_id
+                            ORDER BY
+                                mgs.collection_time DESC
+                        )
+                FROM collect.memory_grant_stats AS mgs
+                WHERE mgs.timeout_error_count_delta IS NULL
+            ),
+                previous_collection AS
+            (
+                SELECT
+                    mgs.collection_id,
+                    mgs.resource_semaphore_id,
+                    mgs.pool_id,
+                    mgs.timeout_error_count,
+                    mgs.forced_grant_count,
+                    mgs.collection_time,
+                    row_number =
+                        ROW_NUMBER() OVER
+                        (
+                            PARTITION BY
+                                mgs.resource_semaphore_id,
+                                mgs.pool_id
+                            ORDER BY
+                                mgs.collection_time DESC
+                        )
+                FROM collect.memory_grant_stats AS mgs
+                WHERE mgs.timeout_error_count_delta IS NOT NULL
+                OR    mgs.collection_id IN
+                (
+                    SELECT
+                        MIN(mgs2.collection_id)
+                    FROM collect.memory_grant_stats AS mgs2
+                    GROUP BY
+                        mgs2.resource_semaphore_id,
+                        mgs2.pool_id
+                )
+            )
+            UPDATE
+                cc
+            SET
+                timeout_error_count_delta =
+                    CASE
+                        WHEN cc.server_start_time >= pc.collection_time
+                        THEN cc.timeout_error_count /*Server restart*/
+                        WHEN cc.timeout_error_count >= pc.timeout_error_count
+                        THEN cc.timeout_error_count - pc.timeout_error_count
+                        ELSE cc.timeout_error_count /*Counter wrapped or restart*/
+                    END,
+                forced_grant_count_delta =
+                    CASE
+                        WHEN cc.server_start_time >= pc.collection_time
+                        THEN cc.forced_grant_count /*Server restart*/
+                        WHEN cc.forced_grant_count >= pc.forced_grant_count
+                        THEN cc.forced_grant_count - pc.forced_grant_count
+                        ELSE cc.forced_grant_count /*Counter wrapped or restart*/
+                    END,
+                sample_interval_seconds =
+                    DATEDIFF(SECOND, pc.collection_time, cc.collection_time)
+            FROM current_collection AS cc
+            LEFT JOIN previous_collection AS pc
+              ON  cc.resource_semaphore_id = pc.resource_semaphore_id
+              AND cc.pool_id = pc.pool_id
+              AND pc.row_number = 1
+            WHERE cc.row_number = 1
+            AND   pc.collection_id IS NOT NULL /*Exclude first collection where no previous exists*/
+            OPTION(RECOMPILE, HASH JOIN, HASH GROUP);';
+        END;
+
         ELSE
         BEGIN
             RAISERROR(N'Unknown table name for delta calculation: %s', 16, 1, @table_name);

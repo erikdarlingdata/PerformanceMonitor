@@ -61,6 +61,10 @@ namespace PerformanceMonitorDashboard.Models
         public long? MinTempdbSpaceUsed { get; set; }
         public long? MaxTempdbSpaceUsed { get; set; }
 
+        // Query identifiers (hex strings from binary columns)
+        public string? QueryHash { get; set; }
+        public string? QueryPlanHash { get; set; }
+
         // Plan info
         public string? PlanType { get; set; }
         public bool IsForcedPlan { get; set; }

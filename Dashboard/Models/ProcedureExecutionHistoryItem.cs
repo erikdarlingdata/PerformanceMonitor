@@ -22,6 +22,7 @@ namespace PerformanceMonitorDashboard.Models
 
         // Cumulative values
         public long ExecutionCount { get; set; }
+        public long IntervalExecutions { get; set; }
         public long TotalWorkerTime { get; set; }
         public long MinWorkerTime { get; set; }
         public long MaxWorkerTime { get; set; }
@@ -40,6 +41,10 @@ namespace PerformanceMonitorDashboard.Models
         public long? TotalSpills { get; set; }
         public long? MinSpills { get; set; }
         public long? MaxSpills { get; set; }
+
+        // Query identifiers (hex strings from binary columns)
+        public string? SqlHandle { get; set; }
+        public string? PlanHandle { get; set; }
 
         // Delta values
         public long? ExecutionCountDelta { get; set; }

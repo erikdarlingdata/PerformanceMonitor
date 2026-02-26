@@ -49,8 +49,7 @@ public class DeltaCalculator
             await SeedWaitStatsAsync(connection);
             await SeedFileIoStatsAsync(connection);
             await SeedPerfmonStatsAsync(connection);
-            await SeedQueryStatsAsync(connection);
-            await SeedProcedureStatsAsync(connection);
+            await SeedMemoryGrantStatsAsync(connection);
 
             _logger?.LogInformation("Delta calculator seeded from database");
         }
@@ -62,8 +61,8 @@ public class DeltaCalculator
 
     /// <summary>
     /// Calculates the delta between the current value and the previous cached value.
-    /// Returns 0 if this is the first collection (no previous value).
-    /// Returns the current value if the delta would be negative (counter reset).
+    /// First-ever sighting (no baseline): returns currentValue so single-execution queries appear.
+    /// Counter reset (value decreased): returns 0 to avoid inflated deltas from plan cache churn.
     /// Thread-safe via atomic AddOrUpdate.
     /// </summary>
     public long CalculateDelta(int serverId, string collectorName, string key, long currentValue)
@@ -75,17 +74,18 @@ public class DeltaCalculator
 
         collectorCache.AddOrUpdate(
             key,
-            /* Add: first time seeing this key, delta = 0 */
+            /* Add: first time seeing this key — use current value as delta
+               so queries that execute once still surface in top-N views */
             _ =>
             {
-                delta = 0;
+                delta = currentValue;
                 return currentValue;
             },
             /* Update: compute delta atomically */
             (_, previousValue) =>
             {
                 delta = currentValue < previousValue
-                    ? currentValue   /* counter reset */
+                    ? 0              /* counter reset (plan cache eviction/re-entry) — not real new work */
                     : currentValue - previousValue;
                 return currentValue;
             });
@@ -158,55 +158,35 @@ WHERE (server_id, collection_time) IN (
         if (count > 0) _logger?.LogDebug("Seeded {Count} perfmon_stats baseline rows", count);
     }
 
-    private async Task SeedQueryStatsAsync(DuckDBConnection connection)
+    private async Task SeedMemoryGrantStatsAsync(DuckDBConnection connection)
     {
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-SELECT server_id, query_hash, execution_count, total_worker_time, total_elapsed_time,
-       total_logical_reads, total_rows
-FROM query_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM query_stats GROUP BY server_id
-)";
-        using var reader = await cmd.ExecuteReaderAsync();
-        var count = 0;
-        while (await reader.ReadAsync())
+        try
         {
-            var serverId = reader.GetInt32(0);
-            var hash = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            Seed(serverId, "query_stats_exec", hash, reader.GetInt64(2));
-            Seed(serverId, "query_stats_worker", hash, reader.GetInt64(3));
-            Seed(serverId, "query_stats_elapsed", hash, reader.GetInt64(4));
-            Seed(serverId, "query_stats_reads", hash, reader.GetInt64(5));
-            Seed(serverId, "query_stats_rows", hash, reader.GetInt64(6));
-            count++;
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT server_id, pool_id, resource_semaphore_id, timeout_error_count, forced_grant_count
+FROM memory_grant_stats
+WHERE (server_id, collection_time) IN (
+    SELECT server_id, MAX(collection_time) FROM memory_grant_stats GROUP BY server_id
+)";
+            using var reader = await cmd.ExecuteReaderAsync();
+            var count = 0;
+            while (await reader.ReadAsync())
+            {
+                var serverId = reader.GetInt32(0);
+                var poolId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+                var semaphoreId = reader.IsDBNull(2) ? (short)0 : reader.GetInt16(2);
+                var deltaKey = $"{poolId}_{semaphoreId}";
+                Seed(serverId, "memory_grants_timeouts", deltaKey, reader.IsDBNull(3) ? 0 : reader.GetInt64(3));
+                Seed(serverId, "memory_grants_forced", deltaKey, reader.IsDBNull(4) ? 0 : reader.GetInt64(4));
+                count++;
+            }
+            if (count > 0) _logger?.LogDebug("Seeded {Count} memory_grant_stats baseline rows", count);
         }
-        if (count > 0) _logger?.LogDebug("Seeded {Count} query_stats baseline rows", count);
+        catch
+        {
+            /* Table may not exist on first run after schema migration */
+        }
     }
 
-    private async Task SeedProcedureStatsAsync(DuckDBConnection connection)
-    {
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-SELECT server_id, database_name, schema_name, object_name, execution_count, total_worker_time, total_elapsed_time
-FROM procedure_stats
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time) FROM procedure_stats GROUP BY server_id
-)";
-        using var reader = await cmd.ExecuteReaderAsync();
-        var count = 0;
-        while (await reader.ReadAsync())
-        {
-            var serverId = reader.GetInt32(0);
-            var db = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            var schema = reader.IsDBNull(2) ? "" : reader.GetString(2);
-            var obj = reader.IsDBNull(3) ? "" : reader.GetString(3);
-            var key = $"{db}.{schema}.{obj}";
-            Seed(serverId, "proc_stats_exec", key, reader.GetInt64(4));
-            Seed(serverId, "proc_stats_worker", key, reader.GetInt64(5));
-            Seed(serverId, "proc_stats_elapsed", key, reader.GetInt64(6));
-            count++;
-        }
-        if (count > 0) _logger?.LogDebug("Seeded {Count} procedure_stats baseline rows", count);
-    }
 }

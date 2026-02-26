@@ -189,6 +189,80 @@ namespace PerformanceMonitorDashboard
             }
         }
 
+        private void CopyCell_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.CurrentCell.Item != null)
+                {
+                    var cellContent = Helpers.TabHelpers.GetCellContent(dataGrid, dataGrid.CurrentCell);
+                    if (!string.IsNullOrEmpty(cellContent))
+                        Clipboard.SetDataObject(cellContent, false);
+                }
+            }
+        }
+
+        private void CopyRow_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid?.SelectedItem != null)
+                    Clipboard.SetDataObject(Helpers.TabHelpers.GetRowAsText(dataGrid, dataGrid.SelectedItem), false);
+            }
+        }
+
+        private void CopyAllRows_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.Items.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    var headers = new List<string>();
+                    foreach (var column in dataGrid.Columns)
+                        headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
+                    sb.AppendLine(string.Join("\t", headers));
+                    foreach (var item in dataGrid.Items)
+                        sb.AppendLine(Helpers.TabHelpers.GetRowAsText(dataGrid, item));
+                    Clipboard.SetDataObject(sb.ToString(), false);
+                }
+            }
+        }
+
+        private void ExportToCsv_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.Items.Count > 0)
+                {
+                    var dialog = new Microsoft.Win32.SaveFileDialog
+                    {
+                        FileName = $"collection_log_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                        DefaultExt = ".csv",
+                        Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+                    };
+                    if (dialog.ShowDialog() == true)
+                    {
+                        var sb = new System.Text.StringBuilder();
+                        var headers = new List<string>();
+                        foreach (var column in dataGrid.Columns)
+                            headers.Add(Helpers.TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
+                        sb.AppendLine(string.Join(",", headers));
+                        foreach (var item in dataGrid.Items)
+                        {
+                            var values = Helpers.TabHelpers.GetRowValues(dataGrid, item);
+                            sb.AppendLine(string.Join(",", values.Select(v => Helpers.TabHelpers.EscapeCsvField(v))));
+                        }
+                        System.IO.File.WriteAllText(dialog.FileName, sb.ToString());
+                    }
+                }
+            }
+        }
+
         private void Close_Click(object sender, RoutedEventArgs e)
         {
             Close();

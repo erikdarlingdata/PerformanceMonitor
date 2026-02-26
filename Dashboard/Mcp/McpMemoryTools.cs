@@ -199,12 +199,9 @@ public sealed class McpMemoryTools
                 waiter_count = r.WaiterCount,
                 timeout_error_count = r.TimeoutErrorCount,
                 forced_grant_count = r.ForcedGrantCount,
-                granted_pct = r.GrantedPercentage,
-                used_pct = r.UsedPercentage,
-                available_memory_pressure = r.AvailableMemoryPressureWarning,
-                waiter_count_warning = r.WaiterCountWarning,
-                timeout_error_warning = r.TimeoutErrorWarning,
-                forced_grant_warning = r.ForcedGrantWarning
+                timeout_error_count_delta = r.TimeoutErrorCountDelta,
+                forced_grant_count_delta = r.ForcedGrantCountDelta,
+                sample_interval_seconds = r.SampleIntervalSeconds
             });
 
             return JsonSerializer.Serialize(new

@@ -1,0 +1,167 @@
+<UserControl x:Class="PerformanceMonitorDashboard.Controls.PlanViewerControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource BackgroundBrush}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" Padding="8,6"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+            <DockPanel>
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                    <Button Content="+" Click="ZoomIn_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                            FontWeight="Bold" ToolTip="Zoom In"/>
+                    <Button Content="&#x2212;" Click="ZoomOut_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                            FontWeight="Bold" Margin="4,0,0,0" ToolTip="Zoom Out"/>
+                    <Button Content="Fit" Click="ZoomFit_Click" Height="28" Padding="8,0" Margin="4,0,0,0"
+                            ToolTip="Zoom to Fit"/>
+                    <TextBlock x:Name="ZoomLevelText" Text="100%" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="8,0,0,0" FontSize="11"/>
+                    <Separator Margin="12,4"/>
+                    <Button Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
+                            ToolTip="Save plan as .sqlplan file"/>
+                    <Separator Margin="12,4"/>
+                    <TextBlock x:Name="StatementLabel" Text="Statement:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"
+                               Visibility="Collapsed"/>
+                    <ComboBox x:Name="StatementSelector" MinWidth="200" Height="28"
+                              SelectionChanged="StatementSelector_Changed"
+                              Visibility="Collapsed"/>
+                </StackPanel>
+                <TextBlock x:Name="CostText" DockPanel.Dock="Right" VerticalAlignment="Center"
+                           HorizontalAlignment="Right"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"/>
+            </DockPanel>
+        </Border>
+
+        <!-- Missing Index Banner -->
+        <Border x:Name="MissingIndexBanner" Grid.Row="1" Padding="10,8"
+                Background="#3D2A0E" Visibility="Collapsed"
+                BorderBrush="#7A5A1E" BorderThickness="0,0,0,1">
+            <StackPanel>
+                <TextBlock Text="Missing Index Suggestions" FontWeight="SemiBold"
+                           Foreground="#FFB347" Margin="0,0,0,4"/>
+                <ItemsControl x:Name="MissingIndexList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="0,2">
+                                <TextBlock Foreground="#E4E6EB" FontSize="11" TextWrapping="Wrap">
+                                    <Run Text="{Binding Table, Mode=OneWay}" FontWeight="SemiBold"/>
+                                    <Run Text=" — Impact: "/>
+                                    <Run Text="{Binding Impact, StringFormat={}{0:F1}%, Mode=OneWay}" Foreground="#FFB347"/>
+                                </TextBlock>
+                                <TextBlock Text="{Binding CreateStatement, Mode=OneWay}" FontFamily="Consolas" FontSize="10"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap"
+                                           Margin="12,2,0,0"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+
+        <!-- Warnings Banner -->
+        <Border x:Name="WarningsBanner" Grid.Row="2" Padding="10,6"
+                Background="#3D1A1A" Visibility="Collapsed"
+                BorderBrush="#7A2A2A" BorderThickness="0,0,0,1">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#x26A0;" Foreground="#E57373" FontSize="14" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBlock x:Name="WarningsSummaryText" Foreground="#E57373" VerticalAlignment="Center" FontSize="12"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Query Text (collapsible) -->
+        <Expander Grid.Row="3" x:Name="QueryTextExpander" Header="  Query Text"
+                  IsExpanded="False" Visibility="Collapsed"
+                  Foreground="{DynamicResource ForegroundBrush}"
+                  Background="{DynamicResource BackgroundDarkBrush}"
+                  BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+            <TextBox x:Name="QueryTextBox" IsReadOnly="True"
+                     FontFamily="Consolas" FontSize="11"
+                     Background="{DynamicResource BackgroundLightBrush}"
+                     Foreground="{DynamicResource ForegroundBrush}"
+                     BorderThickness="0" TextWrapping="Wrap"
+                     MaxHeight="200" VerticalScrollBarVisibility="Auto"
+                     Padding="8,4"/>
+        </Expander>
+
+        <!-- Plan Canvas + Properties Panel -->
+        <Grid Grid.Row="4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition x:Name="PropertiesColumn" Width="0"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Plan Canvas -->
+            <ScrollViewer Grid.Column="0" x:Name="PlanScrollViewer"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto"
+                          Background="{DynamicResource BackgroundBrush}"
+                          PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel">
+                <Canvas x:Name="PlanCanvas" ClipToBounds="False">
+                    <Canvas.LayoutTransform>
+                        <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
+                    </Canvas.LayoutTransform>
+                </Canvas>
+            </ScrollViewer>
+
+            <!-- Empty State -->
+            <StackPanel x:Name="EmptyState" Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Center">
+                <TextBlock Text="No Plan Loaded" FontSize="20" FontWeight="Light"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
+                <TextBlock Text="Right-click a query row and choose 'View Plan' to display an execution plan here"
+                           FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           HorizontalAlignment="Center" Margin="0,8,0,0"/>
+            </StackPanel>
+
+            <!-- GridSplitter -->
+            <GridSplitter x:Name="PropertiesSplitter" Grid.Column="1" Width="5"
+                          HorizontalAlignment="Center" VerticalAlignment="Stretch"
+                          Background="{DynamicResource BorderBrush}"
+                          Visibility="Collapsed"/>
+
+            <!-- Properties Panel -->
+            <Border x:Name="PropertiesPanel" Grid.Column="2"
+                    Background="{DynamicResource BackgroundDarkBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0"
+                    Visibility="Collapsed">
+                <DockPanel>
+                    <!-- Header -->
+                    <Border DockPanel.Dock="Top" Padding="10,8"
+                            Background="{DynamicResource BackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="&#x2715;" Click="CloseProperties_Click"
+                                    Width="24" Height="24" Padding="0" FontSize="12"
+                                    VerticalAlignment="Center" ToolTip="Close Properties"
+                                    Background="Transparent" BorderThickness="0"
+                                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel>
+                                <TextBlock x:Name="PropertiesHeader" Text="Operator Properties"
+                                           FontWeight="SemiBold" FontSize="13"
+                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock x:Name="PropertiesSubHeader" FontSize="11"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="0,2,0,0"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Properties Content -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                  Padding="0">
+                        <StackPanel x:Name="PropertiesContent" Margin="0"/>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

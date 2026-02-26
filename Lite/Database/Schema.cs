@@ -73,20 +73,39 @@ CREATE TABLE IF NOT EXISTS query_stats (
     database_name VARCHAR,
     query_hash VARCHAR,
     query_plan_hash VARCHAR,
+    creation_time TIMESTAMP,
+    last_execution_time TIMESTAMP,
     execution_count BIGINT,
     total_worker_time BIGINT,
     total_elapsed_time BIGINT,
     total_logical_reads BIGINT,
     total_logical_writes BIGINT,
     total_physical_reads BIGINT,
+    total_clr_time BIGINT,
     total_rows BIGINT,
     total_spills BIGINT,
     min_worker_time BIGINT,
     max_worker_time BIGINT,
     min_elapsed_time BIGINT,
     max_elapsed_time BIGINT,
+    min_physical_reads BIGINT,
+    max_physical_reads BIGINT,
+    min_rows BIGINT,
+    max_rows BIGINT,
     min_dop INTEGER,
     max_dop INTEGER,
+    min_grant_kb BIGINT,
+    max_grant_kb BIGINT,
+    min_used_grant_kb BIGINT,
+    max_used_grant_kb BIGINT,
+    min_ideal_grant_kb BIGINT,
+    max_ideal_grant_kb BIGINT,
+    min_reserved_threads BIGINT,
+    max_reserved_threads BIGINT,
+    min_used_threads BIGINT,
+    max_used_threads BIGINT,
+    min_spills BIGINT,
+    max_spills BIGINT,
     query_text VARCHAR,
     query_plan_xml VARCHAR,
     sql_handle VARCHAR,
@@ -129,12 +148,16 @@ CREATE TABLE IF NOT EXISTS file_io_stats (
     write_bytes BIGINT,
     io_stall_read_ms BIGINT,
     io_stall_write_ms BIGINT,
+    io_stall_queued_read_ms BIGINT,
+    io_stall_queued_write_ms BIGINT,
     delta_reads BIGINT,
     delta_writes BIGINT,
     delta_read_bytes BIGINT,
     delta_write_bytes BIGINT,
     delta_stall_read_ms BIGINT,
-    delta_stall_write_ms BIGINT
+    delta_stall_write_ms BIGINT,
+    delta_stall_queued_read_ms BIGINT,
+    delta_stall_queued_write_ms BIGINT
 )";
 
     public const string CreateMemoryStatsTable = @"
@@ -187,6 +210,8 @@ CREATE TABLE IF NOT EXISTS procedure_stats (
     schema_name VARCHAR,
     object_name VARCHAR,
     object_type VARCHAR,
+    cached_time TIMESTAMP,
+    last_execution_time TIMESTAMP,
     execution_count BIGINT,
     total_worker_time BIGINT,
     total_elapsed_time BIGINT,
@@ -197,7 +222,15 @@ CREATE TABLE IF NOT EXISTS procedure_stats (
     max_worker_time BIGINT,
     min_elapsed_time BIGINT,
     max_elapsed_time BIGINT,
+    min_logical_reads BIGINT,
+    max_logical_reads BIGINT,
+    min_physical_reads BIGINT,
+    max_physical_reads BIGINT,
+    min_logical_writes BIGINT,
+    max_logical_writes BIGINT,
     total_spills BIGINT,
+    min_spills BIGINT,
+    max_spills BIGINT,
     sql_handle VARCHAR,
     plan_handle VARCHAR,
     delta_execution_count BIGINT,
@@ -217,16 +250,55 @@ CREATE TABLE IF NOT EXISTS query_store_stats (
     database_name VARCHAR NOT NULL,
     query_id BIGINT,
     plan_id BIGINT,
+    execution_type_desc VARCHAR,
+    first_execution_time TIMESTAMP,
+    last_execution_time TIMESTAMP,
+    module_name VARCHAR,
     query_text VARCHAR,
     query_hash VARCHAR,
     execution_count BIGINT,
-    avg_duration_ms DECIMAL(18,2),
-    avg_cpu_time_ms DECIMAL(18,2),
-    avg_logical_reads DECIMAL(18,2),
-    avg_logical_writes DECIMAL(18,2),
-    avg_physical_reads DECIMAL(18,2),
-    avg_rowcount DECIMAL(18,2),
-    last_execution_time TIMESTAMP,
+    avg_duration_us BIGINT,
+    min_duration_us BIGINT,
+    max_duration_us BIGINT,
+    avg_cpu_time_us BIGINT,
+    min_cpu_time_us BIGINT,
+    max_cpu_time_us BIGINT,
+    avg_logical_io_reads BIGINT,
+    min_logical_io_reads BIGINT,
+    max_logical_io_reads BIGINT,
+    avg_logical_io_writes BIGINT,
+    min_logical_io_writes BIGINT,
+    max_logical_io_writes BIGINT,
+    avg_physical_io_reads BIGINT,
+    min_physical_io_reads BIGINT,
+    max_physical_io_reads BIGINT,
+    avg_clr_time_us BIGINT,
+    min_clr_time_us BIGINT,
+    max_clr_time_us BIGINT,
+    min_dop BIGINT,
+    max_dop BIGINT,
+    avg_query_max_used_memory BIGINT,
+    min_query_max_used_memory BIGINT,
+    max_query_max_used_memory BIGINT,
+    avg_rowcount BIGINT,
+    min_rowcount BIGINT,
+    max_rowcount BIGINT,
+    avg_num_physical_io_reads BIGINT,
+    min_num_physical_io_reads BIGINT,
+    max_num_physical_io_reads BIGINT,
+    avg_log_bytes_used BIGINT,
+    min_log_bytes_used BIGINT,
+    max_log_bytes_used BIGINT,
+    avg_tempdb_space_used BIGINT,
+    min_tempdb_space_used BIGINT,
+    max_tempdb_space_used BIGINT,
+    plan_type VARCHAR,
+    plan_forcing_type VARCHAR,
+    is_forced_plan BOOLEAN,
+    force_failure_count BIGINT,
+    last_force_failure_reason VARCHAR,
+    compatibility_level INTEGER,
+    query_plan_text VARCHAR,
     query_plan_hash VARCHAR
 )";
 
@@ -255,7 +327,12 @@ CREATE TABLE IF NOT EXISTS query_snapshots (
     granted_query_memory_gb DECIMAL(18,2),
     transaction_isolation_level VARCHAR,
     dop INTEGER,
-    parallel_worker_count INTEGER
+    parallel_worker_count INTEGER,
+    login_name VARCHAR,
+    host_name VARCHAR,
+    program_name VARCHAR,
+    open_transaction_count INTEGER,
+    percent_complete DECIMAL(5,2)
 )";
 
     public const string CreateTempdbStatsTable = @"
@@ -307,19 +384,20 @@ CREATE TABLE IF NOT EXISTS memory_grant_stats (
     collection_time TIMESTAMP NOT NULL,
     server_id INTEGER NOT NULL,
     server_name VARCHAR NOT NULL,
-    session_id INTEGER,
-    database_name VARCHAR,
-    query_text VARCHAR,
-    requested_memory_mb DECIMAL(18,2),
+    resource_semaphore_id SMALLINT,
+    pool_id INTEGER,
+    target_memory_mb DECIMAL(18,2),
+    max_target_memory_mb DECIMAL(18,2),
+    total_memory_mb DECIMAL(18,2),
+    available_memory_mb DECIMAL(18,2),
     granted_memory_mb DECIMAL(18,2),
     used_memory_mb DECIMAL(18,2),
-    max_used_memory_mb DECIMAL(18,2),
-    ideal_memory_mb DECIMAL(18,2),
-    required_memory_mb DECIMAL(18,2),
-    wait_time_ms BIGINT,
-    is_small_grant BOOLEAN,
-    dop INTEGER,
-    query_cost DECIMAL(18,2)
+    grantee_count INTEGER,
+    waiter_count INTEGER,
+    timeout_error_count BIGINT,
+    forced_grant_count BIGINT,
+    timeout_error_count_delta BIGINT,
+    forced_grant_count_delta BIGINT
 )";
 
     public const string CreateWaitingTasksTable = @"
@@ -460,6 +538,9 @@ CREATE INDEX IF NOT EXISTS idx_waiting_tasks_time ON waiting_tasks(server_id, co
     public const string CreateBlockedProcessReportsIndex = @"
 CREATE INDEX IF NOT EXISTS idx_blocked_process_reports_time ON blocked_process_reports(server_id, collection_time)";
 
+    public const string CreateMemoryClerksIndex = @"
+CREATE INDEX IF NOT EXISTS idx_memory_clerks_time ON memory_clerks(server_id, collection_time)";
+
     public const string CreateDatabaseScopedConfigTable = @"
 CREATE TABLE IF NOT EXISTS database_scoped_config (
     config_id BIGINT PRIMARY KEY,
@@ -575,6 +656,7 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
         yield return CreateMemoryGrantStatsIndex;
         yield return CreateWaitingTasksIndex;
         yield return CreateBlockedProcessReportsIndex;
+        yield return CreateMemoryClerksIndex;
         yield return CreateDatabaseScopedConfigIndex;
         yield return CreateTraceFlagsIndex;
         yield return CreateRunningJobsIndex;

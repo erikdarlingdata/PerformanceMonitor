@@ -29,6 +29,12 @@ namespace PerformanceMonitorDashboard.Helpers
     public static class TabHelpers
     {
         /// <summary>
+        /// CSV separator character used for exports. Auto-detected from locale by default;
+        /// updated from user preferences when settings are loaded.
+        /// </summary>
+        public static string CsvSeparator { get; set; } =
+            CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator == "," ? ";" : ",";
+        /// <summary>
         /// Returns true if a double-click originated from a DataGridRow (not a header).
         /// Use at the top of MouseDoubleClick handlers to prevent header clicks from
         /// triggering row actions.
@@ -307,12 +313,12 @@ namespace PerformanceMonitorDashboard.Helpers
         /// <summary>
         /// Escapes a field value for proper CSV formatting.
         /// </summary>
-        public static string EscapeCsvField(string field)
+        public static string EscapeCsvField(string field, string separator = ",")
         {
             if (string.IsNullOrEmpty(field))
                 return string.Empty;
 
-            if (field.Contains(',', StringComparison.Ordinal) || field.Contains('"', StringComparison.Ordinal) || field.Contains('\n', StringComparison.Ordinal))
+            if (field.Contains(separator, StringComparison.Ordinal) || field.Contains('"', StringComparison.Ordinal) || field.Contains('\n', StringComparison.Ordinal))
             {
                 return "\"" + field.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
             }
@@ -414,8 +420,7 @@ namespace PerformanceMonitorDashboard.Helpers
                 var property = cellInfo.Item.GetType().GetProperty(propertyName);
                 if (property != null)
                 {
-                    var value = property.GetValue(cellInfo.Item);
-                    return value?.ToString() ?? string.Empty;
+                    return FormatForExport(property.GetValue(cellInfo.Item));
                 }
             }
 
@@ -429,7 +434,7 @@ namespace PerformanceMonitorDashboard.Helpers
                     if (textBinding != null)
                     {
                         var prop = cellInfo.Item.GetType().GetProperty(textBinding.Path.Path);
-                        return prop?.GetValue(cellInfo.Item)?.ToString() ?? string.Empty;
+                        return FormatForExport(prop?.GetValue(cellInfo.Item));
                     }
                 }
             }
@@ -463,7 +468,7 @@ namespace PerformanceMonitorDashboard.Helpers
                     if (property != null)
                     {
                         var value = property.GetValue(item);
-                        values.Add(value?.ToString() ?? string.Empty);
+                        values.Add(FormatForExport(value));
                     }
                 }
                 /* DataGridTemplateColumn — instantiate the template and find a TextBlock binding */
@@ -476,7 +481,7 @@ namespace PerformanceMonitorDashboard.Helpers
                         if (textBinding != null)
                         {
                             var prop = item.GetType().GetProperty(textBinding.Path.Path);
-                            values.Add(prop?.GetValue(item)?.ToString() ?? string.Empty);
+                            values.Add(FormatForExport(prop?.GetValue(item)));
                         }
                         else
                         {
@@ -493,14 +498,25 @@ namespace PerformanceMonitorDashboard.Helpers
         }
 
         /// <summary>
+        /// Formats a value for CSV/clipboard export using invariant culture.
+        /// </summary>
+        public static string FormatForExport(object? value)
+        {
+            if (value == null) return string.Empty;
+            if (value is IFormattable formattable)
+                return formattable.ToString(null, CultureInfo.InvariantCulture);
+            return value.ToString() ?? string.Empty;
+        }
+
+        /// <summary>
         /// Finds a DataGrid from a ContextMenu's placement target.
         /// </summary>
         public static DataGrid? FindDataGridFromContextMenu(ContextMenu contextMenu)
         {
+            if (contextMenu.PlacementTarget is DataGrid grid)
+                return grid;
             if (contextMenu.PlacementTarget is DataGridRow row)
-            {
                 return FindParent<DataGrid>(row);
-            }
             return null;
         }
 

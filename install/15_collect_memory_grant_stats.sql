@@ -21,8 +21,8 @@ GO
 /*
 Memory grant statistics collector
 Collects memory grant semaphore data from sys.dm_exec_query_resource_semaphores
-Stores MB values and calculates pressure warnings
 Point-in-time snapshot data for memory grant pressure monitoring
+Delta calculation for cumulative counters handled by collect.calculate_deltas
 */
 
 IF OBJECT_ID(N'collect.memory_grant_stats_collector', N'P') IS NULL
@@ -98,12 +98,12 @@ BEGIN
 
         /*
         Collect memory grant semaphore statistics
-        Stores MB values and calculates pressure warnings
-        This is point-in-time state data showing current memory grant pressure
+        Point-in-time state data showing current memory grant pressure
         */
         INSERT INTO
             collect.memory_grant_stats
         (
+            server_start_time,
             resource_semaphore_id,
             pool_id,
             target_memory_mb,
@@ -115,13 +115,15 @@ BEGIN
             grantee_count,
             waiter_count,
             timeout_error_count,
-            forced_grant_count,
-            available_memory_pressure_warning,
-            waiter_count_warning,
-            timeout_error_warning,
-            forced_grant_warning
+            forced_grant_count
         )
         SELECT
+            server_start_time =
+            (
+                SELECT
+                    dosi.sqlserver_start_time
+                FROM sys.dm_os_sys_info AS dosi
+            ),
             resource_semaphore_id = deqrs.resource_semaphore_id,
             pool_id = deqrs.pool_id,
             target_memory_mb = deqrs.target_memory_kb / 1024.0,
@@ -133,129 +135,19 @@ BEGIN
             grantee_count = deqrs.grantee_count,
             waiter_count = deqrs.waiter_count,
             timeout_error_count = ISNULL(deqrs.timeout_error_count, 0),
-            forced_grant_count = ISNULL(deqrs.forced_grant_count, 0),
-            available_memory_pressure_warning =
-                CASE
-                    WHEN prev.available_memory_mb IS NOT NULL
-                    AND  (deqrs.available_memory_kb / 1024.0) < (prev.available_memory_mb * 0.80)
-                    THEN 1
-                    ELSE 0
-                END,
-            waiter_count_warning =
-                CASE
-                    WHEN deqrs.waiter_count > 0
-                    THEN 1
-                    ELSE 0
-                END,
-            timeout_error_warning =
-                CASE
-                    WHEN ISNULL(deqrs.timeout_error_count, 0) > 0
-                    THEN 1
-                    ELSE 0
-                END,
-            forced_grant_warning =
-                CASE
-                    WHEN ISNULL(deqrs.forced_grant_count, 0) > 0
-                    THEN 1
-                    ELSE 0
-                END
+            forced_grant_count = ISNULL(deqrs.forced_grant_count, 0)
         FROM sys.dm_exec_query_resource_semaphores AS deqrs
-        OUTER APPLY
-        (
-            SELECT TOP (1)
-                prev.available_memory_mb
-            FROM collect.memory_grant_stats AS prev
-            WHERE prev.resource_semaphore_id = deqrs.resource_semaphore_id
-            AND   prev.pool_id = deqrs.pool_id
-            ORDER BY
-                prev.collection_id DESC
-        ) AS prev
         WHERE deqrs.max_target_memory_kb IS NOT NULL
         OPTION(RECOMPILE);
 
         SET @rows_collected = ROWCOUNT_BIG();
 
         /*
-        Debug output for pressure warnings
+        Calculate deltas for cumulative counters
         */
-        IF @debug = 1
-        BEGIN
-            DECLARE
-                @current_available_memory_mb decimal(19,2),
-                @previous_available_memory_mb decimal(19,2),
-                @current_waiter_count integer,
-                @current_timeout_error_count bigint,
-                @current_forced_grant_count bigint,
-                @available_warning bit,
-                @waiter_warning bit,
-                @timeout_warning bit,
-                @forced_warning bit;
-
-            SELECT
-                @current_available_memory_mb = mgs.available_memory_mb,
-                @current_waiter_count = mgs.waiter_count,
-                @current_timeout_error_count = mgs.timeout_error_count,
-                @current_forced_grant_count = mgs.forced_grant_count,
-                @available_warning = mgs.available_memory_pressure_warning,
-                @waiter_warning = mgs.waiter_count_warning,
-                @timeout_warning = mgs.timeout_error_warning,
-                @forced_warning = mgs.forced_grant_warning
-            FROM collect.memory_grant_stats AS mgs
-            WHERE mgs.collection_id =
-            (
-                SELECT
-                    MAX(mgs2.collection_id)
-                FROM collect.memory_grant_stats AS mgs2
-            );
-
-            /*
-            Get previous available memory for warning message
-            */
-            SELECT TOP (1)
-                @previous_available_memory_mb = mgs.available_memory_mb
-            FROM collect.memory_grant_stats AS mgs
-            WHERE mgs.collection_id <
-            (
-                SELECT
-                    MAX(mgs2.collection_id)
-                FROM collect.memory_grant_stats AS mgs2
-            )
-            ORDER BY
-                mgs.collection_id DESC;
-
-            IF @available_warning = 1
-            BEGIN
-                DECLARE @available_msg nvarchar(500) =
-                    N'WARNING: Available memory grant dropped from ' +
-                    CONVERT(nvarchar(20), @previous_available_memory_mb) + N' MB to ' +
-                    CONVERT(nvarchar(20), @current_available_memory_mb) + N' MB (>20% drop)';
-                RAISERROR(@available_msg, 0, 1) WITH NOWAIT;
-            END;
-
-            IF @waiter_warning = 1
-            BEGIN
-                DECLARE @waiter_msg nvarchar(500) =
-                    N'WARNING: Memory grant waiters detected: ' +
-                    CONVERT(nvarchar(20), @current_waiter_count);
-                RAISERROR(@waiter_msg, 0, 1) WITH NOWAIT;
-            END;
-
-            IF @timeout_warning = 1
-            BEGIN
-                DECLARE @timeout_msg nvarchar(500) =
-                    N'WARNING: Memory grant timeout errors detected: ' +
-                    CONVERT(nvarchar(20), @current_timeout_error_count);
-                RAISERROR(@timeout_msg, 0, 1) WITH NOWAIT;
-            END;
-
-            IF @forced_warning = 1
-            BEGIN
-                DECLARE @forced_msg nvarchar(500) =
-                    N'WARNING: Forced memory grants detected: ' +
-                    CONVERT(nvarchar(20), @current_forced_grant_count);
-                RAISERROR(@forced_msg, 0, 1) WITH NOWAIT;
-            END;
-        END;
+        EXECUTE collect.calculate_deltas
+            @table_name = N'memory_grant_stats',
+            @debug = @debug;
 
         /*
         Log successful collection
@@ -318,5 +210,5 @@ GO
 
 PRINT 'Memory grant stats collector created successfully';
 PRINT 'Collects point-in-time memory grant semaphore data from sys.dm_exec_query_resource_semaphores';
-PRINT 'Stores MB values and calculates pressure warnings for memory grant monitoring';
+PRINT 'Delta calculation for timeout_error_count and forced_grant_count via collect.calculate_deltas';
 GO

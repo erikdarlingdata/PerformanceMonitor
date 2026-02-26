@@ -171,6 +171,7 @@ namespace PerformanceMonitorDashboard.Services
         SELECT
             mgs.collection_id,
             mgs.collection_time,
+            mgs.server_start_time,
             mgs.resource_semaphore_id,
             mgs.pool_id,
             mgs.target_memory_mb,
@@ -183,10 +184,9 @@ namespace PerformanceMonitorDashboard.Services
             mgs.waiter_count,
             mgs.timeout_error_count,
             mgs.forced_grant_count,
-            mgs.available_memory_pressure_warning,
-            mgs.waiter_count_warning,
-            mgs.timeout_error_warning,
-            mgs.forced_grant_warning
+            mgs.timeout_error_count_delta,
+            mgs.forced_grant_count_delta,
+            mgs.sample_interval_seconds
         FROM collect.memory_grant_stats AS mgs
         {dateFilter}
         ORDER BY
@@ -212,22 +212,22 @@ namespace PerformanceMonitorDashboard.Services
                         {
                             CollectionId = reader.GetInt64(0),
                             CollectionTime = reader.GetDateTime(1),
-                            ResourceSemaphoreId = reader.GetInt16(2),
-                            PoolId = reader.GetInt32(3),
-                            TargetMemoryMb = reader.IsDBNull(4) ? null : reader.GetDecimal(4),
-                            MaxTargetMemoryMb = reader.IsDBNull(5) ? null : reader.GetDecimal(5),
-                            TotalMemoryMb = reader.IsDBNull(6) ? null : reader.GetDecimal(6),
-                            AvailableMemoryMb = reader.IsDBNull(7) ? null : reader.GetDecimal(7),
-                            GrantedMemoryMb = reader.IsDBNull(8) ? null : reader.GetDecimal(8),
-                            UsedMemoryMb = reader.IsDBNull(9) ? null : reader.GetDecimal(9),
-                            GranteeCount = reader.IsDBNull(10) ? null : reader.GetInt32(10),
-                            WaiterCount = reader.IsDBNull(11) ? null : reader.GetInt32(11),
-                            TimeoutErrorCount = reader.IsDBNull(12) ? null : reader.GetInt64(12),
-                            ForcedGrantCount = reader.IsDBNull(13) ? null : reader.GetInt64(13),
-                            AvailableMemoryPressureWarning = reader.IsDBNull(14) ? null : reader.GetBoolean(14),
-                            WaiterCountWarning = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
-                            TimeoutErrorWarning = reader.IsDBNull(16) ? null : reader.GetBoolean(16),
-                            ForcedGrantWarning = reader.IsDBNull(17) ? null : reader.GetBoolean(17)
+                            ServerStartTime = reader.IsDBNull(2) ? DateTime.MinValue : reader.GetDateTime(2),
+                            ResourceSemaphoreId = reader.GetInt16(3),
+                            PoolId = reader.GetInt32(4),
+                            TargetMemoryMb = reader.IsDBNull(5) ? null : reader.GetDecimal(5),
+                            MaxTargetMemoryMb = reader.IsDBNull(6) ? null : reader.GetDecimal(6),
+                            TotalMemoryMb = reader.IsDBNull(7) ? null : reader.GetDecimal(7),
+                            AvailableMemoryMb = reader.IsDBNull(8) ? null : reader.GetDecimal(8),
+                            GrantedMemoryMb = reader.IsDBNull(9) ? null : reader.GetDecimal(9),
+                            UsedMemoryMb = reader.IsDBNull(10) ? null : reader.GetDecimal(10),
+                            GranteeCount = reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                            WaiterCount = reader.IsDBNull(12) ? null : reader.GetInt32(12),
+                            TimeoutErrorCount = reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                            ForcedGrantCount = reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                            TimeoutErrorCountDelta = reader.IsDBNull(15) ? null : reader.GetInt64(15),
+                            ForcedGrantCountDelta = reader.IsDBNull(16) ? null : reader.GetInt64(16),
+                            SampleIntervalSeconds = reader.IsDBNull(17) ? null : reader.GetInt32(17)
                         });
                     }
         

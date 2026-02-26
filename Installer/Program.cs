@@ -82,6 +82,36 @@ namespace PerformanceMonitorInstaller
               --encrypt=X       Connection encryption: mandatory (default), optional, strict
               --trust-cert      Trust server certificate without validation (default: require valid cert)
             */
+            if (args.Any(a => a.Equals("--help", StringComparison.OrdinalIgnoreCase)
+                              || a.Equals("-h", StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine("Usage:");
+                Console.WriteLine("  PerformanceMonitorInstaller.exe                                   Interactive mode");
+                Console.WriteLine("  PerformanceMonitorInstaller.exe <server> [options]                 Windows Auth");
+                Console.WriteLine("  PerformanceMonitorInstaller.exe <server> <username> <password>     SQL Auth");
+                Console.WriteLine("  PerformanceMonitorInstaller.exe <server> <username>                SQL Auth (password via env var)");
+                Console.WriteLine();
+                Console.WriteLine("Options:");
+                Console.WriteLine("  -h, --help           Show this help message");
+                Console.WriteLine("  --reinstall          Drop existing database and perform clean install");
+                Console.WriteLine("  --reset-schedule     Reset collection schedule to recommended defaults");
+                Console.WriteLine("  --encrypt=<level>    Connection encryption: mandatory (default), optional, strict");
+                Console.WriteLine("  --trust-cert         Trust server certificate without validation");
+                Console.WriteLine();
+                Console.WriteLine("Environment Variables:");
+                Console.WriteLine("  PM_SQL_PASSWORD      SQL Auth password (avoids passing on command line)");
+                Console.WriteLine();
+                Console.WriteLine("Exit Codes:");
+                Console.WriteLine("  0  Success");
+                Console.WriteLine("  1  Invalid arguments");
+                Console.WriteLine("  2  Connection failed");
+                Console.WriteLine("  3  Critical file failed");
+                Console.WriteLine("  4  Partial installation (non-critical failures)");
+                Console.WriteLine("  5  Version check failed");
+                Console.WriteLine("  6  SQL files not found");
+                return 0;
+            }
+
             bool automatedMode = args.Length > 0;
             bool reinstallMode = args.Any(a => a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase));
             bool resetSchedule = args.Any(a => a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase));
@@ -619,7 +649,7 @@ END";
                         */
                         if (resetSchedule && fileName.StartsWith("04_", StringComparison.Ordinal))
                         {
-                            sqlContent = "TRUNCATE TABLE config.collection_schedule;\nGO\n" + sqlContent;
+                            sqlContent = "TRUNCATE TABLE [PerformanceMonitor].[config].[collection_schedule];\nGO\n" + sqlContent;
                             Console.Write("(resetting schedule) ");
                         }
 
@@ -1125,17 +1155,22 @@ END";
                 return upgradeFolders;
             }
 
-            /*Parse current version - if invalid, skip upgrades*/
-            if (!Version.TryParse(currentVersion, out var current))
+            /*Parse current version - if invalid, skip upgrades
+              Normalize to 3-part (Major.Minor.Build) to avoid Revision mismatch:
+              folder names use 3-part "1.3.0" but DB stores 4-part "1.3.0.0"
+              Version(1,3,0).Revision=-1 which breaks >= comparison with Version(1,3,0,0)*/
+            if (!Version.TryParse(currentVersion, out var currentRaw))
             {
                 return upgradeFolders;
             }
+            var current = new Version(currentRaw.Major, currentRaw.Minor, currentRaw.Build);
 
             /*Parse target version - if invalid, skip upgrades*/
-            if (!Version.TryParse(targetVersion, out var target))
+            if (!Version.TryParse(targetVersion, out var targetRaw))
             {
                 return upgradeFolders;
             }
+            var target = new Version(targetRaw.Major, targetRaw.Minor, targetRaw.Build);
 
             /*
             Find all upgrade folders matching pattern: {from}-to-{to}

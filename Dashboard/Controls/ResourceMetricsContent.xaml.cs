@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Media;
 using Microsoft.Win32;
 using PerformanceMonitorDashboard.Models;
@@ -86,6 +87,8 @@ namespace PerformanceMonitorDashboard.Controls
         private Helpers.ChartHoverHelper? _spinlockStatsHover;
         private Helpers.ChartHoverHelper? _fileIoReadHover;
         private Helpers.ChartHoverHelper? _fileIoWriteHover;
+        private Helpers.ChartHoverHelper? _fileIoReadThroughputHover;
+        private Helpers.ChartHoverHelper? _fileIoWriteThroughputHover;
         private Helpers.ChartHoverHelper? _perfmonHover;
         private Helpers.ChartHoverHelper? _waitStatsHover;
         private Helpers.ChartHoverHelper? _tempdbStatsHover;
@@ -111,6 +114,8 @@ namespace PerformanceMonitorDashboard.Controls
             _spinlockStatsHover = new Helpers.ChartHoverHelper(SpinlockStatsChart, "collisions/sec");
             _fileIoReadHover = new Helpers.ChartHoverHelper(UserDbReadLatencyChart, "ms");
             _fileIoWriteHover = new Helpers.ChartHoverHelper(UserDbWriteLatencyChart, "ms");
+            _fileIoReadThroughputHover = new Helpers.ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
+            _fileIoWriteThroughputHover = new Helpers.ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
             _perfmonHover = new Helpers.ChartHoverHelper(PerfmonCountersChart, "");
             _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsDetailChart, "ms/sec");
             _tempdbStatsHover = new Helpers.ChartHoverHelper(TempdbStatsChart, "MB");
@@ -146,6 +151,10 @@ namespace PerformanceMonitorDashboard.Controls
             // File I/O Latency charts
             TabHelpers.SetupChartContextMenu(UserDbReadLatencyChart, "UserDB_Read_Latency", "collect.file_io_stats");
             TabHelpers.SetupChartContextMenu(UserDbWriteLatencyChart, "UserDB_Write_Latency", "collect.file_io_stats");
+
+            // File I/O Throughput charts
+            TabHelpers.SetupChartContextMenu(FileIoReadThroughputChart, "UserDB_Read_Throughput", "collect.file_io_stats");
+            TabHelpers.SetupChartContextMenu(FileIoWriteThroughputChart, "UserDB_Write_Throughput", "collect.file_io_stats");
             TabHelpers.SetupChartContextMenu(TempDbLatencyChart, "TempDB_Latency", "collect.file_io_stats");
 
             // Server Utilization Trends charts
@@ -225,6 +234,7 @@ namespace PerformanceMonitorDashboard.Controls
                     RefreshTempdbStatsAsync(),
                     RefreshSessionStatsAsync(),
                     LoadFileIoLatencyChartsAsync(),
+                    LoadFileIoThroughputChartsAsync(),
                     RefreshServerTrendsAsync(),
                     RefreshPerfmonCountersTabAsync(),
                     RefreshWaitStatsDetailTabAsync()
@@ -837,11 +847,11 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Load User DB data only - TempDB latency moved to TempDB Stats tab
             var userDbData = await _databaseService.GetFileIoLatencyTimeSeriesAsync(isTempDb: false, _fileIoHoursBack, _fileIoFromDate, _fileIoToDate);
-            LoadFileIoChart(UserDbReadLatencyChart, userDbData, d => d.ReadLatencyMs, "Read Latency (ms)", colors, xMin, xMax, _fileIoReadHover);
-            LoadFileIoChart(UserDbWriteLatencyChart, userDbData, d => d.WriteLatencyMs, "Write Latency (ms)", colors, xMin, xMax, _fileIoWriteHover);
+            LoadFileIoChart(UserDbReadLatencyChart, userDbData, d => d.ReadLatencyMs, "Read Latency (ms)", colors, xMin, xMax, _fileIoReadHover, d => d.ReadQueuedLatencyMs);
+            LoadFileIoChart(UserDbWriteLatencyChart, userDbData, d => d.WriteLatencyMs, "Write Latency (ms)", colors, xMin, xMax, _fileIoWriteHover, d => d.WriteQueuedLatencyMs);
         }
 
-        private void LoadFileIoChart(ScottPlot.WPF.WpfPlot chart, List<FileIoLatencyTimeSeriesItem> data, Func<FileIoLatencyTimeSeriesItem, decimal> latencySelector, string yLabel, ScottPlot.Color[] colors, double xMin, double xMax, Helpers.ChartHoverHelper? hover = null)
+        private void LoadFileIoChart(ScottPlot.WPF.WpfPlot chart, List<FileIoLatencyTimeSeriesItem> data, Func<FileIoLatencyTimeSeriesItem, decimal> latencySelector, string yLabel, ScottPlot.Color[] colors, double xMin, double xMax, Helpers.ChartHoverHelper? hover = null, Func<FileIoLatencyTimeSeriesItem, decimal>? queuedSelector = null)
         {
             DateTime rangeStart = DateTime.FromOADate(xMin);
             DateTime rangeEnd = DateTime.FromOADate(xMax);
@@ -855,6 +865,9 @@ namespace PerformanceMonitorDashboard.Controls
             chart.Plot.Clear();
             TabHelpers.ApplyDarkModeToChart(chart);
             hover?.Clear();
+
+            // Check if any queued data exists (only render overlay if there's real data)
+            bool hasQueuedData = queuedSelector != null && data != null && data.Any(d => queuedSelector(d) > 0);
 
             if (data != null && data.Count > 0)
             {
@@ -879,12 +892,30 @@ namespace PerformanceMonitorDashboard.Controls
                         var scatter = chart.Plot.Add.Scatter(xs, ys);
                         scatter.LineWidth = 2;
                         scatter.MarkerSize = 5;
-                        scatter.Color = colors[colorIndex % colors.Length];
+                        var color = colors[colorIndex % colors.Length];
+                        scatter.Color = color;
 
                         // Use just the filename for legend (not database.filename which is redundant)
                         var fileName = fileData.First().FileName;
                         scatter.LegendText = fileName;
                         hover?.Add(scatter, fileName);
+
+                        // Add queued I/O overlay as dashed line with same color
+                        if (hasQueuedData)
+                        {
+                            var queuedValues = fileData.Select(d => (double)queuedSelector!(d));
+                            if (queuedValues.Any(v => v > 0))
+                            {
+                                var (qxs, qys) = TabHelpers.FillTimeSeriesGaps(timePoints, queuedValues);
+                                var queuedScatter = chart.Plot.Add.Scatter(qxs, qys);
+                                queuedScatter.LineWidth = 2;
+                                queuedScatter.MarkerSize = 0;
+                                queuedScatter.Color = color;
+                                queuedScatter.LinePattern = ScottPlot.LinePattern.Dashed;
+                                queuedScatter.LegendText = $"{fileName} (queued)";
+                                hover?.Add(queuedScatter, $"{fileName} (queued)");
+                            }
+                        }
 
                         colorIndex++;
                     }
@@ -913,6 +944,22 @@ namespace PerformanceMonitorDashboard.Controls
             chart.Refresh();
         }
 
+        private async Task LoadFileIoThroughputChartsAsync()
+        {
+            if (_databaseService == null) return;
+
+            DateTime rangeEnd = _fileIoToDate ?? Helpers.ServerTimeHelper.ServerNow;
+            DateTime rangeStart = _fileIoFromDate ?? rangeEnd.AddHours(-_fileIoHoursBack);
+            double xMin = rangeStart.ToOADate();
+            double xMax = rangeEnd.ToOADate();
+
+            var colors = TabHelpers.ChartColors;
+
+            var throughputData = await _databaseService.GetFileIoThroughputTimeSeriesAsync(isTempDb: false, _fileIoHoursBack, _fileIoFromDate, _fileIoToDate);
+            LoadFileIoChart(FileIoReadThroughputChart, throughputData, d => d.ReadThroughputMbPerSec, "Read Throughput (MB/s)", colors, xMin, xMax, _fileIoReadThroughputHover);
+            LoadFileIoChart(FileIoWriteThroughputChart, throughputData, d => d.WriteThroughputMbPerSec, "Write Throughput (MB/s)", colors, xMin, xMax, _fileIoWriteThroughputHover);
+        }
+
         #endregion
 
         #region Server Trends Tab
@@ -936,11 +983,56 @@ namespace PerformanceMonitorDashboard.Controls
                 LoadServerTrendsTempdbChart(await tempdbTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
                 LoadServerTrendsMemoryChart(await memoryTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
                 LoadServerTrendsPerfmonChart(await perfmonTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
+
+                try
+                {
+                    var pressure = await _databaseService.GetCpuPressureAsync();
+                    UpdateCpuSchedulerStatus(pressure);
+                }
+                catch (Exception pressureEx)
+                {
+                    Logger.Error($"Error loading CPU scheduler pressure: {pressureEx.Message}", pressureEx);
+                }
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading server trends: {ex.Message}", ex);
             }
+        }
+
+        private void UpdateCpuSchedulerStatus(CpuPressureItem? pressure)
+        {
+            if (pressure == null)
+            {
+                CpuSchedulerStatusText.Text = "";
+                return;
+            }
+
+            CpuSchedulerStatusText.Inlines.Clear();
+
+            var summary = $"Schedulers: {pressure.TotalSchedulers} | " +
+                          $"Workers: {pressure.TotalWorkers:N0}/{pressure.MaxWorkers:N0} ({pressure.WorkerUtilizationPercent:F1}%) | " +
+                          $"Runnable: {pressure.TotalRunnableTasks} ({pressure.AvgRunnableTasksPerScheduler:F2}/sched) | " +
+                          $"Active: {pressure.TotalActiveRequests} | " +
+                          $"Queued: {pressure.TotalQueuedRequests} | ";
+
+            CpuSchedulerStatusText.Inlines.Add(new Run(summary));
+
+            var levelText = pressure.PressureLevel;
+            var levelRun = new Run(levelText);
+
+            if (levelText.Contains("CRITICAL") || levelText.Contains("HIGH"))
+            {
+                levelRun.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x44, 0x44));
+                levelRun.FontWeight = FontWeights.Bold;
+            }
+            else if (levelText.Contains("MEDIUM"))
+            {
+                levelRun.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0xA5, 0x00));
+                levelRun.FontWeight = FontWeights.Bold;
+            }
+
+            CpuSchedulerStatusText.Inlines.Add(levelRun);
         }
 
         private void LoadServerTrendsCpuChart(IEnumerable<CpuSpikeItem> cpuData, int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -1289,7 +1381,7 @@ namespace PerformanceMonitorDashboard.Controls
                 {
                     var sb = new StringBuilder();
 
-                    var headers = grid.Columns.Select(c => c.Header?.ToString() ?? string.Empty);
+                    var headers = grid.Columns.Select(c => Helpers.DataGridClipboardBehavior.GetHeaderText(c));
                     sb.AppendLine(string.Join("\t", headers));
 
                     foreach (var item in grid.Items)
@@ -1336,8 +1428,9 @@ namespace PerformanceMonitorDashboard.Controls
                         {
                             var sb = new StringBuilder();
 
-                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(c.Header?.ToString() ?? string.Empty));
-                            sb.AppendLine(string.Join(",", headers));
+                            var sep = TabHelpers.CsvSeparator;
+                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c), sep));
+                            sb.AppendLine(string.Join(sep, headers));
 
                             foreach (var item in grid.Items)
                             {
@@ -1348,11 +1441,10 @@ namespace PerformanceMonitorDashboard.Controls
                                     if (binding != null)
                                     {
                                         var prop = item.GetType().GetProperty(binding.Path.Path);
-                                        var value = prop?.GetValue(item)?.ToString() ?? string.Empty;
-                                        values.Add(TabHelpers.EscapeCsvField(value));
+                                        values.Add(TabHelpers.EscapeCsvField(TabHelpers.FormatForExport(prop?.GetValue(item)), sep));
                                     }
                                 }
-                                sb.AppendLine(string.Join(",", values));
+                                sb.AppendLine(string.Join(sep, values));
                             }
 
                             File.WriteAllText(dialog.FileName, sb.ToString());
@@ -1451,6 +1543,51 @@ namespace PerformanceMonitorDashboard.Controls
             await UpdatePerfmonCountersChartAsync();
         }
 
+        private async void PerfmonPack_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_perfmonCounterItems == null || _perfmonCounterItems.Count == 0) return;
+            if (PerfmonPackCombo.SelectedItem is not string pack) return;
+
+            _isUpdatingPerfmonSelection = true;
+
+            /* Clear search so all counters are visible */
+            if (PerfmonCounterSearchBox != null)
+                PerfmonCounterSearchBox.Text = "";
+
+            /* Uncheck everything first */
+            foreach (var item in _perfmonCounterItems)
+                item.IsSelected = false;
+
+            if (pack == PerfmonPacks.AllCounters)
+            {
+                /* "All Counters" selects the General Throughput defaults */
+                var defaultSet = new HashSet<string>(PerfmonPacks.Packs["General Throughput"], StringComparer.OrdinalIgnoreCase);
+                foreach (var item in _perfmonCounterItems)
+                {
+                    if (defaultSet.Contains(item.CounterName))
+                        item.IsSelected = true;
+                }
+            }
+            else if (PerfmonPacks.Packs.TryGetValue(pack, out var packCounters))
+            {
+                var packSet = new HashSet<string>(packCounters, StringComparer.OrdinalIgnoreCase);
+                int count = 0;
+                foreach (var item in _perfmonCounterItems)
+                {
+                    if (count >= 12) break;
+                    if (packSet.Contains(item.CounterName))
+                    {
+                        item.IsSelected = true;
+                        count++;
+                    }
+                }
+            }
+
+            _isUpdatingPerfmonSelection = false;
+            RefreshPerfmonCounterListOrder();
+            await UpdatePerfmonCountersChartAsync();
+        }
+
         private async void PerfmonCounters_Refresh_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -1466,6 +1603,13 @@ namespace PerformanceMonitorDashboard.Controls
         private async Task RefreshPerfmonCountersTabAsync()
         {
             if (_databaseService == null) return;
+
+            /* Initialize pack ComboBox once */
+            if (PerfmonPackCombo.Items.Count == 0)
+            {
+                PerfmonPackCombo.ItemsSource = PerfmonPacks.PackNames;
+                PerfmonPackCombo.SelectedItem = "General Throughput";
+            }
 
             try
             {
@@ -1487,11 +1631,12 @@ namespace PerformanceMonitorDashboard.Controls
                     })
                     .ToList();
 
-                // If nothing was previously selected, default select some useful counters
+                // If nothing was previously selected, default select General Throughput pack
                 if (!counters.Any(c => c.IsSelected))
                 {
-                    var defaultCounters = new[] { "Batch Requests/sec", "SQL Compilations/sec", "SQL Re-Compilations/sec", "Transactions/sec" };
-                    foreach (var item in counters.Where(c => defaultCounters.Contains(c.CounterName)))
+                    var defaultCounters = PerfmonPacks.Packs["General Throughput"];
+                    var defaultSet = new HashSet<string>(defaultCounters, StringComparer.OrdinalIgnoreCase);
+                    foreach (var item in counters.Where(c => defaultSet.Contains(c.CounterName)))
                     {
                         item.IsSelected = true;
                     }

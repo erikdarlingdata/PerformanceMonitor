@@ -95,34 +95,40 @@
 
         <!-- Memory Grants Sub-Tab -->
         <TabItem Header="Memory Grants">
-            <!-- Chart + Summary Panel (grid removed) -->
-            <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Memory Grants Over Time" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryGrantsChart"/>
-                    <!-- Summary Panel -->
-                    <Border Grid.Row="2" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,8">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                            <TextBlock Text="Grantees:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryGrantsGranteesText" Text="0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Waiters:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryGrantsWaitersText" Text="0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Timeouts:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryGrantsTimeoutsText" Text="0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Forced:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="MemoryGrantsForcedText" Text="0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </Border>
-                    <TextBlock x:Name="MemoryGrantsNoDataMessage" Grid.Row="1" Style="{StaticResource EmptyStateMessage}"
-                               Text="No memory grant data in selected time range"/>
-                    <controls:LoadingOverlay x:Name="MemoryGrantsLoading" Grid.Row="1"/>
-                </Grid>
-            </Border>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <!-- Chart 1: Memory Grant Sizing -->
+                <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5,5,5,2">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="Memory Grant Sizing Over Time" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
+                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryGrantSizingChart"/>
+                        <TextBlock x:Name="MemoryGrantSizingNoData" Grid.Row="1" Style="{StaticResource EmptyStateMessage}"
+                                   Text="No memory grant data in selected time range"/>
+                        <controls:LoadingOverlay x:Name="MemoryGrantSizingLoading" Grid.Row="1"/>
+                    </Grid>
+                </Border>
+                <!-- Chart 2: Memory Grant Activity -->
+                <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5,2,5,5">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="Memory Grant Activity Over Time" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
+                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryGrantActivityChart"/>
+                        <TextBlock x:Name="MemoryGrantActivityNoData" Grid.Row="1" Style="{StaticResource EmptyStateMessage}"
+                                   Text="No memory grant data in selected time range"/>
+                        <controls:LoadingOverlay x:Name="MemoryGrantActivityLoading" Grid.Row="1"/>
+                    </Grid>
+                </Border>
+            </Grid>
         </TabItem>
 
         <!-- Memory Clerks Sub-Tab -->

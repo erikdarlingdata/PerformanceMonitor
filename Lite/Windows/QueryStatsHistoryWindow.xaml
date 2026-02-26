@@ -7,7 +7,18 @@
         Background="{StaticResource BackgroundBrush}">
 
     <Window.Resources>
-        <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <ContextMenu x:Key="DataGridContextMenu">
+                <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
+                <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
+                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+                <Separator/>
+                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+            </ContextMenu>
+        </ResourceDictionary>
     </Window.Resources>
 
     <Grid Margin="10">
@@ -49,24 +60,25 @@
         <DataGrid Grid.Row="2" x:Name="HistoryDataGrid" Margin="0,10,0,0"
                   AutoGenerateColumns="False" IsReadOnly="True"
                   CanUserSortColumns="True" CanUserReorderColumns="True"
-                  HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                  HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                  ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Collection Time" Binding="{Binding CollectionTimeLocal}" Width="130"/>
-                <DataGridTextColumn Header="Exec Delta" Binding="{Binding DeltaExecutions, StringFormat=N0}" Width="90"/>
-                <DataGridTextColumn Header="CPU Delta (ms)" Binding="{Binding DeltaCpuMs, StringFormat=N1}" Width="110"/>
-                <DataGridTextColumn Header="Duration Delta (ms)" Binding="{Binding DeltaElapsedMs, StringFormat=N1}" Width="130"/>
-                <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" Width="100"/>
-                <DataGridTextColumn Header="Avg Duration (ms)" Binding="{Binding AvgElapsedMs, StringFormat=N2}" Width="120"/>
-                <DataGridTextColumn Header="Logical Reads" Binding="{Binding DeltaLogicalReads, StringFormat=N0}" Width="100"/>
-                <DataGridTextColumn Header="Avg Reads" Binding="{Binding AvgReads, StringFormat=N1}" Width="90"/>
-                <DataGridTextColumn Header="Rows" Binding="{Binding DeltaRows, StringFormat=N0}" Width="80"/>
-                <DataGridTextColumn Header="Writes" Binding="{Binding DeltaLogicalWrites, StringFormat=N0}" Width="80"/>
-                <DataGridTextColumn Header="Physical Reads" Binding="{Binding DeltaPhysicalReads, StringFormat=N0}" Width="100"/>
-                <DataGridTextColumn Header="Spills" Binding="{Binding DeltaSpills, StringFormat=N0}" Width="70"/>
-                <DataGridTextColumn Header="Min CPU (ms)" Binding="{Binding MinCpuMs, StringFormat=N2}" Width="100"/>
-                <DataGridTextColumn Header="Max CPU (ms)" Binding="{Binding MaxCpuMs, StringFormat=N2}" Width="100"/>
-                <DataGridTextColumn Header="Min Duration (ms)" Binding="{Binding MinElapsedMs, StringFormat=N2}" Width="120"/>
-                <DataGridTextColumn Header="Max Duration (ms)" Binding="{Binding MaxElapsedMs, StringFormat=N2}" Width="120"/>
+                <DataGridTextColumn Header="Exec Delta" Binding="{Binding DeltaExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                <DataGridTextColumn Header="CPU Delta (ms)" Binding="{Binding DeltaCpuMs, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                <DataGridTextColumn Header="Duration Delta (ms)" Binding="{Binding DeltaElapsedMs, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                <DataGridTextColumn Header="Avg Duration (ms)" Binding="{Binding AvgElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                <DataGridTextColumn Header="Logical Reads" Binding="{Binding DeltaLogicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                <DataGridTextColumn Header="Avg Reads" Binding="{Binding AvgReads, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                <DataGridTextColumn Header="Rows" Binding="{Binding DeltaRows, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                <DataGridTextColumn Header="Writes" Binding="{Binding DeltaLogicalWrites, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                <DataGridTextColumn Header="Physical Reads" Binding="{Binding DeltaPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                <DataGridTextColumn Header="Spills" Binding="{Binding DeltaSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="70"/>
+                <DataGridTextColumn Header="Min CPU (ms)" Binding="{Binding MinCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                <DataGridTextColumn Header="Max CPU (ms)" Binding="{Binding MaxCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                <DataGridTextColumn Header="Min Duration (ms)" Binding="{Binding MinElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                <DataGridTextColumn Header="Max Duration (ms)" Binding="{Binding MaxElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                 <DataGridTextColumn Header="Min DOP" Binding="{Binding MinDop}" Width="70"/>
                 <DataGridTextColumn Header="Max DOP" Binding="{Binding MaxDop}" Width="70"/>
                 <DataGridTextColumn Header="Plan Hash" Binding="{Binding QueryPlanHash}" Width="140"/>

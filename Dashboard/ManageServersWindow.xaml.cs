@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Linq;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
@@ -139,19 +141,32 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void RemoveServer_Click(object sender, RoutedEventArgs e)
+        private async void RemoveServer_Click(object sender, RoutedEventArgs e)
         {
             if (ServersDataGrid.SelectedItem is ServerConnection server)
             {
-                var result = MessageBox.Show(
-                    $"Are you sure you want to remove server '{server.DisplayName}'?\n\nThis action cannot be undone.",
-                    "Confirm Remove Server",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Warning
-                );
+                var dialog = new RemoveServerDialog(server.DisplayName);
+                dialog.Owner = this;
 
-                if (result == MessageBoxResult.Yes)
+                if (dialog.ShowDialog() == true)
                 {
+                    if (dialog.DropDatabase)
+                    {
+                        try
+                        {
+                            await _serverManager.DropMonitorDatabaseAsync(server);
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show(
+                                $"Could not drop the PerformanceMonitor database on '{server.DisplayName}':\n\n{ex.Message}\n\nThe server will still be removed from the Dashboard.",
+                                "Database Drop Failed",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Warning
+                            );
+                        }
+                    }
+
                     _serverManager.DeleteServer(server.Id);
                     LoadServers();
                     ServersModified = true;
@@ -172,6 +187,80 @@ namespace PerformanceMonitorDashboard
                     MessageBoxButton.OK,
                     MessageBoxImage.Information
                 );
+            }
+        }
+
+        private void CopyCell_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.CurrentCell.Item != null)
+                {
+                    var cellContent = Helpers.TabHelpers.GetCellContent(dataGrid, dataGrid.CurrentCell);
+                    if (!string.IsNullOrEmpty(cellContent))
+                        Clipboard.SetDataObject(cellContent, false);
+                }
+            }
+        }
+
+        private void CopyRow_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid?.SelectedItem != null)
+                    Clipboard.SetDataObject(Helpers.TabHelpers.GetRowAsText(dataGrid, dataGrid.SelectedItem), false);
+            }
+        }
+
+        private void CopyAllRows_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.Items.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    var headers = new System.Collections.Generic.List<string>();
+                    foreach (var column in dataGrid.Columns)
+                        headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
+                    sb.AppendLine(string.Join("\t", headers));
+                    foreach (var item in dataGrid.Items)
+                        sb.AppendLine(Helpers.TabHelpers.GetRowAsText(dataGrid, item));
+                    Clipboard.SetDataObject(sb.ToString(), false);
+                }
+            }
+        }
+
+        private void ExportToCsv_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = Helpers.TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                if (dataGrid != null && dataGrid.Items.Count > 0)
+                {
+                    var dialog = new Microsoft.Win32.SaveFileDialog
+                    {
+                        FileName = $"servers_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+                        DefaultExt = ".csv",
+                        Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+                    };
+                    if (dialog.ShowDialog() == true)
+                    {
+                        var sb = new System.Text.StringBuilder();
+                        var headers = new System.Collections.Generic.List<string>();
+                        foreach (var column in dataGrid.Columns)
+                            headers.Add(Helpers.TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
+                        sb.AppendLine(string.Join(",", headers));
+                        foreach (var item in dataGrid.Items)
+                        {
+                            var values = Helpers.TabHelpers.GetRowValues(dataGrid, item);
+                            sb.AppendLine(string.Join(",", values.Select(v => Helpers.TabHelpers.EscapeCsvField(v))));
+                        }
+                        System.IO.File.WriteAllText(dialog.FileName, sb.ToString());
+                    }
+                }
             }
         }
 

@@ -22,6 +22,7 @@ namespace PerformanceMonitorDashboard.Models
         // Execution count
         public long ExecutionCount { get; set; }
         public long? ExecutionCountDelta { get; set; }
+        public long IntervalExecutions { get; set; }
 
         // Worker time (CPU) - microseconds in database
         public long TotalWorkerTime { get; set; }
@@ -79,6 +80,12 @@ namespace PerformanceMonitorDashboard.Models
         public long TotalSpills { get; set; }
         public long MinSpills { get; set; }
         public long MaxSpills { get; set; }
+
+        // Query identifiers (hex strings from binary columns)
+        public string? SqlHandle { get; set; }
+        public string? PlanHandle { get; set; }
+        public string? QueryHash { get; set; }
+        public string? QueryPlanHash { get; set; }
 
         // Sample interval
         public int? SampleIntervalSeconds { get; set; }

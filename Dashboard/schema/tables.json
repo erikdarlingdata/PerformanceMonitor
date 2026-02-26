@@ -677,26 +677,5 @@
       "row_count": { "type": "bigint", "nullable": true }
     },
     "primary_key": ["collection_id"]
-  },
-  "collect.session_wait_stats": {
-    "description": "Per-session wait statistics from sys.dm_exec_session_wait_stats (SQL 2016 SP1+)",
-    "columns": {
-      "collection_id": { "type": "bigint", "nullable": false, "identity": true },
-      "collection_time": { "type": "datetime2(7)", "nullable": false },
-      "session_id": { "type": "integer", "nullable": false },
-      "wait_type": { "type": "nvarchar(60)", "nullable": false },
-      "waiting_tasks_count": { "type": "bigint", "nullable": false },
-      "wait_time_ms": { "type": "bigint", "nullable": false },
-      "max_wait_time_ms": { "type": "bigint", "nullable": false },
-      "signal_wait_time_ms": { "type": "bigint", "nullable": false },
-      "database_id": { "type": "integer", "nullable": true },
-      "database_name": { "type": "sysname", "nullable": true },
-      "login_name": { "type": "nvarchar(128)", "nullable": true },
-      "host_name": { "type": "nvarchar(128)", "nullable": true },
-      "program_name": { "type": "nvarchar(128)", "nullable": true },
-      "sql_handle": { "type": "varbinary(64)", "nullable": true },
-      "query_text": { "type": "nvarchar(max)", "nullable": true }
-    },
-    "primary_key": ["collection_id"]
   }
 }

@@ -124,13 +124,12 @@ public sealed class McpMemoryTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_grants"), Description("Gets recently captured memory grants — queries that were granted or waiting for workspace memory at collection time. Shows requested vs granted vs used memory, wait times, and query text. High wait times or large gaps between granted and used memory indicate inefficient grants or memory pressure.")]
+    [McpServerTool(Name = "get_memory_grants"), Description("Gets resource semaphore statistics showing granted vs available workspace memory per resource pool, waiter counts, and timeout/forced grant deltas. High waiter counts or rising timeout deltas indicate memory grant pressure affecting query performance.")]
     public static async Task<string> GetMemoryGrants(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 1.")] int hours_back = 1,
-        [Description("Maximum rows. Default 20.")] int limit = 20)
+        [Description("Hours of history. Default 1.")] int hours_back = 1)
     {
         var resolved = ServerResolver.Resolve(serverManager, server_name);
         if (resolved == null)
@@ -143,33 +142,32 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateHoursBack(hours_back);
             if (hoursError != null) return hoursError;
 
-            var limitError = McpHelpers.ValidateTop(limit);
-            if (limitError != null) return limitError;
+            var rows = await dataService.GetMemoryGrantChartDataAsync(resolved.Value.ServerId, hours_back);
+            if (rows.Count == 0)
+            {
+                return "No memory grant data available.";
+            }
 
-            var rows = await dataService.GetMemoryGrantStatsAsync(resolved.Value.ServerId, hours_back);
-            var result = rows.Take(limit).Select(r => new
+            /* Return latest snapshot */
+            var latestTime = rows.Max(r => r.CollectionTime);
+            var latest = rows.Where(r => r.CollectionTime == latestTime);
+
+            var result = latest.Select(r => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
-                session_id = r.SessionId,
-                database_name = r.DatabaseName,
-                requested_memory_mb = Math.Round(r.RequestedMemoryMb, 2),
+                pool_id = r.PoolId,
+                available_memory_mb = Math.Round(r.AvailableMemoryMb, 2),
                 granted_memory_mb = Math.Round(r.GrantedMemoryMb, 2),
                 used_memory_mb = Math.Round(r.UsedMemoryMb, 2),
-                max_used_memory_mb = Math.Round(r.MaxUsedMemoryMb, 2),
-                ideal_memory_mb = Math.Round(r.IdealMemoryMb, 2),
-                required_memory_mb = Math.Round(r.RequiredMemoryMb, 2),
-                grant_efficiency_pct = r.GrantedMemoryMb > 0 ? Math.Round(r.MaxUsedMemoryMb / r.GrantedMemoryMb * 100, 1) : 0,
-                wait_time_ms = r.WaitTimeMs,
-                is_small_grant = r.IsSmallGrant,
-                dop = r.Dop,
-                query_cost = Math.Round(r.QueryCost, 2),
-                query_text = McpHelpers.Truncate(r.QueryText, 2000)
+                grantee_count = r.GranteeCount,
+                waiter_count = r.WaiterCount,
+                timeout_error_count_delta = r.TimeoutErrorCountDelta,
+                forced_grant_count_delta = r.ForcedGrantCountDelta
             });
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.Value.ServerName,
-                hours_back,
                 grants = result
             }, McpHelpers.JsonOptions);
         }

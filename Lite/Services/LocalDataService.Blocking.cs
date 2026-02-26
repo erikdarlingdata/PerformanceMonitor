@@ -138,7 +138,12 @@ SELECT
     parallel_worker_count,
     query_plan,
     live_query_plan,
-    collection_time
+    collection_time,
+    login_name,
+    host_name,
+    program_name,
+    open_transaction_count,
+    percent_complete
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -176,7 +181,12 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
                 ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
                 QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
                 LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
-                CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20)
+                CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
+                LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+                HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
+                ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
+                OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
+                PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25))
             });
         }
 
@@ -377,6 +387,63 @@ ORDER BY bucket";
         }
         return items;
     }
+    /// <summary>
+    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
+    /// Returns per-second rates grouped by wait type.
+    /// </summary>
+    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+WITH raw AS
+(
+    SELECT
+        collection_time,
+        wait_type,
+        delta_wait_time_ms,
+        date_diff('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time), collection_time) AS interval_seconds
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   wait_type LIKE 'LCK%'
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+)
+SELECT
+    collection_time,
+    wait_type,
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+FROM raw
+WHERE delta_wait_time_ms >= 0
+ORDER BY collection_time, wait_type";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<LockWaitTrendPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new LockWaitTrendPoint
+            {
+                CollectionTime = reader.GetDateTime(0),
+                WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2)
+            });
+        }
+        return items;
+    }
+}
+
+public class LockWaitTrendPoint
+{
+    public DateTime CollectionTime { get; set; }
+    public string WaitType { get; set; } = string.Empty;
+    public double WaitTimeMsPerSecond { get; set; }
 }
 
 public class TrendPoint
@@ -688,6 +755,11 @@ public class QuerySnapshotRow
     public DateTime CollectionTime { get; set; }
     public string? QueryPlan { get; set; }
     public string? LiveQueryPlan { get; set; }
+    public string LoginName { get; set; } = "";
+    public string HostName { get; set; } = "";
+    public string ProgramName { get; set; } = "";
+    public int OpenTransactionCount { get; set; }
+    public decimal PercentComplete { get; set; }
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
     public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);

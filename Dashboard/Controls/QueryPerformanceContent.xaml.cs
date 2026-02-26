@@ -8,10 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -36,12 +38,30 @@ namespace PerformanceMonitorDashboard.Controls
         private DatabaseService? _databaseService;
         private Action<string>? _statusCallback;
 
+        /// <summary>Raised when user wants to view a plan in the Plan Viewer tab. Args: (planXml, label, queryText)</summary>
+        public event Action<string, string, string?>? ViewPlanRequested;
+
+        /// <summary>Raised when actual plan execution starts. Arg: label for the plan tab.</summary>
+        public event Action<string>? ActualPlanStarted;
+
+        /// <summary>Raised when actual plan execution finishes (success or failure).</summary>
+        public event Action? ActualPlanFinished;
+
+        private CancellationTokenSource? _actualPlanCts;
+
+        /// <summary>Cancels the in-flight actual plan execution, if any.</summary>
+        public void CancelActualPlan() => _actualPlanCts?.Cancel();
+
         private Popup? _filterPopup;
         private ColumnFilterPopup? _filterPopupContent;
 
         // Active Queries filter state
         private Dictionary<string, Models.ColumnFilterState> _activeQueriesFilters = new();
         private List<QuerySnapshotItem>? _activeQueriesUnfilteredData;
+
+        // Current Active Queries filter state
+        private Dictionary<string, Models.ColumnFilterState> _currentActiveFilters = new();
+        private List<LiveQueryItem>? _currentActiveUnfilteredData;
 
         // Query Stats filter state
         private Dictionary<string, Models.ColumnFilterState> _queryStatsFilters = new();
@@ -54,6 +74,14 @@ namespace PerformanceMonitorDashboard.Controls
         // Query Store filter state
         private Dictionary<string, Models.ColumnFilterState> _queryStoreFilters = new();
         private List<QueryStoreItem>? _queryStoreUnfilteredData;
+
+        // Query Store Regressions filter state
+        private Dictionary<string, Models.ColumnFilterState> _qsRegressionsFilters = new();
+        private List<QueryStoreRegressionItem>? _qsRegressionsUnfilteredData;
+
+        // Query Trace Patterns filter state
+        private Dictionary<string, Models.ColumnFilterState> _lrqPatternsFilters = new();
+        private List<LongRunningQueryPatternItem>? _lrqPatternsUnfilteredData;
 
         // Active Queries state
         private int _activeQueriesHoursBack = 1;
@@ -125,13 +153,22 @@ namespace PerformanceMonitorDashboard.Controls
                 _filterPopupContent.FilterCleared -= ProcStatsFilterPopup_FilterCleared;
                 _filterPopupContent.FilterApplied -= QueryStoreFilterPopup_FilterApplied;
                 _filterPopupContent.FilterCleared -= QueryStoreFilterPopup_FilterCleared;
+                _filterPopupContent.FilterApplied -= CurrentActiveFilterPopup_FilterApplied;
+                _filterPopupContent.FilterCleared -= CurrentActiveFilterPopup_FilterCleared;
+                _filterPopupContent.FilterApplied -= QsRegressionsFilterPopup_FilterApplied;
+                _filterPopupContent.FilterCleared -= QsRegressionsFilterPopup_FilterCleared;
+                _filterPopupContent.FilterApplied -= LrqPatternsFilterPopup_FilterApplied;
+                _filterPopupContent.FilterCleared -= LrqPatternsFilterPopup_FilterCleared;
             }
 
             /* Clear large data collections to free memory */
+            _currentActiveUnfilteredData = null;
             _activeQueriesUnfilteredData = null;
             _queryStatsUnfilteredData = null;
             _procStatsUnfilteredData = null;
             _queryStoreUnfilteredData = null;
+            _qsRegressionsUnfilteredData = null;
+            _lrqPatternsUnfilteredData = null;
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -148,6 +185,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Apply minimum column widths based on header text to all DataGrids
             TabHelpers.AutoSizeColumnMinWidths(ActiveQueriesDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(CurrentActiveQueriesDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(QueryStatsDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(ProcStatsDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(QueryStoreDataGrid);
@@ -156,6 +194,7 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Freeze first columns for easier horizontal scrolling
             TabHelpers.FreezeColumns(ActiveQueriesDataGrid, 2);
+            TabHelpers.FreezeColumns(CurrentActiveQueriesDataGrid, 2);
             TabHelpers.FreezeColumns(QueryStatsDataGrid, 2);
             TabHelpers.FreezeColumns(ProcStatsDataGrid, 2);
             TabHelpers.FreezeColumns(QueryStoreDataGrid, 2);
@@ -251,14 +290,17 @@ namespace PerformanceMonitorDashboard.Controls
                 var queryStats = await queryStatsTask;
                 QueryStatsDataGrid.ItemsSource = queryStats;
                 QueryStatsNoDataMessage.Visibility = queryStats.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(QueryStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
 
                 var procStats = await procStatsTask;
                 ProcStatsDataGrid.ItemsSource = procStats;
                 ProcStatsNoDataMessage.Visibility = procStats.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(ProcStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
 
                 var queryStore = await queryStoreTask;
                 QueryStoreDataGrid.ItemsSource = queryStore;
                 QueryStoreNoDataMessage.Visibility = queryStore.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(QueryStoreDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
 
                 // Populate charts from time-series data
                 LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0], _queryDurationHover);
@@ -279,6 +321,20 @@ namespace PerformanceMonitorDashboard.Controls
         private void SetStatus(string message)
         {
             _statusCallback?.Invoke(message);
+        }
+
+        private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+        {
+            foreach (var column in grid.Columns)
+            {
+                if (column is DataGridBoundColumn bc &&
+                    bc.Binding is Binding b &&
+                    b.Path.Path == bindingPath)
+                {
+                    column.SortDirection = direction;
+                    return;
+                }
+            }
         }
 
         private void SetupChartSaveMenus()
@@ -360,6 +416,10 @@ namespace PerformanceMonitorDashboard.Controls
             _filterPopupContent.FilterCleared -= ProcStatsFilterPopup_FilterCleared;
             _filterPopupContent.FilterApplied -= QueryStoreFilterPopup_FilterApplied;
             _filterPopupContent.FilterCleared -= QueryStoreFilterPopup_FilterCleared;
+            _filterPopupContent.FilterApplied -= QsRegressionsFilterPopup_FilterApplied;
+            _filterPopupContent.FilterCleared -= QsRegressionsFilterPopup_FilterCleared;
+            _filterPopupContent.FilterApplied -= LrqPatternsFilterPopup_FilterApplied;
+            _filterPopupContent.FilterCleared -= LrqPatternsFilterPopup_FilterCleared;
 
             // Add the new handlers
             _filterPopupContent.FilterApplied += filterAppliedHandler;
@@ -521,6 +581,379 @@ namespace PerformanceMonitorDashboard.Controls
                     SetStatus("Error fetching query plan");
                 }
             }
+        }
+
+        #endregion
+
+        #region Current Active Queries
+
+        private async void CurrentActiveRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            await RefreshCurrentActiveQueriesAsync();
+        }
+
+        private async Task RefreshCurrentActiveQueriesAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                CurrentActiveRefreshButton.IsEnabled = false;
+
+                if (CurrentActiveQueriesDataGrid.ItemsSource == null)
+                {
+                    CurrentActiveLoading.IsLoading = true;
+                    CurrentActiveNoDataMessage.Visibility = Visibility.Collapsed;
+                }
+                SetStatus("Loading current active queries...");
+
+                var data = await _databaseService.GetCurrentActiveQueriesAsync();
+
+                _currentActiveUnfilteredData = data;
+                CurrentActiveQueriesDataGrid.ItemsSource = data;
+                CurrentActiveNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                CurrentActiveTimestamp.Text = $"Last refreshed: {DateTime.Now:HH:mm:ss} — {data.Count} queries";
+
+                if (_currentActiveFilters.Count > 0)
+                    ApplyCurrentActiveFilters();
+
+                SetStatus($"Loaded {data.Count} current active queries");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading current active queries: {ex.Message}");
+                CurrentActiveTimestamp.Text = $"Error: {ex.Message}";
+                SetStatus("Error loading current active queries");
+            }
+            finally
+            {
+                CurrentActiveLoading.IsLoading = false;
+                CurrentActiveRefreshButton.IsEnabled = true;
+            }
+        }
+
+        private void CurrentActiveFilter_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.Tag is not string columnName) return;
+
+            EnsureFilterPopup();
+            RewireFilterPopupEvents(
+                CurrentActiveFilterPopup_FilterApplied,
+                CurrentActiveFilterPopup_FilterCleared);
+
+            _currentActiveFilters.TryGetValue(columnName, out var existingFilter);
+            _filterPopupContent!.Initialize(columnName, existingFilter);
+
+            _filterPopup!.PlacementTarget = button;
+            _filterPopup.IsOpen = true;
+        }
+
+        private void CurrentActiveFilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
+        {
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+
+            if (e.FilterState.IsActive)
+            {
+                _currentActiveFilters[e.FilterState.ColumnName] = e.FilterState;
+            }
+            else
+            {
+                _currentActiveFilters.Remove(e.FilterState.ColumnName);
+            }
+
+            ApplyCurrentActiveFilters();
+            UpdateDataGridFilterButtonStyles(CurrentActiveQueriesDataGrid, _currentActiveFilters);
+        }
+
+        private void CurrentActiveFilterPopup_FilterCleared(object? sender, EventArgs e)
+        {
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+        }
+
+        private void ApplyCurrentActiveFilters()
+        {
+            if (_currentActiveUnfilteredData == null) return;
+
+            if (_currentActiveFilters.Count == 0)
+            {
+                CurrentActiveQueriesDataGrid.ItemsSource = _currentActiveUnfilteredData;
+                return;
+            }
+
+            var filteredData = _currentActiveUnfilteredData.Where(item =>
+            {
+                foreach (var filter in _currentActiveFilters.Values)
+                {
+                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }).ToList();
+
+            CurrentActiveQueriesDataGrid.ItemsSource = filteredData;
+        }
+
+        private void DownloadCurrentActiveEstPlan_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.DataContext is not LiveQueryItem item) return;
+
+            if (string.IsNullOrEmpty(item.QueryPlan))
+            {
+                MessageBox.Show("No estimated plan is available for this query.", "No Plan Available",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            var defaultFileName = $"estimated_plan_{item.SessionId}_{timestamp}.sqlplan";
+
+            var saveFileDialog = new SaveFileDialog
+            {
+                FileName = defaultFileName,
+                DefaultExt = ".sqlplan",
+                Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
+                Title = "Save Query Plan"
+            };
+
+            if (saveFileDialog.ShowDialog() == true)
+            {
+                File.WriteAllText(saveFileDialog.FileName, item.QueryPlan);
+            }
+        }
+
+        private void DownloadCurrentActiveLivePlan_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.DataContext is not LiveQueryItem item) return;
+
+            if (string.IsNullOrEmpty(item.LiveQueryPlan))
+            {
+                MessageBox.Show(
+                    "No live query plan is available for this session. The query may have completed before the plan could be captured.",
+                    "No Plan Available",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            var defaultFileName = $"live_plan_{item.SessionId}_{timestamp}.sqlplan";
+
+            var saveFileDialog = new SaveFileDialog
+            {
+                FileName = defaultFileName,
+                DefaultExt = ".sqlplan",
+                Filter = "SQL Plan (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
+                Title = "Save Live Query Plan"
+            };
+
+            if (saveFileDialog.ShowDialog() == true)
+            {
+                File.WriteAllText(saveFileDialog.FileName, item.LiveQueryPlan);
+            }
+        }
+
+        private async void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
+        {
+            var item = GetContextMenuDataItem(sender);
+            if (item == null) return;
+
+            string? planXml = null;
+            string? queryText = null;
+            string label = "Estimated Plan";
+
+            switch (item)
+            {
+                case QuerySnapshotItem snap when !string.IsNullOrEmpty(snap.QueryPlan):
+                    planXml = snap.QueryPlan;
+                    queryText = snap.QueryText;
+                    label = $"Est Plan - SPID {snap.SessionId}";
+                    break;
+                case LiveQueryItem live when !string.IsNullOrEmpty(live.LiveQueryPlan):
+                    planXml = live.LiveQueryPlan;
+                    queryText = live.QueryText;
+                    label = $"Plan - SPID {live.SessionId}";
+                    break;
+                case LiveQueryItem live when !string.IsNullOrEmpty(live.QueryPlan):
+                    planXml = live.QueryPlan;
+                    queryText = live.QueryText;
+                    label = $"Est Plan - SPID {live.SessionId}";
+                    break;
+                case QueryStatsItem stats when !string.IsNullOrEmpty(stats.QueryPlanXml):
+                    planXml = stats.QueryPlanXml;
+                    queryText = stats.QueryText;
+                    label = $"Est Plan - {stats.QueryHash}";
+                    break;
+                case ProcedureStatsItem proc when !string.IsNullOrEmpty(proc.QueryPlanXml):
+                    planXml = proc.QueryPlanXml;
+                    queryText = proc.ObjectName;
+                    label = $"Est Plan - {proc.ProcedureName}";
+                    break;
+                case QueryStoreItem qs:
+                    if (string.IsNullOrEmpty(qs.QueryPlanXml) && _databaseService != null)
+                    {
+                        qs.QueryPlanXml = await _databaseService.GetQueryStorePlanXmlAsync(qs.DatabaseName, qs.QueryId);
+                    }
+                    planXml = qs.QueryPlanXml;
+                    queryText = qs.QueryText;
+                    label = $"Est Plan - QS {qs.QueryId}";
+                    break;
+                case QueryStoreRegressionItem reg:
+                    if (string.IsNullOrEmpty(reg.QueryPlanXml) && _databaseService != null)
+                    {
+                        reg.QueryPlanXml = await _databaseService.GetQueryStorePlanXmlAsync(reg.DatabaseName, reg.QueryId);
+                    }
+                    planXml = reg.QueryPlanXml;
+                    queryText = reg.QueryTextSample;
+                    label = $"Est Plan - QS {reg.QueryId}";
+                    break;
+            }
+
+            if (planXml != null)
+            {
+                ViewPlanRequested?.Invoke(planXml, label, queryText);
+            }
+            else
+            {
+                MessageBox.Show(
+                    "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.",
+                    "No Plan Available",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+        }
+
+        private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
+        {
+            if (_databaseService == null) return;
+
+            var item = GetContextMenuDataItem(sender);
+            if (item == null) return;
+
+            string? queryText = null;
+            string? databaseName = null;
+            string? planXml = null;
+            string? isolationLevel = null;
+            string label = "Actual Plan";
+
+            switch (item)
+            {
+                case QuerySnapshotItem snap:
+                    queryText = snap.QueryText;
+                    databaseName = snap.DatabaseName;
+                    planXml = snap.QueryPlan;
+                    label = $"Actual Plan - SPID {snap.SessionId}";
+                    break;
+                case LiveQueryItem live:
+                    queryText = live.QueryText;
+                    databaseName = live.DatabaseName;
+                    planXml = live.LiveQueryPlan ?? live.QueryPlan;
+                    label = $"Actual Plan - SPID {live.SessionId}";
+                    break;
+                case QueryStatsItem stats:
+                    queryText = stats.QueryText;
+                    databaseName = stats.DatabaseName;
+                    planXml = stats.QueryPlanXml;
+                    label = $"Actual Plan - {stats.QueryHash}";
+                    break;
+                case QueryStoreItem qs:
+                    queryText = qs.QueryText;
+                    databaseName = qs.DatabaseName;
+                    if (string.IsNullOrEmpty(qs.QueryPlanXml))
+                        qs.QueryPlanXml = await _databaseService.GetQueryStorePlanXmlAsync(qs.DatabaseName, qs.QueryId);
+                    planXml = qs.QueryPlanXml;
+                    label = $"Actual Plan - QS {qs.QueryId}";
+                    break;
+                case QueryStoreRegressionItem reg:
+                    queryText = reg.QueryTextSample;
+                    databaseName = reg.DatabaseName;
+                    if (string.IsNullOrEmpty(reg.QueryPlanXml))
+                        reg.QueryPlanXml = await _databaseService.GetQueryStorePlanXmlAsync(reg.DatabaseName, reg.QueryId);
+                    planXml = reg.QueryPlanXml;
+                    label = $"Actual Plan - QS {reg.QueryId}";
+                    break;
+            }
+
+            if (string.IsNullOrWhiteSpace(queryText))
+            {
+                MessageBox.Show("No query text available for this row.", "No Query Text",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var result = MessageBox.Show(
+                $"You are about to execute this query against the monitored server in database [{databaseName ?? "default"}].\n\n" +
+                "Make sure you understand what the query does before proceeding.\n" +
+                "The query will execute with SET STATISTICS XML ON to capture the actual plan.\n" +
+                "All data results will be discarded.",
+                "Get Actual Plan",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Warning);
+
+            if (result != MessageBoxResult.OK) return;
+
+            ActualPlanStarted?.Invoke(label);
+
+            _actualPlanCts?.Dispose();
+            _actualPlanCts = new CancellationTokenSource();
+
+            try
+            {
+                _statusCallback?.Invoke("Executing query for actual plan...");
+
+                var actualPlanXml = await ActualPlanExecutor.ExecuteForActualPlanAsync(
+                    _databaseService.ConnectionString,
+                    databaseName ?? "",
+                    queryText,
+                    planXml,
+                    isolationLevel,
+                    isAzureSqlDb: false,
+                    timeoutSeconds: 0,
+                    _actualPlanCts.Token);
+
+                if (!string.IsNullOrEmpty(actualPlanXml))
+                {
+                    ViewPlanRequested?.Invoke(actualPlanXml, label, queryText);
+                    _statusCallback?.Invoke("Actual plan captured successfully.");
+                }
+                else
+                {
+                    MessageBox.Show("Query executed but no execution plan was captured.",
+                        "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+                    _statusCallback?.Invoke("No actual plan captured.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                MessageBox.Show("The query was cancelled or timed out.",
+                    "Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
+                _statusCallback?.Invoke("Actual plan capture cancelled.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to get actual plan:\n\n{ex.Message}",
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                _statusCallback?.Invoke("Actual plan capture failed.");
+            }
+            finally
+            {
+                ActualPlanFinished?.Invoke();
+            }
+        }
+
+        private static object? GetContextMenuDataItem(object sender)
+        {
+            if (sender is not MenuItem menuItem) return null;
+            var contextMenu = menuItem.Parent as ContextMenu;
+
+            // Context menu is on a DataGridRow — get its DataContext
+            if (contextMenu?.PlacementTarget is DataGridRow row)
+                return row.DataContext;
+
+            return null;
         }
 
         #endregion
@@ -792,6 +1225,38 @@ namespace PerformanceMonitorDashboard.Controls
             }
         }
 
+        private void QueryStoreRegressionsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
+            if (_databaseService == null) return;
+
+            if (QueryStoreRegressionsDataGrid.SelectedItem is QueryStoreRegressionItem item)
+            {
+                if (string.IsNullOrEmpty(item.DatabaseName) || item.QueryId <= 0)
+                {
+                    MessageBox.Show(
+                        "Unable to show history: missing database name or query ID.",
+                        "Information",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information
+                    );
+                    return;
+                }
+
+                var historyWindow = new QueryExecutionHistoryWindow(
+                    _databaseService,
+                    item.DatabaseName,
+                    item.QueryId,
+                    "Query Store",
+                    _queryStoreHoursBack,
+                    _queryStoreFromDate,
+                    _queryStoreToDate
+                );
+                historyWindow.Owner = Window.GetWindow(this);
+                historyWindow.ShowDialog();
+            }
+        }
+
         private void ProcStatsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
             if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
@@ -818,7 +1283,9 @@ namespace PerformanceMonitorDashboard.Controls
                     item.FullObjectName ?? item.ObjectName ?? $"ObjectId_{item.ObjectId}",
                     _procStatsHoursBack,
                     _procStatsFromDate,
-                    _procStatsToDate
+                    _procStatsToDate,
+                    item.SchemaName,
+                    item.ProcedureName
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();
@@ -872,6 +1339,7 @@ namespace PerformanceMonitorDashboard.Controls
                 var data = await _databaseService.GetQueryStoreRegressionsAsync(_qsRegressionsHoursBack, _qsRegressionsFromDate, _qsRegressionsToDate);
                 QueryStoreRegressionsDataGrid.ItemsSource = data;
                 QueryStoreRegressionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(QueryStoreRegressionsDataGrid, "DurationRegressionPercent", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} query store regression records");
             }
             catch (Exception ex)
@@ -883,14 +1351,78 @@ namespace PerformanceMonitorDashboard.Controls
             }
         }
 
-        private void QueryStoreRegressionsFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        private void QsRegressionsFilter_Click(object sender, RoutedEventArgs e)
         {
-            DataGridFilterService.ApplyFilter(QueryStoreRegressionsDataGrid, sender as TextBox);
+            if (sender is not Button button || button.Tag is not string columnName) return;
+
+            EnsureFilterPopup();
+            RewireFilterPopupEvents(
+                QsRegressionsFilterPopup_FilterApplied,
+                QsRegressionsFilterPopup_FilterCleared);
+
+            _qsRegressionsFilters.TryGetValue(columnName, out var existingFilter);
+            _filterPopupContent!.Initialize(columnName, existingFilter);
+
+            _filterPopup!.PlacementTarget = button;
+            _filterPopup.IsOpen = true;
         }
 
-        private void QueryStoreRegressionsNumericFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        private void QsRegressionsFilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
         {
-            DataGridFilterService.ApplyFilter(QueryStoreRegressionsDataGrid, sender as TextBox);
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+
+            if (e.FilterState.IsActive)
+            {
+                _qsRegressionsFilters[e.FilterState.ColumnName] = e.FilterState;
+            }
+            else
+            {
+                _qsRegressionsFilters.Remove(e.FilterState.ColumnName);
+            }
+
+            ApplyQsRegressionsFilters();
+            UpdateDataGridFilterButtonStyles(QueryStoreRegressionsDataGrid, _qsRegressionsFilters);
+        }
+
+        private void QsRegressionsFilterPopup_FilterCleared(object? sender, EventArgs e)
+        {
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+        }
+
+        private void ApplyQsRegressionsFilters()
+        {
+            if (_qsRegressionsUnfilteredData == null)
+            {
+                _qsRegressionsUnfilteredData = QueryStoreRegressionsDataGrid.ItemsSource as List<QueryStoreRegressionItem>;
+                if (_qsRegressionsUnfilteredData == null && QueryStoreRegressionsDataGrid.ItemsSource != null)
+                {
+                    _qsRegressionsUnfilteredData = (QueryStoreRegressionsDataGrid.ItemsSource as IEnumerable<QueryStoreRegressionItem>)?.ToList();
+                }
+            }
+
+            if (_qsRegressionsUnfilteredData == null) return;
+
+            if (_qsRegressionsFilters.Count == 0)
+            {
+                QueryStoreRegressionsDataGrid.ItemsSource = _qsRegressionsUnfilteredData;
+                return;
+            }
+
+            var filteredData = _qsRegressionsUnfilteredData.Where(item =>
+            {
+                foreach (var filter in _qsRegressionsFilters.Values)
+                {
+                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }).ToList();
+
+            QueryStoreRegressionsDataGrid.ItemsSource = filteredData;
         }
 
         #endregion
@@ -908,6 +1440,7 @@ namespace PerformanceMonitorDashboard.Controls
                 var data = await _databaseService.GetLongRunningQueryPatternsAsync(_lrqPatternsHoursBack, _lrqPatternsFromDate, _lrqPatternsToDate);
                 LongRunningQueryPatternsDataGrid.ItemsSource = data;
                 LongRunningQueryPatternsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                SetInitialSort(LongRunningQueryPatternsDataGrid, "AvgDurationSec", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} long running query pattern records");
             }
             catch (Exception ex)
@@ -917,14 +1450,109 @@ namespace PerformanceMonitorDashboard.Controls
             }
         }
 
-        private void LongRunningQueryPatternsFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        private void LrqPatternsFilter_Click(object sender, RoutedEventArgs e)
         {
-            DataGridFilterService.ApplyFilter(LongRunningQueryPatternsDataGrid, sender as TextBox);
+            if (sender is not Button button || button.Tag is not string columnName) return;
+
+            EnsureFilterPopup();
+            RewireFilterPopupEvents(
+                LrqPatternsFilterPopup_FilterApplied,
+                LrqPatternsFilterPopup_FilterCleared);
+
+            _lrqPatternsFilters.TryGetValue(columnName, out var existingFilter);
+            _filterPopupContent!.Initialize(columnName, existingFilter);
+
+            _filterPopup!.PlacementTarget = button;
+            _filterPopup.IsOpen = true;
         }
 
-        private void LongRunningQueryPatternsNumericFilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        private void LrqPatternsFilterPopup_FilterApplied(object? sender, FilterAppliedEventArgs e)
         {
-            DataGridFilterService.ApplyFilter(LongRunningQueryPatternsDataGrid, sender as TextBox);
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+
+            if (e.FilterState.IsActive)
+            {
+                _lrqPatternsFilters[e.FilterState.ColumnName] = e.FilterState;
+            }
+            else
+            {
+                _lrqPatternsFilters.Remove(e.FilterState.ColumnName);
+            }
+
+            ApplyLrqPatternsFilters();
+            UpdateDataGridFilterButtonStyles(LongRunningQueryPatternsDataGrid, _lrqPatternsFilters);
+        }
+
+        private void LrqPatternsFilterPopup_FilterCleared(object? sender, EventArgs e)
+        {
+            if (_filterPopup != null)
+                _filterPopup.IsOpen = false;
+        }
+
+        private void ApplyLrqPatternsFilters()
+        {
+            if (_lrqPatternsUnfilteredData == null)
+            {
+                _lrqPatternsUnfilteredData = LongRunningQueryPatternsDataGrid.ItemsSource as List<LongRunningQueryPatternItem>;
+                if (_lrqPatternsUnfilteredData == null && LongRunningQueryPatternsDataGrid.ItemsSource != null)
+                {
+                    _lrqPatternsUnfilteredData = (LongRunningQueryPatternsDataGrid.ItemsSource as IEnumerable<LongRunningQueryPatternItem>)?.ToList();
+                }
+            }
+
+            if (_lrqPatternsUnfilteredData == null) return;
+
+            if (_lrqPatternsFilters.Count == 0)
+            {
+                LongRunningQueryPatternsDataGrid.ItemsSource = _lrqPatternsUnfilteredData;
+                return;
+            }
+
+            var filteredData = _lrqPatternsUnfilteredData.Where(item =>
+            {
+                foreach (var filter in _lrqPatternsFilters.Values)
+                {
+                    if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }).ToList();
+
+            LongRunningQueryPatternsDataGrid.ItemsSource = filteredData;
+        }
+
+        private void LongRunningQueryPatternsDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (!TabHelpers.IsDoubleClickOnRow((DependencyObject)e.OriginalSource)) return;
+            if (_databaseService == null) return;
+
+            if (LongRunningQueryPatternsDataGrid.SelectedItem is LongRunningQueryPatternItem item)
+            {
+                if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.QueryPattern))
+                {
+                    MessageBox.Show(
+                        "Unable to show history: missing database name or query pattern.",
+                        "Information",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information
+                    );
+                    return;
+                }
+
+                var historyWindow = new TracePatternHistoryWindow(
+                    _databaseService,
+                    item.DatabaseName,
+                    item.QueryPattern,
+                    _lrqPatternsHoursBack,
+                    _lrqPatternsFromDate,
+                    _lrqPatternsToDate
+                );
+                historyWindow.Owner = Window.GetWindow(this);
+                historyWindow.ShowDialog();
+            }
         }
 
         #endregion
@@ -1089,7 +1717,7 @@ namespace PerformanceMonitorDashboard.Controls
                     {
                         if (column is DataGridBoundColumn)
                         {
-                            headers.Add(TabHelpers.GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                         }
                     }
                     sb.AppendLine(string.Join("\t", headers));
@@ -1192,15 +1820,15 @@ namespace PerformanceMonitorDashboard.Controls
                             {
                                 if (column is DataGridBoundColumn)
                                 {
-                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column), TabHelpers.CsvSeparator));
                                 }
                             }
-                            sb.AppendLine(string.Join(",", headers));
+                            sb.AppendLine(string.Join(TabHelpers.CsvSeparator, headers));
 
                             foreach (var item in dataGrid.Items)
                             {
                                 var values = TabHelpers.GetRowValues(dataGrid, item);
-                                sb.AppendLine(string.Join(",", values.Select(v => TabHelpers.EscapeCsvField(v))));
+                                sb.AppendLine(string.Join(TabHelpers.CsvSeparator, values.Select(v => TabHelpers.EscapeCsvField(v, TabHelpers.CsvSeparator))));
                             }
 
                             File.WriteAllText(saveFileDialog.FileName, sb.ToString());

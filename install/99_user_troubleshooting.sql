@@ -380,15 +380,6 @@ EXECUTE collect.waiting_tasks_collector
 GO
 
 /*
-32. Session Wait Stats Collector
-Collects per-session wait statistics from sys.dm_exec_session_wait_stats
-Requires SQL Server 2016 SP1 or later - will skip gracefully on older versions
-*/
-EXECUTE collect.session_wait_stats_collector
-    @debug = 1;
-GO
-
-/*
 ===============================================================================
 UTILITY COMMANDS
 ===============================================================================
@@ -572,13 +563,6 @@ SELECT
     row_count = COUNT_BIG(*)
 FROM collect.waiting_tasks
 
-UNION ALL
-
-SELECT
-    table_name = N'session_wait_stats',
-    row_count = COUNT_BIG(*)
-FROM collect.session_wait_stats
-
 ORDER BY
     table_name;
 GO
@@ -761,14 +745,6 @@ SELECT
     max_collection_time = MAX(wt.collection_time),
     max_collection_id = MAX(wt.collection_id)
 FROM collect.waiting_tasks AS wt
-
-UNION ALL
-
-SELECT
-    table_name = N'session_wait_stats',
-    max_collection_time = MAX(sws.collection_time),
-    max_collection_id = MAX(sws.collection_id)
-FROM collect.session_wait_stats AS sws
 
 ORDER BY
     table_name;

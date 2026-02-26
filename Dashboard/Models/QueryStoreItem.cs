@@ -64,6 +64,23 @@ namespace PerformanceMonitorDashboard.Models
         public bool IsForcedPlan { get; set; }
         public short? CompatibilityLevel { get; set; }
 
+        // Plan forcing details
+        public long? ForceFailureCount { get; set; }
+        public string? LastForceFailureReasonDesc { get; set; }
+        public string? PlanForcingType { get; set; }
+
+        // CLR time (pre-calculated in ms)
+        public double? MinClrTimeMs { get; set; }
+        public double? MaxClrTimeMs { get; set; }
+
+        // Physical IO reads (memory-optimized tables, SQL 2017+)
+        public long? MinNumPhysicalIoReads { get; set; }
+        public long? MaxNumPhysicalIoReads { get; set; }
+
+        // Log bytes used (SQL 2017+)
+        public long? MinLogBytesUsed { get; set; }
+        public long? MaxLogBytesUsed { get; set; }
+
         // Handle
         public string? QueryPlanHash { get; set; }
 
@@ -73,10 +90,12 @@ namespace PerformanceMonitorDashboard.Models
 
         // Display helpers - memory in MB (8KB pages * 8 / 1024)
         public double? AvgMemoryMb => AvgMemoryPages.HasValue ? AvgMemoryPages.Value * 8.0 / 1024.0 : null;
+        public double? MinMemoryMb => MinMemoryPages.HasValue ? MinMemoryPages.Value * 8.0 / 1024.0 : null;
         public double? MaxMemoryMb => MaxMemoryPages.HasValue ? MaxMemoryPages.Value * 8.0 / 1024.0 : null;
 
         // Tempdb in MB
         public double? AvgTempdbMb => AvgTempdbPages.HasValue ? AvgTempdbPages.Value * 8.0 / 1024.0 : null;
+        public double? MinTempdbMb => MinTempdbPages.HasValue ? MinTempdbPages.Value * 8.0 / 1024.0 : null;
         public double? MaxTempdbMb => MaxTempdbPages.HasValue ? MaxTempdbPages.Value * 8.0 / 1024.0 : null;
 
         // Property aliases for XAML binding compatibility

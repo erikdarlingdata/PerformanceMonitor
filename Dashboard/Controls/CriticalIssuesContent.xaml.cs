@@ -308,7 +308,7 @@ namespace PerformanceMonitorDashboard.Controls
                     {
                         if (column is DataGridBoundColumn)
                         {
-                            headers.Add(TabHelpers.GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                         }
                     }
                     sb.AppendLine(string.Join("\t", headers));
@@ -351,16 +351,16 @@ namespace PerformanceMonitorDashboard.Controls
                             {
                                 if (column is DataGridBoundColumn)
                                 {
-                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column), TabHelpers.CsvSeparator));
                                 }
                             }
-                            sb.AppendLine(string.Join(",", headers));
+                            sb.AppendLine(string.Join(TabHelpers.CsvSeparator, headers));
 
                             // Add all rows
                             foreach (var item in dataGrid.Items)
                             {
                                 var values = TabHelpers.GetRowValues(dataGrid, item);
-                                sb.AppendLine(string.Join(",", values.Select(v => TabHelpers.EscapeCsvField(v))));
+                                sb.AppendLine(string.Join(TabHelpers.CsvSeparator, values.Select(v => TabHelpers.EscapeCsvField(v, TabHelpers.CsvSeparator))));
                             }
 
                             File.WriteAllText(saveFileDialog.FileName, sb.ToString());

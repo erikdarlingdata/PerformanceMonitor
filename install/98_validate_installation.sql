@@ -294,30 +294,6 @@ BEGIN
     HAVING COUNT_BIG(*) > 0;
 END;
 
-/*
-Session wait stats - session_id and wait_type should never be NULL
-*/
-IF OBJECT_ID(N'collect.session_wait_stats', N'U') IS NOT NULL
-BEGIN
-    INSERT INTO @null_checks
-    SELECT
-        table_name = N'session_wait_stats',
-        column_name = N'session_id',
-        null_count = COUNT_BIG(*)
-    FROM collect.session_wait_stats
-    WHERE session_id IS NULL
-    HAVING COUNT_BIG(*) > 0;
-
-    INSERT INTO @null_checks
-    SELECT
-        table_name = N'session_wait_stats',
-        column_name = N'wait_type',
-        null_count = COUNT_BIG(*)
-    FROM collect.session_wait_stats
-    WHERE wait_type IS NULL
-    HAVING COUNT_BIG(*) > 0;
-END;
-
 IF EXISTS (SELECT 1/0 FROM @null_checks)
 BEGIN
     PRINT '*** NULL VALUES FOUND IN REQUIRED COLUMNS ***';

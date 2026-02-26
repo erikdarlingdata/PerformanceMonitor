@@ -265,17 +265,23 @@ BEGIN
         );
 
         /*
-        Loop through databases where Query Store is enabled
+        Build list of databases where Query Store is actually enabled.
+        Uses sys.database_query_store_options.actual_state instead of
+        sys.databases.is_query_store_on, which can be out of sync on Azure SQL DB.
         */
         DECLARE
-            @database_name sysname;
+            @database_name sysname,
+            @qs_check_sql NVARCHAR(500);
 
-        DECLARE @database_cursor CURSOR 
-        
-            SET @database_cursor = 
-                CURSOR 
-                LOCAL 
-                FAST_FORWARD 
+        DECLARE
+            @qs_databases TABLE (name sysname);
+
+        DECLARE @db_check_cursor CURSOR
+
+            SET @db_check_cursor =
+                CURSOR
+                LOCAL
+                FAST_FORWARD
             FOR
             SELECT
                 d.name
@@ -283,15 +289,64 @@ BEGIN
             WHERE d.state_desc = N'ONLINE'
             AND   d.database_id > 4
             AND   d.is_read_only = 0
-            AND   d.is_query_store_on = 1
             AND   d.name <> N'PerformanceMonitor'
             AND   d.database_id < 32761 /*exclude contained AG system databases*/
             OPTION(RECOMPILE);
 
+        OPEN @db_check_cursor;
+
+        FETCH NEXT
+        FROM @db_check_cursor
+        INTO @database_name;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            BEGIN TRY
+                SET @qs_check_sql =
+                    N'USE ' + QUOTENAME(@database_name) + N';
+                    SELECT ' + QUOTENAME(@database_name, '''') + N'
+                    WHERE EXISTS
+                    (
+                        SELECT
+                            1
+                        FROM sys.database_query_store_options
+                        WHERE actual_state > 0
+                    );';
+
+                INSERT @qs_databases (name)
+                EXEC(@qs_check_sql);
+            END TRY
+            BEGIN CATCH
+            END CATCH;
+
+            FETCH NEXT
+            FROM @db_check_cursor
+            INTO @database_name;
+        END;
+
+        CLOSE @db_check_cursor;
+        DEALLOCATE @db_check_cursor;
+
+        /*
+        Loop through databases where Query Store is enabled
+        */
+        DECLARE @database_cursor CURSOR
+
+            SET @database_cursor =
+                CURSOR
+                LOCAL
+                FAST_FORWARD
+            FOR
+            SELECT
+                q.name
+            FROM @qs_databases AS q
+            ORDER BY
+                q.name;
+
         OPEN @database_cursor;
 
-        FETCH NEXT 
-        FROM @database_cursor 
+        FETCH NEXT
+        FROM @database_cursor
         INTO @database_name;
 
         WHILE @@FETCH_STATUS = 0

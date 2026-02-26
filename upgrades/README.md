@@ -73,4 +73,6 @@ GO
 - **1.2.0**: Current Configuration tabs, Default Trace DynamicResource fix, alert badge, chart tooltips, drill-down sizing
 - **1.3.0**: Add total_physical_memory_mb and committed_target_memory_mb to memory_stats collector
 
+- **2.0.0**: Add server_start_time and delta columns to memory_grant_stats for delta framework; drop unused warning columns; new Memory Grants charts
+
 Future upgrade folders will be added here as new versions are released.

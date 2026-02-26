@@ -36,7 +36,7 @@ WHERE d.name = @database_name;", connection);
     /// <summary>
     /// Gets top queries by CPU for a server over a time period.
     /// </summary>
-    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -61,6 +61,14 @@ SELECT
     MAX(max_worker_time) AS max_worker_time,
     MIN(min_elapsed_time) AS min_elapsed_time,
     MAX(max_elapsed_time) AS max_elapsed_time,
+    MIN(min_physical_reads) AS min_physical_reads,
+    MAX(max_physical_reads) AS max_physical_reads,
+    MIN(min_rows) AS min_rows,
+    MAX(max_rows) AS max_rows,
+    MIN(min_grant_kb) AS min_grant_kb,
+    MAX(max_grant_kb) AS max_grant_kb,
+    MIN(min_spills) AS min_spills,
+    MAX(max_spills) AS max_spills,
     MAX(query_plan_hash) AS query_plan_hash,
     MAX(sql_handle) AS sql_handle,
     MAX(plan_handle) AS plan_handle,
@@ -70,8 +78,10 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE
 AND   query_text NOT LIKE 'WAITFOR%'
 GROUP BY database_name, query_hash
+HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
 ORDER BY SUM(delta_elapsed_time) DESC
 LIMIT $4";
 
@@ -79,6 +89,7 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = top });
+        command.Parameters.Add(new DuckDBParameter { Value = utcOffsetMinutes });
 
         var items = new List<QueryStatsRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -102,11 +113,19 @@ LIMIT $4";
                 MaxCpuUs = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
                 MinElapsedUs = reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
                 MaxElapsedUs = reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
-                QueryPlanHash = reader.IsDBNull(16) ? "" : reader.GetString(16),
-                SqlHandle = reader.IsDBNull(17) ? "" : reader.GetString(17),
-                PlanHandle = reader.IsDBNull(18) ? "" : reader.GetString(18),
-                QueryText = reader.IsDBNull(19) ? "" : reader.GetString(19),
-                QueryPlan = reader.IsDBNull(20) ? null : reader.GetString(20)
+                MinPhysicalReads = reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
+                MaxPhysicalReads = reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
+                MinRows = reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
+                MaxRows = reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
+                MinGrantKb = reader.IsDBNull(20) ? 0 : reader.GetInt64(20),
+                MaxGrantKb = reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
+                MinSpills = reader.IsDBNull(22) ? 0 : reader.GetInt64(22),
+                MaxSpills = reader.IsDBNull(23) ? 0 : reader.GetInt64(23),
+                QueryPlanHash = reader.IsDBNull(24) ? "" : reader.GetString(24),
+                SqlHandle = reader.IsDBNull(25) ? "" : reader.GetString(25),
+                PlanHandle = reader.IsDBNull(26) ? "" : reader.GetString(26),
+                QueryText = reader.IsDBNull(27) ? "" : reader.GetString(27),
+                QueryPlan = reader.IsDBNull(28) ? null : reader.GetString(28)
             });
         }
 
@@ -195,7 +214,12 @@ SELECT
     delta_elapsed_time,
     delta_logical_reads,
     delta_logical_writes,
-    delta_physical_reads
+    delta_physical_reads,
+    min_worker_time,
+    max_worker_time,
+    min_elapsed_time,
+    max_elapsed_time,
+    total_spills
 FROM v_procedure_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -222,11 +246,62 @@ ORDER BY collection_time";
                 DeltaElapsedUs = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 DeltaLogicalReads = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 DeltaLogicalWrites = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                DeltaPhysicalReads = reader.IsDBNull(6) ? 0 : reader.GetInt64(6)
+                DeltaPhysicalReads = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                MinWorkerTimeUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                MaxWorkerTimeUs = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                MinElapsedTimeUs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                MaxElapsedTimeUs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                TotalSpills = reader.IsDBNull(11) ? 0 : reader.GetInt64(11)
             });
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Looks up a cached query plan from DuckDB by server_id and query_hash.
+    /// Returns the most recently collected plan XML, or null if not found.
+    /// </summary>
+    public async Task<string?> GetCachedQueryPlanAsync(int serverId, string queryHash)
+    {
+        const string query = @"
+SELECT query_plan_xml
+FROM v_query_stats
+WHERE server_id = $1
+AND   query_hash = $2
+AND   query_plan_xml IS NOT NULL
+AND   query_plan_xml <> ''
+ORDER BY collection_time DESC
+LIMIT 1";
+
+        using var connection = await OpenConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = query;
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = queryHash });
+        var result = await cmd.ExecuteScalarAsync();
+        return result as string;
+    }
+
+    public async Task<string?> GetCachedProcedurePlanAsync(int serverId, string planHandle)
+    {
+        const string query = @"
+SELECT query_plan_xml
+FROM v_query_stats
+WHERE server_id = $1
+AND   plan_handle = $2
+AND   query_plan_xml IS NOT NULL
+AND   query_plan_xml <> ''
+ORDER BY collection_time DESC
+LIMIT 1";
+
+        using var connection = await OpenConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = query;
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = planHandle });
+        var result = await cmd.ExecuteScalarAsync();
+        return result as string;
     }
 
     /// <summary>
@@ -304,7 +379,7 @@ OPTION(RECOMPILE);',
     /// <summary>
     /// Gets top procedures by CPU for a server.
     /// </summary>
-    public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -327,14 +402,25 @@ SELECT
     MAX(max_worker_time) AS max_worker_time,
     MIN(min_elapsed_time) AS min_elapsed_time,
     MAX(max_elapsed_time) AS max_elapsed_time,
+    MIN(min_logical_reads) AS min_logical_reads,
+    MAX(max_logical_reads) AS max_logical_reads,
+    MIN(min_physical_reads) AS min_physical_reads,
+    MAX(max_physical_reads) AS max_physical_reads,
+    MIN(min_logical_writes) AS min_logical_writes,
+    MAX(max_logical_writes) AS max_logical_writes,
     SUM(total_spills) AS total_spills,
+    MIN(min_spills) AS min_spills,
+    MAX(max_spills) AS max_spills,
+    MAX(cached_time) AS cached_time,
     MAX(sql_handle) AS sql_handle,
     MAX(plan_handle) AS plan_handle
 FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
+AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE
 GROUP BY database_name, schema_name, object_name, object_type
+HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
 ORDER BY SUM(delta_elapsed_time) DESC
 LIMIT $4";
 
@@ -342,6 +428,7 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = top });
+        command.Parameters.Add(new DuckDBParameter { Value = utcOffsetMinutes });
 
         var items = new List<ProcedureStatsRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -363,9 +450,18 @@ LIMIT $4";
                 MaxWorkerTimeUs = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 MinElapsedTimeUs = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
                 MaxElapsedTimeUs = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                TotalSpills = reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
-                SqlHandle = reader.IsDBNull(15) ? "" : reader.GetString(15),
-                PlanHandle = reader.IsDBNull(16) ? "" : reader.GetString(16)
+                MinLogicalReads = reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
+                MaxLogicalReads = reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
+                MinPhysicalReads = reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
+                MaxPhysicalReads = reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
+                MinLogicalWrites = reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
+                MaxLogicalWrites = reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
+                TotalSpills = reader.IsDBNull(20) ? 0 : reader.GetInt64(20),
+                MinSpills = reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
+                MaxSpills = reader.IsDBNull(22) ? 0 : reader.GetInt64(22),
+                CachedTime = reader.IsDBNull(23) ? (DateTime?)null : reader.GetDateTime(23),
+                SqlHandle = reader.IsDBNull(24) ? "" : reader.GetString(24),
+                PlanHandle = reader.IsDBNull(25) ? "" : reader.GetString(25)
             });
         }
 
@@ -541,6 +637,14 @@ public class QueryStatsRow
     public long MaxCpuUs { get; set; }
     public long MinElapsedUs { get; set; }
     public long MaxElapsedUs { get; set; }
+    public long MinPhysicalReads { get; set; }
+    public long MaxPhysicalReads { get; set; }
+    public long MinRows { get; set; }
+    public long MaxRows { get; set; }
+    public long MinGrantKb { get; set; }
+    public long MaxGrantKb { get; set; }
+    public long MinSpills { get; set; }
+    public long MaxSpills { get; set; }
     public string QueryPlanHash { get; set; } = "";
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
@@ -574,7 +678,16 @@ public class ProcedureStatsRow
     public long MaxWorkerTimeUs { get; set; }
     public long MinElapsedTimeUs { get; set; }
     public long MaxElapsedTimeUs { get; set; }
+    public long MinLogicalReads { get; set; }
+    public long MaxLogicalReads { get; set; }
+    public long MinPhysicalReads { get; set; }
+    public long MaxPhysicalReads { get; set; }
+    public long MinLogicalWrites { get; set; }
+    public long MaxLogicalWrites { get; set; }
     public long TotalSpills { get; set; }
+    public long MinSpills { get; set; }
+    public long MaxSpills { get; set; }
+    public DateTime? CachedTime { get; set; }
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
     public string FullName => string.IsNullOrEmpty(SchemaName) ? ObjectName : $"{SchemaName}.{ObjectName}";
@@ -587,6 +700,7 @@ public class ProcedureStatsRow
     public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
     public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
     public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
+    public string CachedTimeFormatted => CachedTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
 }
 
 public class QueryStatsHistoryRow
@@ -630,10 +744,19 @@ public class ProcedureStatsHistoryRow
     public long DeltaLogicalReads { get; set; }
     public long DeltaLogicalWrites { get; set; }
     public long DeltaPhysicalReads { get; set; }
+    public long MinWorkerTimeUs { get; set; }
+    public long MaxWorkerTimeUs { get; set; }
+    public long MinElapsedTimeUs { get; set; }
+    public long MaxElapsedTimeUs { get; set; }
+    public long TotalSpills { get; set; }
     public double DeltaCpuMs => DeltaCpuUs / 1000.0;
     public double DeltaElapsedMs => DeltaElapsedUs / 1000.0;
     public double AvgCpuMs => DeltaExecutions > 0 ? DeltaCpuMs / DeltaExecutions : 0;
     public double AvgElapsedMs => DeltaExecutions > 0 ? DeltaElapsedMs / DeltaExecutions : 0;
     public double AvgReads => DeltaExecutions > 0 ? (double)DeltaLogicalReads / DeltaExecutions : 0;
+    public double MinCpuMs => MinWorkerTimeUs / 1000.0;
+    public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
+    public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
+    public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
 }

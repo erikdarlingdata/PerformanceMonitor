@@ -144,53 +144,21 @@ BEGIN
             wait_type = wt.wait_type,
             wait_duration_ms = wt.wait_duration_ms,
             blocking_session_id = ISNULL(wt.blocking_session_id, 0),
-            resource_description =
-                CASE
-                    WHEN LEN(wt.resource_description) > 1000
-                    THEN SUBSTRING(wt.resource_description, 1, 1000) + N'...'
-                    ELSE wt.resource_description
-                END,
-            database_id = der.database_id,
+            resource_description = NULL,
+            database_id = NULL,
             database_name = DB_NAME(der.database_id),
-            query_text =
-                CASE
-                    WHEN dest.text IS NULL
-                    THEN N'(unavailable)'
-                    WHEN LEN(dest.text) > 4000
-                    THEN SUBSTRING(dest.text, 1, 4000) + N'...'
-                    ELSE dest.text
-                END,
-            statement_text =
-                CASE
-                    WHEN dest.text IS NULL
-                    THEN N'(unavailable)'
-                    WHEN der.statement_start_offset = 0
-                    AND  der.statement_end_offset = 0
-                    THEN dest.text
-                    WHEN der.statement_end_offset = -1
-                    THEN SUBSTRING
-                         (
-                             dest.text,
-                             (der.statement_start_offset / 2) + 1,
-                             2147483647
-                         )
-                    ELSE SUBSTRING
-                         (
-                             dest.text,
-                             (der.statement_start_offset / 2) + 1,
-                             ((der.statement_end_offset - der.statement_start_offset) / 2) + 1
-                         )
-                END,
-            query_plan = qp.query_plan,
-            sql_handle = der.sql_handle,
-            plan_handle = der.plan_handle,
-            request_status = der.status,
-            command = der.command,
-            cpu_time_ms = der.cpu_time,
-            total_elapsed_time_ms = der.total_elapsed_time,
-            logical_reads = der.logical_reads,
-            writes = der.writes,
-            row_count = der.row_count
+            query_text = NULL,
+            statement_text = NULL,
+            query_plan = NULL,
+            sql_handle = NULL,
+            plan_handle = NULL,
+            request_status = NULL,
+            command = NULL,
+            cpu_time_ms = NULL,
+            total_elapsed_time_ms = NULL,
+            logical_reads = NULL,
+            writes = NULL,
+            row_count = NULL
         FROM sys.dm_os_waiting_tasks AS wt
         LEFT JOIN sys.dm_exec_requests AS der
           ON der.session_id = wt.session_id

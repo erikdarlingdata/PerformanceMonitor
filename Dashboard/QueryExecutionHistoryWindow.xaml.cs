@@ -35,6 +35,7 @@ namespace PerformanceMonitorDashboard
         private readonly DateTime? _toDate;
         private List<QueryExecutionHistoryItem> _historyData = new();
         private ScottPlot.IPanel? _legendPanel;
+        private ChartHoverHelper? _chartHover;
 
         // Filter state
         private Dictionary<string, ColumnFilterState> _filters = new();
@@ -181,8 +182,8 @@ namespace PerformanceMonitorDashboard
                 ScottPlot.Color.FromHex("#A1887F")
             };
 
-            var legendParts = new List<string>();
             int colorIndex = 0;
+            var scatterSeries = new List<(ScottPlot.Plottables.Scatter Scatter, string Label)>();
 
             foreach (var planGroup in planGroups)
             {
@@ -197,11 +198,23 @@ namespace PerformanceMonitorDashboard
                 var color = colors[colorIndex % colors.Length];
                 var scatter = HistoryChart.Plot.Add.Scatter(dates, values);
                 scatter.Color = color;
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 6;
-                scatter.LegendText = $"Plan {planGroup.Key}";
+                var label = $"Plan {planGroup.Key}";
+                scatter.LegendText = label;
 
-                legendParts.Add($"Plan {planGroup.Key}");
+                // Sparse data: use total dataset size, not per-plan size, since
+                // data is split across plan groups
+                if (_historyData.Count <= 1)
+                {
+                    scatter.LineWidth = 0;
+                    scatter.MarkerSize = 8;
+                }
+                else
+                {
+                    scatter.LineWidth = 2;
+                    scatter.MarkerSize = 4;
+                }
+
+                scatterSeries.Add((scatter, label));
                 colorIndex++;
             }
 
@@ -211,6 +224,16 @@ namespace PerformanceMonitorDashboard
             HistoryChart.Plot.XLabel("Collection Time");
             _legendPanel = HistoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
             HistoryChart.Plot.Legend.FontSize = 12;
+
+            // Hover tooltip
+            var unit = metricTag.Contains("Ms") ? "ms" : "";
+            if (_chartHover == null)
+                _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            else
+                _chartHover.Unit = unit;
+            _chartHover.Clear();
+            foreach (var (s, l) in scatterSeries)
+                _chartHover.Add(s, l);
 
             // Update legend text
             ChartLegendText.Text = planGroups.Count > 1
@@ -421,7 +444,7 @@ namespace PerformanceMonitorDashboard
                     foreach (var column in dataGrid.Columns)
                     {
                         if (column is DataGridBoundColumn)
-                            headers.Add(TabHelpers.GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                     }
                     sb.AppendLine(string.Join("\t", headers));
                     foreach (var item in dataGrid.Items)
@@ -454,7 +477,7 @@ namespace PerformanceMonitorDashboard
                             foreach (var column in dataGrid.Columns)
                             {
                                 if (column is DataGridBoundColumn)
-                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
                             }
                             sb.AppendLine(string.Join(",", headers));
                             foreach (var item in dataGrid.Items)

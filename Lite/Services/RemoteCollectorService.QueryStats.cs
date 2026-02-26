@@ -34,24 +34,43 @@ public partial class RemoteCollectorService
         const string standardQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (50)
+SELECT /* PerformanceMonitorLite */ TOP (200)
     database_name = d.name,
     query_hash = CONVERT(varchar(64), qs.query_hash, 1),
     query_plan_hash = CONVERT(varchar(64), qs.query_plan_hash, 1),
+    creation_time = qs.creation_time,
+    last_execution_time = qs.last_execution_time,
     execution_count = qs.execution_count,
     total_worker_time = qs.total_worker_time,
     total_elapsed_time = qs.total_elapsed_time,
     total_logical_reads = qs.total_logical_reads,
     total_logical_writes = qs.total_logical_writes,
     total_physical_reads = qs.total_physical_reads,
+    total_clr_time = qs.total_clr_time,
     total_rows = qs.total_rows,
     total_spills = qs.total_spills,
     min_worker_time = qs.min_worker_time,
     max_worker_time = qs.max_worker_time,
     min_elapsed_time = qs.min_elapsed_time,
     max_elapsed_time = qs.max_elapsed_time,
+    min_physical_reads = qs.min_physical_reads,
+    max_physical_reads = qs.max_physical_reads,
+    min_rows = qs.min_rows,
+    max_rows = qs.max_rows,
     min_dop = qs.min_dop,
     max_dop = qs.max_dop,
+    min_grant_kb = qs.min_grant_kb,
+    max_grant_kb = qs.max_grant_kb,
+    min_used_grant_kb = qs.min_used_grant_kb,
+    max_used_grant_kb = qs.max_used_grant_kb,
+    min_ideal_grant_kb = qs.min_ideal_grant_kb,
+    max_ideal_grant_kb = qs.max_ideal_grant_kb,
+    min_reserved_threads = qs.min_reserved_threads,
+    max_reserved_threads = qs.max_reserved_threads,
+    min_used_threads = qs.min_used_threads,
+    max_used_threads = qs.max_used_threads,
+    min_spills = qs.min_spills,
+    max_spills = qs.max_spills,
     sql_handle = CONVERT(varchar(64), qs.sql_handle, 1),
     plan_handle = CONVERT(varchar(64), qs.plan_handle, 1),
     query_text =
@@ -85,6 +104,8 @@ CROSS APPLY
 INNER JOIN sys.databases AS d
   ON pa.dbid = d.database_id
 WHERE pa.dbid NOT IN (1, 2, 3, 4, 32761, 32767, ISNULL(DB_ID(N'PerformanceMonitor'), 0))
+AND   st.text NOT LIKE N'%PerformanceMonitorLite%'
+AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
@@ -93,24 +114,43 @@ OPTION(RECOMPILE);";
         const string azureSqlDbQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (50)
+SELECT /* PerformanceMonitorLite */ TOP (200)
     database_name = DB_NAME(),
     query_hash = CONVERT(varchar(64), qs.query_hash, 1),
     query_plan_hash = CONVERT(varchar(64), qs.query_plan_hash, 1),
+    creation_time = qs.creation_time,
+    last_execution_time = qs.last_execution_time,
     execution_count = qs.execution_count,
     total_worker_time = qs.total_worker_time,
     total_elapsed_time = qs.total_elapsed_time,
     total_logical_reads = qs.total_logical_reads,
     total_logical_writes = qs.total_logical_writes,
     total_physical_reads = qs.total_physical_reads,
+    total_clr_time = qs.total_clr_time,
     total_rows = qs.total_rows,
     total_spills = qs.total_spills,
     min_worker_time = qs.min_worker_time,
     max_worker_time = qs.max_worker_time,
     min_elapsed_time = qs.min_elapsed_time,
     max_elapsed_time = qs.max_elapsed_time,
+    min_physical_reads = qs.min_physical_reads,
+    max_physical_reads = qs.max_physical_reads,
+    min_rows = qs.min_rows,
+    max_rows = qs.max_rows,
     min_dop = qs.min_dop,
     max_dop = qs.max_dop,
+    min_grant_kb = qs.min_grant_kb,
+    max_grant_kb = qs.max_grant_kb,
+    min_used_grant_kb = qs.min_used_grant_kb,
+    max_used_grant_kb = qs.max_used_grant_kb,
+    min_ideal_grant_kb = qs.min_ideal_grant_kb,
+    max_ideal_grant_kb = qs.max_ideal_grant_kb,
+    min_reserved_threads = qs.min_reserved_threads,
+    max_reserved_threads = qs.max_reserved_threads,
+    min_used_threads = qs.min_used_threads,
+    max_used_threads = qs.max_used_threads,
+    min_spills = qs.min_spills,
+    max_spills = qs.max_spills,
     sql_handle = CONVERT(varchar(64), qs.sql_handle, 1),
     plan_handle = CONVERT(varchar(64), qs.plan_handle, 1),
     query_text =
@@ -134,6 +174,8 @@ SELECT TOP (50)
         END
 FROM sys.dm_exec_query_stats AS qs
 OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
+AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
@@ -165,68 +207,101 @@ OPTION(RECOMPILE);";
             {
                 while (await reader.ReadAsync(cancellationToken))
                 {
+                    /* Reader ordinals match SELECT column order:
+                       0=database_name, 1=query_hash, 2=query_plan_hash,
+                       3=creation_time, 4=last_execution_time,
+                       5=execution_count, 6=total_worker_time, 7=total_elapsed_time,
+                       8=total_logical_reads, 9=total_logical_writes, 10=total_physical_reads,
+                       11=total_clr_time, 12=total_rows, 13=total_spills,
+                       14=min_worker_time, 15=max_worker_time, 16=min_elapsed_time, 17=max_elapsed_time,
+                       18=min_physical_reads, 19=max_physical_reads, 20=min_rows, 21=max_rows,
+                       22=min_dop, 23=max_dop,
+                       24=min_grant_kb, 25=max_grant_kb, 26=min_used_grant_kb, 27=max_used_grant_kb,
+                       28=min_ideal_grant_kb, 29=max_ideal_grant_kb,
+                       30=min_reserved_threads, 31=max_reserved_threads, 32=min_used_threads, 33=max_used_threads,
+                       34=min_spills, 35=max_spills,
+                       36=sql_handle, 37=plan_handle, 38=query_text */
                     var queryHash = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                    var executionCount = reader.IsDBNull(3) ? 0L : reader.GetInt64(3);
-                    var totalWorkerTime = reader.IsDBNull(4) ? 0L : reader.GetInt64(4);
-                    var totalElapsedTime = reader.IsDBNull(5) ? 0L : reader.GetInt64(5);
-                    var totalLogicalReads = reader.IsDBNull(6) ? 0L : reader.GetInt64(6);
-                    var totalLogicalWrites = reader.IsDBNull(7) ? 0L : reader.GetInt64(7);
-                    var totalPhysicalReads = reader.IsDBNull(8) ? 0L : reader.GetInt64(8);
-                    var totalRows = reader.IsDBNull(9) ? 0L : reader.GetInt64(9);
-                    var totalSpills = reader.IsDBNull(10) ? 0L : reader.GetInt64(10);
-                    var minWorkerTime = reader.IsDBNull(11) ? 0L : reader.GetInt64(11);
-                    var maxWorkerTime = reader.IsDBNull(12) ? 0L : reader.GetInt64(12);
-                    var minElapsedTime = reader.IsDBNull(13) ? 0L : reader.GetInt64(13);
-                    var maxElapsedTime = reader.IsDBNull(14) ? 0L : reader.GetInt64(14);
-                    var minDop = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15));
-                    var maxDop = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16));
-                    var sqlHandle = reader.IsDBNull(17) ? (string?)null : reader.GetString(17);
-                    var planHandle = reader.IsDBNull(18) ? (string?)null : reader.GetString(18);
+                    var creationTime = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+                    var lastExecTime = reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4);
+                    var executionCount = reader.IsDBNull(5) ? 0L : reader.GetInt64(5);
+                    var totalWorkerTime = reader.IsDBNull(6) ? 0L : reader.GetInt64(6);
+                    var totalElapsedTime = reader.IsDBNull(7) ? 0L : reader.GetInt64(7);
+                    var totalLogicalReads = reader.IsDBNull(8) ? 0L : reader.GetInt64(8);
+                    var totalLogicalWrites = reader.IsDBNull(9) ? 0L : reader.GetInt64(9);
+                    var totalPhysicalReads = reader.IsDBNull(10) ? 0L : reader.GetInt64(10);
+                    var totalClrTime = reader.IsDBNull(11) ? 0L : reader.GetInt64(11);
+                    var totalRows = reader.IsDBNull(12) ? 0L : reader.GetInt64(12);
+                    var totalSpills = reader.IsDBNull(13) ? 0L : reader.GetInt64(13);
+                    var sqlHandle = reader.IsDBNull(36) ? (string?)null : reader.GetString(36);
+                    var planHandle = reader.IsDBNull(37) ? (string?)null : reader.GetString(37);
 
-                    /* Delta calculations based on query_hash */
-                    var deltaExecCount = _deltaCalculator.CalculateDelta(serverId, "query_stats_exec", queryHash, executionCount);
-                    var deltaWorkerTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_worker", queryHash, totalWorkerTime);
-                    var deltaElapsedTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_elapsed", queryHash, totalElapsedTime);
-                    var deltaLogicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_reads", queryHash, totalLogicalReads);
-                    var deltaLogicalWrites = _deltaCalculator.CalculateDelta(serverId, "query_stats_writes", queryHash, totalLogicalWrites);
-                    var deltaPhysicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_phys_reads", queryHash, totalPhysicalReads);
-                    var deltaRows = _deltaCalculator.CalculateDelta(serverId, "query_stats_rows", queryHash, totalRows);
-                    var deltaSpills = _deltaCalculator.CalculateDelta(serverId, "query_stats_spills", queryHash, totalSpills);
+                    /* Delta calculations keyed by plan_handle to prevent cross-contamination
+                       when multiple plans exist for the same query_hash */
+                    var deltaKey = planHandle ?? queryHash;
+                    var deltaExecCount = _deltaCalculator.CalculateDelta(serverId, "query_stats_exec", deltaKey, executionCount);
+                    var deltaWorkerTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_worker", deltaKey, totalWorkerTime);
+                    var deltaElapsedTime = _deltaCalculator.CalculateDelta(serverId, "query_stats_elapsed", deltaKey, totalElapsedTime);
+                    var deltaLogicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_reads", deltaKey, totalLogicalReads);
+                    var deltaLogicalWrites = _deltaCalculator.CalculateDelta(serverId, "query_stats_writes", deltaKey, totalLogicalWrites);
+                    var deltaPhysicalReads = _deltaCalculator.CalculateDelta(serverId, "query_stats_phys_reads", deltaKey, totalPhysicalReads);
+                    var deltaRows = _deltaCalculator.CalculateDelta(serverId, "query_stats_rows", deltaKey, totalRows);
+                    var deltaSpills = _deltaCalculator.CalculateDelta(serverId, "query_stats_spills", deltaKey, totalSpills);
 
+                    /* Appender column order must match DuckDB table definition exactly */
                     var row = appender.CreateRow();
-                    row.AppendValue(GenerateCollectionId())
-                       .AppendValue(collectionTime)
-                       .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
-                       .AppendValue(reader.IsDBNull(0) ? (string?)null : reader.GetString(0))
-                       .AppendValue(queryHash)
-                       .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))
-                       .AppendValue(executionCount)
-                       .AppendValue(totalWorkerTime)
-                       .AppendValue(totalElapsedTime)
-                       .AppendValue(totalLogicalReads)
-                       .AppendValue(totalLogicalWrites)
-                       .AppendValue(totalPhysicalReads)
-                       .AppendValue(totalRows)
-                       .AppendValue(totalSpills)
-                       .AppendValue(minWorkerTime)
-                       .AppendValue(maxWorkerTime)
-                       .AppendValue(minElapsedTime)
-                       .AppendValue(maxElapsedTime)
-                       .AppendValue(minDop)
-                       .AppendValue(maxDop)
-                       .AppendValue(reader.IsDBNull(19) ? (string?)null : reader.GetString(19))
-                       .AppendValue((string?)null) /* query plans retrieved on-demand */
-                       .AppendValue(sqlHandle)
-                       .AppendValue(planHandle)
-                       .AppendValue(deltaExecCount)
-                       .AppendValue(deltaWorkerTime)
-                       .AppendValue(deltaElapsedTime)
-                       .AppendValue(deltaLogicalReads)
-                       .AppendValue(deltaLogicalWrites)
-                       .AppendValue(deltaPhysicalReads)
-                       .AppendValue(deltaRows)
-                       .AppendValue(deltaSpills)
+                    row.AppendValue(GenerateCollectionId())                                                 /* collection_id */
+                       .AppendValue(collectionTime)                                                         /* collection_time */
+                       .AppendValue(serverId)                                                               /* server_id */
+                       .AppendValue(server.ServerName)                                                      /* server_name */
+                       .AppendValue(reader.IsDBNull(0) ? (string?)null : reader.GetString(0))               /* database_name */
+                       .AppendValue(queryHash)                                                              /* query_hash */
+                       .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))               /* query_plan_hash */
+                       .AppendValue(creationTime)                                                           /* creation_time */
+                       .AppendValue(lastExecTime)                                                           /* last_execution_time */
+                       .AppendValue(executionCount)                                                         /* execution_count */
+                       .AppendValue(totalWorkerTime)                                                        /* total_worker_time */
+                       .AppendValue(totalElapsedTime)                                                       /* total_elapsed_time */
+                       .AppendValue(totalLogicalReads)                                                      /* total_logical_reads */
+                       .AppendValue(totalLogicalWrites)                                                     /* total_logical_writes */
+                       .AppendValue(totalPhysicalReads)                                                     /* total_physical_reads */
+                       .AppendValue(totalClrTime)                                                           /* total_clr_time */
+                       .AppendValue(totalRows)                                                              /* total_rows */
+                       .AppendValue(totalSpills)                                                            /* total_spills */
+                       .AppendValue(reader.IsDBNull(14) ? 0L : reader.GetInt64(14))                         /* min_worker_time */
+                       .AppendValue(reader.IsDBNull(15) ? 0L : reader.GetInt64(15))                         /* max_worker_time */
+                       .AppendValue(reader.IsDBNull(16) ? 0L : reader.GetInt64(16))                         /* min_elapsed_time */
+                       .AppendValue(reader.IsDBNull(17) ? 0L : reader.GetInt64(17))                         /* max_elapsed_time */
+                       .AppendValue(reader.IsDBNull(18) ? 0L : reader.GetInt64(18))                         /* min_physical_reads */
+                       .AppendValue(reader.IsDBNull(19) ? 0L : reader.GetInt64(19))                         /* max_physical_reads */
+                       .AppendValue(reader.IsDBNull(20) ? 0L : reader.GetInt64(20))                         /* min_rows */
+                       .AppendValue(reader.IsDBNull(21) ? 0L : reader.GetInt64(21))                         /* max_rows */
+                       .AppendValue(reader.IsDBNull(22) ? 0 : Convert.ToInt32(reader.GetValue(22)))         /* min_dop */
+                       .AppendValue(reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)))         /* max_dop */
+                       .AppendValue(reader.IsDBNull(24) ? 0L : reader.GetInt64(24))                         /* min_grant_kb */
+                       .AppendValue(reader.IsDBNull(25) ? 0L : reader.GetInt64(25))                         /* max_grant_kb */
+                       .AppendValue(reader.IsDBNull(26) ? 0L : reader.GetInt64(26))                         /* min_used_grant_kb */
+                       .AppendValue(reader.IsDBNull(27) ? 0L : reader.GetInt64(27))                         /* max_used_grant_kb */
+                       .AppendValue(reader.IsDBNull(28) ? 0L : reader.GetInt64(28))                         /* min_ideal_grant_kb */
+                       .AppendValue(reader.IsDBNull(29) ? 0L : reader.GetInt64(29))                         /* max_ideal_grant_kb */
+                       .AppendValue(reader.IsDBNull(30) ? 0L : reader.GetInt64(30))                         /* min_reserved_threads */
+                       .AppendValue(reader.IsDBNull(31) ? 0L : reader.GetInt64(31))                         /* max_reserved_threads */
+                       .AppendValue(reader.IsDBNull(32) ? 0L : reader.GetInt64(32))                         /* min_used_threads */
+                       .AppendValue(reader.IsDBNull(33) ? 0L : reader.GetInt64(33))                         /* max_used_threads */
+                       .AppendValue(reader.IsDBNull(34) ? 0L : reader.GetInt64(34))                         /* min_spills */
+                       .AppendValue(reader.IsDBNull(35) ? 0L : reader.GetInt64(35))                         /* max_spills */
+                       .AppendValue(reader.IsDBNull(38) ? (string?)null : reader.GetString(38))             /* query_text */
+                       .AppendValue((string?)null)                                                          /* query_plan_xml — retrieved on-demand */
+                       .AppendValue(sqlHandle)                                                              /* sql_handle */
+                       .AppendValue(planHandle)                                                             /* plan_handle */
+                       .AppendValue(deltaExecCount)                                                         /* delta_execution_count */
+                       .AppendValue(deltaWorkerTime)                                                        /* delta_worker_time */
+                       .AppendValue(deltaElapsedTime)                                                       /* delta_elapsed_time */
+                       .AppendValue(deltaLogicalReads)                                                      /* delta_logical_reads */
+                       .AppendValue(deltaLogicalWrites)                                                     /* delta_logical_writes */
+                       .AppendValue(deltaPhysicalReads)                                                     /* delta_physical_reads */
+                       .AppendValue(deltaRows)                                                              /* delta_rows */
+                       .AppendValue(deltaSpills)                                                            /* delta_spills */
                        .EndRow();
 
                     rowsCollected++;

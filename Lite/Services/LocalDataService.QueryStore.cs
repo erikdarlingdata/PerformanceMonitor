@@ -19,7 +19,7 @@ public partial class LocalDataService
 {
     /// <summary>
     /// Gets the latest Query Store snapshot for a server, aggregated across all databases.
-    /// Shows top queries by total duration (execution_count * avg_duration_ms).
+    /// Shows top queries by total duration (execution_count * avg_duration).
     /// </summary>
     public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -35,22 +35,37 @@ SELECT
     plan_id,
     query_hash,
     MAX(query_text) AS query_text,
+    MAX(module_name) AS module_name,
     SUM(execution_count) AS total_executions,
-    AVG(avg_duration_ms) AS avg_duration_ms,
-    AVG(avg_cpu_time_ms) AS avg_cpu_time_ms,
-    AVG(avg_logical_reads) AS avg_logical_reads,
-    AVG(avg_logical_writes) AS avg_logical_writes,
-    AVG(avg_physical_reads) AS avg_physical_reads,
-    AVG(avg_rowcount) AS avg_rowcount,
+    AVG(CAST(avg_duration_us AS DOUBLE)) / 1000.0 AS avg_duration_ms,
+    AVG(CAST(avg_cpu_time_us AS DOUBLE)) / 1000.0 AS avg_cpu_time_ms,
+    AVG(CAST(avg_logical_io_reads AS DOUBLE)) AS avg_logical_reads,
+    AVG(CAST(avg_logical_io_writes AS DOUBLE)) AS avg_logical_writes,
+    AVG(CAST(avg_physical_io_reads AS DOUBLE)) AS avg_physical_reads,
+    AVG(CAST(avg_rowcount AS DOUBLE)) AS avg_rowcount,
+    MIN(min_dop) AS min_dop,
+    MAX(max_dop) AS max_dop,
     MAX(last_execution_time) AS last_execution_time,
-    MAX(query_plan_hash) AS query_plan_hash
+    MAX(query_plan_hash) AS query_plan_hash,
+    MAX(CASE WHEN is_forced_plan THEN TRUE ELSE FALSE END) AS is_forced_plan,
+    MAX(plan_forcing_type) AS plan_forcing_type,
+    MAX(query_plan_text) AS query_plan_text,
+    MAX(execution_type_desc) AS execution_type_desc,
+    MIN(first_execution_time) AS first_execution_time,
+    AVG(CAST(avg_clr_time_us AS DOUBLE)) / 1000.0 AS avg_clr_time_ms,
+    AVG(CAST(avg_tempdb_space_used AS DOUBLE)) AS avg_tempdb_space_used,
+    AVG(CAST(avg_log_bytes_used AS DOUBLE)) AS avg_log_bytes_used,
+    MAX(plan_type) AS plan_type,
+    MAX(force_failure_count) AS force_failure_count,
+    MAX(last_force_failure_reason) AS last_force_failure_reason,
+    MAX(compatibility_level) AS compatibility_level
 FROM v_query_store_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   query_text NOT LIKE 'WAITFOR%'
 GROUP BY database_name, query_id, plan_id, query_hash
-ORDER BY SUM(execution_count) * AVG(avg_duration_ms) DESC
+ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE)) DESC
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -69,15 +84,30 @@ LIMIT $4";
                 PlanId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 QueryHash = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 QueryText = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                TotalExecutions = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                AvgDurationMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                AvgCpuTimeMs = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
-                AvgLogicalReads = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
-                AvgLogicalWrites = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                AvgPhysicalReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
-                AvgRowcount = reader.IsDBNull(11) ? 0 : ToDouble(reader.GetValue(11)),
-                LastExecutionTime = reader.IsDBNull(12) ? (DateTime?)null : reader.GetDateTime(12),
-                QueryPlanHash = reader.IsDBNull(13) ? "" : reader.GetString(13)
+                ModuleName = reader.IsDBNull(5) ? "" : reader.GetString(5),
+                TotalExecutions = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                AvgDurationMs = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
+                AvgCpuTimeMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
+                AvgLogicalReads = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
+                AvgLogicalWrites = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+                AvgPhysicalReads = reader.IsDBNull(11) ? 0 : ToDouble(reader.GetValue(11)),
+                AvgRowcount = reader.IsDBNull(12) ? 0 : ToDouble(reader.GetValue(12)),
+                MinDop = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
+                MaxDop = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+                LastExecutionTime = reader.IsDBNull(15) ? (DateTime?)null : reader.GetDateTime(15),
+                QueryPlanHash = reader.IsDBNull(16) ? "" : reader.GetString(16),
+                IsForcedPlan = !reader.IsDBNull(17) && reader.GetBoolean(17),
+                PlanForcingType = reader.IsDBNull(18) ? "" : reader.GetString(18),
+                QueryPlanText = reader.IsDBNull(19) ? null : reader.GetString(19),
+                ExecutionTypeDesc = reader.IsDBNull(20) ? "" : reader.GetString(20),
+                FirstExecutionTime = reader.IsDBNull(21) ? (DateTime?)null : reader.GetDateTime(21),
+                AvgClrTimeMs = reader.IsDBNull(22) ? 0 : ToDouble(reader.GetValue(22)),
+                AvgTempdbSpaceUsed = reader.IsDBNull(23) ? 0 : ToDouble(reader.GetValue(23)),
+                AvgLogBytesUsed = reader.IsDBNull(24) ? 0 : ToDouble(reader.GetValue(24)),
+                PlanType = reader.IsDBNull(25) ? "" : reader.GetString(25),
+                ForceFailureCount = reader.IsDBNull(26) ? 0 : Convert.ToInt64(reader.GetValue(26)),
+                LastForceFailureReason = reader.IsDBNull(27) ? "" : reader.GetString(27),
+                CompatibilityLevel = reader.IsDBNull(28) ? 0 : Convert.ToInt32(reader.GetValue(28))
             });
         }
 
@@ -95,13 +125,15 @@ LIMIT $4";
 SELECT
     collection_time,
     execution_count,
-    avg_duration_ms,
-    avg_cpu_time_ms,
-    avg_logical_reads,
-    avg_logical_writes,
-    avg_physical_reads,
-    avg_rowcount,
-    last_execution_time
+    avg_duration_us / 1000.0 AS avg_duration_ms,
+    avg_cpu_time_us / 1000.0 AS avg_cpu_time_ms,
+    CAST(avg_logical_io_reads AS DOUBLE) AS avg_logical_reads,
+    CAST(avg_logical_io_writes AS DOUBLE) AS avg_logical_writes,
+    CAST(avg_physical_io_reads AS DOUBLE) AS avg_physical_reads,
+    CAST(avg_rowcount AS DOUBLE) AS avg_rowcount,
+    last_execution_time,
+    min_dop,
+    max_dop
 FROM v_query_store_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -130,7 +162,9 @@ ORDER BY collection_time";
                 AvgLogicalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 AvgPhysicalReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 AvgRowcount = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
-                LastExecutionTime = reader.IsDBNull(8) ? (DateTime?)null : reader.GetDateTime(8)
+                LastExecutionTime = reader.IsDBNull(8) ? (DateTime?)null : reader.GetDateTime(8),
+                MinDop = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                MaxDop = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10))
             });
         }
 
@@ -204,7 +238,7 @@ OPTION(RECOMPILE);',
         return result as string;
     }
     /// <summary>
-    /// Gets Query Store duration trend — SUM(execution_count * avg_duration_ms) per collection snapshot.
+    /// Gets Query Store duration trend — SUM(execution_count * avg_duration) per collection snapshot.
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -218,7 +252,7 @@ WITH raw AS
 (
     SELECT
         collection_time,
-        SUM(execution_count * avg_duration_ms) AS total_duration_ms,
+        SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
         SUM(execution_count) AS total_executions,
         date_diff('second', LAG(collection_time) OVER (ORDER BY collection_time), collection_time) AS interval_seconds
     FROM v_query_store_stats
@@ -260,6 +294,7 @@ public class QueryStoreRow
     public long PlanId { get; set; }
     public string QueryHash { get; set; } = "";
     public string QueryText { get; set; } = "";
+    public string ModuleName { get; set; } = "";
     public long TotalExecutions { get; set; }
     public double AvgDurationMs { get; set; }
     public double AvgCpuTimeMs { get; set; }
@@ -267,8 +302,24 @@ public class QueryStoreRow
     public double AvgLogicalWrites { get; set; }
     public double AvgPhysicalReads { get; set; }
     public double AvgRowcount { get; set; }
+    public long MinDop { get; set; }
+    public long MaxDop { get; set; }
     public DateTime? LastExecutionTime { get; set; }
     public string QueryPlanHash { get; set; } = "";
+    public bool IsForcedPlan { get; set; }
+    public string PlanForcingType { get; set; } = "";
+    public string? QueryPlanText { get; set; }
+    public string ExecutionTypeDesc { get; set; } = "";
+    public DateTime? FirstExecutionTime { get; set; }
+    public double AvgClrTimeMs { get; set; }
+    public double AvgTempdbSpaceUsed { get; set; }
+    public double AvgLogBytesUsed { get; set; }
+    public string PlanType { get; set; } = "";
+    public long ForceFailureCount { get; set; }
+    public string LastForceFailureReason { get; set; } = "";
+    public int CompatibilityLevel { get; set; }
+    public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlanText);
+    public string FirstExecutionTimeLocal => ServerTimeHelper.FormatServerTime(FirstExecutionTime);
     public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;
     public double TotalDurationMs => TotalExecutions * AvgDurationMs;
@@ -285,6 +336,8 @@ public class QueryStoreHistoryRow
     public double AvgPhysicalReads { get; set; }
     public double AvgRowcount { get; set; }
     public DateTime? LastExecutionTime { get; set; }
+    public long MinDop { get; set; }
+    public long MaxDop { get; set; }
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);

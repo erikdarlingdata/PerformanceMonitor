@@ -78,9 +78,9 @@ public partial class RemoteCollectorService
     private const int CommandTimeoutSeconds = 30;
 
     /// <summary>
-    /// Connection timeout for SQL Server connections in seconds.
+    /// Connection timeout for SQL Server connections in seconds. Read from App settings each call.
     /// </summary>
-    private const int ConnectionTimeoutSeconds = 5;
+    private static int ConnectionTimeoutSeconds => App.ConnectionTimeoutSeconds;
 
     /// <summary>
     /// Per-call timing fields set by each collector method.
@@ -112,6 +112,7 @@ public partial class RemoteCollectorService
         _scheduleManager = scheduleManager;
         _logger = logger;
         _deltaCalculator = new DeltaCalculator(logger);
+        _ignoredWaitTypes = new Lazy<HashSet<string>>(LoadIgnoredWaitTypes);
     }
 
     /// <summary>
@@ -239,10 +240,11 @@ public partial class RemoteCollectorService
         await Task.WhenAll(serverTasks);
 
         /* Run CHECKPOINT here after all collector connections are closed.
-           This avoids opening a separate DuckDB instance that could conflict
-           with concurrent UI connections via OS file locks. */
+           Write lock ensures no UI readers have stale file offsets when
+           CHECKPOINT reorganizes/truncates the database file. */
         try
         {
+            using var writeLock = _duckDb.AcquireWriteLock();
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();

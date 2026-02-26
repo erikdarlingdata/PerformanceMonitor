@@ -33,6 +33,7 @@ namespace PerformanceMonitorDashboard
         private readonly DateTime? _fromDate;
         private readonly DateTime? _toDate;
         private List<QueryStatsHistoryItem> _historyData = new();
+        private ChartHoverHelper? _chartHover;
 
         // Filter state
         private Dictionary<string, ColumnFilterState> _filters = new();
@@ -91,6 +92,33 @@ namespace PerformanceMonitorDashboard
             {
                 _historyData = await _databaseService.GetQueryStatsHistoryAsync(_databaseName, _queryHash, _hoursBack, _fromDate, _toDate);
 
+                // Compute per-interval executions. DMV counters are cumulative and reset on plan
+                // eviction, so we walk oldest→newest, detecting lifetime boundaries by CreationTime.
+                // Data arrives sorted by CollectionTime DESC, so walk from end to start.
+                for (int i = _historyData.Count - 1; i >= 0; i--)
+                {
+                    var item = _historyData[i];
+                    if (i == _historyData.Count - 1)
+                    {
+                        // Oldest row in window: credit all executions (no prior reference)
+                        item.IntervalExecutions = item.ExecutionCount;
+                    }
+                    else
+                    {
+                        var olderItem = _historyData[i + 1];
+                        if (item.CreationTime != olderItem.CreationTime)
+                        {
+                            // New plan lifetime (eviction + re-cache): credit all executions
+                            item.IntervalExecutions = item.ExecutionCount;
+                        }
+                        else
+                        {
+                            // Same lifetime: delta from previous snapshot
+                            item.IntervalExecutions = Math.Max(0, item.ExecutionCount - olderItem.ExecutionCount);
+                        }
+                    }
+                }
+
                 _unfilteredData = _historyData;
                 _filters.Clear();
                 HistoryDataGrid.ItemsSource = _historyData;
@@ -98,8 +126,7 @@ namespace PerformanceMonitorDashboard
 
                 if (_historyData.Count > 0)
                 {
-                    var totalExecutions = _historyData.Max(h => h.ExecutionCount);
-                    var latestExecDelta = _historyData.FirstOrDefault()?.ExecutionCountDelta ?? 0;
+                    var totalExecutions = _historyData.Sum(h => h.IntervalExecutions);
                     var avgCpu = _historyData.Where(h => h.AvgWorkerTimeMs.HasValue).Select(h => h.AvgWorkerTimeMs ?? 0).DefaultIfEmpty(0).Average();
                     var avgDuration = _historyData.Where(h => h.AvgElapsedTimeMs.HasValue).Select(h => h.AvgElapsedTimeMs ?? 0).DefaultIfEmpty(0).Average();
                     var firstSample = _historyData.Min(h => h.CollectionTime);
@@ -154,13 +181,32 @@ namespace PerformanceMonitorDashboard
             var color = ScottPlot.Color.FromHex("#4FC3F7");
             var scatter = HistoryChart.Plot.Add.Scatter(dates, values);
             scatter.Color = color;
-            scatter.LineWidth = 2;
-            scatter.MarkerSize = 6;
+
+            // Sparse data: show only markers to avoid misleading interpolated lines
+            if (dates.Length <= 1)
+            {
+                scatter.LineWidth = 0;
+                scatter.MarkerSize = 8;
+            }
+            else
+            {
+                scatter.LineWidth = 2;
+                scatter.MarkerSize = 4;
+            }
 
             HistoryChart.Plot.Axes.DateTimeTicksBottom();
             Helpers.TabHelpers.ReapplyAxisColors(HistoryChart);
             HistoryChart.Plot.YLabel(metricLabel);
             HistoryChart.Plot.XLabel("Collection Time");
+
+            // Hover tooltip
+            var unit = metricTag.Contains("Ms") ? "ms" : "";
+            if (_chartHover == null)
+                _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            else
+                _chartHover.Unit = unit;
+            _chartHover.Clear();
+            _chartHover.Add(scatter, metricLabel);
 
             HistoryChart.Refresh();
         }
@@ -175,7 +221,7 @@ namespace PerformanceMonitorDashboard
                 "AvgLogicalWrites" => item.AvgLogicalWrites ?? 0,
                 "AvgPhysicalReads" => item.AvgPhysicalReads ?? 0,
                 "AvgRows" => item.AvgRows ?? 0,
-                "ExecutionCountDelta" => item.ExecutionCountDelta ?? 0,
+                "IntervalExecutions" => item.IntervalExecutions,
                 _ => item.AvgElapsedTimeMs ?? 0
             };
         }
@@ -366,7 +412,7 @@ namespace PerformanceMonitorDashboard
                     foreach (var column in dataGrid.Columns)
                     {
                         if (column is DataGridBoundColumn)
-                            headers.Add(TabHelpers.GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                     }
                     sb.AppendLine(string.Join("\t", headers));
                     foreach (var item in dataGrid.Items)
@@ -399,7 +445,7 @@ namespace PerformanceMonitorDashboard
                             foreach (var column in dataGrid.Columns)
                             {
                                 if (column is DataGridBoundColumn)
-                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
                             }
                             sb.AppendLine(string.Join(",", headers));
                             foreach (var item in dataGrid.Items)

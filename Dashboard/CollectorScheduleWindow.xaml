@@ -6,6 +6,15 @@
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResizeWithGrip"
         Background="{DynamicResource BackgroundBrush}">
+    <Window.Resources>
+        <ContextMenu x:Key="DataGridContextMenu">
+            <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
+            <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
+            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+            <Separator/>
+            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+        </ContextMenu>
+    </Window.Resources>
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -34,7 +43,8 @@
                       Background="{DynamicResource BackgroundBrush}"
                       RowBackground="{DynamicResource BackgroundBrush}"
                       AlternatingRowBackground="{DynamicResource BackgroundLightBrush}"
-                      BorderThickness="0">
+                      BorderThickness="0"
+                      ContextMenu="{StaticResource DataGridContextMenu}">
                 <DataGrid.Columns>
                     <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="65"/>
                     <DataGridTextColumn Header="Collector" Binding="{Binding DisplayName}" Width="180" IsReadOnly="True"/>

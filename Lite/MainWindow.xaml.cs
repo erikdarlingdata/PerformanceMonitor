@@ -62,10 +62,10 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // Initialize services
-        _databaseInitializer = new DuckDbInitializer(App.DatabasePath);
+        // Initialize services (with loggers wired to AppLogger)
+        _databaseInitializer = new DuckDbInitializer(App.DatabasePath, new AppLoggerAdapter<DuckDbInitializer>());
         _emailAlertService = new EmailAlertService(_databaseInitializer);
-        _serverManager = new ServerManager(App.ConfigDirectory);
+        _serverManager = new ServerManager(App.ConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
         _scheduleManager = new ScheduleManager(App.ConfigDirectory);
 
         // Status bar update timer
@@ -96,16 +96,19 @@ public partial class MainWindow : Window
             // Initialize the DuckDB database
             await _databaseInitializer.InitializeAsync();
 
-            // Initialize the collection engine
+            // Initialize the collection engine (with loggers wired to AppLogger)
             _collectorService = new RemoteCollectorService(
                 _databaseInitializer,
                 _serverManager,
-                _scheduleManager);
+                _scheduleManager,
+                new AppLoggerAdapter<RemoteCollectorService>());
 
-            var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory);
-            var retentionService = new RetentionService(App.ArchiveDirectory);
+            var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
+            var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
 
-            _backgroundService = new CollectionBackgroundService(_collectorService, _databaseInitializer, archiveService, retentionService, _serverManager);
+            _backgroundService = new CollectionBackgroundService(
+                _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,
+                new AppLoggerAdapter<CollectionBackgroundService>());
 
             // Start background collection
             _backgroundCts = new CancellationTokenSource();
@@ -351,7 +354,7 @@ public partial class MainWindow : Window
         else
         {
             CollectorHealthText.Text = $"Collectors: {health.TotalCollectors} OK";
-            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
+            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush");
             CollectorHealthText.ToolTip = null;
         }
     }

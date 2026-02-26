@@ -33,7 +33,7 @@
 
                 <Grid Grid.Row="1">
                 <DataGrid x:Name="DefaultTraceEventsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                          RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
+                          GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
                           ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
@@ -103,7 +103,7 @@
         <TabItem Header="Trace Analysis">
             <Grid>
             <DataGrid x:Name="TraceAnalysisDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                      RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
+                      GridLinesVisibility="Horizontal" CanUserResizeColumns="True" ContextMenu="{DynamicResource DataGridContextMenu}"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
@@ -138,7 +138,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding DurationMs, StringFormat=N0}" Width="90">
+                    <DataGridTextColumn Binding="{Binding DurationMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
@@ -146,7 +146,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding CpuMs, StringFormat=N0}" Width="80">
+                    <DataGridTextColumn Binding="{Binding CpuMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuMs" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
@@ -154,7 +154,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding Reads, StringFormat=N0}" Width="90">
+                    <DataGridTextColumn Binding="{Binding Reads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Reads" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
@@ -162,7 +162,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding Writes, StringFormat=N0}" Width="90">
+                    <DataGridTextColumn Binding="{Binding Writes, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Writes" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
@@ -170,14 +170,19 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding SqlText}" Width="400">
-                        <DataGridTextColumn.Header>
+                    <DataGridTemplateColumn Width="400">
+                        <DataGridTemplateColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlText" Click="TraceAnalysisFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="SQL Text" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
-                        </DataGridTextColumn.Header>
-                    </DataGridTextColumn>
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding SqlText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding SqlText}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="TraceAnalysisNoDataMessage" Style="{DynamicResource NoDataMessage}"/>

@@ -86,6 +86,44 @@ WITH
     WHERE cl.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
     GROUP BY
         cl.collector_name
+),
+    /*
+    Count consecutive recent failures per collector.
+    If the last 5+ runs are all errors, the collector is
+    actively broken regardless of 7-day failure percentage.
+    */
+    recent_failures AS
+(
+    SELECT
+        collector_name = r.collector_name,
+        consecutive_failures =
+            MIN
+            (
+                CASE
+                    WHEN r.collection_status <> N'ERROR'
+                    THEN r.rn
+                    ELSE NULL
+                END
+            )
+    FROM
+    (
+        SELECT
+            cl.collector_name,
+            cl.collection_status,
+            rn = ROW_NUMBER() OVER
+            (
+                PARTITION BY
+                    cl.collector_name
+                ORDER BY
+                    cl.collection_time DESC
+            )
+        FROM config.collection_log AS cl
+        WHERE cl.collection_status NOT IN (N'CONFIG_CHANGE', N'TABLE_MISSING', N'TABLE_CREATED', N'SKIPPED')
+        AND   cl.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+    ) AS r
+    WHERE r.rn <= 20
+    GROUP BY
+        r.collector_name
 )
 SELECT
     collector_name = cs.collector_name,
@@ -99,6 +137,12 @@ SELECT
             THEN N'NEVER_RUN'
             WHEN DATEDIFF(HOUR, cs.last_success_time, SYSDATETIME()) > 24
             THEN N'STALE'
+            WHEN rf.consecutive_failures IS NULL
+            THEN N'FAILING'
+            WHEN rf.consecutive_failures > 5
+            THEN N'FAILING'
+            WHEN rf.consecutive_failures > 3
+            THEN N'WARNING'
             WHEN cs.failed_runs * 100.0 / NULLIF(cs.total_runs, 0) > 50
             THEN N'FAILING'
             WHEN cs.failed_runs * 100.0 / NULLIF(cs.total_runs, 0) > 10
@@ -115,7 +159,9 @@ SELECT
     failed_runs_7d = cs.failed_runs,
     avg_duration_ms = CONVERT(integer, cs.avg_duration_ms),
     total_rows_collected_7d = cs.total_rows_collected
-FROM collector_stats AS cs;
+FROM collector_stats AS cs
+LEFT JOIN recent_failures AS rf
+    ON cs.collector_name = rf.collector_name;
 GO
 
 /*
@@ -2678,118 +2724,6 @@ GO
 
 /*
 =============================================================================
-SESSION WAIT ANALYSIS
-Shows per-session wait patterns with query context from session_wait_stats
-Requires SQL Server 2016 SP1+ (collector skips gracefully on older versions)
-=============================================================================
-*/
-CREATE OR ALTER VIEW
-    report.session_wait_analysis
-AS
-WITH
-    recent_session_waits AS
-(
-    SELECT
-        sws.session_id,
-        sws.database_name,
-        sws.login_name,
-        sws.host_name,
-        sws.program_name,
-        sws.wait_type,
-        sws.wait_time_ms,
-        sws.waiting_tasks_count,
-        sws.max_wait_time_ms,
-        sws.signal_wait_time_ms,
-        sws.query_text,
-        sws.collection_time,
-        /*Rank by total wait time per session*/
-        session_wait_rank = ROW_NUMBER() OVER
-            (
-                PARTITION BY
-                    sws.session_id
-                ORDER BY
-                    sws.wait_time_ms DESC
-            )
-    FROM collect.session_wait_stats AS sws
-    WHERE sws.collection_time >= DATEADD(HOUR, -1, SYSDATETIME())
-),
-    session_totals AS
-(
-    SELECT
-        session_id,
-        total_wait_time_ms = SUM(wait_time_ms),
-        total_waiting_tasks = SUM(waiting_tasks_count),
-        distinct_wait_types = COUNT_BIG(DISTINCT wait_type)
-    FROM recent_session_waits
-    GROUP BY
-        session_id
-)
-SELECT TOP (100)
-    rsw.session_id,
-    rsw.database_name,
-    rsw.login_name,
-    rsw.host_name,
-    rsw.program_name,
-    /*Top wait for this session*/
-    top_wait_type = rsw.wait_type,
-    top_wait_time_ms = rsw.wait_time_ms,
-    top_wait_tasks = rsw.waiting_tasks_count,
-    top_wait_max_ms = rsw.max_wait_time_ms,
-    top_wait_signal_ms = rsw.signal_wait_time_ms,
-    /*Session totals*/
-    st.total_wait_time_ms,
-    st.total_waiting_tasks,
-    st.distinct_wait_types,
-    /*Wait time breakdown*/
-    resource_wait_ms = rsw.wait_time_ms - rsw.signal_wait_time_ms,
-    signal_wait_percent =
-        CASE
-            WHEN rsw.wait_time_ms > 0
-            THEN CONVERT(decimal(5,2), rsw.signal_wait_time_ms * 100.0 / rsw.wait_time_ms)
-            ELSE 0
-        END,
-    /*Assessment*/
-    wait_concern =
-        CASE
-            WHEN rsw.wait_time_ms > 60000 THEN N'CRITICAL - > 1 minute wait'
-            WHEN rsw.wait_time_ms > 30000 THEN N'HIGH - > 30 second wait'
-            WHEN rsw.wait_time_ms > 10000 THEN N'MEDIUM - > 10 second wait'
-            WHEN rsw.signal_wait_time_ms * 100.0 / NULLIF(rsw.wait_time_ms, 0) > 25
-            THEN N'MEDIUM - High signal wait (CPU pressure)'
-            ELSE N'LOW'
-        END,
-    recommendation =
-        CASE
-            WHEN rsw.wait_type LIKE N'LCK_M_%'
-            THEN N'Lock wait - check for blocking, review transaction scope'
-            WHEN rsw.wait_type LIKE N'PAGEIOLATCH_%'
-            THEN N'I/O wait - check storage latency, consider adding memory'
-            WHEN rsw.wait_type LIKE N'PAGELATCH_%'
-            THEN N'Page latch - check for tempdb contention or hot pages'
-            WHEN rsw.wait_type = N'CXPACKET'
-            THEN N'Parallelism wait - review MAXDOP settings, check for skewed parallelism'
-            WHEN rsw.wait_type = N'SOS_SCHEDULER_YIELD'
-            THEN N'CPU pressure - query is CPU-bound'
-            WHEN rsw.wait_type LIKE N'ASYNC_NETWORK_IO%'
-            THEN N'Network wait - client not consuming results fast enough'
-            WHEN rsw.wait_type = N'RESOURCE_SEMAPHORE'
-            THEN N'Memory grant wait - query needs large memory grant'
-            WHEN rsw.wait_type = N'WRITELOG'
-            THEN N'Transaction log write - check log disk performance'
-            ELSE N'Review wait type documentation'
-        END,
-    query_text = CONVERT(nvarchar(500), rsw.query_text),
-    last_seen = rsw.collection_time
-FROM recent_session_waits AS rsw
-JOIN session_totals AS st
-  ON st.session_id = rsw.session_id
-WHERE rsw.session_wait_rank = 1
-ORDER BY
-    rsw.wait_time_ms DESC;
-GO
-
-/*
-=============================================================================
 CRITICAL ISSUES
 Friendly view over config.critical_issues for monitoring configuration problems
 =============================================================================
@@ -2856,7 +2790,6 @@ PRINT '  - report.blocking_chain_analysis (blocking hierarchies with query plans
 PRINT '  - report.tempdb_contention_analysis (tempdb + PFS/GAM waits + sessions)';
 PRINT '  - report.parameter_sensitivity_detection (same query_hash, different plans)';
 PRINT '  - report.scheduler_cpu_analysis (scheduler health + runnable task trends)';
-PRINT '  - report.session_wait_analysis (per-session waits with query context)';
 PRINT '  - report.critical_issues (configuration problems with recommendations)';
 PRINT '';
 PRINT 'Quick health check:';

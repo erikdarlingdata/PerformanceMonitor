@@ -64,7 +64,8 @@ namespace PerformanceMonitorDashboard.Controls
 
         // Chart hover tooltips
         private Helpers.ChartHoverHelper? _memoryStatsOverviewHover;
-        private Helpers.ChartHoverHelper? _memoryGrantsHover;
+        private Helpers.ChartHoverHelper? _memoryGrantSizingHover;
+        private Helpers.ChartHoverHelper? _memoryGrantActivityHover;
         private Helpers.ChartHoverHelper? _memoryClerksHover;
         private Helpers.ChartHoverHelper? _planCacheHover;
         private Helpers.ChartHoverHelper? _memoryPressureEventsHover;
@@ -78,7 +79,8 @@ namespace PerformanceMonitorDashboard.Controls
             Loaded += OnLoaded;
 
             _memoryStatsOverviewHover = new Helpers.ChartHoverHelper(MemoryStatsOverviewChart, "MB");
-            _memoryGrantsHover = new Helpers.ChartHoverHelper(MemoryGrantsChart, "MB");
+            _memoryGrantSizingHover = new Helpers.ChartHoverHelper(MemoryGrantSizingChart, "MB");
+            _memoryGrantActivityHover = new Helpers.ChartHoverHelper(MemoryGrantActivityChart, "count");
             _memoryClerksHover = new Helpers.ChartHoverHelper(MemoryClerksChart, "MB");
             _planCacheHover = new Helpers.ChartHoverHelper(PlanCacheChart, "MB");
             _memoryPressureEventsHover = new Helpers.ChartHoverHelper(MemoryPressureEventsChart, "events");
@@ -94,8 +96,9 @@ namespace PerformanceMonitorDashboard.Controls
             // Memory Stats Overview chart
             TabHelpers.SetupChartContextMenu(MemoryStatsOverviewChart, "Memory_Stats_Overview", "collect.memory_stats");
 
-            // Memory Grants chart
-            TabHelpers.SetupChartContextMenu(MemoryGrantsChart, "Memory_Grants", "collect.memory_grant_stats");
+            // Memory Grant charts
+            TabHelpers.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", "collect.memory_grant_stats");
+            TabHelpers.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity", "collect.memory_grant_stats");
 
             // Memory Clerks chart
             TabHelpers.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks", "collect.memory_clerks_stats");
@@ -391,112 +394,213 @@ namespace PerformanceMonitorDashboard.Controls
 
         #region Memory Grants
 
+        private sealed class PoolGrantPoint
+        {
+            public DateTime CollectionTime { get; set; }
+            public int PoolId { get; set; }
+            public double AvailableMemoryMb { get; set; }
+            public double GrantedMemoryMb { get; set; }
+            public double UsedMemoryMb { get; set; }
+            public double GranteeCount { get; set; }
+            public double WaiterCount { get; set; }
+            public double TimeoutErrorCountDelta { get; set; }
+            public double ForcedGrantCountDelta { get; set; }
+        }
+
         private async System.Threading.Tasks.Task RefreshMemoryGrantsAsync()
         {
             if (_databaseService == null) return;
 
             try
             {
-                // Only show loading overlay on initial load (no existing chart data)
-                if (!MemoryGrantsChart.Plot.GetPlottables().Any())
+                if (!MemoryGrantSizingChart.Plot.GetPlottables().Any())
                 {
-                    MemoryGrantsLoading.IsLoading = true;
-                    MemoryGrantsNoDataMessage.Visibility = Visibility.Collapsed;
+                    MemoryGrantSizingLoading.IsLoading = true;
+                    MemoryGrantSizingNoData.Visibility = Visibility.Collapsed;
+                    MemoryGrantActivityNoData.Visibility = Visibility.Collapsed;
                 }
 
                 var data = await _databaseService.GetMemoryGrantStatsAsync(_memoryGrantsHoursBack, _memoryGrantsFromDate, _memoryGrantsToDate);
                 var dataList = data.ToList();
-                MemoryGrantsNoDataMessage.Visibility = dataList.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                LoadMemoryGrantsChart(dataList, _memoryGrantsHoursBack, _memoryGrantsFromDate, _memoryGrantsToDate);
+
+                // Filter to rows with active grants for charting
+                var filtered = dataList.Where(d => (d.GrantedMemoryMb ?? 0) > 0).ToList();
+
+                bool hasData = filtered.Count > 0;
+                MemoryGrantSizingNoData.Visibility = hasData ? Visibility.Collapsed : Visibility.Visible;
+                MemoryGrantActivityNoData.Visibility = hasData ? Visibility.Collapsed : Visibility.Visible;
+
+                // Aggregate across resource_semaphore_id within each pool
+                var aggregated = filtered
+                    .GroupBy(d => new { d.CollectionTime, d.PoolId })
+                    .Select(g => new PoolGrantPoint
+                    {
+                        CollectionTime = g.Key.CollectionTime,
+                        PoolId = g.Key.PoolId,
+                        AvailableMemoryMb = g.Sum(x => (double)(x.AvailableMemoryMb ?? 0)),
+                        GrantedMemoryMb = g.Sum(x => (double)(x.GrantedMemoryMb ?? 0)),
+                        UsedMemoryMb = g.Sum(x => (double)(x.UsedMemoryMb ?? 0)),
+                        GranteeCount = g.Sum(x => (double)(x.GranteeCount ?? 0)),
+                        WaiterCount = g.Sum(x => (double)(x.WaiterCount ?? 0)),
+                        TimeoutErrorCountDelta = g.Sum(x => (double)(x.TimeoutErrorCountDelta ?? 0)),
+                        ForcedGrantCountDelta = g.Sum(x => (double)(x.ForcedGrantCountDelta ?? 0))
+                    })
+                    .OrderBy(d => d.CollectionTime)
+                    .ToList();
+
+                LoadMemoryGrantSizingChart(aggregated, _memoryGrantsHoursBack, _memoryGrantsFromDate, _memoryGrantsToDate);
+                LoadMemoryGrantActivityChart(aggregated, _memoryGrantsHoursBack, _memoryGrantsFromDate, _memoryGrantsToDate);
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading memory grants: {ex.Message}");
+                MemoryGrantSizingNoData.Visibility = Visibility.Visible;
+                MemoryGrantActivityNoData.Visibility = Visibility.Visible;
             }
             finally
             {
-                MemoryGrantsLoading.IsLoading = false;
+                MemoryGrantSizingLoading.IsLoading = false;
+                MemoryGrantActivityLoading.IsLoading = false;
             }
         }
 
-        private void LoadMemoryGrantsChart(IEnumerable<MemoryGrantStatsItem> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+        private void LoadMemoryGrantSizingChart(List<PoolGrantPoint> aggregated, int hoursBack, DateTime? fromDate, DateTime? toDate)
         {
             DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
             DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
             double xMin = rangeStart.ToOADate();
             double xMax = rangeEnd.ToOADate();
 
-            if (_legendPanels.TryGetValue(MemoryGrantsChart, out var existingPanel) && existingPanel != null)
+            if (_legendPanels.TryGetValue(MemoryGrantSizingChart, out var existingPanel) && existingPanel != null)
             {
-                MemoryGrantsChart.Plot.Axes.Remove(existingPanel);
-                _legendPanels[MemoryGrantsChart] = null;
+                MemoryGrantSizingChart.Plot.Axes.Remove(existingPanel);
+                _legendPanels[MemoryGrantSizingChart] = null;
             }
-            MemoryGrantsChart.Plot.Clear();
-            _memoryGrantsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(MemoryGrantsChart);
+            MemoryGrantSizingChart.Plot.Clear();
+            _memoryGrantSizingHover?.Clear();
+            TabHelpers.ApplyDarkModeToChart(MemoryGrantSizingChart);
 
-            var dataList = data?.OrderBy(d => d.CollectionTime).ToList() ?? new List<MemoryGrantStatsItem>();
-            
-            // Aggregate by collection_time to avoid doubling from multiple resource_semaphore_ids
-            // SUM granted (actual usage), MAX target (global limit)
-            var aggregated = dataList
-                .GroupBy(d => d.CollectionTime)
-                .Select(g => new {
-                    CollectionTime = g.Key,
-                    GrantedMemoryMb = g.Sum(x => x.GrantedMemoryMb ?? 0m),
-                    TargetMemoryMb = g.Max(x => x.TargetMemoryMb ?? 0m)
-                })
-                .OrderBy(d => d.CollectionTime)
-                .ToList();
-            
-            // Granted MB series with gap filling (already aggregated, no further summing needed)
-            var (grantedXs, grantedYs) = TabHelpers.FillTimeSeriesGaps(
-                aggregated.Select(d => d.CollectionTime),
-                aggregated.Select(d => (double)d.GrantedMemoryMb));
+            var poolIds = aggregated.Select(d => d.PoolId).Distinct().OrderBy(id => id).ToList();
+            int colorIndex = 0;
+            var colors = TabHelpers.ChartColors;
+            bool hasData = false;
 
-            // Target MB series with gap filling (already aggregated)
-            var (targetXs, targetYs) = TabHelpers.FillTimeSeriesGaps(
-                aggregated.Select(d => d.CollectionTime),
-                aggregated.Select(d => (double)d.TargetMemoryMb));
-
-            if (grantedXs.Length > 0)
+            foreach (var poolId in poolIds)
             {
-                var grantedScatter = MemoryGrantsChart.Plot.Add.Scatter(grantedXs, grantedYs);
-                grantedScatter.LineWidth = 2;
-                grantedScatter.MarkerSize = 5;
-                grantedScatter.Color = TabHelpers.ChartColors[0];
-                grantedScatter.LegendText = "Granted MB";
-                _memoryGrantsHover?.Add(grantedScatter, "Granted MB");
+                var poolData = aggregated.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
+                if (poolData.Count == 0) continue;
+                hasData = true;
 
-                var targetScatter = MemoryGrantsChart.Plot.Add.Scatter(targetXs, targetYs);
-                targetScatter.LineWidth = 2;
-                targetScatter.MarkerSize = 5;
-                targetScatter.Color = TabHelpers.ChartColors[2];
-                targetScatter.LegendText = "Target MB";
-                _memoryGrantsHover?.Add(targetScatter, "Target MB");
+                var metrics = new (string Name, Func<PoolGrantPoint, double> Selector)[] {
+                    ("Available MB", d => d.AvailableMemoryMb),
+                    ("Granted MB", d => d.GrantedMemoryMb),
+                    ("Used MB", d => d.UsedMemoryMb)
+                };
 
-                _legendPanels[MemoryGrantsChart] = MemoryGrantsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                MemoryGrantsChart.Plot.Legend.FontSize = 12;
-            }
-            else
-            {
-                double xCenter = xMin + (xMax - xMin) / 2;
-                var noDataText = MemoryGrantsChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-                noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
-                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+                foreach (var (metricName, selector) in metrics)
+                {
+                    var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
+                        poolData.Select(d => d.CollectionTime),
+                        poolData.Select(selector));
+
+                    if (xs.Length > 0)
+                    {
+                        var scatter = MemoryGrantSizingChart.Plot.Add.Scatter(xs, ys);
+                        scatter.LineWidth = 2;
+                        scatter.MarkerSize = 5;
+                        scatter.Color = colors[colorIndex % colors.Length];
+                        var label = $"Pool {poolId}: {metricName}";
+                        scatter.LegendText = label;
+                        _memoryGrantSizingHover?.Add(scatter, label);
+                        colorIndex++;
+                    }
+                }
             }
 
-            MemoryGrantsChart.Plot.Axes.DateTimeTicksBottom();
-            MemoryGrantsChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            MemoryGrantsChart.Plot.YLabel("MB");
-            // Fixed negative space for legend
-            MemoryGrantsChart.Plot.Axes.AutoScaleY();
-            var grantsLimits = MemoryGrantsChart.Plot.Axes.GetLimits();
-            MemoryGrantsChart.Plot.Axes.SetLimitsY(0, grantsLimits.Top * 1.05);
+            if (hasData)
+            {
+                _legendPanels[MemoryGrantSizingChart] = MemoryGrantSizingChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+                MemoryGrantSizingChart.Plot.Legend.FontSize = 12;
+            }
 
-            TabHelpers.LockChartVerticalAxis(MemoryGrantsChart);
-            MemoryGrantsChart.Refresh();
+            MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryGrantSizingChart.Plot.Axes.SetLimitsX(xMin, xMax);
+            MemoryGrantSizingChart.Plot.YLabel("MB");
+            MemoryGrantSizingChart.Plot.Axes.AutoScaleY();
+            var limits = MemoryGrantSizingChart.Plot.Axes.GetLimits();
+            MemoryGrantSizingChart.Plot.Axes.SetLimitsY(0, limits.Top * 1.05);
+            TabHelpers.LockChartVerticalAxis(MemoryGrantSizingChart);
+            MemoryGrantSizingChart.Refresh();
+        }
+
+        private void LoadMemoryGrantActivityChart(List<PoolGrantPoint> aggregated, int hoursBack, DateTime? fromDate, DateTime? toDate)
+        {
+            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
+            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+            double xMin = rangeStart.ToOADate();
+            double xMax = rangeEnd.ToOADate();
+
+            if (_legendPanels.TryGetValue(MemoryGrantActivityChart, out var existingPanel) && existingPanel != null)
+            {
+                MemoryGrantActivityChart.Plot.Axes.Remove(existingPanel);
+                _legendPanels[MemoryGrantActivityChart] = null;
+            }
+            MemoryGrantActivityChart.Plot.Clear();
+            _memoryGrantActivityHover?.Clear();
+            TabHelpers.ApplyDarkModeToChart(MemoryGrantActivityChart);
+
+            var poolIds = aggregated.Select(d => d.PoolId).Distinct().OrderBy(id => id).ToList();
+            int colorIndex = 0;
+            var colors = TabHelpers.ChartColors;
+            bool hasData = false;
+
+            foreach (var poolId in poolIds)
+            {
+                var poolData = aggregated.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
+                if (poolData.Count == 0) continue;
+                hasData = true;
+
+                var metrics = new (string Name, Func<PoolGrantPoint, double> Selector)[] {
+                    ("Grantees", d => d.GranteeCount),
+                    ("Waiters", d => d.WaiterCount),
+                    ("Timeouts", d => d.TimeoutErrorCountDelta),
+                    ("Forced Grants", d => d.ForcedGrantCountDelta)
+                };
+
+                foreach (var (metricName, selector) in metrics)
+                {
+                    var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
+                        poolData.Select(d => d.CollectionTime),
+                        poolData.Select(selector));
+
+                    if (xs.Length > 0)
+                    {
+                        var scatter = MemoryGrantActivityChart.Plot.Add.Scatter(xs, ys);
+                        scatter.LineWidth = 2;
+                        scatter.MarkerSize = 5;
+                        scatter.Color = colors[colorIndex % colors.Length];
+                        var label = $"Pool {poolId}: {metricName}";
+                        scatter.LegendText = label;
+                        _memoryGrantActivityHover?.Add(scatter, label);
+                        colorIndex++;
+                    }
+                }
+            }
+
+            if (hasData)
+            {
+                _legendPanels[MemoryGrantActivityChart] = MemoryGrantActivityChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+                MemoryGrantActivityChart.Plot.Legend.FontSize = 12;
+            }
+
+            MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryGrantActivityChart.Plot.Axes.SetLimitsX(xMin, xMax);
+            MemoryGrantActivityChart.Plot.YLabel("Count");
+            MemoryGrantActivityChart.Plot.Axes.AutoScaleY();
+            var limits = MemoryGrantActivityChart.Plot.Axes.GetLimits();
+            MemoryGrantActivityChart.Plot.Axes.SetLimitsY(0, limits.Top * 1.05);
+            TabHelpers.LockChartVerticalAxis(MemoryGrantActivityChart);
+            MemoryGrantActivityChart.Refresh();
         }
 
         #endregion
@@ -928,7 +1032,7 @@ namespace PerformanceMonitorDashboard.Controls
                     {
                         if (column is DataGridBoundColumn)
                         {
-                            headers.Add(TabHelpers.GetColumnHeader(column));
+                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
                         }
                     }
                     sb.AppendLine(string.Join("\t", headers));
@@ -974,16 +1078,16 @@ namespace PerformanceMonitorDashboard.Controls
                             {
                                 if (column is DataGridBoundColumn)
                                 {
-                                    headers.Add(TabHelpers.EscapeCsvField(TabHelpers.GetColumnHeader(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column), TabHelpers.CsvSeparator));
                                 }
                             }
-                            sb.AppendLine(string.Join(",", headers));
+                            sb.AppendLine(string.Join(TabHelpers.CsvSeparator, headers));
 
                             // Add all rows
                             foreach (var item in dataGrid.Items)
                             {
                                 var values = TabHelpers.GetRowValues(dataGrid, item);
-                                sb.AppendLine(string.Join(",", values.Select(v => TabHelpers.EscapeCsvField(v))));
+                                sb.AppendLine(string.Join(TabHelpers.CsvSeparator, values.Select(v => TabHelpers.EscapeCsvField(v, TabHelpers.CsvSeparator))));
                             }
 
                             File.WriteAllText(saveFileDialog.FileName, sb.ToString());

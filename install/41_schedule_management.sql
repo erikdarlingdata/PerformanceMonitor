@@ -160,7 +160,6 @@ BEGIN
     BEGIN TRY
         /*High frequency for real-time dashboard*/
         EXECUTE config.update_collector_frequency N'query_snapshots_collector', 1, 1;
-        EXECUTE config.update_collector_frequency N'session_wait_stats_collector', 1, 1;
         EXECUTE config.update_collector_frequency N'wait_stats_collector', 1, 1;
         EXECUTE config.update_collector_frequency N'query_stats_collector', 1, 1;
         EXECUTE config.update_collector_frequency N'procedure_stats_collector', 2, 1;
@@ -218,7 +217,6 @@ BEGIN
     BEGIN TRY
         /*Balanced frequencies for consulting work*/
         EXECUTE config.update_collector_frequency N'query_snapshots_collector', 1, 1;
-        EXECUTE config.update_collector_frequency N'session_wait_stats_collector', 1, 1;
         EXECUTE config.update_collector_frequency N'wait_stats_collector', 5, 1;
         EXECUTE config.update_collector_frequency N'query_stats_collector', 5, 1;
         EXECUTE config.update_collector_frequency N'procedure_stats_collector', 5, 1;
@@ -285,7 +283,6 @@ BEGIN
 
         /*Disable high-frequency collectors*/
         EXECUTE config.set_collector_enabled N'query_snapshots_collector', 0;
-        EXECUTE config.set_collector_enabled N'session_wait_stats_collector', 0;
 
         PRINT 'Baseline monitoring profile enabled';
         PRINT 'All collectors at 5-minute intervals, snapshots disabled';

@@ -44,9 +44,14 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <TextBlock Text="CPU Utilization (%)" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
                         <ScottPlot:WpfPlot Grid.Row="1" x:Name="ServerUtilTrendsCpuChart" Margin="5"/>
+                        <TextBlock Grid.Row="2" x:Name="CpuSchedulerStatusText"
+                                   Margin="10,0,10,5" FontSize="11"
+                                   HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource ForegroundBrush}"/>
                     </Grid>
                 </Border>
 
@@ -201,38 +206,77 @@
             </Grid>
         </TabItem>
 
-        <!-- File I/O Latency Sub-Tab - User DB only, TempDB moved to TempDB Stats -->
-        <TabItem Header="File I/O Latency">
-            <Grid Margin="5">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-
-                <!-- User DB Read Latency -->
-                <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,2">
-                    <Grid>
+        <!-- File I/O Sub-Tab -->
+        <TabItem Header="File I/O">
+            <TabControl Background="Transparent" BorderThickness="0">
+                <!-- File I/O Latency sub-tab -->
+                <TabItem Header="File I/O Latency">
+                    <Grid Margin="5">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <TextBlock Grid.Row="0" Text="User DB Read Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot x:Name="UserDbReadLatencyChart" Grid.Row="1"/>
-                    </Grid>
-                </Border>
 
-                <!-- User DB Write Latency -->
-                <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
-                    <Grid>
+                        <!-- User DB Read Latency -->
+                        <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,2">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Read Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="UserDbReadLatencyChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- User DB Write Latency -->
+                        <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Write Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="UserDbWriteLatencyChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </TabItem>
+
+                <!-- File I/O Throughput sub-tab -->
+                <TabItem Header="File I/O Throughput">
+                    <Grid Margin="5">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <TextBlock Grid.Row="0" Text="User DB Write Latency (ms)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot x:Name="UserDbWriteLatencyChart" Grid.Row="1"/>
+
+                        <!-- User DB Read Throughput -->
+                        <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,2">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Read Throughput (MB/s)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="FileIoReadThroughputChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- User DB Write Throughput -->
+                        <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="User DB Write Throughput (MB/s)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <ScottPlot:WpfPlot x:Name="FileIoWriteThroughputChart" Grid.Row="1"/>
+                            </Grid>
+                        </Border>
                     </Grid>
-                </Border>
-            </Grid>
+                </TabItem>
+            </TabControl>
         </TabItem>
 
         <!-- Perfmon Counters Sub-Tab -->
@@ -250,20 +294,24 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="5,5,5,2">
                             <TextBlock Text="Select Counters" FontWeight="Bold" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="PerfmonCounters_Refresh_Click" Margin="10,0,0,0" Padding="8,2" Style="{StaticResource SuccessButton}" FontSize="11"/>
                         </StackPanel>
-                        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="5,2">
+                        <ComboBox Grid.Row="1" x:Name="PerfmonPackCombo"
+                                  SelectionChanged="PerfmonPack_SelectionChanged"
+                                  Margin="5,2" FontSize="11"/>
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="5,2">
                             <Button Content="Select All" Click="PerfmonCounters_SelectAll_Click" Padding="6,2" FontSize="10" Margin="0,0,5,0"/>
                             <Button Content="Clear All" Click="PerfmonCounters_ClearAll_Click" Padding="6,2" FontSize="10"/>
                         </StackPanel>
-                        <TextBox Grid.Row="2" x:Name="PerfmonCounterSearchBox" Margin="5,2" Height="24" FontSize="11"
+                        <TextBox Grid.Row="3" x:Name="PerfmonCounterSearchBox" Margin="5,2" Height="24" FontSize="11"
                                  TextChanged="PerfmonCounterSearch_TextChanged"
                                  ToolTip="Type to filter counters"/>
-                        <ListBox Grid.Row="3" x:Name="PerfmonCountersList" Margin="5" Background="{DynamicResource BackgroundDarkBrush}" Foreground="{DynamicResource ForegroundBrush}"
+                        <ListBox Grid.Row="4" x:Name="PerfmonCountersList" Margin="5" Background="{DynamicResource BackgroundDarkBrush}" Foreground="{DynamicResource ForegroundBrush}"
                                  SelectionMode="Multiple"
                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
                                  SelectionChanged="PerfmonCountersList_SelectionChanged">

@@ -72,7 +72,7 @@ public partial class RemoteCollectorService
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     is_running = CASE WHEN dxs.name IS NOT NULL THEN 1 ELSE 0 END
 FROM sys.server_event_sessions AS ses
 LEFT JOIN sys.dm_xe_sessions AS dxs
@@ -156,7 +156,7 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connect
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     has_correct_event = CASE
         WHEN EXISTS
         (
@@ -282,7 +282,7 @@ INSERT
 (
     ring_buffer
 )
-SELECT
+SELECT /* PerformanceMonitorLite */
     ring_xml = TRY_CAST(xet.target_data AS xml)
 FROM sys.dm_xe_database_session_targets AS xet
 JOIN sys.dm_xe_database_sessions AS xes
@@ -323,7 +323,7 @@ INSERT
 (
     ring_buffer
 )
-SELECT
+SELECT /* PerformanceMonitorLite */
     ring_xml = TRY_CAST(xet.target_data AS xml)
 FROM sys.dm_xe_session_targets AS xet
 JOIN sys.dm_xe_sessions AS xes

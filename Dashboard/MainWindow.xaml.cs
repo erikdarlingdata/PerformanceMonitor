@@ -137,6 +137,10 @@ namespace PerformanceMonitorDashboard
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            // Sync CSV separator from preferences
+            var startupPrefs = _preferencesService.GetPreferences();
+            TabHelpers.CsvSeparator = startupPrefs.CsvSeparator;
+
             LoadServerList();
             InitializeNotificationService();
             OpenNocTab();
@@ -441,6 +445,17 @@ namespace PerformanceMonitorDashboard
 
             /* Set server UTC offset for chart axis bounds */
             var connStatus = _serverManager.GetConnectionStatus(server.Id);
+            if (!connStatus.UtcOffsetMinutes.HasValue)
+            {
+                /* Background check hasn't run yet — fetch offset synchronously so
+                   the first tab open doesn't default to local timezone. */
+                try
+                {
+                    _serverManager.CheckConnectionAsync(server.Id).GetAwaiter().GetResult();
+                    connStatus = _serverManager.GetConnectionStatus(server.Id);
+                }
+                catch { /* Fall through to local offset default */ }
+            }
             var utcOffset = connStatus.UtcOffsetMinutes ?? (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
             Helpers.ServerTimeHelper.UtcOffsetMinutes = utcOffset;
 
@@ -772,20 +787,34 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void RemoveServer_Click(object sender, RoutedEventArgs e)
+        private async void RemoveServer_Click(object sender, RoutedEventArgs e)
         {
             if (ServerListView.SelectedItem is ServerListItem item)
             {
                 var server = item.Server;
-                var result = MessageBox.Show(
-                    $"Are you sure you want to remove server '{server.DisplayName}'?\n\nThis action cannot be undone.",
-                    "Confirm Remove Server",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Warning
-                );
+                var dialog = new RemoveServerDialog(server.DisplayName);
+                dialog.Owner = this;
 
-                if (result == MessageBoxResult.Yes)
+                if (dialog.ShowDialog() == true)
                 {
+                    // Drop the database first if requested (before we delete credentials)
+                    if (dialog.DropDatabase)
+                    {
+                        try
+                        {
+                            await _serverManager.DropMonitorDatabaseAsync(server);
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show(
+                                $"Could not drop the PerformanceMonitor database on '{server.DisplayName}':\n\n{ex.Message}\n\nThe server will still be removed from the Dashboard.",
+                                "Database Drop Failed",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Warning
+                            );
+                        }
+                    }
+
                     if (_openTabs.TryGetValue(server.Id, out var tabItem))
                     {
                         _openTabs.Remove(server.Id);

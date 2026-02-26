@@ -20,8 +20,10 @@ GO
 
 /*
 Data retention procedure for performance monitoring system
-Automatically purges old data from ALL collection tables based on configurable retention periods
-DYNAMIC VERSION - automatically discovers tables in collect schema with collection_time column
+Automatically purges old data from ALL collection tables
+Uses per-collector retention from config.collection_schedule when available,
+falls back to @retention_days parameter for unmatched tables
+DYNAMIC VERSION - automatically discovers tables in collect schema with time columns
 */
 
 IF OBJECT_ID(N'config.data_retention', N'P') IS NULL
@@ -33,7 +35,7 @@ GO
 ALTER PROCEDURE
     config.data_retention
 (
-    @retention_days integer = 30, /*Number of days to retain collected data*/
+    @retention_days integer = 30, /*Fallback retention for tables without a collection_schedule entry*/
     @batch_size integer = 10000, /*Number of rows to delete per batch to avoid blocking*/
     @debug bit = 0 /*Print debugging information*/
 )
@@ -192,6 +194,42 @@ BEGIN
                 1/0
             FROM #tables_to_clean AS ttc
             WHERE ttc.table_name = t.name
+        );
+
+        /*
+        Override retention_date per-collector from config.collection_schedule.
+        Direct match: strip _collector/_analyzer suffix and match table name prefix.
+        */
+        UPDATE ttc
+        SET ttc.retention_date = DATEADD(DAY, -cs.retention_days, SYSDATETIME())
+        FROM #tables_to_clean AS ttc
+        JOIN config.collection_schedule AS cs
+          ON ttc.table_name LIKE REPLACE(REPLACE(cs.collector_name, N'_collector', N''), N'_analyzer', N'') + N'%';
+
+        /*
+        Special mappings for tables whose names don't match their collector:
+        - HealthParser_* tables -> system_health_collector
+        - blocking_BlockedProcessReport -> process_blocked_process_xml
+        - deadlocks (sp_BlitzLock output) -> process_deadlock_xml
+        */
+        UPDATE ttc
+        SET ttc.retention_date = DATEADD(DAY, -cs.retention_days, SYSDATETIME())
+        FROM #tables_to_clean AS ttc
+        CROSS JOIN config.collection_schedule AS cs
+        WHERE
+        (
+            ttc.table_name LIKE N'HealthParser%'
+            AND cs.collector_name = N'system_health_collector'
+        )
+        OR
+        (
+            ttc.table_name = N'blocking_BlockedProcessReport'
+            AND cs.collector_name = N'process_blocked_process_xml'
+        )
+        OR
+        (
+            ttc.table_name = N'deadlocks'
+            AND cs.collector_name = N'process_deadlock_xml'
         );
 
         /*
@@ -399,12 +437,13 @@ GO
 
 PRINT 'Data retention procedure created successfully (DYNAMIC VERSION)';
 PRINT 'Use config.data_retention to automatically purge old monitoring data';
-PRINT 'AUTOMATICALLY discovers ALL collect schema tables with time columns';
+PRINT 'Uses per-collector retention from config.collection_schedule when available';
+PRINT 'Falls back to @retention_days parameter for unmatched tables';
 PRINT '';
 PRINT 'Examples:';
-PRINT '  -- Keep 30 days (default)';
+PRINT '  -- Use per-collector retention (default)';
 PRINT '  EXECUTE config.data_retention @debug = 1;';
 PRINT '';
-PRINT '  -- Keep 90 days';
+PRINT '  -- Override fallback to 90 days for tables without schedule entries';
 PRINT '  EXECUTE config.data_retention @retention_days = 90;';
 GO

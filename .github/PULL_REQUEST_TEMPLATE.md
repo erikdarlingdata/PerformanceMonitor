@@ -5,9 +5,11 @@ A clear description of the change and why it's being made.
 ## Which component(s) does this affect?
 
 - [ ] Full Dashboard
-- [ ] Lite
+- [ ] Lite Dashboard
+- [ ] Lite Tests
 - [ ] SQL collection scripts
-- [ ] Installer
+- [ ] CLI Installer
+- [ ] GUI Installer
 - [ ] Documentation
 
 ## How was this tested?

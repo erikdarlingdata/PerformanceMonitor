@@ -157,6 +157,9 @@ BEGIN
         (
             /*I/O counters*/
             N'Forwarded Records/sec',
+            N'Full Scans/sec',
+            N'Index Searches/sec',
+            N'Page Splits/sec',
             N'Page reads/sec',
             N'Page writes/sec',
             N'Checkpoint pages/sec',
@@ -177,6 +180,8 @@ BEGIN
             N'Lock Waits/sec',
             N'Number of Deadlocks/sec',
             N'Lock waits',
+            N'Lock Timeouts/sec',
+            N'Processes blocked',
             /*Memory counters*/
             N'Granted Workspace Memory (KB)',
             N'Lock Memory (KB)',
@@ -187,6 +192,7 @@ BEGIN
             N'Total Server Memory (KB)',
             N'Memory grant queue waits',
             N'Thread-safe memory objects waits',
+            N'Free list stalls/sec',
             /*Compilation counters*/
             N'SQL Compilations/sec',
             N'SQL Re-Compilations/sec',
@@ -205,6 +211,15 @@ BEGIN
             N'Log Flush Write Time (ms)',
             N'Log buffer waits',
             N'Log write waits',
+            /*TempDB counters*/
+            N'Version Store Size (KB)',
+            N'Free Space in tempdb (KB)',
+            N'Active Temp Tables',
+            N'Version Generation rate (KB/s)',
+            N'Version Cleanup rate (KB/s)',
+            N'Temp Tables Creation Rate',
+            N'Workfiles Created/sec',
+            N'Worktables Created/sec',
             /*Wait counters*/
             N'Network IO waits',
             N'Wait for the worker'

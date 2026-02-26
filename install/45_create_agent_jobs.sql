@@ -164,7 +164,7 @@ EXECUTE msdb.dbo.sp_add_jobstep
     @step_name = N'Run Data Retention',
     @subsystem = N'TSQL',
     @database_name = N'PerformanceMonitor',
-    @command = N'EXECUTE config.data_retention @retention_days = 30, @debug = 1;',
+    @command = N'EXECUTE config.data_retention @debug = 1;',
     @retry_attempts = 0,
     @on_success_action = 1; /*Quit with success*/
 

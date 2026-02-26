@@ -72,13 +72,13 @@ public class DuckDbSchemaTests : IDisposable
         };
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
 
         foreach (var table in expectedTables)
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = $"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table}'";
-            var count = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+            var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
             Assert.True(count == 1, $"Table '{table}' should exist but was not found");
         }
     }
@@ -90,11 +90,11 @@ public class DuckDbSchemaTests : IDisposable
         await initializer.InitializeAsync();
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT MAX(version) FROM schema_version";
-        var version = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+        var version = Convert.ToInt32(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
 
         Assert.Equal(DuckDbInitializer.CurrentSchemaVersion, version);
     }
@@ -109,11 +109,11 @@ public class DuckDbSchemaTests : IDisposable
         await initializer.InitializeAsync();
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT MAX(version) FROM schema_version";
-        var version = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+        var version = Convert.ToInt32(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
 
         Assert.Equal(DuckDbInitializer.CurrentSchemaVersion, version);
     }
@@ -147,12 +147,12 @@ public class DuckDbSchemaTests : IDisposable
         await initializer.InitializeAsync();
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
 
         /* Verify at least some indexes exist by checking duckdb_indexes */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM duckdb_indexes()";
-        var indexCount = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+        var indexCount = Convert.ToInt32(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
 
         /* We create 18 indexes */
         Assert.True(indexCount >= 18, $"Expected >= 18 indexes, found {indexCount}");

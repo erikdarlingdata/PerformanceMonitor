@@ -119,16 +119,35 @@ public partial class QueryStatsHistoryWindow : Window
     private async void DownloadPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn) return;
-        if (string.IsNullOrEmpty(_connectionString) || string.IsNullOrEmpty(_queryHash)) return;
+        if (string.IsNullOrEmpty(_queryHash)) return;
 
         btn.IsEnabled = false;
         btn.Content = "...";
         try
         {
-            var plan = await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash);
+            string? plan = null;
+            var source = "collected data";
+
+            // Try DuckDB first — plan may already be cached from collection
+            try
+            {
+                plan = await _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash);
+            }
+            catch
+            {
+                // DuckDB lookup failed, fall through to live server
+            }
+
+            // Fall back to live server if DuckDB didn't have it
+            if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
+            {
+                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash);
+                source = "live server";
+            }
+
             if (string.IsNullOrEmpty(plan))
             {
-                MessageBox.Show("No query plan found in the plan cache for this query hash. The plan may have been evicted.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("No query plan found in collected data or the live plan cache for this query hash.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
@@ -141,6 +160,8 @@ public partial class QueryStatsHistoryWindow : Window
 
             if (dialog.ShowDialog() != true) return;
             File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
+            btn.Content = $"Saved ({source})";
+            return;
         }
         catch (Exception ex)
         {
@@ -148,7 +169,8 @@ public partial class QueryStatsHistoryWindow : Window
         }
         finally
         {
-            btn.Content = "Download";
+            if (btn.Content is "...")
+                btn.Content = "Download";
             btn.IsEnabled = true;
         }
     }
@@ -168,6 +190,11 @@ public partial class QueryStatsHistoryWindow : Window
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = text;
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = text;
     }
+
+    private void CopyCell_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyCell(sender);
+    private void CopyRow_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyRow(sender);
+    private void CopyAllRows_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyAllRows(sender);
+    private void ExportToCsv_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.ExportToCsv(sender, "query_stats_history");
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }

@@ -278,10 +278,10 @@ INSERT INTO
     waiter_count,
     timeout_error_count,
     forced_grant_count,
-    available_memory_pressure_warning,
-    waiter_count_warning,
-    timeout_error_warning,
-    forced_grant_warning
+    server_start_time,
+    timeout_error_count_delta,
+    forced_grant_count_delta,
+    sample_interval_seconds
 )
 VALUES
 (
@@ -298,10 +298,10 @@ VALUES
     25, /* High waiter count */
     10, /* Timeouts occurring */
     5,  /* Forced grants */
-    1,  /* Memory pressure warning */
-    1,  /* Waiter warning */
-    1,  /* Timeout warning */
-    1   /* Forced grant warning */
+    @test_collection_time, /* server_start_time */
+    10, /* timeout_error_count_delta */
+    5,  /* forced_grant_count_delta */
+    30  /* sample_interval_seconds */
 );
 
 PRINT '✓ Test 5 data created: Memory grant pressure > 20% threshold';

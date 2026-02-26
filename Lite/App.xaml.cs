@@ -65,6 +65,18 @@ public partial class App : Application
     public static bool AlertLongRunningJobEnabled { get; set; } = true;
     public static int AlertLongRunningJobMultiplier { get; set; } = 3;
 
+    /* Connection settings */
+    public static int ConnectionTimeoutSeconds { get; set; } = 5;
+
+    /* CSV export settings */
+    public static string CsvSeparator { get; set; } = GetDefaultCsvSeparator();
+
+    private static string GetDefaultCsvSeparator()
+    {
+        /* Auto-detect: use semicolon when the locale's decimal separator is a comma (Italian, German, French, etc.) */
+        return System.Globalization.CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator == "," ? ";" : ",";
+    }
+
     /* System tray settings */
     public static bool MinimizeToTray { get; set; } = true;
 
@@ -220,6 +232,20 @@ public partial class App : Application
             if (root.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.GetInt32();
             if (root.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.GetInt32();
+
+            /* Connection settings */
+            if (root.TryGetProperty("connection_timeout_seconds", out v))
+            {
+                var timeout = v.GetInt32();
+                if (timeout >= 5 && timeout <= 60) ConnectionTimeoutSeconds = timeout;
+            }
+
+            /* CSV export settings */
+            if (root.TryGetProperty("csv_separator", out v))
+            {
+                var sep = v.GetString();
+                if (sep == "," || sep == ";" || sep == "\t") CsvSeparator = sep;
+            }
 
             /* System tray settings */
             if (root.TryGetProperty("minimize_to_tray", out v)) MinimizeToTray = v.GetBoolean();

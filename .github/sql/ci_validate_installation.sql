@@ -30,7 +30,7 @@ IF SCHEMA_ID(N'report')  IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: sche
 PRINT '';
 
 /*
-Procedures in collect schema (37)
+Procedures in collect schema (36)
 */
 PRINT 'Checking collect procedures...';
 
@@ -65,7 +65,6 @@ IF OBJECT_ID(N'collect.tempdb_stats_collector', N'P')           IS NULL BEGIN SE
 IF OBJECT_ID(N'collect.plan_cache_stats_collector', N'P')       IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.plan_cache_stats_collector'; END;       SET @checked += 1;
 IF OBJECT_ID(N'collect.session_stats_collector', N'P')          IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.session_stats_collector'; END;          SET @checked += 1;
 IF OBJECT_ID(N'collect.waiting_tasks_collector', N'P')          IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.waiting_tasks_collector'; END;          SET @checked += 1;
-IF OBJECT_ID(N'collect.session_wait_stats_collector', N'P')     IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.session_wait_stats_collector'; END;     SET @checked += 1;
 IF OBJECT_ID(N'collect.server_configuration_collector', N'P')   IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.server_configuration_collector'; END;   SET @checked += 1;
 IF OBJECT_ID(N'collect.database_configuration_collector', N'P') IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.database_configuration_collector'; END; SET @checked += 1;
 IF OBJECT_ID(N'collect.configuration_issues_analyzer', N'P')    IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.configuration_issues_analyzer'; END;    SET @checked += 1;
@@ -142,7 +141,6 @@ IF OBJECT_ID(N'report.blocking_chain_analysis', N'V')             IS NULL BEGIN 
 IF OBJECT_ID(N'report.tempdb_contention_analysis', N'V')          IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.tempdb_contention_analysis'; END;          SET @checked += 1;
 IF OBJECT_ID(N'report.parameter_sensitivity_detection', N'V')     IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.parameter_sensitivity_detection'; END;     SET @checked += 1;
 IF OBJECT_ID(N'report.scheduler_cpu_analysis', N'V')              IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.scheduler_cpu_analysis'; END;              SET @checked += 1;
-IF OBJECT_ID(N'report.session_wait_analysis', N'V')               IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.session_wait_analysis'; END;               SET @checked += 1;
 IF OBJECT_ID(N'report.critical_issues', N'V')                     IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.critical_issues'; END;                     SET @checked += 1;
 IF OBJECT_ID(N'report.memory_usage_trends', N'V')                 IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.memory_usage_trends'; END;                 SET @checked += 1;
 IF OBJECT_ID(N'report.running_jobs', N'V')                        IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.running_jobs'; END;                        SET @checked += 1;
@@ -182,7 +180,7 @@ WHERE OBJECT_SCHEMA_NAME(t.object_id) = N'config';
 PRINT '  collect schema tables: ' + CONVERT(varchar(10), @collect_tables);
 PRINT '  config schema tables: ' + CONVERT(varchar(10), @config_tables);
 
-IF @collect_tables < 20 BEGIN SET @missing += 1; PRINT '  MISSING: expected >= 20 collect tables, found ' + CONVERT(varchar(10), @collect_tables); END; SET @checked += 1;
+IF @collect_tables < 19 BEGIN SET @missing += 1; PRINT '  MISSING: expected >= 20 collect tables, found ' + CONVERT(varchar(10), @collect_tables); END; SET @checked += 1;
 IF @config_tables < 5  BEGIN SET @missing += 1; PRINT '  MISSING: expected >= 5 config tables, found ' + CONVERT(varchar(10), @config_tables); END;  SET @checked += 1;
 
 PRINT '';

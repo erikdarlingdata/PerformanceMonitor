@@ -6,6 +6,7 @@ namespace PerformanceMonitorDashboard.Models
     {
         public long CollectionId { get; set; }
         public DateTime CollectionTime { get; set; }
+        public DateTime ServerStartTime { get; set; }
         public short ResourceSemaphoreId { get; set; }
         public int PoolId { get; set; }
 
@@ -17,24 +18,15 @@ namespace PerformanceMonitorDashboard.Models
         public decimal? GrantedMemoryMb { get; set; }
         public decimal? UsedMemoryMb { get; set; }
 
-        // Counts
+        // Point-in-time counts
         public int? GranteeCount { get; set; }
         public int? WaiterCount { get; set; }
         public long? TimeoutErrorCount { get; set; }
         public long? ForcedGrantCount { get; set; }
 
-        // Pressure warnings
-        public bool? AvailableMemoryPressureWarning { get; set; }
-        public bool? WaiterCountWarning { get; set; }
-        public bool? TimeoutErrorWarning { get; set; }
-        public bool? ForcedGrantWarning { get; set; }
-
-        // Computed helpers
-        public decimal? GrantedPercentage => TargetMemoryMb > 0
-            ? GrantedMemoryMb * 100.0m / TargetMemoryMb
-            : null;
-        public decimal? UsedPercentage => GrantedMemoryMb > 0
-            ? UsedMemoryMb * 100.0m / GrantedMemoryMb
-            : null;
+        // Delta columns (calculated by framework)
+        public long? TimeoutErrorCountDelta { get; set; }
+        public long? ForcedGrantCountDelta { get; set; }
+        public int? SampleIntervalSeconds { get; set; }
     }
 }

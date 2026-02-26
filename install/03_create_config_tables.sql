@@ -202,7 +202,6 @@ BEGIN
                 (N'plan_cache_stats_collector', 1, 60, 5, 30, N'Plan cache composition statistics - single-use plans and plan cache bloat detection'),
                 (N'session_stats_collector', 1, 5, 2, 30, N'Session and connection statistics - connection leaks and application patterns'),
                 (N'waiting_tasks_collector', 1, 5, 2, 30, N'Currently waiting tasks - blocking chains and wait analysis'),
-                (N'session_wait_stats_collector', 1, 1, 2, 30, N'Per-session wait statistics - correlates waits with specific sessions/queries (requires SQL Server 2016 SP1+)'),
                 (N'running_jobs_collector', 1, 5, 2, 7, N'Currently running SQL Agent jobs with historical duration comparison');
 
             /*

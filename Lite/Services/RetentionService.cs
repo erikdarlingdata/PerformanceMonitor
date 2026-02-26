@@ -29,7 +29,9 @@ public class RetentionService
 
     /// <summary>
     /// Deletes Parquet files older than the specified retention period.
-    /// Files are named like "2025-01_wait_stats.parquet" where the prefix is the archive month.
+    /// Supports two naming formats:
+    ///   - Timestamped: "20260221_1328_wait_stats.parquet" (yyyyMMdd prefix)
+    ///   - Legacy monthly: "2026-02_wait_stats.parquet" (yyyy-MM prefix)
     /// </summary>
     public void CleanupOldArchives(int retentionDays = 90)
     {
@@ -45,8 +47,24 @@ public class RetentionService
             try
             {
                 var fileName = Path.GetFileNameWithoutExtension(file);
-                /* Parse month from filename: "2025-01_wait_stats" -> "2025-01" */
-                if (fileName.Length >= 7 &&
+
+                /* Try timestamped format first: "20260221_1328_wait_stats" -> "20260221" */
+                if (fileName.Length >= 8 &&
+                    DateTime.TryParseExact(
+                        fileName[..8],
+                        "yyyyMMdd",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.None,
+                        out var fileDate))
+                {
+                    if (fileDate < cutoffDate)
+                    {
+                        File.Delete(file);
+                        _logger?.LogInformation("Deleted expired archive: {File}", file);
+                    }
+                }
+                /* Fall back to legacy monthly format: "2026-02_wait_stats" -> "2026-02" */
+                else if (fileName.Length >= 7 &&
                     DateTime.TryParseExact(
                         fileName[..7],
                         "yyyy-MM",

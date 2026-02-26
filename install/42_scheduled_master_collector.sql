@@ -311,10 +311,6 @@ BEGIN
                 BEGIN
                     EXECUTE collect.waiting_tasks_collector @debug = @debug;
                 END;
-                ELSE IF @collector_name = N'session_wait_stats_collector'
-                BEGIN
-                    EXECUTE collect.session_wait_stats_collector @debug = @debug;
-                END;
                 ELSE IF @collector_name = N'running_jobs_collector'
                 BEGIN
                     EXECUTE collect.running_jobs_collector @debug = @debug;

@@ -30,7 +30,8 @@ public static class ReproScriptBuilder
         string? databaseName,
         string? planXml,
         string? isolationLevel,
-        string source = "Query")
+        string source = "Query",
+        bool isAzureSqlDb = false)
     {
         var sb = new StringBuilder();
         var warnings = new List<string>();
@@ -95,19 +96,30 @@ public static class ReproScriptBuilder
         sb.AppendLine("*/");
         sb.AppendLine();
 
-        /* USE database */
-        if (!string.IsNullOrEmpty(databaseName))
+        /* USE database (skip for Azure SQL DB — USE is invalid there) */
+        if (!string.IsNullOrEmpty(databaseName) && !isAzureSqlDb)
         {
             sb.AppendLine($"USE [{databaseName}];");
             sb.AppendLine();
         }
 
-        /* SET options */
+        /* SET options from plan XML (match the query's original execution context) */
+        if (!string.IsNullOrEmpty(planXml))
+        {
+            var setOptions = ExtractSetOptionsFromPlan(planXml);
+            if (setOptions.Count > 0)
+            {
+                foreach (var setOption in setOptions)
+                {
+                    sb.AppendLine(setOption);
+                }
+            }
+        }
+
         if (!string.IsNullOrEmpty(isolationLevel))
         {
             sb.AppendLine($"SET TRANSACTION ISOLATION LEVEL {isolationLevel.ToUpperInvariant()};");
         }
-        sb.AppendLine("SET STATISTICS XML OFF;");
         sb.AppendLine("SET NOCOUNT ON;");
         sb.AppendLine();
 
@@ -257,6 +269,52 @@ public static class ReproScriptBuilder
         }
 
         return parameters;
+    }
+
+    /// <summary>
+    /// Extracts StatementSetOptions from plan XML and returns ordered SET statements.
+    /// These match the execution context the query was originally compiled under.
+    /// </summary>
+    private static List<string> ExtractSetOptionsFromPlan(string planXml)
+    {
+        var setStatements = new List<string>();
+
+        try
+        {
+            var doc = XDocument.Parse(planXml);
+            XNamespace ns = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
+
+            var setOptsEl = doc.Descendants(ns + "StatementSetOptions").FirstOrDefault();
+            if (setOptsEl == null) return setStatements;
+
+            /* Emit in conventional order matching SSMS/plan explorer output */
+            var options = new (string Attribute, string SetName)[]
+            {
+                ("ANSI_NULLS", "ANSI_NULLS"),
+                ("ANSI_PADDING", "ANSI_PADDING"),
+                ("ANSI_WARNINGS", "ANSI_WARNINGS"),
+                ("ARITHABORT", "ARITHABORT"),
+                ("CONCAT_NULL_YIELDS_NULL", "CONCAT_NULL_YIELDS_NULL"),
+                ("QUOTED_IDENTIFIER", "QUOTED_IDENTIFIER"),
+                ("NUMERIC_ROUNDABORT", "NUMERIC_ROUNDABORT"),
+            };
+
+            foreach (var (attr, setName) in options)
+            {
+                var value = setOptsEl.Attribute(attr)?.Value;
+                if (value != null)
+                {
+                    var onOff = value is "true" or "1" ? "ON" : "OFF";
+                    setStatements.Add($"SET {setName} {onOff};");
+                }
+            }
+        }
+        catch
+        {
+            /* Plan XML parse failure — return empty list, SET options are best-effort */
+        }
+
+        return setStatements;
     }
 
     /// <summary>

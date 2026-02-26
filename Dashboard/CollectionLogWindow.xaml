@@ -6,6 +6,15 @@
         Title="Collection History" Height="600" Width="1000"
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource BackgroundBrush}">
+    <Window.Resources>
+        <ContextMenu x:Key="DataGridContextMenu">
+            <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
+            <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
+            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click"/>
+            <Separator/>
+            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
+        </ContextMenu>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -28,7 +37,8 @@
                   CanUserSortColumns="True"
                   AlternatingRowBackground="{DynamicResource BackgroundLightBrush}"
                   GridLinesVisibility="All"
-                  Margin="10">
+                  Margin="10"
+                  ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
                 <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
                     <DataGridTextColumn.Header>
@@ -46,7 +56,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding RowsCollected}" Width="120">
+                <DataGridTextColumn Binding="{Binding RowsCollected}" ElementStyle="{StaticResource NumericCell}" Width="120">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button x:Name="RowsCollectedFilterButton" Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowsCollected" Click="LogFilter_Click" Margin="0,0,4,0"/>
@@ -54,7 +64,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding DurationMs, StringFormat='{}{0:N0}'}" Width="110">
+                <DataGridTextColumn Binding="{Binding DurationMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button x:Name="DurationFilterButton" Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="LogFilter_Click" Margin="0,0,4,0"/>

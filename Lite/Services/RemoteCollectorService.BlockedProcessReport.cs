@@ -119,7 +119,7 @@ SELECT @threshold;", connection);
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     is_running = CASE WHEN dxs.name IS NOT NULL THEN 1 ELSE 0 END
 FROM sys.server_event_sessions AS ses
 LEFT JOIN sys.dm_xe_sessions AS dxs
@@ -200,7 +200,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     session_state = des.name
 FROM sys.database_event_sessions AS des
 WHERE des.name = @session_name;", connection))
@@ -285,7 +285,7 @@ INSERT
 (
     ring_buffer
 )
-SELECT
+SELECT /* PerformanceMonitorLite */
     ring_xml = TRY_CAST(xet.target_data AS xml)
 FROM sys.dm_xe_database_session_targets AS xet
 JOIN sys.dm_xe_database_sessions AS xes
@@ -325,7 +325,7 @@ INSERT
 (
     ring_buffer
 )
-SELECT
+SELECT /* PerformanceMonitorLite */
     ring_xml = TRY_CAST(xet.target_data AS xml)
 FROM sys.dm_xe_session_targets AS xet
 JOIN sys.dm_xe_sessions AS xes

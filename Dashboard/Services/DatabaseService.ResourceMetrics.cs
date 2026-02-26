@@ -1379,6 +1379,18 @@ namespace PerformanceMonitorDashboard.Services
                     THEN CONVERT(decimal(19,2), fio.io_stall_write_ms_delta * 1.0 / fio.num_of_writes_delta)
                     ELSE 0
                 END,
+            read_queued_latency_ms =
+                CASE
+                    WHEN ISNULL(fio.num_of_reads_delta, 0) > 0
+                    THEN CONVERT(decimal(19,2), ISNULL(fio.io_stall_queued_read_ms_delta, 0) * 1.0 / fio.num_of_reads_delta)
+                    ELSE 0
+                END,
+            write_queued_latency_ms =
+                CASE
+                    WHEN ISNULL(fio.num_of_writes_delta, 0) > 0
+                    THEN CONVERT(decimal(19,2), ISNULL(fio.io_stall_queued_write_ms_delta, 0) * 1.0 / fio.num_of_writes_delta)
+                    ELSE 0
+                END,
             read_count = ISNULL(fio.num_of_reads_delta, 0),
             write_count = ISNULL(fio.num_of_writes_delta, 0)
         FROM collect.file_io_stats AS fio
@@ -1392,10 +1404,10 @@ namespace PerformanceMonitorDashboard.Services
             fio.collection_time,
             fio.database_name,
             fio.file_name;";
-        
+
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
-        
+
                     if (fromDate.HasValue && toDate.HasValue)
                     {
                         command.Parameters.Add(new SqlParameter("@fromDate", SqlDbType.DateTime2) { Value = fromDate.Value });
@@ -1405,7 +1417,7 @@ namespace PerformanceMonitorDashboard.Services
                     {
                         command.Parameters.Add(new SqlParameter("@hoursBack", SqlDbType.Int) { Value = hoursBack });
                     }
-        
+
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
@@ -1417,11 +1429,124 @@ namespace PerformanceMonitorDashboard.Services
                             FileType = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
                             ReadLatencyMs = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
                             WriteLatencyMs = reader.IsDBNull(5) ? 0m : reader.GetDecimal(5),
+                            ReadQueuedLatencyMs = reader.IsDBNull(6) ? 0m : reader.GetDecimal(6),
+                            WriteQueuedLatencyMs = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7),
+                            ReadCount = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                            WriteCount = reader.IsDBNull(9) ? 0 : reader.GetInt64(9)
+                        });
+                    }
+        
+                    return items;
+                }
+
+                public async Task<List<FileIoLatencyTimeSeriesItem>> GetFileIoThroughputTimeSeriesAsync(bool isTempDb, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+                {
+                    var items = new List<FileIoLatencyTimeSeriesItem>();
+
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    string dateFilter = fromDate.HasValue && toDate.HasValue
+                        ? "AND fio.collection_time >= @fromDate AND fio.collection_time <= @toDate"
+                        : "AND fio.collection_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME())";
+
+                    string dbFilter = isTempDb
+                        ? "AND fio.database_name = N'tempdb'"
+                        : "AND fio.database_name <> N'tempdb'";
+
+                    string query = $@"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        WITH
+            file_avg_throughput AS
+        (
+            SELECT
+                fio.database_name,
+                fio.file_name,
+                fio.file_type_desc,
+                total_bytes = SUM(ISNULL(fio.num_of_bytes_read_delta, 0)) + SUM(ISNULL(fio.num_of_bytes_written_delta, 0)),
+                total_io = SUM(ISNULL(fio.num_of_reads_delta, 0)) + SUM(ISNULL(fio.num_of_writes_delta, 0))
+            FROM collect.file_io_stats AS fio
+            WHERE fio.database_name IS NOT NULL
+            {dbFilter}
+            {dateFilter}
+            GROUP BY
+                fio.database_name,
+                fio.file_name,
+                fio.file_type_desc
+            HAVING
+                SUM(ISNULL(fio.num_of_bytes_read_delta, 0)) + SUM(ISNULL(fio.num_of_bytes_written_delta, 0)) > 0
+        ),
+            top_files AS
+        (
+            SELECT TOP (10)
+                fat.database_name,
+                fat.file_name,
+                fat.file_type_desc
+            FROM file_avg_throughput AS fat
+            ORDER BY
+                fat.total_bytes DESC
+        )
+        SELECT
+            fio.collection_time,
+            fio.database_name,
+            fio.file_name,
+            fio.file_type_desc,
+            read_throughput_mb_per_sec =
+                CASE
+                    WHEN ISNULL(fio.sample_ms_delta, 0) > 0
+                    THEN CONVERT(decimal(19,4), fio.num_of_bytes_read_delta * 1000.0 / fio.sample_ms_delta / 1048576.0)
+                    ELSE 0
+                END,
+            write_throughput_mb_per_sec =
+                CASE
+                    WHEN ISNULL(fio.sample_ms_delta, 0) > 0
+                    THEN CONVERT(decimal(19,4), fio.num_of_bytes_written_delta * 1000.0 / fio.sample_ms_delta / 1048576.0)
+                    ELSE 0
+                END,
+            read_count = ISNULL(fio.num_of_reads_delta, 0),
+            write_count = ISNULL(fio.num_of_writes_delta, 0)
+        FROM collect.file_io_stats AS fio
+        JOIN top_files AS tf
+          ON  tf.database_name = fio.database_name
+          AND tf.file_name = fio.file_name
+        WHERE fio.database_name IS NOT NULL
+        {dbFilter}
+        {dateFilter}
+        ORDER BY
+            fio.collection_time,
+            fio.database_name,
+            fio.file_name;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 120;
+
+                    if (fromDate.HasValue && toDate.HasValue)
+                    {
+                        command.Parameters.Add(new SqlParameter("@fromDate", SqlDbType.DateTime2) { Value = fromDate.Value });
+                        command.Parameters.Add(new SqlParameter("@toDate", SqlDbType.DateTime2) { Value = toDate.Value });
+                    }
+                    else
+                    {
+                        command.Parameters.Add(new SqlParameter("@hoursBack", SqlDbType.Int) { Value = hoursBack });
+                    }
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        items.Add(new FileIoLatencyTimeSeriesItem
+                        {
+                            CollectionTime = reader.GetDateTime(0),
+                            DatabaseName = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                            FileName = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                            FileType = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                            ReadThroughputMbPerSec = reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
+                            WriteThroughputMbPerSec = reader.IsDBNull(5) ? 0m : reader.GetDecimal(5),
                             ReadCount = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                             WriteCount = reader.IsDBNull(7) ? 0 : reader.GetInt64(7)
                         });
                     }
-        
+
                     return items;
                 }
 
