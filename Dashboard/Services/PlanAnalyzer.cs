@@ -139,7 +139,21 @@ public static class PlanAnalyzer
             });
         }
 
+        // Rule 4 (statement-level): UDF execution timing from QueryTimeStats
+        // Some plans report UDF timing only at the statement level, not per-node.
+        if (stmt.QueryUdfCpuTimeMs > 0 || stmt.QueryUdfElapsedTimeMs > 0)
+        {
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "UDF Execution",
+                Message = $"Scalar UDF executing in this statement. UDF elapsed: {stmt.QueryUdfElapsedTimeMs:N0}ms, UDF CPU: {stmt.QueryUdfCpuTimeMs:N0}ms",
+                Severity = stmt.QueryUdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
+            });
+        }
+
         // Rule 20: Local variables without RECOMPILE
+        // Parameters with no CompiledValue are likely local variables — the optimizer
+        // cannot sniff their values and uses density-based ("unknown") estimates.
         if (stmt.Parameters.Count > 0)
         {
             var unsnifffedParams = stmt.Parameters
@@ -484,6 +498,11 @@ public static class PlanAnalyzer
 
         var predicate = node.Predicate;
 
+        // CASE expression in predicate — check first because CASE bodies
+        // often contain CONVERT_IMPLICIT that isn't the root cause
+        if (CaseInPredicateRegex.IsMatch(predicate))
+            return "CASE expression in predicate";
+
         // CONVERT_IMPLICIT — most common non-SARGable pattern
         if (predicate.Contains("CONVERT_IMPLICIT", StringComparison.OrdinalIgnoreCase))
             return "Implicit conversion (CONVERT_IMPLICIT)";
@@ -500,10 +519,6 @@ public static class PlanAnalyzer
             if (funcName != "CONVERT_IMPLICIT")
                 return $"Function call ({funcName}) on column";
         }
-
-        // CASE expression in predicate
-        if (CaseInPredicateRegex.IsMatch(predicate))
-            return "CASE expression in predicate";
 
         // Leading wildcard LIKE
         if (LeadingWildcardLikeRegex.IsMatch(predicate))
