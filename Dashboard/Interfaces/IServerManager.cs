@@ -55,7 +55,7 @@ namespace PerformanceMonitorDashboard.Interfaces
         /// <summary>
         /// Tests connectivity to a single server and updates its status.
         /// </summary>
-        Task<ServerConnectionStatus> CheckConnectionAsync(string serverId);
+        Task<ServerConnectionStatus> CheckConnectionAsync(string serverId, bool allowInteractiveAuth = false);
 
         /// <summary>
         /// Tests connectivity to all servers and updates their statuses.

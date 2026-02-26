@@ -82,11 +82,20 @@ namespace PerformanceMonitorDashboard.Services
                 SaveServersInternal();
             }
 
-            if (!server.UseWindowsAuth && !string.IsNullOrEmpty(username) && password != null)
+            if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
             {
+                // For SQL Server auth, save both username and password
                 if (!_credentialService.SaveCredential(server.Id, username, password))
                 {
                     throw new InvalidOperationException("Failed to save credentials to Windows Credential Manager");
+                }
+            }
+            else if (server.AuthenticationType == AuthenticationTypes.EntraMFA && !string.IsNullOrEmpty(username))
+            {
+                // For MFA auth, save username hint only (no password needed)
+                if (!_credentialService.SaveCredential(server.Id, username, string.Empty))
+                {
+                    throw new InvalidOperationException("Failed to save username to Windows Credential Manager");
                 }
             }
 
@@ -109,15 +118,25 @@ namespace PerformanceMonitorDashboard.Services
                 SaveServersInternal();
             }
 
-            if (!server.UseWindowsAuth && !string.IsNullOrEmpty(username) && password != null)
+            if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
             {
+                // For SQL Server auth, update both username and password
                 if (!_credentialService.UpdateCredential(server.Id, username, password))
                 {
                     throw new InvalidOperationException("Failed to update credentials in Windows Credential Manager");
                 }
             }
-            else if (server.UseWindowsAuth)
+            else if (server.AuthenticationType == AuthenticationTypes.EntraMFA && !string.IsNullOrEmpty(username))
             {
+                // For MFA auth, update username hint only (no password needed)
+                if (!_credentialService.UpdateCredential(server.Id, username, string.Empty))
+                {
+                    throw new InvalidOperationException("Failed to update username in Windows Credential Manager");
+                }
+            }
+            else if (server.AuthenticationType == AuthenticationTypes.Windows)
+            {
+                // For Windows auth, remove any stored credentials
                 _credentialService.DeleteCredential(server.Id);
             }
         }
@@ -202,7 +221,7 @@ namespace PerformanceMonitorDashboard.Services
             return newStatus;
         }
 
-        public async Task<ServerConnectionStatus> CheckConnectionAsync(string serverId)
+        public async Task<ServerConnectionStatus> CheckConnectionAsync(string serverId, bool allowInteractiveAuth = false)
         {
             var server = GetServerById(serverId);
             if (server == null)
@@ -219,6 +238,25 @@ namespace PerformanceMonitorDashboard.Services
 
             // Get previous status to detect status changes
             var previousStatus = GetConnectionStatus(serverId);
+
+            // Skip interactive authentication methods during background checks
+            if (!allowInteractiveAuth && server.AuthenticationType == AuthenticationTypes.EntraMFA)
+            {
+                var errorMsg = previousStatus.UserCancelledMfa
+                    ? "Authentication cancelled by user"
+                    : "Skipped — requires interactive authentication";
+
+                return new ServerConnectionStatus
+                {
+                    ServerId = serverId,
+                    IsOnline = previousStatus.UserCancelledMfa ? false : previousStatus.IsOnline,
+                    LastChecked = DateTime.Now,
+                    StatusChangedAt = previousStatus.StatusChangedAt,
+                    ErrorMessage = errorMsg,
+                    PreviousIsOnline = previousStatus.IsOnline,
+                    UserCancelledMfa = previousStatus.UserCancelledMfa
+                };
+            }
 
             var status = new ServerConnectionStatus
             {
@@ -284,19 +322,40 @@ namespace PerformanceMonitorDashboard.Services
                 else
                 {
                     Logger.Info($"Connectivity check passed for server '{server.DisplayName}'");
+                    status.UserCancelledMfa = false; // Clear any previous cancellation flag
                 }
             }
             catch (SqlException ex)
             {
                 status.IsOnline = false;
                 status.ErrorMessage = ex.Message;
-                Logger.Warning($"Connectivity check failed for server '{server.DisplayName}': {ex.Message}");
+
+                if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+                {
+                    status.UserCancelledMfa = true;
+                    status.ErrorMessage = "Authentication cancelled by user";
+                    Logger.Info($"MFA authentication cancelled by user for server '{server.DisplayName}'");
+                }
+                else
+                {
+                    Logger.Warning($"Connectivity check failed for server '{server.DisplayName}': {ex.Message}");
+                }
             }
             catch (Exception ex)
             {
                 status.IsOnline = false;
                 status.ErrorMessage = ex.Message;
-                Logger.Warning($"Connectivity check error for server '{server.DisplayName}': {ex.Message}");
+
+                if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+                {
+                    status.UserCancelledMfa = true;
+                    status.ErrorMessage = "Authentication cancelled by user";
+                    Logger.Info($"MFA authentication cancelled by user for server '{server.DisplayName}'");
+                }
+                else
+                {
+                    Logger.Warning($"Connectivity check error for server '{server.DisplayName}': {ex.Message}");
+                }
             }
 
             // Track when status changed (online to offline or vice versa)

@@ -69,6 +69,12 @@ namespace PerformanceMonitorDashboard.Models
         public bool IsAwsRds { get; set; }
 
         /// <summary>
+        /// Whether the user cancelled MFA authentication for this server.
+        /// When true, background connectivity checks are skipped to avoid repeated authentication popups.
+        /// </summary>
+        public bool UserCancelledMfa { get; set; }
+
+        /// <summary>
         /// The server's UTC offset in minutes, queried via DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()).
         /// Used to convert UTC-stored collection_time values to server-local time for display.
         /// </summary>

@@ -130,92 +130,130 @@ public partial class AddServerDialog : Window
         };
     }
 
+    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    {
+        var dbName = DatabaseNameBox.Text.Trim();
+        var builder = new SqlConnectionStringBuilder
+        {
+            DataSource = ServerNameBox.Text.Trim(),
+            InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
+            ApplicationName = "PerformanceMonitorLite",
+            ConnectTimeout = 10,
+            TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
+            Encrypt = ParseEncryptOption(GetSelectedEncryptMode())
+        };
+
+        if (WindowsAuthRadio.IsChecked == true)
+        {
+            builder.IntegratedSecurity = true;
+        }
+        else if (SqlAuthRadio.IsChecked == true)
+        {
+            builder.IntegratedSecurity = false;
+            builder.UserID = UsernameBox.Text.Trim();
+            builder.Password = PasswordBox.Password;
+        }
+        else if (EntraMfaAuthRadio.IsChecked == true)
+        {
+            builder.IntegratedSecurity = false;
+            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
+            var mfaUsername = EntraMfaUsernameBox.Text.Trim();
+            if (!string.IsNullOrEmpty(mfaUsername))
+                builder.UserID = mfaUsername;
+        }
+
+        return builder;
+    }
+
+    private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool MfaCancelled, string? ServerVersion)> RunConnectionTestAsync()
+    {
+        TestButton.IsEnabled = false;
+        SaveButton.IsEnabled = false;
+
+        StatusText.Text = EntraMfaAuthRadio.IsChecked == true
+            ? "Testing connection — please complete authentication in the popup window..."
+            : "Testing connection...";
+
+        bool connected = false;
+        string? errorMessage = null;
+        bool mfaCancelled = false;
+        string? serverVersion = null;
+
+        try
+        {
+            using var connection = new SqlConnection(BuildConnectionBuilder().ConnectionString);
+            await connection.OpenAsync();
+            using var cmd = new SqlCommand("SELECT @@VERSION", connection);
+            var version = await cmd.ExecuteScalarAsync() as string;
+            serverVersion = version?.Split('\n')[0]?.Trim();
+            connected = true;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            if (EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+                mfaCancelled = true;
+        }
+        finally
+        {
+            TestButton.IsEnabled = true;
+            SaveButton.IsEnabled = true;
+            StatusText.Text = string.Empty;
+        }
+
+        return (connected, errorMessage, mfaCancelled, serverVersion);
+    }
+
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
-        var serverName = ServerNameBox.Text.Trim();
-        if (string.IsNullOrEmpty(serverName))
+        if (string.IsNullOrEmpty(ServerNameBox.Text.Trim()))
         {
             StatusText.Text = "Enter a server name first.";
             return;
         }
 
-        TestButton.IsEnabled = false;
-        StatusText.Text = "Testing connection...";
+        var (connected, errorMessage, mfaCancelled, serverVersion) = await RunConnectionTestAsync();
 
-        try
+        if (connected)
         {
-            var dbName = DatabaseNameBox.Text.Trim();
-            var builder = new SqlConnectionStringBuilder
-            {
-                DataSource = serverName,
-                InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
-                ApplicationName = "PerformanceMonitorLite",
-                ConnectTimeout = 10,
-                TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
-                Encrypt = ParseEncryptOption(GetSelectedEncryptMode())
-            };
+            var message = serverVersion != null
+                ? $"Successfully connected to {ServerNameBox.Text.Trim()}!\n\n{serverVersion}"
+                : $"Successfully connected to {ServerNameBox.Text.Trim()}!";
+            MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
 
-            if (WindowsAuthRadio.IsChecked == true)
-            {
-                builder.IntegratedSecurity = true;
-            }
-            else if (SqlAuthRadio.IsChecked == true)
-            {
-                builder.IntegratedSecurity = false;
-                builder.UserID = UsernameBox.Text.Trim();
-                builder.Password = PasswordBox.Password;
-            }
-            else if (EntraMfaAuthRadio.IsChecked == true)
-            {
-                // Microsoft Entra MFA (Azure AD Interactive)
-                builder.IntegratedSecurity = false;
-                builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
-                
-                // Optional: Use username if provided
-                var username = EntraMfaUsernameBox.Text.Trim();
-                if (!string.IsNullOrEmpty(username))
-                {
-                    builder.UserID = username;
-                }
-                
-                StatusText.Text = "Please complete authentication in the popup window...";
-            }
-
-            using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync();
-
-            using var cmd = new SqlCommand("SELECT @@VERSION", connection);
-            var version = await cmd.ExecuteScalarAsync() as string;
-            var shortVersion = version?.Split('\n')[0] ?? "Connected";
-
-            StatusText.Text = $"Success: {shortVersion}";
-            
-            // Clear any previous MFA cancellation flag on successful connection
             if (AddedServer != null && EntraMfaAuthRadio.IsChecked == true)
             {
                 var status = _serverManager.GetConnectionStatus(AddedServer.Id);
                 status.UserCancelledMfa = false;
             }
         }
-        catch (Exception ex)
+        else if (mfaCancelled)
         {
-            StatusText.Text = $"Failed: {ex.Message}";
-            
-            // Mark MFA as cancelled if user cancelled the authentication popup
-            if (AddedServer != null && EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+            if (AddedServer != null)
             {
                 var status = _serverManager.GetConnectionStatus(AddedServer.Id);
                 status.UserCancelledMfa = true;
-                StatusText.Text = "Authentication cancelled by user. Click Test to try again.";
             }
+            MessageBox.Show(
+                "Authentication was cancelled. Click Test to try again.",
+                "Authentication Cancelled",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning
+            );
         }
-        finally
+        else
         {
-            TestButton.IsEnabled = true;
+            var detail = errorMessage != null ? $"\n\nError: {errorMessage}" : string.Empty;
+            MessageBox.Show(
+                $"Could not connect to {ServerNameBox.Text.Trim()}.{detail}",
+                "Connection Failed",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error
+            );
         }
     }
 
-    private void SaveButton_Click(object sender, RoutedEventArgs e)
+    private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         var serverName = ServerNameBox.Text.Trim();
         if (string.IsNullOrEmpty(serverName))
@@ -226,9 +264,7 @@ public partial class AddServerDialog : Window
 
         var displayName = DisplayNameBox.Text.Trim();
         if (string.IsNullOrEmpty(displayName))
-        {
             displayName = serverName;
-        }
 
         // Determine authentication type
         string authenticationType;
@@ -242,7 +278,6 @@ public partial class AddServerDialog : Window
         else if (EntraMfaAuthRadio.IsChecked == true)
         {
             authenticationType = AuthenticationTypes.EntraMFA;
-            // Optionally store username for MFA
             username = EntraMfaUsernameBox.Text.Trim();
         }
         else // SQL Server Authentication
@@ -254,6 +289,41 @@ public partial class AddServerDialog : Window
             if (string.IsNullOrEmpty(username))
             {
                 StatusText.Text = "Username is required for SQL Server authentication.";
+                return;
+            }
+        }
+
+        // Test connection when data collection is enabled
+        if (EnabledCheckBox.IsChecked == true)
+        {
+            var (connected, errorMessage, mfaCancelled, _) = await RunConnectionTestAsync();
+
+            if (!connected)
+            {
+                if (mfaCancelled)
+                {
+                    if (AddedServer != null)
+                    {
+                        var status = _serverManager.GetConnectionStatus(AddedServer.Id);
+                        status.UserCancelledMfa = true;
+                    }
+                    MessageBox.Show(
+                        "Authentication was cancelled. Click Save to try again, or uncheck \"Enable data collection for this server\" to save without connecting.",
+                        "Authentication Cancelled",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning
+                    );
+                }
+                else
+                {
+                    var detail = errorMessage != null ? $"\n\nError: {errorMessage}" : string.Empty;
+                    MessageBox.Show(
+                        $"Could not connect to {ServerNameBox.Text.Trim()}.{detail}\n\nTo save this server without a working connection, uncheck \"Enable data collection for this server\".",
+                        "Connection Failed",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error
+                    );
+                }
                 return;
             }
         }

@@ -69,13 +69,23 @@
                                     Background="{DynamicResource BackgroundLightBrush}">
                                 <Border.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="Connect" Click="ServerContextMenu_Connect_Click"/>
-                                        <MenuItem Header="Disconnect" Click="ServerContextMenu_Disconnect_Click"/>
+                                        <MenuItem Header="Connect" Click="ServerContextMenu_Connect_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x1F517;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Disconnect" Click="ServerContextMenu_Disconnect_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x274C;"/></MenuItem.Icon>
+                                        </MenuItem>
                                         <Separator/>
-                                        <MenuItem Header="Toggle Favorite" Click="ServerContextMenu_ToggleFavorite_Click"/>
+                                        <MenuItem Header="Toggle Favorite" Click="ServerContextMenu_ToggleFavorite_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x2B50;"/></MenuItem.Icon>
+                                        </MenuItem>
                                         <Separator/>
-                                        <MenuItem Header="Edit..." Click="ServerContextMenu_Edit_Click"/>
-                                        <MenuItem Header="Remove" Click="ServerContextMenu_Remove_Click"/>
+                                        <MenuItem Header="Edit..." Click="ServerContextMenu_Edit_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Remove" Click="ServerContextMenu_Remove_Click">
+                                            <MenuItem.Icon><TextBlock Text="&#x1F5D1;"/></MenuItem.Icon>
+                                        </MenuItem>
                                     </ContextMenu>
                                 </Border.ContextMenu>
                                 <Grid>

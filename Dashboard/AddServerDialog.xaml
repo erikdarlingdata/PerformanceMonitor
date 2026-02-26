@@ -26,6 +26,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Header -->
@@ -50,29 +51,40 @@
                 <!-- Authentication Type -->
                 <TextBlock Text="Authentication:" FontWeight="Bold" Margin="0,0,0,5"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
+                <StackPanel Margin="0,0,0,15">
                     <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication"
                                  GroupName="Auth" IsChecked="True"
                                  Foreground="{DynamicResource ForegroundBrush}"
-                                 Checked="AuthType_Changed" Margin="0,0,20,0"/>
+                                 Checked="AuthType_Changed" Margin="0,0,0,4"/>
                     <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication"
                                  GroupName="Auth"
                                  Foreground="{DynamicResource ForegroundBrush}"
-                                 Checked="AuthType_Changed"/>
+                                 Checked="AuthType_Changed" Margin="0,0,0,4"/>
+                    <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft Entra MFA"
+                                 GroupName="Auth"
+                                 Foreground="{DynamicResource ForegroundBrush}"
+                                 Checked="AuthType_Changed"
+                                 ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
                 </StackPanel>
 
-                <!-- SQL Authentication Fields (initially disabled) -->
-                <Border x:Name="SqlAuthPanel" IsEnabled="False">
-                    <StackPanel>
-                        <TextBlock Text="Username:" FontWeight="Bold" Margin="0,0,0,5"
-                                   Foreground="{DynamicResource ForegroundBrush}"/>
-                        <TextBox x:Name="UsernameTextBox" Height="25" Margin="0,0,0,15"/>
+                <!-- SQL Authentication Fields -->
+                <StackPanel x:Name="SqlAuthPanel" Visibility="Collapsed" Margin="0,0,0,15">
+                    <TextBlock Text="Username:" FontWeight="Bold" Margin="0,0,0,5"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="UsernameTextBox" Height="25" Margin="0,0,0,15"/>
 
-                        <TextBlock Text="Password:" FontWeight="Bold" Margin="0,0,0,5"
-                                   Foreground="{DynamicResource ForegroundBrush}"/>
-                        <PasswordBox x:Name="PasswordBox" Height="25" Margin="0,0,0,15"/>
-                    </StackPanel>
-                </Border>
+                    <TextBlock Text="Password:" FontWeight="Bold" Margin="0,0,0,5"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <PasswordBox x:Name="PasswordBox" Height="25" Margin="0,0,0,0"/>
+                </StackPanel>
+
+                <!-- Microsoft Entra MFA Fields -->
+                <StackPanel x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,15">
+                    <TextBlock Text="Username (optional):" FontWeight="Bold" Margin="0,0,0,5"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="EntraMfaUsernameBox" Height="25" Margin="0,0,0,0"
+                             ToolTip="Optional: Pre-populate the authentication dialog with this email address"/>
+                </StackPanel>
 
                 <!-- Description -->
                 <TextBlock Text="Description (optional):" FontWeight="Bold" Margin="0,0,0,5"
@@ -114,10 +126,15 @@
             </StackPanel>
         </ScrollViewer>
 
+        <!-- Status -->
+        <TextBlock x:Name="StatusText" Grid.Row="2"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                   TextWrapping="Wrap" Margin="0,8,0,0" Visibility="Collapsed"/>
+
         <!-- Buttons -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
-            <Button Content="Test Connection" Width="120" Height="30" Margin="0,0,10,0" Click="TestConnection_Click"/>
-            <Button Content="Save" Width="80" Height="30" Margin="0,0,10,0" Click="Save_Click" IsDefault="True"/>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+            <Button x:Name="TestConnectionButton" Content="Test Connection" Width="120" Height="30" Margin="0,0,10,0" Click="TestConnection_Click"/>
+            <Button x:Name="SaveButton" Content="Save" Width="80" Height="30" Margin="0,0,10,0" Click="Save_Click" IsDefault="True"/>
             <Button Content="Cancel" Width="80" Height="30" Click="Cancel_Click" IsCancel="True"/>
         </StackPanel>
     </Grid>

@@ -722,7 +722,7 @@ namespace PerformanceMonitorDashboard
 
                     MessageBox.Show(
                         $"Server '{server.DisplayName}' added successfully!\n\n" +
-                        (server.UseWindowsAuth ? "Using Windows Authentication" : "Credentials saved securely to Windows Credential Manager"),
+                        (server.AuthenticationType == Models.AuthenticationTypes.Windows ? "Using Windows Authentication" : $"Using {server.AuthenticationDisplay} — credentials saved securely to Windows Credential Manager"),
                         "Server Added",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information
@@ -768,7 +768,7 @@ namespace PerformanceMonitorDashboard
 
                         MessageBox.Show(
                             $"Server '{updatedServer.DisplayName}' updated successfully!\n\n" +
-                            (updatedServer.UseWindowsAuth ? "Using Windows Authentication" : "Credentials updated securely in Windows Credential Manager"),
+                            (updatedServer.AuthenticationType == Models.AuthenticationTypes.Windows ? "Using Windows Authentication" : $"Using {updatedServer.AuthenticationDisplay} — credentials updated securely in Windows Credential Manager"),
                             "Server Updated",
                             MessageBoxButton.OK,
                             MessageBoxImage.Information

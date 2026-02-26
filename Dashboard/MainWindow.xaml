@@ -128,13 +128,23 @@
                     </ListView.ItemTemplate>
                     <ListView.ContextMenu>
                         <ContextMenu Opened="ServerContextMenu_Opened">
-                            <MenuItem Header="Open in New Tab" Click="OpenServerTab_Click"/>
-                            <MenuItem Header="Check Connection" Click="CheckConnection_Click"/>
-                            <MenuItem Header="Edit Server..." Click="EditServer_Click"/>
+                            <MenuItem Header="Open in New Tab" Click="OpenServerTab_Click">
+                                <MenuItem.Icon><TextBlock Text="&#x1F5C2;"/></MenuItem.Icon>
+                            </MenuItem>
+                            <MenuItem Header="Check Connection" Click="CheckConnection_Click">
+                                <MenuItem.Icon><TextBlock Text="&#x2705;"/></MenuItem.Icon>
+                            </MenuItem>
+                            <MenuItem Header="Edit Server..." Click="EditServer_Click">
+                                <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
+                            </MenuItem>
                             <Separator/>
-                            <MenuItem x:Name="ToggleFavoriteMenuItem" Header="Set as Favorite" Click="ToggleFavorite_Click"/>
+                            <MenuItem x:Name="ToggleFavoriteMenuItem" Header="Set as Favorite" Click="ToggleFavorite_Click">
+                                <MenuItem.Icon><TextBlock Text="&#x2B50;"/></MenuItem.Icon>
+                            </MenuItem>
                             <Separator/>
-                            <MenuItem Header="Remove Server" Click="RemoveServer_Click"/>
+                            <MenuItem Header="Remove Server" Click="RemoveServer_Click">
+                                <MenuItem.Icon><TextBlock Text="&#x1F5D1;"/></MenuItem.Icon>
+                            </MenuItem>
                         </ContextMenu>
                     </ListView.ContextMenu>
                 </ListView>
