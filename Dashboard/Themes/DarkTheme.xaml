@@ -276,6 +276,11 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+                <Setter Property="Background" Value="#1A472A"/>
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- Tab Close Button Style -->

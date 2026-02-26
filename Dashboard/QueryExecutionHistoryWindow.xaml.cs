@@ -66,11 +66,19 @@ namespace PerformanceMonitorDashboard
 
             ApplyDarkModeToChart();
             Loaded += QueryExecutionHistoryWindow_Loaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            Closed += (s, e) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
         private void ApplyDarkModeToChart()
         {
             Helpers.TabHelpers.ApplyDarkModeToChart(HistoryChart);
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            ApplyDarkModeToChart();
+            HistoryChart.Refresh();
         }
 
         private async void QueryExecutionHistoryWindow_Loaded(object sender, RoutedEventArgs e)

@@ -111,6 +111,9 @@ namespace PerformanceMonitorDashboard.Models
         // Navigation settings
         public bool FocusServerTabOnClick { get; set; } = true;
 
+        // Color theme ("Dark" or "Light")
+        public string ColorTheme { get; set; } = "Dark";
+
         // Update check settings
         public bool CheckForUpdatesOnStartup { get; set; } = true;
 

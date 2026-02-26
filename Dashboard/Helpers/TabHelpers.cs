@@ -147,23 +147,40 @@ namespace PerformanceMonitorDashboard.Helpers
         }
 
         /// <summary>
-        /// Applies the Darling Data dark theme to a ScottPlot chart.
+        /// Applies the current color theme to a ScottPlot chart.
         /// </summary>
         public static void ApplyDarkModeToChart(WpfPlot chart)
         {
-            // Grafana-inspired dark theme colors
-            var darkBackground = ScottPlot.Color.FromHex("#22252b");
-            var darkerBackground = ScottPlot.Color.FromHex("#111217");
-            var textColor = ScottPlot.Color.FromHex("#9DA5B4");
-            var gridColor = ScottPlot.Colors.White.WithAlpha(40);
+            ScottPlot.Color figureBackground, dataBackground, textColor, gridColor, legendBg, legendFg, legendOutline;
 
-            chart.Plot.FigureBackground.Color = darkBackground;
-            chart.Plot.DataBackground.Color = darkerBackground;
+            if (ThemeManager.IsLight)
+            {
+                figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
+                dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
+                textColor        = ScottPlot.Color.FromHex("#4A5568");
+                gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
+                legendBg         = ScottPlot.Color.FromHex("#FFFFFF");
+                legendFg         = ScottPlot.Color.FromHex("#1A1D23");
+                legendOutline    = ScottPlot.Color.FromHex("#DEE2E6");
+            }
+            else
+            {
+                figureBackground = ScottPlot.Color.FromHex("#22252b");
+                dataBackground   = ScottPlot.Color.FromHex("#111217");
+                textColor        = ScottPlot.Color.FromHex("#9DA5B4");
+                gridColor        = ScottPlot.Colors.White.WithAlpha(40);
+                legendBg         = ScottPlot.Color.FromHex("#22252b");
+                legendFg         = ScottPlot.Color.FromHex("#E4E6EB");
+                legendOutline    = ScottPlot.Color.FromHex("#2a2d35");
+            }
+
+            chart.Plot.FigureBackground.Color = figureBackground;
+            chart.Plot.DataBackground.Color = dataBackground;
             chart.Plot.Axes.Color(textColor);
             chart.Plot.Grid.MajorLineColor = gridColor;
-            chart.Plot.Legend.BackgroundColor = darkBackground;
-            chart.Plot.Legend.FontColor = ScottPlot.Color.FromHex("#E4E6EB");
-            chart.Plot.Legend.OutlineColor = ScottPlot.Color.FromHex("#2a2d35");
+            chart.Plot.Legend.BackgroundColor = legendBg;
+            chart.Plot.Legend.FontColor = legendFg;
+            chart.Plot.Legend.OutlineColor = legendOutline;
             chart.Plot.Legend.Alignment = ScottPlot.Alignment.LowerCenter;
             chart.Plot.Legend.Orientation = ScottPlot.Orientation.Horizontal;
             chart.Plot.Axes.Margins(bottom: 0); // No bottom margin - SetChartYLimitsWithLegendPadding handles Y-axis
@@ -176,16 +193,34 @@ namespace PerformanceMonitorDashboard.Helpers
         }
 
         /// <summary>
-        /// Reapplies dark mode text colors to chart axes.
+        /// Reapplies theme-appropriate text colors to chart axes.
         /// Call this AFTER DateTimeTicksBottom() or other axis modifications.
         /// </summary>
         public static void ReapplyAxisColors(WpfPlot chart)
         {
-            var textColor = ScottPlot.Color.FromHex("#9DA5B4");
+            var textColor = ThemeManager.IsLight
+                ? ScottPlot.Color.FromHex("#4A5568")
+                : ScottPlot.Color.FromHex("#9DA5B4");
             chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
             chart.Plot.Axes.Left.Label.ForeColor = textColor;
+        }
+
+        /// <summary>
+        /// Recursively finds all WpfPlot chart controls in a visual tree.
+        /// Use this to apply theme updates to all charts in a control on theme switch.
+        /// </summary>
+        public static IEnumerable<WpfPlot> GetAllCharts(DependencyObject root)
+        {
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            {
+                var child = VisualTreeHelper.GetChild(root, i);
+                if (child is WpfPlot plot)
+                    yield return plot;
+                foreach (var nested in GetAllCharts(child))
+                    yield return nested;
+            }
         }
 
         /// <summary>
@@ -238,25 +273,37 @@ namespace PerformanceMonitorDashboard.Helpers
         }
 
         /// <summary>
-        /// Applies dark theme styling to a WPF Calendar control.
+        /// Applies theme-appropriate styling to a WPF Calendar control (used by DatePicker popup).
         /// </summary>
         public static void ApplyDarkThemeToCalendar(System.Windows.Controls.Calendar calendar)
         {
-            var darkBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#111217"));
-            var lightBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b"));
-            var whiteFg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB"));
-            var mutedFg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#6B7280"));
-            var accentBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2eaef1"));
+            SolidColorBrush primaryBg, secondaryBg, fg, mutedFg, borderBrush;
 
-            calendar.Background = darkBg;
-            calendar.Foreground = whiteFg;
-            calendar.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35"));
+            if (ThemeManager.IsLight)
+            {
+                primaryBg   = new SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF));
+                secondaryBg = new SolidColorBrush(Color.FromRgb(0xF5, 0xF7, 0xFA));
+                fg          = new SolidColorBrush(Color.FromRgb(0x1A, 0x1D, 0x23));
+                mutedFg     = new SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96));
+                borderBrush = new SolidColorBrush(Color.FromRgb(0xDE, 0xE2, 0xE6));
+            }
+            else
+            {
+                primaryBg   = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#111217"));
+                secondaryBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b"));
+                fg          = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB"));
+                mutedFg     = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#6B7280"));
+                borderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35"));
+            }
 
-            // Apply to all child controls recursively
-            ApplyDarkThemeRecursively(calendar, darkBg, lightBg, whiteFg, mutedFg);
+            calendar.Background = primaryBg;
+            calendar.Foreground = fg;
+            calendar.BorderBrush = borderBrush;
+
+            ApplyDarkThemeRecursively(calendar, primaryBg, secondaryBg, fg, mutedFg, ThemeManager.IsLight);
         }
 
-        private static void ApplyDarkThemeRecursively(DependencyObject parent, Brush darkBg, Brush lightBg, Brush whiteFg, Brush mutedFg)
+        private static void ApplyDarkThemeRecursively(DependencyObject parent, Brush primaryBg, Brush secondaryBg, Brush fg, Brush mutedFg, bool isLight)
         {
             for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
             {
@@ -264,49 +311,44 @@ namespace PerformanceMonitorDashboard.Helpers
 
                 if (child is System.Windows.Controls.Primitives.CalendarItem calendarItem)
                 {
-                    calendarItem.Background = darkBg;
-                    calendarItem.Foreground = whiteFg;
+                    calendarItem.Background = primaryBg;
+                    calendarItem.Foreground = fg;
                 }
                 else if (child is System.Windows.Controls.Primitives.CalendarDayButton dayButton)
                 {
                     dayButton.Background = Brushes.Transparent;
-                    dayButton.Foreground = whiteFg;
+                    dayButton.Foreground = fg;
                 }
                 else if (child is System.Windows.Controls.Primitives.CalendarButton calButton)
                 {
                     calButton.Background = Brushes.Transparent;
-                    calButton.Foreground = whiteFg;
+                    calButton.Foreground = fg;
                 }
                 else if (child is Button button)
                 {
                     button.Background = Brushes.Transparent;
-                    button.Foreground = whiteFg;
+                    button.Foreground = fg;
                 }
                 else if (child is TextBlock textBlock)
                 {
-                    textBlock.Foreground = whiteFg;
+                    textBlock.Foreground = fg;
                 }
-                else if (child is Border border)
+                else if (!isLight)
                 {
-                    // Apply dark background to any border with a light background
-                    if (border.Background is SolidColorBrush bg)
+                    // Dark mode only: replace any light-colored backgrounds with the dark theme color
+                    if (child is Border border && border.Background is SolidColorBrush bg)
                     {
-                        // Check if it's a light color (R, G, B all > 200)
                         if (bg.Color.R > 200 && bg.Color.G > 200 && bg.Color.B > 200)
-                            border.Background = darkBg;
+                            border.Background = primaryBg;
                     }
-                }
-                else if (child is Grid grid)
-                {
-                    // Apply dark background to any grid with a light background
-                    if (grid.Background is SolidColorBrush gridBg)
+                    else if (child is Grid grid && grid.Background is SolidColorBrush gridBg)
                     {
                         if (gridBg.Color.R > 200 && gridBg.Color.G > 200 && gridBg.Color.B > 200)
-                            grid.Background = darkBg;
+                            grid.Background = primaryBg;
                     }
                 }
 
-                ApplyDarkThemeRecursively(child, darkBg, lightBg, whiteFg, mutedFg);
+                ApplyDarkThemeRecursively(child, primaryBg, secondaryBg, fg, mutedFg, isLight);
             }
         }
 

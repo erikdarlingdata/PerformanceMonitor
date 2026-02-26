@@ -8,10 +8,6 @@
              d:DesignHeight="450" d:DesignWidth="800">
     <UserControl.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="pack://application:,,,/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
-
             <!-- Context Menu for DataGrid Copy/Export -->
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
@@ -43,9 +39,9 @@
         <!-- Date Selection Controls -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,5" Background="{DynamicResource BackgroundLightBrush}" Height="40">
             <TextBlock Text="Summary Date:" VerticalAlignment="Center" Margin="5,0" FontWeight="Bold"/>
-            <Button x:Name="DailySummaryTodayButton" Content="Today" Click="DailySummaryToday_Click" Margin="5,0" Padding="8,4" MinWidth="60" Style="{StaticResource AccentButton}"/>
+            <Button x:Name="DailySummaryTodayButton" Content="Today" Click="DailySummaryToday_Click" Margin="5,0" Padding="8,4" MinWidth="60" Style="{DynamicResource AccentButton}"/>
             <DatePicker x:Name="DailySummaryDatePicker" Width="120" Margin="5,0" SelectedDateChanged="DailySummaryDate_Changed" CalendarOpened="DatePicker_CalendarOpened"/>
-            <Button Content="Refresh" Click="DailySummary_Refresh_Click" Margin="10,0,2,0" Padding="10,4" MinWidth="70" Style="{StaticResource SuccessButton}"/>
+            <Button Content="Refresh" Click="DailySummary_Refresh_Click" Margin="10,0,2,0" Padding="10,4" MinWidth="70" Style="{DynamicResource SuccessButton}"/>
             <TextBlock x:Name="DailySummaryIndicator"
                        Text="Showing: Today"
                        Margin="10,0"

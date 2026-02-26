@@ -8,9 +8,6 @@
              xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF">
         <UserControl.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
             <converters:NullToBooleanConverter x:Key="NullToBooleanConverter"/>
             <converters:StatusToBrushConverter x:Key="StatusToBrushConverter"/>
             <converters:LatencyToBrushConverter x:Key="LatencyToBrushConverter"/>
@@ -91,22 +88,22 @@
                 <!-- Row 1: Time Range Buttons -->
                 <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal">
                     <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
-                    <Button x:Name="GlobalLast1HourButton" Content="1 Hour" Click="GlobalTimeRange_Click" Tag="1" Style="{StaticResource TimeRangeButton}"/>
-                    <Button x:Name="GlobalLast4HoursButton" Content="4 Hours" Click="GlobalTimeRange_Click" Tag="4" Style="{StaticResource TimeRangeButton}"/>
-                    <Button x:Name="GlobalLast8HoursButton" Content="8 Hours" Click="GlobalTimeRange_Click" Tag="8" Style="{StaticResource TimeRangeButton}"/>
-                    <Button x:Name="GlobalLast12HoursButton" Content="12 Hours" Click="GlobalTimeRange_Click" Tag="12" Style="{StaticResource TimeRangeButton}"/>
-                    <Button x:Name="GlobalLast24HoursButton" Content="24 Hours" Click="GlobalTimeRange_Click" Tag="24" Style="{StaticResource TimeRangeButton}"/>
-                    <Button x:Name="GlobalLast7DaysButton" Content="7 Days" Click="GlobalTimeRange_Click" Tag="168" Style="{StaticResource TimeRangeButton}"/>
-                    <Button x:Name="GlobalLast30DaysButton" Content="30 Days" Click="GlobalTimeRange_Click" Tag="720" Style="{StaticResource TimeRangeButton}"/>
+                    <Button x:Name="GlobalLast1HourButton" Content="1 Hour" Click="GlobalTimeRange_Click" Tag="1" Style="{DynamicResource TimeRangeButton}"/>
+                    <Button x:Name="GlobalLast4HoursButton" Content="4 Hours" Click="GlobalTimeRange_Click" Tag="4" Style="{DynamicResource TimeRangeButton}"/>
+                    <Button x:Name="GlobalLast8HoursButton" Content="8 Hours" Click="GlobalTimeRange_Click" Tag="8" Style="{DynamicResource TimeRangeButton}"/>
+                    <Button x:Name="GlobalLast12HoursButton" Content="12 Hours" Click="GlobalTimeRange_Click" Tag="12" Style="{DynamicResource TimeRangeButton}"/>
+                    <Button x:Name="GlobalLast24HoursButton" Content="24 Hours" Click="GlobalTimeRange_Click" Tag="24" Style="{DynamicResource TimeRangeButton}"/>
+                    <Button x:Name="GlobalLast7DaysButton" Content="7 Days" Click="GlobalTimeRange_Click" Tag="168" Style="{DynamicResource TimeRangeButton}"/>
+                    <Button x:Name="GlobalLast30DaysButton" Content="30 Days" Click="GlobalTimeRange_Click" Tag="720" Style="{DynamicResource TimeRangeButton}"/>
                 </StackPanel>
 
                 <!-- Row 1: Action Buttons and Status -->
                 <StackPanel Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Vertical" Margin="15,0,0,0">
                     <StackPanel Orientation="Horizontal">
-                        <Button x:Name="ApplyToAllButton" Content="Apply to All Tabs" Click="ApplyToAllTabs_Click" Margin="2,0" Padding="12,5" Style="{StaticResource AccentButton}"/>
-                        <Button x:Name="RefreshButton" Content="Refresh Tab" Click="RefreshButton_Click" Margin="2,0" Padding="12,5" Style="{StaticResource SuccessButton}"/>
+                        <Button x:Name="ApplyToAllButton" Content="Apply to All Tabs" Click="ApplyToAllTabs_Click" Margin="2,0" Padding="12,5" Style="{DynamicResource AccentButton}"/>
+                        <Button x:Name="RefreshButton" Content="Refresh Tab" Click="RefreshButton_Click" Margin="2,0" Padding="12,5" Style="{DynamicResource SuccessButton}"/>
                         <ToggleButton x:Name="AutoRefreshToggle" Content="Auto-Refresh: Off" Click="AutoRefreshToggle_Click" Margin="8,0,2,0" Padding="12,5" MinWidth="130" ToolTip="Toggle auto-refresh on/off. Configure interval in Settings."/>
-                        <Button Content="Edit Schedules" Click="EditSchedules_Click" Margin="8,0,2,0" Padding="12,5" Style="{StaticResource AccentButton}" ToolTip="Edit collector schedules (frequency, retention, enabled/disabled)"/>
+                        <Button Content="Edit Schedules" Click="EditSchedules_Click" Margin="8,0,2,0" Padding="12,5" Style="{DynamicResource AccentButton}" ToolTip="Edit collector schedules (frequency, retention, enabled/disabled)"/>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="2,4,0,0">
                         <TextBlock x:Name="GlobalDateRangeIndicator"

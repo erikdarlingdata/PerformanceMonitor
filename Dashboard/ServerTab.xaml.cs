@@ -113,6 +113,7 @@ namespace PerformanceMonitorDashboard
             Loaded += ServerTab_Loaded;
             Unloaded += ServerTab_Unloaded;
             KeyDown += ServerTab_KeyDown;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
             Focusable = true;
 
             // Initialize Overview sub-tab UserControls
@@ -315,13 +316,11 @@ namespace PerformanceMonitorDashboard
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.IsChecked = true;
                 AutoRefreshToggle.Content = $"Auto-Refresh: {prefs.AutoRefreshIntervalSeconds}s";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1A472A")); // Dark green when active
             }
             else
             {
                 AutoRefreshToggle.IsChecked = false;
                 AutoRefreshToggle.Content = "Auto-Refresh: Off";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35")); // Gray when inactive
             }
         }
 
@@ -332,9 +331,19 @@ namespace PerformanceMonitorDashboard
             _autoRefreshTimer = null;
 
             // Unsubscribe event handlers to prevent memory leaks
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
             Loaded -= ServerTab_Loaded;
             Unloaded -= ServerTab_Unloaded;
             KeyDown -= ServerTab_KeyDown;
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var chart in Helpers.TabHelpers.GetAllCharts(this))
+            {
+                Helpers.TabHelpers.ApplyDarkModeToChart(chart);
+                chart.Refresh();
+            }
         }
 
         public void RefreshAutoRefreshSettings()
@@ -422,7 +431,6 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.Content = $"Auto-Refresh: {prefs.AutoRefreshIntervalSeconds}s";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1A472A")); // Dark green when active
             }
             else
             {
@@ -433,7 +441,6 @@ namespace PerformanceMonitorDashboard
                 _autoRefreshTimer?.Stop();
                 _autoRefreshTimer = null;
                 AutoRefreshToggle.Content = "Auto-Refresh: Off";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35")); // Gray when inactive
             }
         }
 
@@ -837,22 +844,20 @@ namespace PerformanceMonitorDashboard
 
         private void ClearTimeButtonHighlights()
         {
-            // Use dark theme background color (#404040)
-            var defaultBrush = new SolidColorBrush(Color.FromRgb(0x40, 0x40, 0x40));
             GlobalLast1HourButton.FontWeight = FontWeights.Normal;
-            GlobalLast1HourButton.Background = defaultBrush;
+            GlobalLast1HourButton.ClearValue(Control.BackgroundProperty);
             GlobalLast4HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast4HoursButton.Background = defaultBrush;
+            GlobalLast4HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast8HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast8HoursButton.Background = defaultBrush;
+            GlobalLast8HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast12HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast12HoursButton.Background = defaultBrush;
+            GlobalLast12HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast24HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast24HoursButton.Background = defaultBrush;
+            GlobalLast24HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast7DaysButton.FontWeight = FontWeights.Normal;
-            GlobalLast7DaysButton.Background = defaultBrush;
+            GlobalLast7DaysButton.ClearValue(Control.BackgroundProperty);
             GlobalLast30DaysButton.FontWeight = FontWeights.Normal;
-            GlobalLast30DaysButton.Background = defaultBrush;
+            GlobalLast30DaysButton.ClearValue(Control.BackgroundProperty);
         }
 
         private void HighlightTimeButton(int hours)

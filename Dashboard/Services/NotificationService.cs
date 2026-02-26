@@ -27,35 +27,43 @@ namespace PerformanceMonitorDashboard.Services
         {
             _mainWindow = mainWindow;
             _preferencesService = preferencesService ?? new UserPreferencesService();
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
         }
 
         public void Initialize()
         {
             // Dispose any existing icon first
-            _trayIcon?.Dispose();
+            if (_trayIcon != null)
+            {
+                _trayIcon.Visibility = Visibility.Collapsed;
+                _trayIcon.Dispose();
+                _trayIcon = null;
+            }
 
             _trayIcon = new TaskbarIcon();
 
-            /* Custom dark tooltip (native ToolTipText uses Windows light theme) */
+            bool isLight = Helpers.ThemeManager.IsLight;
+
+            /* Custom tooltip styled to match current theme */
             _trayIcon.TrayToolTip = new Border
             {
-                Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b")),
-                BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#33363e")),
+                Background = new SolidColorBrush(isLight
+                    ? (Color)ColorConverter.ConvertFromString("#FFFFFF")
+                    : (Color)ColorConverter.ConvertFromString("#22252b")),
+                BorderBrush = new SolidColorBrush(isLight
+                    ? (Color)ColorConverter.ConvertFromString("#DEE2E6")
+                    : (Color)ColorConverter.ConvertFromString("#33363e")),
                 BorderThickness = new Thickness(1),
                 Padding = new Thickness(10, 8, 10, 8),
                 CornerRadius = new CornerRadius(4),
                 Child = new TextBlock
                 {
                     Text = "SQL Server Performance Monitor",
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                    Foreground = new SolidColorBrush(isLight
+                        ? (Color)ColorConverter.ConvertFromString("#1A1D23")
+                        : (Color)ColorConverter.ConvertFromString("#E4E6EB")),
                     FontSize = 12
                 }
-            };
-
-            // Load dark theme for context menu styling
-            var darkTheme = new ResourceDictionary
-            {
-                Source = new Uri("pack://application:,,,/Themes/DarkTheme.xaml", UriKind.Absolute)
             };
 
             // Load icon from embedded resource using pack URI
@@ -69,9 +77,7 @@ namespace PerformanceMonitorDashboard.Services
                 // Icon loading failed, tray icon will be blank but functional
             }
 
-            // Create context menu with dark theme
             var contextMenu = new ContextMenu();
-            contextMenu.Resources.MergedDictionaries.Add(darkTheme);
 
             var showItem = new MenuItem
             {
@@ -280,15 +286,25 @@ namespace PerformanceMonitorDashboard.Services
         {
             if (_disposed) return;
 
-            if (disposing && _trayIcon != null)
+            if (disposing)
             {
-                // Hide the icon before disposing to ensure it's removed from tray
-                _trayIcon.Visibility = Visibility.Collapsed;
-                _trayIcon.Dispose();
-                _trayIcon = null;
+                Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+
+                if (_trayIcon != null)
+                {
+                    // Hide the icon before disposing to ensure it's removed from tray
+                    _trayIcon.Visibility = Visibility.Collapsed;
+                    _trayIcon.Dispose();
+                    _trayIcon = null;
+                }
             }
 
             _disposed = true;
+        }
+
+        private void OnThemeChanged(string theme)
+        {
+            _mainWindow.Dispatcher.InvokeAsync(Initialize);
         }
 
     }
