@@ -91,7 +91,6 @@ public static class PerfmonPacks
             "Temp Tables Creation Rate",
             "Workfiles Created/sec",
             "Worktables Created/sec",
-            "Forwarded Records/sec",
         ],
         ["Lock / Blocking"] =
         [
