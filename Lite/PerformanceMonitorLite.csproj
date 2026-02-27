@@ -7,7 +7,7 @@
     <AssemblyName>PerformanceMonitorLite</AssemblyName>
     <RootNamespace>PerformanceMonitorLite</RootNamespace>
     <Product>SQL Server Performance Monitor Lite</Product>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <Description>Lightweight SQL Server performance monitoring - no installation required on target servers</Description>
