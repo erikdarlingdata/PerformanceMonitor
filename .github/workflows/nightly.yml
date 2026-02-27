@@ -1,0 +1,148 @@
+name: Nightly Build
+
+on:
+  schedule:
+    # 6:00 AM UTC (1:00 AM EST / 2:00 AM EDT)
+    - cron: '0 6 * * *'
+  workflow_dispatch: # manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Check for new commits in last 24 hours
+        id: check
+        run: |
+          RECENT=$(git log --since="24 hours ago" --oneline | head -1)
+          if [ -n "$RECENT" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "New commits found — building nightly"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No new commits — skipping nightly build"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Setup .NET 8.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Set nightly version
+        id: version
+        shell: pwsh
+        run: |
+          $base = ([xml](Get-Content Dashboard/Dashboard.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $date = Get-Date -Format "yyyyMMdd"
+          $nightly = "$base-nightly.$date"
+          echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
+          echo "Nightly version: $nightly"
+
+      - name: Restore dependencies
+        run: |
+          dotnet restore Dashboard/Dashboard.csproj
+          dotnet restore Lite/PerformanceMonitorLite.csproj
+          dotnet restore Installer/PerformanceMonitorInstaller.csproj
+          dotnet restore InstallerGui/InstallerGui.csproj
+          dotnet restore Lite.Tests/Lite.Tests.csproj
+
+      - name: Run tests
+        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --verbosity normal
+
+      - name: Publish Dashboard
+        run: dotnet publish Dashboard/Dashboard.csproj -c Release -o publish/Dashboard
+
+      - name: Publish Lite
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
+
+      - name: Publish CLI Installer
+        run: dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
+
+      - name: Publish GUI Installer
+        run: dotnet publish InstallerGui/InstallerGui.csproj -c Release
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          New-Item -ItemType Directory -Force -Path releases
+
+          Compress-Archive -Path 'publish/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
+          Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
+
+          $instDir = 'publish/Installer'
+          New-Item -ItemType Directory -Force -Path $instDir
+          New-Item -ItemType Directory -Force -Path "$instDir/install"
+          New-Item -ItemType Directory -Force -Path "$instDir/upgrades"
+
+          Copy-Item 'Installer/bin/Release/net8.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
+          Copy-Item 'InstallerGui/bin/Release/net8.0-windows/win-x64/publish/PerformanceMonitorInstallerGui.exe' $instDir -ErrorAction SilentlyContinue
+          Copy-Item 'install/*.sql' "$instDir/install/"
+          if (Test-Path 'install/templates') { Copy-Item 'install/templates' "$instDir/install/templates" -Recurse -ErrorAction SilentlyContinue }
+          if (Test-Path 'upgrades') { Copy-Item 'upgrades/*' "$instDir/upgrades/" -Recurse -ErrorAction SilentlyContinue }
+          if (Test-Path 'README.md') { Copy-Item 'README.md' $instDir }
+          if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $instDir }
+          if (Test-Path 'THIRD_PARTY_NOTICES.md') { Copy-Item 'THIRD_PARTY_NOTICES.md' $instDir }
+
+          Compress-Archive -Path 'publish/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $checksums = Get-ChildItem releases/*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          }
+          $checksums | Out-File -FilePath releases/SHA256SUMS.txt -Encoding utf8
+          Write-Host "Checksums:"
+          $checksums | ForEach-Object { Write-Host $_ }
+
+      - name: Delete previous nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete nightly --yes --cleanup-tag 2>$null; exit 0
+        shell: pwsh
+
+      - name: Create nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $sha = git rev-parse --short HEAD
+          $body = @"
+          Automated nightly build from ``dev`` branch.
+
+          **Version:** ``$version``
+          **Commit:** ``$sha``
+          **Built:** $(Get-Date -Format "yyyy-MM-dd HH:mm UTC")
+
+          > These builds include the latest changes and may be unstable.
+          > For production use, download the [latest stable release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest).
+          "@
+
+          gh release create nightly `
+            --target dev `
+            --title "Nightly Build ($version)" `
+            --notes $body `
+            --prerelease `
+            releases/*.zip releases/SHA256SUMS.txt
