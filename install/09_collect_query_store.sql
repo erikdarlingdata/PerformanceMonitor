@@ -145,16 +145,16 @@ BEGIN
         END;
 
         /*
-        First run detection - collect 3 days of history if this is the first execution
+        First run detection - collect last 1 hour of history if this is the first execution
         */
         IF NOT EXISTS (SELECT 1/0 FROM collect.query_store_data)
         AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'query_store_collector')
         BEGIN
-            SET @cutoff_time = TODATETIMEOFFSET(DATEADD(DAY, -3, SYSUTCDATETIME()), 0);
+            SET @cutoff_time = TODATETIMEOFFSET(DATEADD(HOUR, -1, SYSUTCDATETIME()), 0);
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting last 3 days of Query Store data', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting last 1 hour of Query Store data', 0, 1) WITH NOWAIT;
             END;
         END;
         ELSE
