@@ -236,17 +236,29 @@ public static class PlanAnalyzer
         // Rule 5: Large estimate vs actual row gaps (actual plans only)
         if (node.HasActualStats && node.EstimateRows > 0)
         {
-            var ratio = node.ActualRows / node.EstimateRows;
-            if (ratio >= 10.0 || ratio <= 0.1)
+            if (node.ActualRows == 0)
             {
-                var direction = ratio >= 10.0 ? "underestimated" : "overestimated";
-                var factor = ratio >= 10.0 ? ratio : 1.0 / ratio;
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Row Estimate Mismatch",
-                    Message = $"Estimated {node.EstimateRows:N0} rows, actual {node.ActualRows:N0} ({factor:F0}x {direction}). May cause poor plan choices.",
-                    Severity = factor >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
+                    Message = $"Estimated {node.EstimateRows:N0} rows, actual 0 rows returned. May cause poor plan choices.",
+                    Severity = node.EstimateRows >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                 });
+            }
+            else
+            {
+                var ratio = node.ActualRows / node.EstimateRows;
+                if (ratio >= 10.0 || ratio <= 0.1)
+                {
+                    var direction = ratio >= 10.0 ? "underestimated" : "overestimated";
+                    var factor = ratio >= 10.0 ? ratio : 1.0 / ratio;
+                    node.Warnings.Add(new PlanWarning
+                    {
+                        WarningType = "Row Estimate Mismatch",
+                        Message = $"Estimated {node.EstimateRows:N0} rows, actual {node.ActualRows:N0} ({factor:F0}x {direction}). May cause poor plan choices.",
+                        Severity = factor >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
+                    });
+                }
             }
         }
 
@@ -270,10 +282,12 @@ public static class PlanAnalyzer
         }
 
         // Rule 8: Parallel thread skew (actual plans with per-thread stats)
+        // Only warn when there are enough rows to meaningfully distribute across threads
         if (node.PerThreadStats.Count > 1)
         {
             var totalRows = node.PerThreadStats.Sum(t => t.ActualRows);
-            if (totalRows > 0)
+            var minRowsForSkew = node.PerThreadStats.Count * 1000;
+            if (totalRows >= minRowsForSkew)
             {
                 var maxThread = node.PerThreadStats.OrderByDescending(t => t.ActualRows).First();
                 var skewRatio = (double)maxThread.ActualRows / totalRows;
@@ -448,25 +462,37 @@ public static class PlanAnalyzer
             });
         }
 
-        // Rule 24: Top above a scan (linear search pattern)
-        if (node.PhysicalOp == "Top" && node.Children.Count > 0)
+        // Rule 24: Top above a scan on the inner side of Nested Loops
+        // This pattern means the scan executes once per outer row, and the Top
+        // limits each iteration — but with no supporting index the scan is a
+        // linear search repeated potentially millions of times.
+        if (node.PhysicalOp == "Nested Loops" && node.Children.Count >= 2)
         {
-            // Walk through pass-through operators (Compute Scalar, etc.)
-            var child = node.Children[0];
-            while (child.PhysicalOp == "Compute Scalar" && child.Children.Count > 0)
-                child = child.Children[0];
+            var inner = node.Children[1];
 
-            if (IsRowstoreScan(child))
+            // Walk through pass-through operators to find Top
+            while (inner.PhysicalOp == "Compute Scalar" && inner.Children.Count > 0)
+                inner = inner.Children[0];
+
+            if (inner.PhysicalOp == "Top" && inner.Children.Count > 0)
             {
-                var predInfo = !string.IsNullOrEmpty(child.Predicate)
-                    ? " The scan has a residual predicate, so it may read many rows before the Top is satisfied."
-                    : "";
-                node.Warnings.Add(new PlanWarning
+                // Walk through pass-through operators below the Top to find the scan
+                var scanCandidate = inner.Children[0];
+                while (scanCandidate.PhysicalOp == "Compute Scalar" && scanCandidate.Children.Count > 0)
+                    scanCandidate = scanCandidate.Children[0];
+
+                if (IsRowstoreScan(scanCandidate))
                 {
-                    WarningType = "Top Above Scan",
-                    Message = $"Top operator reads from {child.PhysicalOp} (Node {child.NodeId}).{predInfo} An index supporting the filter and ordering may convert this to a seek.",
-                    Severity = PlanWarningSeverity.Warning
-                });
+                    var predInfo = !string.IsNullOrEmpty(scanCandidate.Predicate)
+                        ? " The scan has a residual predicate, so it may read many rows before the Top is satisfied."
+                        : "";
+                    inner.Warnings.Add(new PlanWarning
+                    {
+                        WarningType = "Top Above Scan",
+                        Message = $"Top operator reads from {scanCandidate.PhysicalOp} (Node {scanCandidate.NodeId}) on the inner side of Nested Loops (Node {node.NodeId}).{predInfo} An index supporting the filter and ordering may convert this to a seek.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
             }
         }
     }
