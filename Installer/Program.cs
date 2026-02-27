@@ -19,14 +19,12 @@ using Microsoft.Data.SqlClient;
 
 namespace PerformanceMonitorInstaller
 {
-    class Program
+    partial class Program
     {
         /*
         Pre-compiled regex patterns for performance
         */
-        private static readonly Regex GoBatchPattern = new Regex(
-            @"^\s*GO\s*(?:--[^\r\n]*)?\s*$",
-            RegexOptions.Compiled | RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        private static readonly Regex GoBatchPattern = GoBatchRegExp();
 
         private static readonly Regex SqlFileNamePattern = new Regex(
             @"^\d{2}[a-z]?_.*\.sql$",
@@ -1792,5 +1790,8 @@ END";
 
             return reportPath;
         }
+
+        [GeneratedRegex(@"^\s*GO\s*(?:--[^\r\n]*)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled, "en-GB")]
+        private static partial Regex GoBatchRegExp();
     }
 }
