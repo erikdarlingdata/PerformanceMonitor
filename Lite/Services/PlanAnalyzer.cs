@@ -351,40 +351,49 @@ public static class PlanAnalyzer
             });
         }
 
-        // Rule 13: Mismatched data types (GetRangeWithMismatchedTypes)
-        if (node.PhysicalOp == "Compute Scalar" &&
-            !string.IsNullOrEmpty(node.DefinedValues) &&
-            node.DefinedValues.Contains("GetRangeWithMismatchedTypes", StringComparison.OrdinalIgnoreCase))
+        // Rule 13: Mismatched data types (GetRangeWithMismatchedTypes / GetRangeThroughConvert)
+        if (node.PhysicalOp == "Compute Scalar" && !string.IsNullOrEmpty(node.DefinedValues))
         {
-            node.Warnings.Add(new PlanWarning
+            var hasMismatch = node.DefinedValues.Contains("GetRangeWithMismatchedTypes", StringComparison.OrdinalIgnoreCase);
+            var hasConvert = node.DefinedValues.Contains("GetRangeThroughConvert", StringComparison.OrdinalIgnoreCase);
+
+            if (hasMismatch || hasConvert)
             {
-                WarningType = "Data Type Mismatch",
-                Message = "Implicit conversion due to mismatched data types. The column type does not match the parameter or literal type, forcing SQL Server to convert values at runtime. Fix the parameter type to match the column.",
-                Severity = PlanWarningSeverity.Warning
-            });
+                var reason = hasMismatch
+                    ? "Implicit conversion due to mismatched data types. The column type does not match the parameter or literal type, forcing SQL Server to convert values at runtime. Fix the parameter type to match the column."
+                    : "Implicit conversion through CONVERT/CAST on a column. SQL Server must convert values at runtime, which can prevent index seeks. Remove the conversion or add a computed column.";
+
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Data Type Mismatch",
+                    Message = reason,
+                    Severity = PlanWarningSeverity.Warning
+                });
+            }
         }
 
         // Rule 14: Lazy Table Spool unfavorable rebind/rewind ratio
+        // Rebinds = cache misses (child re-executes), rewinds = cache hits (reuse cached result)
         if (node.LogicalOp == "Lazy Spool")
         {
             var rebinds = node.HasActualStats ? (double)node.ActualRebinds : node.EstimateRebinds;
             var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
             var source = node.HasActualStats ? "actual" : "estimated";
 
-            if (rebinds > 100 && (rewinds == 0 || rebinds * 2 >= rewinds))
+            if (rebinds > 100 && rewinds < rebinds * 5)
             {
-                var severity = rebinds > rewinds
+                var severity = rewinds < rebinds
                     ? PlanWarningSeverity.Critical
                     : PlanWarningSeverity.Warning;
 
                 var ratio = rewinds > 0
-                    ? $"{rewinds / rebinds:F1}x more rewinds (cache hits) than rebinds (cache misses)"
+                    ? $"{rewinds / rebinds:F1}x rewinds (cache hits) per rebind (cache miss)"
                     : "no rewinds (cache hits) at all";
 
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Lazy Spool Ineffective",
-                    Message = $"Lazy spool has unfavorable rebind/rewind ratio ({source}): {rebinds:N0} rebinds, {rewinds:N0} rewinds — {ratio}. The spool cache is not providing significant benefit.",
+                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds, {rewinds:N0} rewinds — {ratio}. The spool cache is not earning its overhead.",
                     Severity = severity
                 });
             }
