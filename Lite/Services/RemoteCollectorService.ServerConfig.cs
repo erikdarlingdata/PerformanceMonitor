@@ -332,27 +332,18 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT
     d.name
 FROM sys.databases AS d
+LEFT JOIN sys.dm_hadr_database_replica_states AS drs
+    ON d.database_id = drs.database_id
+    AND drs.is_local = 1
 WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
 AND   d.state_desc = N'ONLINE'
-AND   d.database_id NOT IN
-      (
-          SELECT
-              d2.database_id
-          FROM sys.databases AS d2
-          JOIN sys.availability_replicas AS r
-            ON d2.replica_id = r.replica_id
-          WHERE NOT EXISTS
-                (
-                    SELECT
-                        1/0
-                    FROM sys.dm_hadr_availability_group_states AS s
-                    WHERE s.primary_replica = r.replica_server_name
-                )
-          AND   r.secondary_role_allow_connections_desc = N'READ_ONLY'
-          AND   r.replica_server_name = @@SERVERNAME
-      )
+AND
+(
+    drs.database_id IS NULL          /*not in any AG*/
+    OR drs.is_primary_replica = 1    /*primary replica*/
+)
 ORDER BY d.name
 OPTION(RECOMPILE);";
 

@@ -299,28 +299,19 @@ BEGIN
             SELECT
                 d.name
             FROM sys.databases AS d
+            LEFT JOIN sys.dm_hadr_database_replica_states AS drs
+                ON d.database_id = drs.database_id
+                AND drs.is_local = 1
             WHERE d.state_desc = N'ONLINE'
             AND   d.database_id > 4
             AND   d.is_read_only = 0
             AND   d.name <> N'PerformanceMonitor'
             AND   d.database_id < 32761 /*exclude contained AG system databases*/
-            AND   d.database_id NOT IN
-                  (
-                      SELECT
-                          d2.database_id
-                      FROM sys.databases AS d2
-                      JOIN sys.availability_replicas AS r
-                        ON d2.replica_id = r.replica_id
-                      WHERE NOT EXISTS
-                            (
-                                SELECT
-                                    1/0
-                                FROM sys.dm_hadr_availability_group_states AS s
-                                WHERE s.primary_replica = r.replica_server_name
-                            )
-                      AND   r.secondary_role_allow_connections_desc = N'READ_ONLY'
-                      AND   r.replica_server_name = @@SERVERNAME
-                  )
+            AND
+            (
+                drs.database_id IS NULL          /*not in any AG*/
+                OR drs.is_primary_replica = 1    /*primary replica*/
+            )
             OPTION(RECOMPILE);
 
         OPEN @db_check_cursor;
