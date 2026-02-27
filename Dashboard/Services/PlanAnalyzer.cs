@@ -399,15 +399,16 @@ public static class PlanAnalyzer
             }
         }
 
-        // Rule 15: Join OR clause (Concatenation + Constant Scan under Merge Interval)
-        // Pattern: Merge Interval → TopN Sort → Concatenation → Constant Scans
+        // Rule 15: Join OR clause (Concatenation + Constant Scan under join/Merge Interval)
+        // Best signal: Merge Interval → TopN Sort → Concatenation → Constant Scans
+        // Also fires under a join ancestor (broader catch)
         if (node.PhysicalOp == "Concatenation")
         {
             var constantScanBranches = node.Children
                 .Count(c => c.PhysicalOp == "Constant Scan" ||
                             c.Children.Any(gc => gc.PhysicalOp == "Constant Scan"));
 
-            if (constantScanBranches >= 2 && HasMergeIntervalAncestor(node))
+            if (constantScanBranches >= 2 && (HasMergeIntervalAncestor(node) || HasJoinAncestor(node)))
             {
                 node.Warnings.Add(new PlanWarning
                 {
@@ -620,6 +621,22 @@ public static class PlanAnalyzer
         while (ancestor != null)
         {
             if (ancestor.PhysicalOp == "Merge Interval")
+                return true;
+            ancestor = ancestor.Parent;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Checks whether a node has any join ancestor.
+    /// </summary>
+    private static bool HasJoinAncestor(PlanNode node)
+    {
+        var ancestor = node.Parent;
+        while (ancestor != null)
+        {
+            if (ancestor.LogicalOp != null &&
+                ancestor.LogicalOp.Contains("Join", StringComparison.OrdinalIgnoreCase))
                 return true;
             ancestor = ancestor.Parent;
         }
