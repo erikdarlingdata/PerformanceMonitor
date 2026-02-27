@@ -186,6 +186,12 @@
                           Margin="0,0,0,10"
                           Foreground="{DynamicResource ForegroundBrush}"/>
 
+                <!-- Preserve Jobs Checkbox -->
+                <CheckBox x:Name="PreserveJobsCheckBox"
+                          Content="Keep existing SQL Agent jobs (owner, schedule, notifications)"
+                          Margin="0,0,0,10"
+                          Foreground="{DynamicResource ForegroundBrush}"/>
+
                 <!-- Validation Checkbox -->
                 <CheckBox x:Name="ValidationCheckBox"
                           Content="Run validation after install (recommended)"

@@ -21,9 +21,21 @@ GO
 /*
 Create SQL Server Agent Jobs for Performance Monitor
 These jobs automate data collection and retention
+
+When @preserve_jobs = 1, existing jobs are left untouched (owner,
+schedule, notifications, etc.) and only missing jobs are created.
+The installer sets this to 1 when --preserve-jobs is specified.
 */
 
+DECLARE
+    @preserve_jobs bit = 0;
+
 PRINT 'Creating SQL Server Agent jobs for Performance Monitor';
+
+IF @preserve_jobs = 1
+BEGIN
+    PRINT '(preserve mode — existing jobs will not be modified)';
+END;
 PRINT '';
 
 /*
@@ -31,11 +43,8 @@ Job 1: PerformanceMonitor - Collection
 Runs scheduled master collector every 1 minute
 The collector checks config.collection_schedule to determine which collectors should run
 */
-
-/*
-Drop existing job if it exists
-*/
-IF EXISTS
+IF @preserve_jobs = 0
+AND EXISTS
 (
     SELECT
         1/0
@@ -72,48 +81,55 @@ BEGIN
     PRINT 'Dropped existing PerformanceMonitor - Collection job';
 END;
 
-/*
-Create the collection job
-*/
-EXECUTE msdb.dbo.sp_add_job
-    @job_name = N'PerformanceMonitor - Collection',
-    @enabled = 1,
-    @description = N'Runs scheduled master collector to execute collectors based on config.collection_schedule',
-    @category_name = N'Data Collector';
+IF NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM msdb.dbo.sysjobs AS j
+    WHERE j.name = N'PerformanceMonitor - Collection'
+)
+BEGIN
+    EXECUTE msdb.dbo.sp_add_job
+        @job_name = N'PerformanceMonitor - Collection',
+        @enabled = 1,
+        @description = N'Runs scheduled master collector to execute collectors based on config.collection_schedule',
+        @category_name = N'Data Collector';
 
-EXECUTE msdb.dbo.sp_add_jobstep
-    @job_name = N'PerformanceMonitor - Collection',
-    @step_name = N'Run Scheduled Master Collector',
-    @subsystem = N'TSQL',
-    @database_name = N'PerformanceMonitor',
-    @command = N'EXECUTE collect.scheduled_master_collector @debug = 0;',
-    @retry_attempts = 0,
-    @on_success_action = 1; /*Quit with success*/
+    EXECUTE msdb.dbo.sp_add_jobstep
+        @job_name = N'PerformanceMonitor - Collection',
+        @step_name = N'Run Scheduled Master Collector',
+        @subsystem = N'TSQL',
+        @database_name = N'PerformanceMonitor',
+        @command = N'EXECUTE collect.scheduled_master_collector @debug = 0;',
+        @retry_attempts = 0,
+        @on_success_action = 1; /*Quit with success*/
 
-EXECUTE msdb.dbo.sp_add_jobschedule
-    @job_name = N'PerformanceMonitor - Collection',
-    @name = N'Every 1 Minute',
-    @freq_type = 4, /*Daily*/
-    @freq_interval = 1,
-    @freq_subday_type = 4, /*Minutes*/
-    @freq_subday_interval = 1; /*Every 1 minute*/
+    EXECUTE msdb.dbo.sp_add_jobschedule
+        @job_name = N'PerformanceMonitor - Collection',
+        @name = N'Every 1 Minute',
+        @freq_type = 4, /*Daily*/
+        @freq_interval = 1,
+        @freq_subday_type = 4, /*Minutes*/
+        @freq_subday_interval = 1; /*Every 1 minute*/
 
-EXECUTE msdb.dbo.sp_add_jobserver
-    @job_name = N'PerformanceMonitor - Collection',
-    @server_name = N'(local)';
+    EXECUTE msdb.dbo.sp_add_jobserver
+        @job_name = N'PerformanceMonitor - Collection',
+        @server_name = N'(local)';
 
-PRINT 'Created PerformanceMonitor - Collection job (runs every 1 minute)';
+    PRINT 'Created PerformanceMonitor - Collection job (runs every 1 minute)';
+END;
+ELSE IF @preserve_jobs = 1
+BEGIN
+    PRINT 'PerformanceMonitor - Collection job already exists — preserving current settings';
+END;
 PRINT '';
 
 /*
 Job 2: PerformanceMonitor - Data Retention
 Purges old performance monitoring data daily at 2am
 */
-
-/*
-Drop existing job if it exists
-*/
-IF EXISTS
+IF @preserve_jobs = 0
+AND EXISTS
 (
     SELECT
         1/0
@@ -150,47 +166,54 @@ BEGIN
     PRINT 'Dropped existing PerformanceMonitor - Data Retention job';
 END;
 
-/*
-Create the data retention job
-*/
-EXECUTE msdb.dbo.sp_add_job
-    @job_name = N'PerformanceMonitor - Data Retention',
-    @enabled = 1,
-    @description = N'Purges old performance monitoring data',
-    @category_name = N'Data Collector';
+IF NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM msdb.dbo.sysjobs AS j
+    WHERE j.name = N'PerformanceMonitor - Data Retention'
+)
+BEGIN
+    EXECUTE msdb.dbo.sp_add_job
+        @job_name = N'PerformanceMonitor - Data Retention',
+        @enabled = 1,
+        @description = N'Purges old performance monitoring data',
+        @category_name = N'Data Collector';
 
-EXECUTE msdb.dbo.sp_add_jobstep
-    @job_name = N'PerformanceMonitor - Data Retention',
-    @step_name = N'Run Data Retention',
-    @subsystem = N'TSQL',
-    @database_name = N'PerformanceMonitor',
-    @command = N'EXECUTE config.data_retention @debug = 1;',
-    @retry_attempts = 0,
-    @on_success_action = 1; /*Quit with success*/
+    EXECUTE msdb.dbo.sp_add_jobstep
+        @job_name = N'PerformanceMonitor - Data Retention',
+        @step_name = N'Run Data Retention',
+        @subsystem = N'TSQL',
+        @database_name = N'PerformanceMonitor',
+        @command = N'EXECUTE config.data_retention @debug = 1;',
+        @retry_attempts = 0,
+        @on_success_action = 1; /*Quit with success*/
 
-EXECUTE msdb.dbo.sp_add_jobschedule
-    @job_name = N'PerformanceMonitor - Data Retention',
-    @name = N'Daily at 2am',
-    @freq_type = 4, /*Daily*/
-    @freq_interval = 1,
-    @active_start_time = 20000; /*2:00 AM*/
+    EXECUTE msdb.dbo.sp_add_jobschedule
+        @job_name = N'PerformanceMonitor - Data Retention',
+        @name = N'Daily at 2am',
+        @freq_type = 4, /*Daily*/
+        @freq_interval = 1,
+        @active_start_time = 20000; /*2:00 AM*/
 
-EXECUTE msdb.dbo.sp_add_jobserver
-    @job_name = N'PerformanceMonitor - Data Retention',
-    @server_name = N'(local)';
+    EXECUTE msdb.dbo.sp_add_jobserver
+        @job_name = N'PerformanceMonitor - Data Retention',
+        @server_name = N'(local)';
 
-PRINT 'Created PerformanceMonitor - Data Retention job (runs daily at 2:00 AM)';
+    PRINT 'Created PerformanceMonitor - Data Retention job (runs daily at 2:00 AM)';
+END;
+ELSE IF @preserve_jobs = 1
+BEGIN
+    PRINT 'PerformanceMonitor - Data Retention job already exists — preserving current settings';
+END;
 PRINT '';
 
 /*
 Job 3: PerformanceMonitor - Hung Job Monitor
 Monitors the collection job for hung state every 5 minutes
 */
-
-/*
-Drop existing job if it exists
-*/
-IF EXISTS
+IF @preserve_jobs = 0
+AND EXISTS
 (
     SELECT
         1/0
@@ -227,42 +250,52 @@ BEGIN
     PRINT 'Dropped existing PerformanceMonitor - Hung Job Monitor job';
 END;
 
-/*
-Create the hung job monitor job
-*/
-EXECUTE msdb.dbo.sp_add_job
-    @job_name = N'PerformanceMonitor - Hung Job Monitor',
-    @enabled = 1,
-    @description = N'Monitors collection job for hung state and stops it if needed',
-    @category_name = N'Data Collector';
+IF NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM msdb.dbo.sysjobs AS j
+    WHERE j.name = N'PerformanceMonitor - Hung Job Monitor'
+)
+BEGIN
+    EXECUTE msdb.dbo.sp_add_job
+        @job_name = N'PerformanceMonitor - Hung Job Monitor',
+        @enabled = 1,
+        @description = N'Monitors collection job for hung state and stops it if needed',
+        @category_name = N'Data Collector';
 
-EXECUTE msdb.dbo.sp_add_jobstep
-    @job_name = N'PerformanceMonitor - Hung Job Monitor',
-    @step_name = N'Check for Hung Collection Job',
-    @subsystem = N'TSQL',
-    @database_name = N'PerformanceMonitor',
-    @command = N'EXECUTE config.check_hung_collector_job
+    EXECUTE msdb.dbo.sp_add_jobstep
+        @job_name = N'PerformanceMonitor - Hung Job Monitor',
+        @step_name = N'Check for Hung Collection Job',
+        @subsystem = N'TSQL',
+        @database_name = N'PerformanceMonitor',
+        @command = N'EXECUTE config.check_hung_collector_job
     @job_name = N''PerformanceMonitor - Collection'',
     @normal_max_duration_minutes = 5,
     @first_run_max_duration_minutes = 30,
     @stop_hung_job = 1,
     @debug = 0;',
-    @retry_attempts = 0,
-    @on_success_action = 1; /*Quit with success*/
+        @retry_attempts = 0,
+        @on_success_action = 1; /*Quit with success*/
 
-EXECUTE msdb.dbo.sp_add_jobschedule
-    @job_name = N'PerformanceMonitor - Hung Job Monitor',
-    @name = N'Every 5 Minutes',
-    @freq_type = 4, /*Daily*/
-    @freq_interval = 1,
-    @freq_subday_type = 4, /*Minutes*/
-    @freq_subday_interval = 5; /*Every 5 minutes*/
+    EXECUTE msdb.dbo.sp_add_jobschedule
+        @job_name = N'PerformanceMonitor - Hung Job Monitor',
+        @name = N'Every 5 Minutes',
+        @freq_type = 4, /*Daily*/
+        @freq_interval = 1,
+        @freq_subday_type = 4, /*Minutes*/
+        @freq_subday_interval = 5; /*Every 5 minutes*/
 
-EXECUTE msdb.dbo.sp_add_jobserver
-    @job_name = N'PerformanceMonitor - Hung Job Monitor',
-    @server_name = N'(local)';
+    EXECUTE msdb.dbo.sp_add_jobserver
+        @job_name = N'PerformanceMonitor - Hung Job Monitor',
+        @server_name = N'(local)';
 
-PRINT 'Created PerformanceMonitor - Hung Job Monitor job (runs every 5 minutes)';
+    PRINT 'Created PerformanceMonitor - Hung Job Monitor job (runs every 5 minutes)';
+END;
+ELSE IF @preserve_jobs = 1
+BEGIN
+    PRINT 'PerformanceMonitor - Hung Job Monitor job already exists — preserving current settings';
+END;
 PRINT '';
 
 /*

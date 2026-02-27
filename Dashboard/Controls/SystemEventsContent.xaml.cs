@@ -130,6 +130,27 @@ namespace PerformanceMonitorDashboard.Controls
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
 
+            // Apply dark theme immediately so charts don't flash white before data loads
+            TabHelpers.ApplyDarkModeToChart(BadPagesChart);
+            TabHelpers.ApplyDarkModeToChart(DumpRequestsChart);
+            TabHelpers.ApplyDarkModeToChart(AccessViolationsChart);
+            TabHelpers.ApplyDarkModeToChart(WriteAccessViolationsChart);
+            TabHelpers.ApplyDarkModeToChart(NonYieldingTasksChart);
+            TabHelpers.ApplyDarkModeToChart(LatchWarningsChart);
+            TabHelpers.ApplyDarkModeToChart(SickSpinlocksChart);
+            TabHelpers.ApplyDarkModeToChart(CpuComparisonChart);
+            TabHelpers.ApplyDarkModeToChart(SevereErrorsChart);
+            TabHelpers.ApplyDarkModeToChart(IOIssuesChart);
+            TabHelpers.ApplyDarkModeToChart(LongestPendingIOChart);
+            TabHelpers.ApplyDarkModeToChart(SchedulerIssuesChart);
+            TabHelpers.ApplyDarkModeToChart(MemoryConditionsChart);
+            TabHelpers.ApplyDarkModeToChart(CPUTasksChart);
+            TabHelpers.ApplyDarkModeToChart(MemoryBrokerChart);
+            TabHelpers.ApplyDarkModeToChart(MemoryBrokerRatioChart);
+            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMChart);
+            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMUtilChart);
+            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMMemoryChart);
+
             _badPagesHover = new Helpers.ChartHoverHelper(BadPagesChart, "events");
             _dumpRequestsHover = new Helpers.ChartHoverHelper(DumpRequestsChart, "events");
             _accessViolationsHover = new Helpers.ChartHoverHelper(AccessViolationsChart, "events");

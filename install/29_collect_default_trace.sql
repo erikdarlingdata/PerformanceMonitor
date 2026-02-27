@@ -110,17 +110,17 @@ BEGIN
         END;
 
         /*
-        First run detection - collect all available trace data if this is the first execution
+        First run detection - collect last 1 hour of trace data if this is the first execution
         Ignore CONFIG_CHANGE entries when checking for first run (those are just from enabling the trace)
         */
         IF NOT EXISTS (SELECT 1/0 FROM collect.default_trace_events)
         AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'default_trace_collector' AND collection_status = N'SUCCESS')
         BEGIN
-            SET @cutoff_time = CONVERT(datetime2(7), '19000101');
+            SET @cutoff_time = DATEADD(HOUR, -1, SYSDATETIME());
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting all available default trace events', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting last 1 hour of default trace events', 0, 1) WITH NOWAIT;
             END;
         END;
 

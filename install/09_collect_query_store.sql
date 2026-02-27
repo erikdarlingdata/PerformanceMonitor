@@ -145,16 +145,16 @@ BEGIN
         END;
 
         /*
-        First run detection - collect 3 days of history if this is the first execution
+        First run detection - collect last 1 hour of history if this is the first execution
         */
         IF NOT EXISTS (SELECT 1/0 FROM collect.query_store_data)
         AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'query_store_collector')
         BEGIN
-            SET @cutoff_time = TODATETIMEOFFSET(DATEADD(DAY, -3, SYSUTCDATETIME()), 0);
+            SET @cutoff_time = TODATETIMEOFFSET(DATEADD(HOUR, -1, SYSUTCDATETIME()), 0);
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting last 3 days of Query Store data', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting last 1 hour of Query Store data', 0, 1) WITH NOWAIT;
             END;
         END;
         ELSE
@@ -199,6 +199,19 @@ BEGIN
             DECLARE @debug_msg nvarchar(200) = N'Collecting Query Store data with cutoff time: ' + CONVERT(nvarchar(50), @cutoff_time, 127);
             RAISERROR(@debug_msg, 0, 1) WITH NOWAIT;
         END;
+
+        /*
+        Read collection flags for query text and plans
+        */
+        DECLARE
+            @collect_query bit = 1,
+            @collect_plan bit = 1;
+
+        SELECT
+            @collect_query = cs.collect_query,
+            @collect_plan = cs.collect_plan
+        FROM config.collection_schedule AS cs
+        WHERE cs.collector_name = N'query_store_collector';
 
         /*
         Create temp table to hold Query Store data from all databases
@@ -291,6 +304,23 @@ BEGIN
             AND   d.is_read_only = 0
             AND   d.name <> N'PerformanceMonitor'
             AND   d.database_id < 32761 /*exclude contained AG system databases*/
+            AND   d.database_id NOT IN
+                  (
+                      SELECT
+                          d2.database_id
+                      FROM sys.databases AS d2
+                      JOIN sys.availability_replicas AS r
+                        ON d2.replica_id = r.replica_id
+                      WHERE NOT EXISTS
+                            (
+                                SELECT
+                                    1/0
+                                FROM sys.dm_hadr_availability_group_states AS s
+                                WHERE s.primary_replica = r.replica_server_name
+                            )
+                      AND   r.secondary_role_allow_connections_desc = N'READ_ONLY'
+                      AND   r.replica_server_name = @@SERVERNAME
+                  )
             OPTION(RECOMPILE);
 
         OPEN @db_check_cursor;
@@ -391,8 +421,20 @@ BEGIN
                         WHEN q.object_id > 0
                         AND  o.object_id IS NOT NULL
                         THEN o.object_name
-                    END,
-                query_sql_text = qt.query_sql_text,
+                    END,';
+
+            IF @collect_query = 1
+            BEGIN
+                SET @sql += N'
+                query_sql_text = qt.query_sql_text,';
+            END;
+            ELSE
+            BEGIN
+                SET @sql += N'
+                query_sql_text = NULL,';
+            END;
+
+            SET @sql += N'
                 query_hash = q.query_hash,
                 count_executions = rs.count_executions,
                 avg_duration = rs.avg_duration,
@@ -484,8 +526,20 @@ BEGIN
                 is_forced_plan = p.is_forced_plan,
                 p.force_failure_count,
                 p.last_force_failure_reason_desc,
-                p.compatibility_level,
-                query_plan_text = CONVERT(nvarchar(max), p.query_plan),
+                p.compatibility_level,';
+
+            IF @collect_plan = 1
+            BEGIN
+                SET @sql += N'
+                query_plan_text = CONVERT(nvarchar(max), p.query_plan),';
+            END;
+            ELSE
+            BEGIN
+                SET @sql += N'
+                query_plan_text = NULL,';
+            END;
+
+            SET @sql += N'
                 compilation_metrics =
                     (
                         SELECT

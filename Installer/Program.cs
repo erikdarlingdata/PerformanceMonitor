@@ -95,6 +95,7 @@ namespace PerformanceMonitorInstaller
                 Console.WriteLine("  -h, --help           Show this help message");
                 Console.WriteLine("  --reinstall          Drop existing database and perform clean install");
                 Console.WriteLine("  --reset-schedule     Reset collection schedule to recommended defaults");
+                Console.WriteLine("  --preserve-jobs      Keep existing SQL Agent jobs (owner, schedule, notifications)");
                 Console.WriteLine("  --encrypt=<level>    Connection encryption: mandatory (default), optional, strict");
                 Console.WriteLine("  --trust-cert         Trust server certificate without validation");
                 Console.WriteLine();
@@ -115,6 +116,7 @@ namespace PerformanceMonitorInstaller
             bool automatedMode = args.Length > 0;
             bool reinstallMode = args.Any(a => a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase));
             bool resetSchedule = args.Any(a => a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase));
+            bool preserveJobs = args.Any(a => a.Equals("--preserve-jobs", StringComparison.OrdinalIgnoreCase));
             bool trustCert = args.Any(a => a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase));
 
             /*Parse encryption option (default: Mandatory)*/
@@ -135,6 +137,7 @@ namespace PerformanceMonitorInstaller
             var filteredArgs = args
                 .Where(a => !a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase))
+                .Where(a => !a.Equals("--preserve-jobs", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase))
                 .ToArray();
@@ -651,6 +654,16 @@ END";
                         {
                             sqlContent = "TRUNCATE TABLE [PerformanceMonitor].[config].[collection_schedule];\nGO\n" + sqlContent;
                             Console.Write("(resetting schedule) ");
+                        }
+
+                        /*
+                        Preserve existing SQL Agent jobs if requested — flip the T-SQL
+                        variable so existing jobs are left untouched during upgrade
+                        */
+                        if (preserveJobs && fileName.StartsWith("45_", StringComparison.Ordinal))
+                        {
+                            sqlContent = sqlContent.Replace("@preserve_jobs bit = 0", "@preserve_jobs bit = 1");
+                            Console.Write("(preserving existing jobs) ");
                         }
 
                         /*

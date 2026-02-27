@@ -45,6 +45,12 @@ public partial class PlanViewerControl : UserControl
     // Current property section for collapsible groups
     private StackPanel? _currentPropertySection;
 
+    // Canvas panning
+    private bool _isPanning;
+    private Point _panStart;
+    private double _panStartOffsetX;
+    private double _panStartOffsetY;
+
     public PlanViewerControl()
     {
         InitializeComponent();
@@ -81,33 +87,18 @@ public partial class PlanViewerControl : UserControl
         EmptyState.Visibility = Visibility.Collapsed;
         PlanScrollViewer.Visibility = Visibility.Visible;
 
-        // Populate statement selector
+        // Populate statement grid for multi-statement plans
         if (allStatements.Count > 1)
         {
-            StatementSelector.Items.Clear();
-            for (int i = 0; i < allStatements.Count; i++)
-            {
-                var s = allStatements[i];
-                var text = s.StatementText.Length > 80
-                    ? s.StatementText[..80] + "..."
-                    : s.StatementText;
-                if (string.IsNullOrWhiteSpace(text))
-                    text = $"Statement {i + 1}";
-                StatementSelector.Items.Add(new ComboBoxItem
-                {
-                    Content = $"[{s.StatementSubTreeCost:F4}] {text}",
-                    Tag = i
-                });
-            }
-            StatementSelector.SelectedIndex = 0;
-            StatementLabel.Visibility = Visibility.Visible;
-            StatementSelector.Visibility = Visibility.Visible;
+            PopulateStatementsGrid(allStatements);
+            ShowStatementsPanel();
             CostText.Visibility = Visibility.Visible;
+            // Auto-select first statement to render it
+            if (StatementsGrid.Items.Count > 0)
+                StatementsGrid.SelectedIndex = 0;
         }
         else
         {
-            StatementLabel.Visibility = Visibility.Collapsed;
-            StatementSelector.Visibility = Visibility.Collapsed;
             CostText.Visibility = Visibility.Collapsed;
             RenderStatement(allStatements[0]);
         }
@@ -123,8 +114,7 @@ public partial class PlanViewerControl : UserControl
         PlanScrollViewer.Visibility = Visibility.Collapsed;
         MissingIndexBanner.Visibility = Visibility.Collapsed;
         WarningsBanner.Visibility = Visibility.Collapsed;
-        StatementLabel.Visibility = Visibility.Collapsed;
-        StatementSelector.Visibility = Visibility.Collapsed;
+        CloseStatementsPanel();
         CostText.Text = "";
         CostText.Visibility = Visibility.Collapsed;
         ClosePropertiesPanel();
@@ -698,17 +688,17 @@ public partial class PlanViewerControl : UserControl
 
             // Timing
             if (node.ActualElapsedMs > 0 || node.ActualCPUMs > 0
-                || node.UdfCpuTimeUs > 0 || node.UdfElapsedTimeUs > 0)
+                || node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
             {
                 AddPropertySection("Actual Timing");
                 if (node.ActualElapsedMs > 0)
                     AddPropertyRow("Elapsed Time", $"{node.ActualElapsedMs:N0} ms");
                 if (node.ActualCPUMs > 0)
                     AddPropertyRow("CPU Time", $"{node.ActualCPUMs:N0} ms");
-                if (node.UdfElapsedTimeUs > 0)
-                    AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeUs:N0} us");
-                if (node.UdfCpuTimeUs > 0)
-                    AddPropertyRow("UDF CPU", $"{node.UdfCpuTimeUs:N0} us");
+                if (node.UdfElapsedTimeMs > 0)
+                    AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeMs:N0} ms");
+                if (node.UdfCpuTimeMs > 0)
+                    AddPropertyRow("UDF CPU", $"{node.UdfCpuTimeMs:N0} ms");
             }
 
             // I/O
@@ -1467,19 +1457,242 @@ public partial class PlanViewerControl : UserControl
         }
     }
 
-    private void StatementSelector_Changed(object sender, SelectionChangedEventArgs e)
+    private void PopulateStatementsGrid(List<PlanStatement> statements)
     {
-        if (StatementSelector.SelectedItem is ComboBoxItem item && item.Tag is int index)
-        {
-            var allStatements = _currentPlan?.Batches
-                .SelectMany(b => b.Statements)
-                .Where(s => s.RootNode != null)
-                .ToList();
+        StatementsHeader.Text = $"Statements ({statements.Count})";
 
-            if (allStatements != null && index >= 0 && index < allStatements.Count)
-                RenderStatement(allStatements[index]);
+        var hasActualTimes = statements.Any(s => s.QueryTimeStats != null &&
+            (s.QueryTimeStats.CpuTimeMs > 0 || s.QueryTimeStats.ElapsedTimeMs > 0));
+        var hasUdf = statements.Any(s => s.QueryUdfElapsedTimeMs > 0);
+
+        // Build columns
+        StatementsGrid.Columns.Clear();
+
+        StatementsGrid.Columns.Add(new DataGridTextColumn
+        {
+            Header = "#",
+            Binding = new System.Windows.Data.Binding("Index"),
+            Width = new DataGridLength(40),
+            IsReadOnly = true
+        });
+
+        StatementsGrid.Columns.Add(new DataGridTextColumn
+        {
+            Header = "Query",
+            Binding = new System.Windows.Data.Binding("QueryText"),
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+            IsReadOnly = true
+        });
+
+        if (hasActualTimes)
+        {
+            StatementsGrid.Columns.Add(new DataGridTextColumn
+            {
+                Header = "CPU",
+                Binding = new System.Windows.Data.Binding("CpuDisplay"),
+                Width = new DataGridLength(70),
+                IsReadOnly = true,
+                SortMemberPath = "CpuMs"
+            });
+            StatementsGrid.Columns.Add(new DataGridTextColumn
+            {
+                Header = "Elapsed",
+                Binding = new System.Windows.Data.Binding("ElapsedDisplay"),
+                Width = new DataGridLength(70),
+                IsReadOnly = true,
+                SortMemberPath = "ElapsedMs"
+            });
         }
+
+        if (hasUdf)
+        {
+            StatementsGrid.Columns.Add(new DataGridTextColumn
+            {
+                Header = "UDF",
+                Binding = new System.Windows.Data.Binding("UdfDisplay"),
+                Width = new DataGridLength(70),
+                IsReadOnly = true,
+                SortMemberPath = "UdfMs"
+            });
+        }
+
+        if (!hasActualTimes)
+        {
+            StatementsGrid.Columns.Add(new DataGridTextColumn
+            {
+                Header = "Est. Cost",
+                Binding = new System.Windows.Data.Binding("CostDisplay"),
+                Width = new DataGridLength(80),
+                IsReadOnly = true,
+                SortMemberPath = "EstCost"
+            });
+        }
+
+        StatementsGrid.Columns.Add(new DataGridTextColumn
+        {
+            Header = "\u26A0 Crit",
+            Binding = new System.Windows.Data.Binding("Critical"),
+            Width = new DataGridLength(55),
+            IsReadOnly = true
+        });
+
+        StatementsGrid.Columns.Add(new DataGridTextColumn
+        {
+            Header = "\u26A0 Warn",
+            Binding = new System.Windows.Data.Binding("Warnings"),
+            Width = new DataGridLength(60),
+            IsReadOnly = true
+        });
+
+        // Build rows
+        var rows = new List<StatementRow>();
+        for (int i = 0; i < statements.Count; i++)
+        {
+            var stmt = statements[i];
+            var allWarnings = stmt.PlanWarnings.ToList();
+            if (stmt.RootNode != null)
+                CollectWarnings(stmt.RootNode, allWarnings);
+
+            var text = stmt.StatementText;
+            if (string.IsNullOrWhiteSpace(text))
+                text = $"Statement {i + 1}";
+            if (text.Length > 120)
+                text = text[..120] + "...";
+
+            rows.Add(new StatementRow
+            {
+                Index = i + 1,
+                QueryText = text,
+                CpuMs = stmt.QueryTimeStats?.CpuTimeMs ?? 0,
+                ElapsedMs = stmt.QueryTimeStats?.ElapsedTimeMs ?? 0,
+                UdfMs = stmt.QueryUdfElapsedTimeMs,
+                EstCost = stmt.StatementSubTreeCost,
+                Critical = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
+                Warnings = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Warning),
+                Statement = stmt
+            });
+        }
+
+        StatementsGrid.ItemsSource = rows;
+    }
+
+    private void StatementsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (StatementsGrid.SelectedItem is StatementRow row)
+            RenderStatement(row.Statement);
+    }
+
+    private void ToggleStatements_Click(object sender, RoutedEventArgs e)
+    {
+        if (StatementsPanel.Visibility == Visibility.Visible)
+            CloseStatementsPanel();
+        else
+            ShowStatementsPanel();
+    }
+
+    private void CloseStatements_Click(object sender, RoutedEventArgs e)
+    {
+        CloseStatementsPanel();
+    }
+
+    private void ShowStatementsPanel()
+    {
+        StatementsColumn.Width = new GridLength(450);
+        StatementsSplitterColumn.Width = new GridLength(5);
+        StatementsSplitter.Visibility = Visibility.Visible;
+        StatementsPanel.Visibility = Visibility.Visible;
+        StatementsButton.Visibility = Visibility.Visible;
+        StatementsButtonSeparator.Visibility = Visibility.Visible;
+    }
+
+    private void CloseStatementsPanel()
+    {
+        StatementsPanel.Visibility = Visibility.Collapsed;
+        StatementsSplitter.Visibility = Visibility.Collapsed;
+        StatementsColumn.Width = new GridLength(0);
+        StatementsSplitterColumn.Width = new GridLength(0);
     }
 
     #endregion
+
+    #region Canvas Panning
+
+    private void PlanScrollViewer_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        // Don't pan if clicking on a node
+        if (IsNodeAtPoint(e))
+            return;
+
+        _isPanning = true;
+        _panStart = e.GetPosition(PlanScrollViewer);
+        _panStartOffsetX = PlanScrollViewer.HorizontalOffset;
+        _panStartOffsetY = PlanScrollViewer.VerticalOffset;
+        PlanScrollViewer.Cursor = Cursors.SizeAll;
+        PlanScrollViewer.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void PlanScrollViewer_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isPanning) return;
+
+        var current = e.GetPosition(PlanScrollViewer);
+        var dx = current.X - _panStart.X;
+        var dy = current.Y - _panStart.Y;
+
+        PlanScrollViewer.ScrollToHorizontalOffset(Math.Max(0, _panStartOffsetX - dx));
+        PlanScrollViewer.ScrollToVerticalOffset(Math.Max(0, _panStartOffsetY - dy));
+        e.Handled = true;
+    }
+
+    private void PlanScrollViewer_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_isPanning) return;
+        _isPanning = false;
+        PlanScrollViewer.Cursor = Cursors.Arrow;
+        PlanScrollViewer.ReleaseMouseCapture();
+        e.Handled = true;
+    }
+
+    /// <summary>Check if the mouse event originated from a node Border (has PlanNode in Tag).</summary>
+    private static bool IsNodeAtPoint(MouseButtonEventArgs e)
+    {
+        var source = e.OriginalSource as DependencyObject;
+        while (source != null)
+        {
+            if (source is Border b && b.Tag is PlanNode)
+                return true;
+            source = VisualTreeHelper.GetParent(source);
+        }
+        return false;
+    }
+
+    #endregion
+}
+
+/// <summary>Data model for the statement DataGrid rows.</summary>
+public class StatementRow
+{
+    public int Index { get; set; }
+    public string QueryText { get; set; } = "";
+    public long CpuMs { get; set; }
+    public long ElapsedMs { get; set; }
+    public long UdfMs { get; set; }
+    public double EstCost { get; set; }
+    public int Critical { get; set; }
+    public int Warnings { get; set; }
+    public PlanStatement Statement { get; set; } = null!;
+
+    // Display helpers — grid binds to these, sorting uses the raw properties via SortMemberPath
+    public string CpuDisplay => FormatDuration(CpuMs);
+    public string ElapsedDisplay => FormatDuration(ElapsedMs);
+    public string UdfDisplay => UdfMs > 0 ? FormatDuration(UdfMs) : "";
+    public string CostDisplay => EstCost > 0 ? $"{EstCost:F2}" : "";
+
+    private static string FormatDuration(long ms)
+    {
+        if (ms < 1000) return $"{ms}ms";
+        if (ms < 60_000) return $"{ms / 1000.0:F1}s";
+        return $"{ms / 60_000}m {(ms % 60_000) / 1000}s";
+    }
 }

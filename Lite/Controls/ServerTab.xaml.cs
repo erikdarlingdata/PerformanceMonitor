@@ -158,6 +158,31 @@ public partial class ServerTab : UserControl
             grid.CopyingRowClipboardContent += Helpers.DataGridClipboardBehavior.FixHeaderCopy;
         }
 
+        /* Apply dark theme immediately so charts don't flash white before data loads */
+        ApplyDarkTheme(WaitStatsChart);
+        ApplyDarkTheme(QueryDurationTrendChart);
+        ApplyDarkTheme(ProcDurationTrendChart);
+        ApplyDarkTheme(QueryStoreDurationTrendChart);
+        ApplyDarkTheme(ExecutionCountTrendChart);
+        ApplyDarkTheme(CpuChart);
+        ApplyDarkTheme(MemoryChart);
+        ApplyDarkTheme(MemoryClerksChart);
+        ApplyDarkTheme(MemoryGrantSizingChart);
+        ApplyDarkTheme(MemoryGrantActivityChart);
+        ApplyDarkTheme(FileIoReadChart);
+        ApplyDarkTheme(FileIoWriteChart);
+        ApplyDarkTheme(FileIoReadThroughputChart);
+        ApplyDarkTheme(FileIoWriteThroughputChart);
+        ApplyDarkTheme(TempDbChart);
+        ApplyDarkTheme(TempDbFileIoChart);
+        ApplyDarkTheme(LockWaitTrendChart);
+        ApplyDarkTheme(BlockingTrendChart);
+        ApplyDarkTheme(DeadlockTrendChart);
+        ApplyDarkTheme(CurrentWaitsDurationChart);
+        ApplyDarkTheme(CurrentWaitsBlockedChart);
+        ApplyDarkTheme(PerfmonChart);
+        ApplyDarkTheme(CollectorDurationChart);
+
         /* Chart hover tooltips */
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
         _perfmonHover = new Helpers.ChartHoverHelper(PerfmonChart, "");

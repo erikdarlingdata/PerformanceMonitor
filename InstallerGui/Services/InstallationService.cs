@@ -325,6 +325,7 @@ END;";
             List<string> sqlFiles,
             bool cleanInstall,
             bool resetSchedule = false,
+            bool preserveJobs = false,
             IProgress<InstallationProgress>? progress = null,
             Func<Task>? preValidationAction = null,
             CancellationToken cancellationToken = default)
@@ -418,6 +419,17 @@ END;";
                         progress?.Report(new InstallationProgress
                         {
                             Message = "Resetting schedule to recommended defaults...",
+                            Status = "Info"
+                        });
+                    }
+
+                    /*Preserve existing SQL Agent jobs if requested*/
+                    if (preserveJobs && fileName.StartsWith("45_", StringComparison.Ordinal))
+                    {
+                        sqlContent = sqlContent.Replace("@preserve_jobs bit = 0", "@preserve_jobs bit = 1");
+                        progress?.Report(new InstallationProgress
+                        {
+                            Message = "Preserving existing SQL Agent jobs...",
                             Status = "Info"
                         });
                     }

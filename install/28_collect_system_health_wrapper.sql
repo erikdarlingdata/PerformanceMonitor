@@ -101,16 +101,16 @@ BEGIN
         END;
 
         /*
-        First run detection - collect 3 days of history if this is the first execution
+        First run detection - collect last 1 hour of history if this is the first execution
         */
         IF NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'system_health_collector')
         BEGIN
-            SET @hours_back = 72; /*3 days*/
+            SET @hours_back = 1; /*1 hour*/
             SET @start_date = DATEADD(HOUR, -@hours_back, SYSDATETIMEOFFSET());
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting last 3 days of system health data', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting last 1 hour of system health data', 0, 1) WITH NOWAIT;
             END;
         END;
 

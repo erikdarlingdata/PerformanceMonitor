@@ -107,16 +107,16 @@ BEGIN
         END;
 
         /*
-        First run detection - collect all queries if this is the first execution
+        First run detection - collect last 1 hour of queries if this is the first execution
         */
         IF NOT EXISTS (SELECT 1/0 FROM collect.query_stats)
         AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'query_stats_collector')
         BEGIN
-            SET @cutoff_time = CONVERT(datetime2(7), '19000101');
+            SET @cutoff_time = DATEADD(HOUR, -1, SYSDATETIME());
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting all queries from sys.dm_exec_query_stats', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting last 1 hour of query stats', 0, 1) WITH NOWAIT;
             END;
         END;
         ELSE
@@ -152,6 +152,19 @@ BEGIN
             DECLARE @cutoff_time_string nvarchar(30) = CONVERT(nvarchar(30), @cutoff_time, 120);
             RAISERROR(N'Collecting queries executed since %s', 0, 1, @cutoff_time_string) WITH NOWAIT;
         END;
+
+        /*
+        Read collection flags for query text and plans
+        */
+        DECLARE
+            @collect_query bit = 1,
+            @collect_plan bit = 1;
+
+        SELECT
+            @collect_query = cs.collect_query,
+            @collect_plan = cs.collect_plan
+        FROM config.collection_schedule AS cs
+        WHERE cs.collector_name = N'query_stats_collector';
 
         /*
         Collect query statistics directly from DMV
@@ -255,6 +268,8 @@ BEGIN
             max_spills = qs.max_spills,
             query_text =
                 CASE
+                    WHEN @collect_query = 0
+                    THEN NULL
                     WHEN qs.statement_start_offset = 0
                     AND  qs.statement_end_offset = -1
                     THEN st.text
@@ -272,7 +287,12 @@ BEGIN
                             ) / 2 + 1
                         )
                 END,
-            query_plan_text = tqp.query_plan
+            query_plan_text =
+                CASE
+                    WHEN @collect_plan = 1
+                    THEN tqp.query_plan
+                    ELSE NULL
+                END
         FROM sys.dm_exec_query_stats AS qs
         OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
         OUTER APPLY

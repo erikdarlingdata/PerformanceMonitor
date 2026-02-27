@@ -401,11 +401,13 @@ namespace PerformanceMonitorInstallerGui
                 Community dependencies install automatically before validation (98_validate)
                 */
                 bool resetSchedule = ResetScheduleCheckBox.IsChecked == true;
+                bool preserveJobs = PreserveJobsCheckBox.IsChecked == true;
                 _installationResult = await InstallationService.ExecuteInstallationAsync(
                     _connectionString,
                     _sqlFiles,
                     isCleanInstall,
                     resetSchedule,
+                    preserveJobs,
                     progress,
                     preValidationAction: async () =>
                     {
