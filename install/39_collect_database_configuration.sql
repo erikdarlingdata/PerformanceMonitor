@@ -165,23 +165,6 @@ BEGIN
             AND   d.name != DB_NAME()
             AND   d.state_desc = N'ONLINE'
             AND   d.database_id < 32761 /*exclude contained AG system databases*/
-            AND   d.database_id NOT IN
-                  (
-                      SELECT
-                          d2.database_id
-                      FROM sys.databases AS d2
-                      JOIN sys.availability_replicas AS r
-                        ON d2.replica_id = r.replica_id
-                      WHERE NOT EXISTS
-                            (
-                                SELECT
-                                    1/0
-                                FROM sys.dm_hadr_availability_group_states AS s
-                                WHERE s.primary_replica = r.replica_server_name
-                            )
-                      AND   r.secondary_role_allow_connections_desc = N'READ_ONLY'
-                      AND   r.replica_server_name = @@SERVERNAME
-                  )
             ORDER BY
                 d.name
             OPTION (RECOMPILE);

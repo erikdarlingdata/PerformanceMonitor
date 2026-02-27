@@ -146,7 +146,6 @@ A GUI installer (`PerformanceMonitorInstallerGui.exe`) is also included in the r
 | `USERNAME PASSWORD` | SQL Authentication credentials (positional, optional) |
 | `--reinstall` | Drop existing database and perform clean install |
 | `--reset-schedule` | Reset collection schedule to recommended defaults during upgrade |
-| `--preserve-jobs` | Keep existing SQL Agent jobs unchanged (owner, schedule, notifications) |
 | `--encrypt=optional\|mandatory\|strict` | Connection encryption level (default: mandatory) |
 | `--trust-cert` | Trust server certificate without validation (default: require valid cert) |
 

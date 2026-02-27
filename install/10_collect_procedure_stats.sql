@@ -107,16 +107,16 @@ BEGIN
         END;
 
         /*
-        First run detection - collect last 1 hour of procedures if this is the first execution
+        First run detection - collect all procedures if this is the first execution
         */
         IF NOT EXISTS (SELECT 1/0 FROM collect.procedure_stats)
         AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'procedure_stats_collector')
         BEGIN
-            SET @cutoff_time = DATEADD(HOUR, -1, SYSDATETIME());
+            SET @cutoff_time = CONVERT(datetime2(7), '19000101');
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting last 1 hour of procedure stats', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting all procedures from sys.dm_exec_procedure_stats', 0, 1) WITH NOWAIT;
             END;
         END;
         ELSE
@@ -152,17 +152,6 @@ BEGIN
             DECLARE @cutoff_time_string nvarchar(30) = CONVERT(nvarchar(30), @cutoff_time, 120);
             RAISERROR(N'Collecting procedure stats with cutoff time: %s', 0, 1, @cutoff_time_string) WITH NOWAIT;
         END;
-
-        /*
-        Read collection flag for plans
-        */
-        DECLARE
-            @collect_plan bit = 1;
-
-        SELECT
-            @collect_plan = cs.collect_plan
-        FROM config.collection_schedule AS cs
-        WHERE cs.collector_name = N'procedure_stats_collector';
 
         /*
         Collect procedure, trigger, and function statistics
@@ -234,12 +223,7 @@ BEGIN
             total_spills = ps.total_spills,
             min_spills = ps.min_spills,
             max_spills = ps.max_spills,
-            query_plan_text =
-                CASE
-                    WHEN @collect_plan = 1
-                    THEN CONVERT(nvarchar(max), tqp.query_plan)
-                    ELSE NULL
-                END
+            query_plan_text = CONVERT(nvarchar(max), tqp.query_plan)
         FROM sys.dm_exec_procedure_stats AS ps
         OUTER APPLY
             sys.dm_exec_text_query_plan
@@ -401,12 +385,7 @@ BEGIN
             total_spills = ts.total_spills,
             min_spills = ts.min_spills,
             max_spills = ts.max_spills,
-            query_plan_text =
-                CASE
-                    WHEN @collect_plan = 1
-                    THEN CONVERT(nvarchar(max), tqp.query_plan)
-                    ELSE NULL
-                END
+            query_plan_text = CONVERT(nvarchar(max), tqp.query_plan)
         FROM sys.dm_exec_trigger_stats AS ts
         CROSS APPLY sys.dm_exec_sql_text(ts.sql_handle) AS st
         OUTER APPLY
@@ -465,12 +444,7 @@ BEGIN
             total_spills = NULL,
             min_spills = NULL,
             max_spills = NULL,
-            query_plan_text =
-                CASE
-                    WHEN @collect_plan = 1
-                    THEN CONVERT(nvarchar(max), tqp.query_plan)
-                    ELSE NULL
-                END
+            query_plan_text = CONVERT(nvarchar(max), tqp.query_plan)
         FROM sys.dm_exec_function_stats AS fs
         OUTER APPLY
             sys.dm_exec_text_query_plan

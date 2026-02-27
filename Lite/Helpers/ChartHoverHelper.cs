@@ -68,10 +68,9 @@ internal sealed class ChartHoverHelper
         _lastUpdate = now;
 
         var pos = e.GetPosition(_chart);
-        var dpi = VisualTreeHelper.GetDpi(_chart);
         var pixel = new ScottPlot.Pixel(
-            (float)(pos.X * dpi.DpiScaleX),
-            (float)(pos.Y * dpi.DpiScaleY));
+            (float)(pos.X * _chart.DisplayScale),
+            (float)(pos.Y * _chart.DisplayScale));
         var mouseCoords = _chart.Plot.GetCoordinates(pixel);
 
         double bestDistance = double.MaxValue;

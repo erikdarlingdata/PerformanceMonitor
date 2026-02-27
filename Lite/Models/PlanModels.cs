@@ -272,8 +272,8 @@ public class PlanNode
     public string? ActionColumn { get; set; }
     public long ActualSegmentReads { get; set; }
     public long ActualSegmentSkips { get; set; }
-    public long UdfCpuTimeMs { get; set; }
-    public long UdfElapsedTimeMs { get; set; }
+    public long UdfCpuTimeUs { get; set; }
+    public long UdfElapsedTimeUs { get; set; }
 
     // XSD gap: RelOp-level metadata
     public bool GroupExecuted { get; set; }
