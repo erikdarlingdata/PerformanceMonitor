@@ -107,16 +107,16 @@ BEGIN
         END;
 
         /*
-        First run detection - collect all queries if this is the first execution
+        First run detection - collect last 1 hour of queries if this is the first execution
         */
         IF NOT EXISTS (SELECT 1/0 FROM collect.query_stats)
         AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'query_stats_collector')
         BEGIN
-            SET @cutoff_time = CONVERT(datetime2(7), '19000101');
+            SET @cutoff_time = DATEADD(HOUR, -1, SYSDATETIME());
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting all queries from sys.dm_exec_query_stats', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting last 1 hour of query stats', 0, 1) WITH NOWAIT;
             END;
         END;
         ELSE

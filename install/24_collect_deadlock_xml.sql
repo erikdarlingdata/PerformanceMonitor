@@ -101,17 +101,17 @@ BEGIN
         END;
 
         /*
-        First run detection - collect 3 days of history if this is the first execution
+        First run detection - collect last 1 hour of history if this is the first execution
         */
         IF NOT EXISTS (SELECT 1/0 FROM collect.deadlock_xml)
         AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'deadlock_xml_collector')
         BEGIN
-            SET @minutes_back = 4320; /*3 days*/
+            SET @minutes_back = 60; /*1 hour*/
             SET @cutoff_time = DATEADD(MINUTE, -@minutes_back, SYSUTCDATETIME());
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'First run detected - collecting last 3 days of deadlock events', 0, 1) WITH NOWAIT;
+                RAISERROR(N'First run detected - collecting last 1 hour of deadlock events', 0, 1) WITH NOWAIT;
             END;
         END;
 
