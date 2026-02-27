@@ -118,18 +118,27 @@ namespace PerformanceMonitorDashboard.Services
             var stringValue = rawValue?.ToString() ?? string.Empty;
             var filterValue = filter.Value ?? string.Empty;
 
-            // Handle comparison operators
+            // Split comma-separated values for text operators (e.g., "db1, db2")
+            var terms = filterValue.Split(',')
+                .Select(t => t.Trim())
+                .Where(t => !string.IsNullOrEmpty(t))
+                .ToArray();
+
+            if (terms.Length == 0)
+                return true;
+
+            // Text operators match ANY term, NotEquals excludes ALL terms
             return filter.Operator switch
             {
-                FilterOperator.Contains => stringValue.Contains(filterValue, StringComparison.OrdinalIgnoreCase),
-                FilterOperator.Equals => CompareValues(rawValue, filterValue, (a, b) => a == b),
-                FilterOperator.NotEquals => CompareValues(rawValue, filterValue, (a, b) => a != b),
+                FilterOperator.Contains => terms.Any(t => stringValue.Contains(t, StringComparison.OrdinalIgnoreCase)),
+                FilterOperator.Equals => terms.Any(t => CompareValues(rawValue, t, (a, b) => a == b)),
+                FilterOperator.NotEquals => terms.All(t => CompareValues(rawValue, t, (a, b) => a != b)),
                 FilterOperator.GreaterThan => CompareNumeric(rawValue, filterValue, (a, b) => a > b),
                 FilterOperator.GreaterThanOrEqual => CompareNumeric(rawValue, filterValue, (a, b) => a >= b),
                 FilterOperator.LessThan => CompareNumeric(rawValue, filterValue, (a, b) => a < b),
                 FilterOperator.LessThanOrEqual => CompareNumeric(rawValue, filterValue, (a, b) => a <= b),
-                FilterOperator.StartsWith => stringValue.StartsWith(filterValue, StringComparison.OrdinalIgnoreCase),
-                FilterOperator.EndsWith => stringValue.EndsWith(filterValue, StringComparison.OrdinalIgnoreCase),
+                FilterOperator.StartsWith => terms.Any(t => stringValue.StartsWith(t, StringComparison.OrdinalIgnoreCase)),
+                FilterOperator.EndsWith => terms.Any(t => stringValue.EndsWith(t, StringComparison.OrdinalIgnoreCase)),
                 _ => true
             };
         }
