@@ -123,7 +123,14 @@ public partial class ProcedureHistoryWindow : Window
     private static void ApplyTheme(ScottPlot.WPF.WpfPlot chart)
     {
         ScottPlot.Color figureBackground, dataBackground, textColor, gridColor;
-        if (Helpers.ThemeManager.HasLightBackground)
+        if (Helpers.ThemeManager.CurrentTheme == "CoolBreeze")
+        {
+            figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
+            dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
+            textColor        = ScottPlot.Color.FromHex("#1A2A3A");
+            gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
+        }
+        else if (Helpers.ThemeManager.HasLightBackground)
         {
             figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
             dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
