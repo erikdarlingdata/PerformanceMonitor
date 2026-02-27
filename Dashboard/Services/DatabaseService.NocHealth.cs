@@ -603,13 +603,16 @@ namespace PerformanceMonitorDashboard.Services
         /// Gets currently running queries that exceed the duration threshold.
         /// Uses live DMV data (sys.dm_exec_requests) for immediate detection.
         /// </summary>
-        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes, bool excludeSpServerDiagnostics = true, bool excludeWaitFor = true, int maxLongRunningQueryCount = 5)
+        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes, bool excludeSpServerDiagnostics = true, bool excludeWaitFor = true, int maxLongRunningQueryCount = 5, bool excludeBackupWaits = true)
         {
             // Exclude internal SP_SERVER_DIAGNOSTICS queries by default, as they often run long and aren't actionable.
             string spServerDiagnosticsFilter = excludeSpServerDiagnostics ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'" : "";
 
             // Exclude WAITFOR queries by default, as they can run indefinitely and may not indicate a problem.
             string waitForFilter = excludeWaitFor ? "AND r.wait_type <> N'WAITFOR'" : "";
+
+            // Exclude backup waits if specified, as they can run long and aren't typically actionable in this context.
+            string backupsFilter = excludeBackupWaits ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
 
             // Sanity check to prevent SQL syntax errors   
             if (maxLongRunningQueryCount <= 5)
@@ -641,6 +644,7 @@ namespace PerformanceMonitorDashboard.Services
                     AND r.total_elapsed_time >= @thresholdMs
                     {spServerDiagnosticsFilter}
                     {waitForFilter}
+                    {backupsFilter}
                 ORDER BY r.total_elapsed_time DESC
                 OPTION(MAXDOP 1, RECOMPILE);";
 
