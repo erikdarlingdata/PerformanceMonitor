@@ -603,13 +603,26 @@ namespace PerformanceMonitorDashboard.Services
         /// Gets currently running queries that exceed the duration threshold.
         /// Uses live DMV data (sys.dm_exec_requests) for immediate detection.
         /// </summary>
-        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes, bool excludeSpServerDiagnostics = true)
+        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes, bool excludeSpServerDiagnostics = true, bool excludeWaitFor = true, int maxLongRunningQueryCount = 5)
         {
+            // Exclude internal SP_SERVER_DIAGNOSTICS queries by default, as they often run long and aren't actionable.
             string spServerDiagnosticsFilter = excludeSpServerDiagnostics ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'" : "";
+
+            // Exclude WAITFOR queries by default, as they can run indefinitely and may not indicate a problem.
+            string waitForFilter = excludeWaitFor ? "AND r.wait_type <> N'WAITFOR'" : "";
+
+            // Sanity check to prevent SQL syntax errors   
+            if (maxLongRunningQueryCount <= 5) 
+            {
+                maxLongRunningQueryCount = 5;
+            };
+
+            // Use TOP to limit the number of long-running queries returned, with a reasonable default of 5.
+            string LongRunningQueryCount = "TOP (" + maxLongRunningQueryCount + ")";
 
             string query = @$"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-                SELECT TOP (5)
+                SELECT {LongRunningQueryCount}
                     r.session_id,
                     DB_NAME(r.database_id) AS database_name,
                     SUBSTRING(t.text, 1, 300) AS query_text,
@@ -625,9 +638,9 @@ namespace PerformanceMonitorDashboard.Services
                 JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
                 WHERE 
                     r.session_id > 50
-                    {spServerDiagnosticsFilter}
                     AND r.total_elapsed_time >= @thresholdMs
-                    AND r.wait_type <> N'WAITFOR'
+                    {spServerDiagnosticsFilter}
+                    {waitForFilter}
                 ORDER BY r.total_elapsed_time DESC
                 OPTION(MAXDOP 1, RECOMPILE);";
 
