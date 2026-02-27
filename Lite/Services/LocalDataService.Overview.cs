@@ -126,6 +126,8 @@ public class ServerSummaryItem
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
     public bool? IsOnline { get; set; }
+    /// <summary>True when the server is reachable but one or more collectors have consecutive errors.</summary>
+    public bool HasCollectorErrors { get; set; }
     public double? CpuPercent { get; set; }
     public double? MemoryMb { get; set; }
     public int BlockingCount { get; set; }
@@ -139,8 +141,20 @@ public class ServerSummaryItem
     public string LastCollectionDisplay => LastCollectionTime.HasValue ? ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss") : "Never";
 
     /* Connection status */
-    public string StatusDisplay => IsOnline switch { true => "Online", false => "Offline", _ => "Unknown" };
-    public SolidColorBrush StatusBrush => MakeBrush(IsOnline switch { true => "#81C784", false => "#E57373", _ => "#888888" });
+    public string StatusDisplay => IsOnline switch
+    {
+        true when HasCollectorErrors => "Warning",
+        true => "Online",
+        false => "Offline",
+        _ => "Unknown"
+    };
+    public SolidColorBrush StatusBrush => MakeBrush(IsOnline switch
+    {
+        true when HasCollectorErrors => "#FFD54F",  // amber — connected but collectors failing
+        true => "#81C784",
+        false => "#E57373",
+        _ => "#888888"
+    });
     public bool IsOffline => IsOnline == false;
 
     /* Color coding */
@@ -152,6 +166,7 @@ public class ServerSummaryItem
         DeadlockCount > 0 ? "#E57373" :
         BlockingCount > 0 ? "#FFB74D" :
         CpuPercent >= 80 ? "#FFB74D" :
+        HasCollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
         "#2a2d35");
 
     private static SolidColorBrush MakeBrush(string hex)

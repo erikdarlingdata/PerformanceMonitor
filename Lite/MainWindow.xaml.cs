@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     private SystemTrayService? _trayService;
     private readonly Dictionary<string, TabItem> _openServerTabs = new();
     private readonly Dictionary<string, bool> _previousConnectionStates = new();
+    private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, DateTime> _lastCpuAlert = new();
     private readonly Dictionary<string, DateTime> _lastBlockingAlert = new();
     private readonly Dictionary<string, DateTime> _lastDeadlockAlert = new();
@@ -255,6 +256,9 @@ public partial class MainWindow : Window
         foreach (var server in servers)
         {
             server.IsOnline = _serverManager.GetConnectionStatus(server.Id).IsOnline;
+            server.HasCollectorErrors = _collectorService != null
+                && server.IsOnline == true
+                && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
         }
         ServerListView.ItemsSource = servers;
 
@@ -380,6 +384,8 @@ public partial class MainWindow : Window
                         summary.ServerName = server.ServerName;
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
+                        if (_collectorService != null && connStatus.IsOnline == true)
+                            summary.HasCollectorErrors = _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
                         summaries.Add(summary);
                     }
                 }
@@ -898,6 +904,9 @@ public partial class MainWindow : Window
                 if (status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;
+                bool hasErrors = _collectorService != null && isOnline
+                    && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
+                server.HasCollectorErrors = hasErrors;
 
                 if (_previousConnectionStates.TryGetValue(server.Id, out var wasOnline))
                 {
@@ -930,7 +939,11 @@ public partial class MainWindow : Window
                     needsRefresh = true;
                 }
 
+                if (_previousCollectorErrorStates.TryGetValue(server.Id, out var prevHasErrors) && prevHasErrors != hasErrors)
+                    needsRefresh = true;
+
                 _previousConnectionStates[server.Id] = isOnline;
+                _previousCollectorErrorStates[server.Id] = hasErrors;
             }
 
             if (needsRefresh)

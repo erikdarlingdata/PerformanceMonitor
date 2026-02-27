@@ -127,6 +127,12 @@ public partial class RemoteCollectorService
     public Task CheckpointAsync() => _duckDb.CheckpointAsync();
 
     /// <summary>
+    /// Gets a summary of collector health for a specific server connection.
+    /// </summary>
+    public CollectorHealthSummary GetHealthSummary(ServerConnection server)
+        => GetHealthSummary(GetServerId(server));
+
+    /// <summary>
     /// Gets a summary of collector health. When serverId is provided, filters to that server only.
     /// </summary>
     public CollectorHealthSummary GetHealthSummary(int? serverId = null)
