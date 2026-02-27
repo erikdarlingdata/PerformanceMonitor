@@ -86,6 +86,16 @@ namespace PerformanceMonitorDashboard
         {
             InitializeComponent();
 
+            // Apply theme immediately to every WpfPlot field in this control.
+            // Child UserControls (MemoryContent, ResourceMetricsContent, etc.) handle their own charts;
+            // this loop covers the charts declared directly in ServerTab.xaml (ResourceOverview*, Blocking*, etc.).
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+            }
+
             _resourceOverviewCpuHover = new Helpers.ChartHoverHelper(ResourceOverviewCpuChart, "%");
             _resourceOverviewMemoryHover = new Helpers.ChartHoverHelper(ResourceOverviewMemoryChart, "MB");
             _resourceOverviewIoHover = new Helpers.ChartHoverHelper(ResourceOverviewIoChart, "ms");

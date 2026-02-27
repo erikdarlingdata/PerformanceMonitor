@@ -108,23 +108,25 @@ namespace PerformanceMonitorDashboard.Controls
             InitializeComponent();
             SetupChartContextMenus();
             Loaded += OnLoaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            Unloaded += (_, _) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
 
             // Apply dark theme immediately so charts don't flash white before data loads
-            TabHelpers.ApplyDarkModeToChart(LatchStatsChart);
-            TabHelpers.ApplyDarkModeToChart(SpinlockStatsChart);
-            TabHelpers.ApplyDarkModeToChart(TempdbStatsChart);
-            TabHelpers.ApplyDarkModeToChart(TempDbLatencyChart);
-            TabHelpers.ApplyDarkModeToChart(SessionStatsChart);
-            TabHelpers.ApplyDarkModeToChart(UserDbReadLatencyChart);
-            TabHelpers.ApplyDarkModeToChart(UserDbWriteLatencyChart);
-            TabHelpers.ApplyDarkModeToChart(FileIoReadThroughputChart);
-            TabHelpers.ApplyDarkModeToChart(FileIoWriteThroughputChart);
-            TabHelpers.ApplyDarkModeToChart(PerfmonCountersChart);
-            TabHelpers.ApplyDarkModeToChart(WaitStatsDetailChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsCpuChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsTempdbChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsMemoryChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsPerfmonChart);
+            TabHelpers.ApplyThemeToChart(LatchStatsChart);
+            TabHelpers.ApplyThemeToChart(SpinlockStatsChart);
+            TabHelpers.ApplyThemeToChart(TempdbStatsChart);
+            TabHelpers.ApplyThemeToChart(TempDbLatencyChart);
+            TabHelpers.ApplyThemeToChart(SessionStatsChart);
+            TabHelpers.ApplyThemeToChart(UserDbReadLatencyChart);
+            TabHelpers.ApplyThemeToChart(UserDbWriteLatencyChart);
+            TabHelpers.ApplyThemeToChart(FileIoReadThroughputChart);
+            TabHelpers.ApplyThemeToChart(FileIoWriteThroughputChart);
+            TabHelpers.ApplyThemeToChart(PerfmonCountersChart);
+            TabHelpers.ApplyThemeToChart(WaitStatsDetailChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsCpuChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsTempdbChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsMemoryChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsPerfmonChart);
 
             _sessionStatsHover = new Helpers.ChartHoverHelper(SessionStatsChart, "sessions");
             _latchStatsHover = new Helpers.ChartHoverHelper(LatchStatsChart, "ms/sec");
@@ -148,6 +150,19 @@ namespace PerformanceMonitorDashboard.Controls
             // Apply minimum column widths based on header text
 
             // Freeze identifier columns
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         private void SetupChartContextMenus()

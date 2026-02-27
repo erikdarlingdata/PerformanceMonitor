@@ -200,6 +200,23 @@ namespace PerformanceMonitorDashboard.Helpers
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
             chart.Plot.Axes.Left.Label.ForeColor = textColor;
+
+            // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
+            chart.Background = new SolidColorBrush(Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
+
+            // Ensure ScottPlot renders with the correct colors the very first time it gets pixel dimensions.
+            // Without this, ScottPlot's first auto-render (triggered by SizeChanged) would show a white canvas
+            // before our FigureBackground color takes visual effect.
+            chart.Loaded -= HandleChartFirstLoaded;
+            if (!chart.IsLoaded)
+                chart.Loaded += HandleChartFirstLoaded;
+        }
+
+        private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)
+        {
+            var chart = (WpfPlot)sender;
+            chart.Loaded -= HandleChartFirstLoaded;
+            chart.Refresh();
         }
 
         /// <summary>

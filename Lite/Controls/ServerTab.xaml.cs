@@ -158,30 +158,30 @@ public partial class ServerTab : UserControl
             grid.CopyingRowClipboardContent += Helpers.DataGridClipboardBehavior.FixHeaderCopy;
         }
 
-        /* Apply dark theme immediately so charts don't flash white before data loads */
-        ApplyDarkTheme(WaitStatsChart);
-        ApplyDarkTheme(QueryDurationTrendChart);
-        ApplyDarkTheme(ProcDurationTrendChart);
-        ApplyDarkTheme(QueryStoreDurationTrendChart);
-        ApplyDarkTheme(ExecutionCountTrendChart);
-        ApplyDarkTheme(CpuChart);
-        ApplyDarkTheme(MemoryChart);
-        ApplyDarkTheme(MemoryClerksChart);
-        ApplyDarkTheme(MemoryGrantSizingChart);
-        ApplyDarkTheme(MemoryGrantActivityChart);
-        ApplyDarkTheme(FileIoReadChart);
-        ApplyDarkTheme(FileIoWriteChart);
-        ApplyDarkTheme(FileIoReadThroughputChart);
-        ApplyDarkTheme(FileIoWriteThroughputChart);
-        ApplyDarkTheme(TempDbChart);
-        ApplyDarkTheme(TempDbFileIoChart);
-        ApplyDarkTheme(LockWaitTrendChart);
-        ApplyDarkTheme(BlockingTrendChart);
-        ApplyDarkTheme(DeadlockTrendChart);
-        ApplyDarkTheme(CurrentWaitsDurationChart);
-        ApplyDarkTheme(CurrentWaitsBlockedChart);
-        ApplyDarkTheme(PerfmonChart);
-        ApplyDarkTheme(CollectorDurationChart);
+        /* Apply theme immediately so charts don't flash white before data loads */
+        ApplyTheme(WaitStatsChart);
+        ApplyTheme(QueryDurationTrendChart);
+        ApplyTheme(ProcDurationTrendChart);
+        ApplyTheme(QueryStoreDurationTrendChart);
+        ApplyTheme(ExecutionCountTrendChart);
+        ApplyTheme(CpuChart);
+        ApplyTheme(MemoryChart);
+        ApplyTheme(MemoryClerksChart);
+        ApplyTheme(MemoryGrantSizingChart);
+        ApplyTheme(MemoryGrantActivityChart);
+        ApplyTheme(FileIoReadChart);
+        ApplyTheme(FileIoWriteChart);
+        ApplyTheme(FileIoReadThroughputChart);
+        ApplyTheme(FileIoWriteThroughputChart);
+        ApplyTheme(TempDbChart);
+        ApplyTheme(TempDbFileIoChart);
+        ApplyTheme(LockWaitTrendChart);
+        ApplyTheme(BlockingTrendChart);
+        ApplyTheme(DeadlockTrendChart);
+        ApplyTheme(CurrentWaitsDurationChart);
+        ApplyTheme(CurrentWaitsBlockedChart);
+        ApplyTheme(PerfmonChart);
+        ApplyTheme(CollectorDurationChart);
 
         /* Chart hover tooltips */
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
@@ -2263,6 +2263,21 @@ public partial class ServerTab : UserControl
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
         chart.Plot.Axes.Left.Label.ForeColor = textColor;
+
+        // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
+        chart.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
+
+        // Ensure ScottPlot renders with the correct colors the very first time it gets pixel dimensions.
+        chart.Loaded -= HandleChartFirstLoaded;
+        if (!chart.IsLoaded)
+            chart.Loaded += HandleChartFirstLoaded;
+    }
+
+    private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)
+    {
+        var chart = (ScottPlot.WPF.WpfPlot)sender;
+        chart.Loaded -= HandleChartFirstLoaded;
+        chart.Refresh();
     }
 
     private void OnThemeChanged(string _)
@@ -2294,9 +2309,11 @@ public partial class ServerTab : UserControl
     /// </summary>
     private static void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
-        var textColor = Helpers.ThemeManager.HasLightBackground
-            ? ScottPlot.Color.FromHex("#4A5568")
-            : ScottPlot.Color.FromHex("#9DA5B4");
+        var textColor = Helpers.ThemeManager.CurrentTheme == "CoolBreeze"
+            ? ScottPlot.Color.FromHex("#364D61")
+            : Helpers.ThemeManager.HasLightBackground
+                ? ScottPlot.Color.FromHex("#4A5568")
+                : ScottPlot.Color.FromHex("#9DA5B4");
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;

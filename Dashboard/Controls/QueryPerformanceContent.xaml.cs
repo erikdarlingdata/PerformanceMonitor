@@ -133,6 +133,7 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartSaveMenus();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
 
             _queryDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsQueryChart, "ms/sec");
             _procDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsProcChart, "ms/sec");
@@ -169,6 +170,21 @@ namespace PerformanceMonitorDashboard.Controls
             _queryStoreUnfilteredData = null;
             _qsRegressionsUnfilteredData = null;
             _lrqPatternsUnfilteredData = null;
+
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)

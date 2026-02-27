@@ -129,27 +129,28 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartContextMenus();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
 
             // Apply dark theme immediately so charts don't flash white before data loads
-            TabHelpers.ApplyDarkModeToChart(BadPagesChart);
-            TabHelpers.ApplyDarkModeToChart(DumpRequestsChart);
-            TabHelpers.ApplyDarkModeToChart(AccessViolationsChart);
-            TabHelpers.ApplyDarkModeToChart(WriteAccessViolationsChart);
-            TabHelpers.ApplyDarkModeToChart(NonYieldingTasksChart);
-            TabHelpers.ApplyDarkModeToChart(LatchWarningsChart);
-            TabHelpers.ApplyDarkModeToChart(SickSpinlocksChart);
-            TabHelpers.ApplyDarkModeToChart(CpuComparisonChart);
-            TabHelpers.ApplyDarkModeToChart(SevereErrorsChart);
-            TabHelpers.ApplyDarkModeToChart(IOIssuesChart);
-            TabHelpers.ApplyDarkModeToChart(LongestPendingIOChart);
-            TabHelpers.ApplyDarkModeToChart(SchedulerIssuesChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryConditionsChart);
-            TabHelpers.ApplyDarkModeToChart(CPUTasksChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryBrokerChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryBrokerRatioChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMUtilChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMMemoryChart);
+            TabHelpers.ApplyThemeToChart(BadPagesChart);
+            TabHelpers.ApplyThemeToChart(DumpRequestsChart);
+            TabHelpers.ApplyThemeToChart(AccessViolationsChart);
+            TabHelpers.ApplyThemeToChart(WriteAccessViolationsChart);
+            TabHelpers.ApplyThemeToChart(NonYieldingTasksChart);
+            TabHelpers.ApplyThemeToChart(LatchWarningsChart);
+            TabHelpers.ApplyThemeToChart(SickSpinlocksChart);
+            TabHelpers.ApplyThemeToChart(CpuComparisonChart);
+            TabHelpers.ApplyThemeToChart(SevereErrorsChart);
+            TabHelpers.ApplyThemeToChart(IOIssuesChart);
+            TabHelpers.ApplyThemeToChart(LongestPendingIOChart);
+            TabHelpers.ApplyThemeToChart(SchedulerIssuesChart);
+            TabHelpers.ApplyThemeToChart(MemoryConditionsChart);
+            TabHelpers.ApplyThemeToChart(CPUTasksChart);
+            TabHelpers.ApplyThemeToChart(MemoryBrokerChart);
+            TabHelpers.ApplyThemeToChart(MemoryBrokerRatioChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMUtilChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMMemoryChart);
 
             _badPagesHover = new Helpers.ChartHoverHelper(BadPagesChart, "events");
             _dumpRequestsHover = new Helpers.ChartHoverHelper(DumpRequestsChart, "events");
@@ -187,6 +188,21 @@ namespace PerformanceMonitorDashboard.Controls
             _ioIssuesUnfilteredData = null;
             _memoryBrokerUnfilteredData = null;
             _memoryNodeOOMUnfilteredData = null;
+
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)

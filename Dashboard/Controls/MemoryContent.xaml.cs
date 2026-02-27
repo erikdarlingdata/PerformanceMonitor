@@ -81,14 +81,16 @@ namespace PerformanceMonitorDashboard.Controls
             InitializeComponent();
             SetupChartContextMenus();
             Loaded += OnLoaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            Unloaded += (_, _) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
 
             // Apply dark theme immediately so charts don't flash white before data loads
-            TabHelpers.ApplyDarkModeToChart(MemoryStatsOverviewChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryGrantSizingChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryGrantActivityChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryClerksChart);
-            TabHelpers.ApplyDarkModeToChart(PlanCacheChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryPressureEventsChart);
+            TabHelpers.ApplyThemeToChart(MemoryStatsOverviewChart);
+            TabHelpers.ApplyThemeToChart(MemoryGrantSizingChart);
+            TabHelpers.ApplyThemeToChart(MemoryGrantActivityChart);
+            TabHelpers.ApplyThemeToChart(MemoryClerksChart);
+            TabHelpers.ApplyThemeToChart(PlanCacheChart);
+            TabHelpers.ApplyThemeToChart(MemoryPressureEventsChart);
 
             _memoryStatsOverviewHover = new Helpers.ChartHoverHelper(MemoryStatsOverviewChart, "MB");
             _memoryGrantSizingHover = new Helpers.ChartHoverHelper(MemoryGrantSizingChart, "MB");
@@ -101,6 +103,19 @@ namespace PerformanceMonitorDashboard.Controls
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
             // No grids to configure - all tabs are chart-only now
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         private void SetupChartContextMenus()
