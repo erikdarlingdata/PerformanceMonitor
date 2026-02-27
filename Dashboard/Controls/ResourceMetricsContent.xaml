@@ -112,7 +112,7 @@
                         </Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="5,5,5,2">
                             <TextBlock Text="Select Wait Types" FontWeight="Bold" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
-                            <Button Content="Refresh" Click="WaitStatsDetail_Refresh_Click" Margin="10,0,0,0" Padding="8,2" Style="{StaticResource SuccessButton}" FontSize="11"/>
+                            <Button Content="Refresh" Click="WaitStatsDetail_Refresh_Click" Margin="10,0,0,0" Padding="8,2" Style="{DynamicResource SuccessButton}" FontSize="11"/>
                         </StackPanel>
                         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="5,2">
                             <Button Content="Top Waits" Click="WaitTypes_SelectAll_Click" Padding="6,2" FontSize="10" Margin="0,0,5,0"/>
@@ -299,7 +299,7 @@
                         </Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="5,5,5,2">
                             <TextBlock Text="Select Counters" FontWeight="Bold" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
-                            <Button Content="Refresh" Click="PerfmonCounters_Refresh_Click" Margin="10,0,0,0" Padding="8,2" Style="{StaticResource SuccessButton}" FontSize="11"/>
+                            <Button Content="Refresh" Click="PerfmonCounters_Refresh_Click" Margin="10,0,0,0" Padding="8,2" Style="{DynamicResource SuccessButton}" FontSize="11"/>
                         </StackPanel>
                         <ComboBox Grid.Row="1" x:Name="PerfmonPackCombo"
                                   SelectionChanged="PerfmonPack_SelectionChanged"

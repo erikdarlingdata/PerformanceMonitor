@@ -4,7 +4,7 @@
                     xmlns:helpers="clr-namespace:PerformanceMonitorLite.Helpers">
 
     <!-- ============================================ -->
-    <!-- Darling Data Dark Theme                      -->
+    <!-- Darling Data Light Theme                      -->
     <!-- Flat/Minimal Design                          -->
     <!-- ============================================ -->
 
@@ -13,26 +13,26 @@
     <Color x:Key="AccentHoverColor">#5bc4f5</Color>
     <Color x:Key="AccentPressedColor">#1a9ae0</Color>
 
-    <!-- Background Colors (Grafana-inspired blue-gray tints) -->
-    <Color x:Key="BackgroundDarkColor">#111217</Color>
-    <Color x:Key="AlternatingRowColor">#1c1f25</Color>
-    <Color x:Key="BackgroundColor">#181b1f</Color>
-    <Color x:Key="BackgroundLightColor">#22252b</Color>
-    <Color x:Key="BackgroundLighterColor">#2a2d35</Color>
+    <!-- Background Colors -->
+    <Color x:Key="BackgroundDarkColor">#F0F2F5</Color>
+    <Color x:Key="AlternatingRowColor">#EDF1F7</Color>
+    <Color x:Key="BackgroundColor">#F5F7FA</Color>
+    <Color x:Key="BackgroundLightColor">#FFFFFF</Color>
+    <Color x:Key="BackgroundLighterColor">#E8ECF0</Color>
 
-    <!-- Text Colors (off-white to reduce eye strain) -->
-    <Color x:Key="ForegroundColor">#E4E6EB</Color>
-    <Color x:Key="ForegroundDimColor">#9DA5B4</Color>
-    <Color x:Key="ForegroundMutedColor">#6B7280</Color>
+    <!-- Text Colors (dark on light backgrounds) -->
+    <Color x:Key="ForegroundColor">#1A1D23</Color>
+    <Color x:Key="ForegroundDimColor">#4A5568</Color>
+    <Color x:Key="ForegroundMutedColor">#718096</Color>
 
     <!-- Border Colors (subtle, low-contrast) -->
-    <Color x:Key="BorderColor">#2a2d35</Color>
-    <Color x:Key="BorderLightColor">#33363e</Color>
+    <Color x:Key="BorderColor">#DEE2E6</Color>
+    <Color x:Key="BorderLightColor">#CED4DA</Color>
 
-    <!-- Status Colors (Material Design 300 — softer against dark backgrounds) -->
-    <Color x:Key="SuccessColor">#81C784</Color>
-    <Color x:Key="WarningColor">#FFD54F</Color>
-    <Color x:Key="ErrorColor">#E57373</Color>
+    <!-- Status Colors (Material Design 700 — visible against light backgrounds) -->
+    <Color x:Key="SuccessColor">#2E7D32</Color>
+    <Color x:Key="WarningColor">#F57F17</Color>
+    <Color x:Key="ErrorColor">#C62828</Color>
     <Color x:Key="InfoColor">#2eaef1</Color>
 
     <!-- Spacing Scale -->
@@ -97,7 +97,7 @@
     <!-- ============================================ -->
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
-        <Setter Property="Foreground" Value="#E4E6EB"/>
+        <Setter Property="Foreground" Value="#1A1D23"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,6"/>
@@ -203,8 +203,8 @@
 
     <!-- ToggleButton Style (respects Background in all states) -->
     <Style TargetType="ToggleButton">
-        <Setter Property="Background" Value="#2a2d35"/>
-        <Setter Property="Foreground" Value="#E4E6EB"/>
+        <Setter Property="Background" Value="#E8ECF0"/>
+        <Setter Property="Foreground" Value="#1A1D23"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,5"/>
         <Setter Property="Template">
@@ -315,11 +315,11 @@
     <!-- Named style for filter TextBoxes in DataGrid column headers -->
     <Style x:Key="FilterTextBoxStyle" TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="Foreground" Value="#E4E6EB"/>
+        <Setter Property="Foreground" Value="#1A1D23"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="4,2"/>
-        <Setter Property="CaretBrush" Value="#E4E6EB"/>
+        <Setter Property="CaretBrush" Value="#1A1D23"/>
         <Setter Property="SelectionBrush" Value="{StaticResource AccentBrush}"/>
     </Style>
 
@@ -662,7 +662,7 @@
     <!-- Column header style when filter is active - subtle blue highlight -->
     <Style x:Key="FilteredColumnHeaderStyle" TargetType="DataGridColumnHeader"
            BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
-        <Setter Property="Background" Value="#3D5A80"/>
+        <Setter Property="Background" Value="#BBDEFB"/>
     </Style>
 
     <!-- Right-aligned text style for numeric DataGrid columns -->

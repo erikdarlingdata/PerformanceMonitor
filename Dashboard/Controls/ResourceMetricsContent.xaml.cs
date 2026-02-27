@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -108,23 +108,25 @@ namespace PerformanceMonitorDashboard.Controls
             InitializeComponent();
             SetupChartContextMenus();
             Loaded += OnLoaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            Unloaded += (_, _) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
 
             // Apply dark theme immediately so charts don't flash white before data loads
-            TabHelpers.ApplyDarkModeToChart(LatchStatsChart);
-            TabHelpers.ApplyDarkModeToChart(SpinlockStatsChart);
-            TabHelpers.ApplyDarkModeToChart(TempdbStatsChart);
-            TabHelpers.ApplyDarkModeToChart(TempDbLatencyChart);
-            TabHelpers.ApplyDarkModeToChart(SessionStatsChart);
-            TabHelpers.ApplyDarkModeToChart(UserDbReadLatencyChart);
-            TabHelpers.ApplyDarkModeToChart(UserDbWriteLatencyChart);
-            TabHelpers.ApplyDarkModeToChart(FileIoReadThroughputChart);
-            TabHelpers.ApplyDarkModeToChart(FileIoWriteThroughputChart);
-            TabHelpers.ApplyDarkModeToChart(PerfmonCountersChart);
-            TabHelpers.ApplyDarkModeToChart(WaitStatsDetailChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsCpuChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsTempdbChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsMemoryChart);
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsPerfmonChart);
+            TabHelpers.ApplyThemeToChart(LatchStatsChart);
+            TabHelpers.ApplyThemeToChart(SpinlockStatsChart);
+            TabHelpers.ApplyThemeToChart(TempdbStatsChart);
+            TabHelpers.ApplyThemeToChart(TempDbLatencyChart);
+            TabHelpers.ApplyThemeToChart(SessionStatsChart);
+            TabHelpers.ApplyThemeToChart(UserDbReadLatencyChart);
+            TabHelpers.ApplyThemeToChart(UserDbWriteLatencyChart);
+            TabHelpers.ApplyThemeToChart(FileIoReadThroughputChart);
+            TabHelpers.ApplyThemeToChart(FileIoWriteThroughputChart);
+            TabHelpers.ApplyThemeToChart(PerfmonCountersChart);
+            TabHelpers.ApplyThemeToChart(WaitStatsDetailChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsCpuChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsTempdbChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsMemoryChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsPerfmonChart);
 
             _sessionStatsHover = new Helpers.ChartHoverHelper(SessionStatsChart, "sessions");
             _latchStatsHover = new Helpers.ChartHoverHelper(LatchStatsChart, "ms/sec");
@@ -148,6 +150,19 @@ namespace PerformanceMonitorDashboard.Controls
             // Apply minimum column widths based on header text
 
             // Freeze identifier columns
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         private void SetupChartContextMenus()
@@ -293,7 +308,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[LatchStatsChart] = null;
             }
             LatchStatsChart.Plot.Clear();
-            TabHelpers.ApplyDarkModeToChart(LatchStatsChart);
+            TabHelpers.ApplyThemeToChart(LatchStatsChart);
             _latchStatsHover?.Clear();
 
             var dataList = data?.ToList() ?? new List<LatchStatsItem>();
@@ -384,7 +399,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[SpinlockStatsChart] = null;
             }
             SpinlockStatsChart.Plot.Clear();
-            TabHelpers.ApplyDarkModeToChart(SpinlockStatsChart);
+            TabHelpers.ApplyThemeToChart(SpinlockStatsChart);
             _spinlockStatsHover?.Clear();
 
             var dataList = data?.ToList() ?? new List<SpinlockStatsItem>();
@@ -492,7 +507,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             TempDbLatencyChart.Plot.Clear();
             _tempDbLatencyHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(TempDbLatencyChart);
+            TabHelpers.ApplyThemeToChart(TempDbLatencyChart);
 
             if (data != null && data.Count > 0)
             {
@@ -565,7 +580,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             TempdbStatsChart.Plot.Clear();
             _tempdbStatsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(TempdbStatsChart);
+            TabHelpers.ApplyThemeToChart(TempdbStatsChart);
 
             var dataList = data?.OrderBy(d => d.CollectionTime).ToList() ?? new List<TempdbStatsItem>();
             if (dataList.Count > 0)
@@ -710,7 +725,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[SessionStatsChart] = null;
             }
             SessionStatsChart.Plot.Clear();
-            TabHelpers.ApplyDarkModeToChart(SessionStatsChart);
+            TabHelpers.ApplyThemeToChart(SessionStatsChart);
             _sessionStatsHover?.Clear();
 
             var dataList = data?.OrderBy(d => d.CollectionTime).ToList() ?? new List<SessionStatsItem>();
@@ -880,7 +895,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[chart] = null;
             }
             chart.Plot.Clear();
-            TabHelpers.ApplyDarkModeToChart(chart);
+            TabHelpers.ApplyThemeToChart(chart);
             hover?.Clear();
 
             // Check if any queued data exists (only render overlay if there's real data)
@@ -1066,7 +1081,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             ServerUtilTrendsCpuChart.Plot.Clear();
             _serverTrendsCpuHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsCpuChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsCpuChart);
 
             var dataList = cpuData?.OrderBy(d => d.EventTime).ToList() ?? new List<CpuSpikeItem>();
             if (dataList.Count > 0)
@@ -1127,7 +1142,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             ServerUtilTrendsTempdbChart.Plot.Clear();
             _serverTrendsTempdbHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsTempdbChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsTempdbChart);
 
             var dataList = tempdbData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<TempdbStatsItem>();
             if (dataList.Count >= 1)
@@ -1188,7 +1203,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             ServerUtilTrendsMemoryChart.Plot.Clear();
             _serverTrendsMemoryHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsMemoryChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsMemoryChart);
 
             var dataList = memoryData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<MemoryStatsItem>();
             if (dataList.Count >= 1)
@@ -1293,7 +1308,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             ServerUtilTrendsPerfmonChart.Plot.Clear();
             _serverTrendsPerfmonHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(ServerUtilTrendsPerfmonChart);
+            TabHelpers.ApplyThemeToChart(ServerUtilTrendsPerfmonChart);
 
             var allData = (perfmonData ?? Enumerable.Empty<PerfmonStatsItem>()).ToList();
 
@@ -1709,7 +1724,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _legendPanels[PerfmonCountersChart] = null;
             }
             PerfmonCountersChart.Plot.Clear();
-            TabHelpers.ApplyDarkModeToChart(PerfmonCountersChart);
+            TabHelpers.ApplyThemeToChart(PerfmonCountersChart);
             _perfmonHover?.Clear();
 
             if (data == null || data.Count == 0 || _perfmonCounterItems == null)
@@ -1990,7 +2005,7 @@ namespace PerformanceMonitorDashboard.Controls
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
 
             WaitStatsDetailChart.Plot.Clear();
-            TabHelpers.ApplyDarkModeToChart(WaitStatsDetailChart);
+            TabHelpers.ApplyThemeToChart(WaitStatsDetailChart);
             _waitStatsHover?.Clear();
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 

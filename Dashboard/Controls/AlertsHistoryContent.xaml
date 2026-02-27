@@ -7,10 +7,6 @@
              d:DesignHeight="450" d:DesignWidth="800">
     <UserControl.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="pack://application:,,,/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
-
             <!-- Context Menu for DataGrid Copy/Export -->
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
@@ -74,7 +70,7 @@
                 <ComboBoxItem Content="All Servers" IsSelected="True"/>
             </ComboBox>
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"
-                    Style="{StaticResource SuccessButton}"/>
+                    Style="{DynamicResource SuccessButton}"/>
             <Button x:Name="DismissSelectedButton" Content="Dismiss Selected" Click="DismissSelected_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90" IsEnabled="False"/>
             <Button Content="Dismiss All" Click="DismissAll_Click"

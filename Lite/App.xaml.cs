@@ -80,6 +80,9 @@ public partial class App : Application
     /* System tray settings */
     public static bool MinimizeToTray { get; set; } = true;
 
+    /* Color theme ("Dark" or "Light") */
+    public static string ColorTheme { get; set; } = "Dark";
+
     /* Update check settings */
     public static bool CheckForUpdatesOnStartup { get; set; } = true;
 
@@ -163,6 +166,9 @@ public partial class App : Application
         // Load settings
         LoadDefaultTimeRange();
         LoadAlertSettings();
+
+        // Apply saved color theme before the main window is shown
+        Helpers.ThemeManager.Apply(ColorTheme);
 
         // Initialize logging
         var logDirectory = Path.Combine(exeDirectory, "logs");
@@ -249,6 +255,13 @@ public partial class App : Application
 
             /* System tray settings */
             if (root.TryGetProperty("minimize_to_tray", out v)) MinimizeToTray = v.GetBoolean();
+
+            /* Color theme */
+            if (root.TryGetProperty("color_theme", out v))
+            {
+                var t = v.GetString();
+                if (t == "Dark" || t == "Light" || t == "CoolBreeze") ColorTheme = t;
+            }
 
             /* Update check settings */
             if (root.TryGetProperty("check_for_updates_on_startup", out v)) CheckForUpdatesOnStartup = v.GetBoolean();

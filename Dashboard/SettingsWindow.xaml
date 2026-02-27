@@ -85,7 +85,19 @@
                         <TextBlock Text="Navigation" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
                         <CheckBox x:Name="FocusServerTabCheckBox"
                                   Content="Focus server tab when clicking a server card"
-                                  Margin="0,0,0,0"/>
+                                  Margin="0,0,0,20"/>
+
+                        <!-- Color Theme Section -->
+                        <TextBlock Text="Color Theme" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,0">
+                            <TextBlock Text="Theme:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <ComboBox x:Name="ColorThemeComboBox" Width="120"
+                                      SelectionChanged="ColorThemeComboBox_Changed">
+                                <ComboBoxItem Content="Dark" Tag="Dark"/>
+                                <ComboBoxItem Content="Light" Tag="Light"/>
+                                <ComboBoxItem Content="Cool Breeze" Tag="CoolBreeze"/>
+                            </ComboBox>
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

@@ -64,13 +64,21 @@ namespace PerformanceMonitorDashboard
                 displayPattern = displayPattern.Substring(0, 120) + "...";
             QueryIdentifierText.Text = $"Trace Pattern History: [{databaseName}] — {displayPattern}";
 
-            ApplyDarkModeToChart();
+            ApplyThemeToChart();
             Loaded += TracePatternHistoryWindow_Loaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            Closed += (s, e) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
-        private void ApplyDarkModeToChart()
+        private void ApplyThemeToChart()
         {
-            Helpers.TabHelpers.ApplyDarkModeToChart(HistoryChart);
+            Helpers.TabHelpers.ApplyThemeToChart(HistoryChart);
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            ApplyThemeToChart();
+            HistoryChart.Refresh();
         }
 
         private async void TracePatternHistoryWindow_Loaded(object sender, RoutedEventArgs e)

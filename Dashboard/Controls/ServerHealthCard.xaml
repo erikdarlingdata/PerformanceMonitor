@@ -10,10 +10,6 @@
              Cursor="Hand">
     <UserControl.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="pack://application:,,,/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
-
             <!-- Severity to color converter -->
             <Style x:Key="SeverityIndicator" TargetType="Ellipse">
                 <Setter Property="Width" Value="10"/>

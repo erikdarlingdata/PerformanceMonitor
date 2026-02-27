@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -86,6 +86,16 @@ namespace PerformanceMonitorDashboard
         {
             InitializeComponent();
 
+            // Apply theme immediately to every WpfPlot field in this control.
+            // Child UserControls (MemoryContent, ResourceMetricsContent, etc.) handle their own charts;
+            // this loop covers the charts declared directly in ServerTab.xaml (ResourceOverview*, Blocking*, etc.).
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+            }
+
             _resourceOverviewCpuHover = new Helpers.ChartHoverHelper(ResourceOverviewCpuChart, "%");
             _resourceOverviewMemoryHover = new Helpers.ChartHoverHelper(ResourceOverviewMemoryChart, "MB");
             _resourceOverviewIoHover = new Helpers.ChartHoverHelper(ResourceOverviewIoChart, "ms");
@@ -113,6 +123,7 @@ namespace PerformanceMonitorDashboard
             Loaded += ServerTab_Loaded;
             Unloaded += ServerTab_Unloaded;
             KeyDown += ServerTab_KeyDown;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
             Focusable = true;
 
             // Initialize Overview sub-tab UserControls
@@ -315,13 +326,11 @@ namespace PerformanceMonitorDashboard
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.IsChecked = true;
                 AutoRefreshToggle.Content = $"Auto-Refresh: {prefs.AutoRefreshIntervalSeconds}s";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1A472A")); // Dark green when active
             }
             else
             {
                 AutoRefreshToggle.IsChecked = false;
                 AutoRefreshToggle.Content = "Auto-Refresh: Off";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35")); // Gray when inactive
             }
         }
 
@@ -332,9 +341,23 @@ namespace PerformanceMonitorDashboard
             _autoRefreshTimer = null;
 
             // Unsubscribe event handlers to prevent memory leaks
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
             Loaded -= ServerTab_Loaded;
             Unloaded -= ServerTab_Unloaded;
             KeyDown -= ServerTab_KeyDown;
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         public void RefreshAutoRefreshSettings()
@@ -382,9 +405,9 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void ApplyDarkModeToChart(ScottPlot.WPF.WpfPlot chart)
+        private void ApplyThemeToChart(ScottPlot.WPF.WpfPlot chart)
         {
-            TabHelpers.ApplyDarkModeToChart(chart);
+            TabHelpers.ApplyThemeToChart(chart);
         }
 
         private void AutoRefreshToggle_Click(object sender, RoutedEventArgs e)
@@ -422,7 +445,6 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.Content = $"Auto-Refresh: {prefs.AutoRefreshIntervalSeconds}s";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1A472A")); // Dark green when active
             }
             else
             {
@@ -433,7 +455,6 @@ namespace PerformanceMonitorDashboard
                 _autoRefreshTimer?.Stop();
                 _autoRefreshTimer = null;
                 AutoRefreshToggle.Content = "Auto-Refresh: Off";
-                AutoRefreshToggle.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35")); // Gray when inactive
             }
         }
 
@@ -646,7 +667,7 @@ namespace PerformanceMonitorDashboard
                     var popup = datePicker.Template.FindName("PART_Popup", datePicker) as System.Windows.Controls.Primitives.Popup;
                     if (popup?.Child is System.Windows.Controls.Calendar calendar)
                     {
-                        TabHelpers.ApplyDarkThemeToCalendar(calendar);
+                        TabHelpers.ApplyThemeToCalendar(calendar);
                     }
                 }));
             }
@@ -837,22 +858,20 @@ namespace PerformanceMonitorDashboard
 
         private void ClearTimeButtonHighlights()
         {
-            // Use dark theme background color (#404040)
-            var defaultBrush = new SolidColorBrush(Color.FromRgb(0x40, 0x40, 0x40));
             GlobalLast1HourButton.FontWeight = FontWeights.Normal;
-            GlobalLast1HourButton.Background = defaultBrush;
+            GlobalLast1HourButton.ClearValue(Control.BackgroundProperty);
             GlobalLast4HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast4HoursButton.Background = defaultBrush;
+            GlobalLast4HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast8HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast8HoursButton.Background = defaultBrush;
+            GlobalLast8HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast12HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast12HoursButton.Background = defaultBrush;
+            GlobalLast12HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast24HoursButton.FontWeight = FontWeights.Normal;
-            GlobalLast24HoursButton.Background = defaultBrush;
+            GlobalLast24HoursButton.ClearValue(Control.BackgroundProperty);
             GlobalLast7DaysButton.FontWeight = FontWeights.Normal;
-            GlobalLast7DaysButton.Background = defaultBrush;
+            GlobalLast7DaysButton.ClearValue(Control.BackgroundProperty);
             GlobalLast30DaysButton.FontWeight = FontWeights.Normal;
-            GlobalLast30DaysButton.Background = defaultBrush;
+            GlobalLast30DaysButton.ClearValue(Control.BackgroundProperty);
         }
 
         private void HighlightTimeButton(int hours)
@@ -1449,7 +1468,7 @@ namespace PerformanceMonitorDashboard
             // Blocking Events Chart (raw per-interval count, not delta)
             BlockingStatsBlockingEventsChart.Plot.Clear();
             _blockingEventsHover?.Clear();
-            ApplyDarkModeToChart(BlockingStatsBlockingEventsChart);
+            ApplyThemeToChart(BlockingStatsBlockingEventsChart);
             var (blockingXs, blockingYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
                 orderedData.Select(d => (double)d.BlockingEventCount));
@@ -1478,7 +1497,7 @@ namespace PerformanceMonitorDashboard
             // Blocking Duration Chart (raw per-interval total, not delta)
             BlockingStatsDurationChart.Plot.Clear();
             _blockingDurationHover?.Clear();
-            ApplyDarkModeToChart(BlockingStatsDurationChart);
+            ApplyThemeToChart(BlockingStatsDurationChart);
             var (durationXs, durationYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
                 orderedData.Select(d => (double)d.TotalBlockingDurationMs));
@@ -1507,7 +1526,7 @@ namespace PerformanceMonitorDashboard
             // Deadlock Count Chart (raw per-interval count, not delta)
             BlockingStatsDeadlocksChart.Plot.Clear();
             _deadlocksHover?.Clear();
-            ApplyDarkModeToChart(BlockingStatsDeadlocksChart);
+            ApplyThemeToChart(BlockingStatsDeadlocksChart);
             var (deadlockXs, deadlockYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
                 orderedData.Select(d => (double)d.DeadlockCount));
@@ -1536,7 +1555,7 @@ namespace PerformanceMonitorDashboard
             // Deadlock Wait Time Chart (raw per-interval total, not delta)
             BlockingStatsDeadlockWaitTimeChart.Plot.Clear();
             _deadlockWaitTimeHover?.Clear();
-            ApplyDarkModeToChart(BlockingStatsDeadlockWaitTimeChart);
+            ApplyThemeToChart(BlockingStatsDeadlockWaitTimeChart);
             var (deadlockWaitXs, deadlockWaitYs) = TabHelpers.FillTimeSeriesGaps(
                 orderedData.Select(d => d.CollectionTime),
                 orderedData.Select(d => (double)d.TotalDeadlockWaitTimeMs));
@@ -1572,7 +1591,7 @@ namespace PerformanceMonitorDashboard
             }
             CollectorDurationChart.Plot.Clear();
             _collectorDurationHover?.Clear();
-            ApplyDarkModeToChart(CollectorDurationChart);
+            ApplyThemeToChart(CollectorDurationChart);
 
             if (data.Count == 0) { CollectorDurationChart.Refresh(); return; }
 
@@ -1627,7 +1646,7 @@ namespace PerformanceMonitorDashboard
             }
             LockWaitStatsChart.Plot.Clear();
             _lockWaitStatsHover?.Clear();
-            ApplyDarkModeToChart(LockWaitStatsChart);
+            ApplyThemeToChart(LockWaitStatsChart);
 
             // Get all unique time points across all wait types for gap filling
             // Group by wait type and plot each as a separate series
@@ -1688,7 +1707,7 @@ namespace PerformanceMonitorDashboard
             }
             CurrentWaitsDurationChart.Plot.Clear();
             _currentWaitsDurationHover?.Clear();
-            ApplyDarkModeToChart(CurrentWaitsDurationChart);
+            ApplyThemeToChart(CurrentWaitsDurationChart);
 
             var waitTypes = data.Select(d => d.WaitType).Distinct().OrderBy(w => w).ToList();
             var colors = TabHelpers.ChartColors;
@@ -1745,7 +1764,7 @@ namespace PerformanceMonitorDashboard
             }
             CurrentWaitsBlockedChart.Plot.Clear();
             _currentWaitsBlockedHover?.Clear();
-            ApplyDarkModeToChart(CurrentWaitsBlockedChart);
+            ApplyThemeToChart(CurrentWaitsBlockedChart);
 
             var databases = data.Select(d => d.DatabaseName).Distinct().OrderBy(d => d).ToList();
             var colors = TabHelpers.ChartColors;
@@ -2089,7 +2108,7 @@ namespace PerformanceMonitorDashboard
             }
             ResourceOverviewCpuChart.Plot.Clear();
             _resourceOverviewCpuHover?.Clear();
-            ApplyDarkModeToChart(ResourceOverviewCpuChart);
+            ApplyThemeToChart(ResourceOverviewCpuChart);
 
             var dataList = cpuData?.OrderBy(d => d.SampleTime).ToList() ?? new List<CpuDataPoint>();
 
@@ -2141,7 +2160,7 @@ namespace PerformanceMonitorDashboard
             }
             ResourceOverviewMemoryChart.Plot.Clear();
             _resourceOverviewMemoryHover?.Clear();
-            ApplyDarkModeToChart(ResourceOverviewMemoryChart);
+            ApplyThemeToChart(ResourceOverviewMemoryChart);
 
             var dataList = memoryData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<MemoryDataPoint>();
             // Buffer Pool series with gap filling
@@ -2203,7 +2222,7 @@ namespace PerformanceMonitorDashboard
             }
             ResourceOverviewIoChart.Plot.Clear();
             _resourceOverviewIoHover?.Clear();
-            ApplyDarkModeToChart(ResourceOverviewIoChart);
+            ApplyThemeToChart(ResourceOverviewIoChart);
 
             var dataList = ioData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<FileIoDataPoint>();
             int bucketMinutes = hoursBack <= 1 ? 1 : hoursBack <= 6 ? 5 : hoursBack <= 24 ? 15 : 60;
@@ -2281,7 +2300,7 @@ namespace PerformanceMonitorDashboard
             }
             ResourceOverviewWaitChart.Plot.Clear();
             _resourceOverviewWaitHover?.Clear();
-            ApplyDarkModeToChart(ResourceOverviewWaitChart);
+            ApplyThemeToChart(ResourceOverviewWaitChart);
 
             var dataList = waitData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<WaitStatsDataPoint>();
 

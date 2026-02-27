@@ -1,14 +1,10 @@
-<UserControl x:Class="PerformanceMonitorLite.Controls.ServerTab"
+﻿<UserControl x:Class="PerformanceMonitorLite.Controls.ServerTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
              xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls">
     <UserControl.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
-
             <!-- Context Menu for DataGrid Copy -->
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
@@ -60,14 +56,14 @@
         </ResourceDictionary>
     </UserControl.Resources>
 
-    <Grid Background="{StaticResource BackgroundBrush}">
+    <Grid Background="{DynamicResource BackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
         <!-- Header Bar -->
-        <Border Grid.Row="0" Background="{StaticResource BackgroundDarkBrush}" Padding="12,8">
+        <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" Padding="12,8">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -76,9 +72,9 @@
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                     <TextBlock x:Name="ServerNameText" Text="Server Name" FontSize="16" FontWeight="SemiBold"
-                               Foreground="{StaticResource ForegroundBrush}" Margin="0,0,16,0"/>
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0"/>
                     <TextBlock x:Name="ConnectionStatusText" Text="Collecting..." FontSize="12"
-                               Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Center"/>
+                               Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
@@ -98,7 +94,7 @@
                     <ComboBox x:Name="FromMinuteCombo" Width="52" Margin="2,0,0,0" Visibility="Collapsed"
                               SelectionChanged="CustomTimeCombo_Changed" ToolTip="Minute"/>
                     <TextBlock x:Name="ToLabel" Text="to" VerticalAlignment="Center" Margin="6,0" Visibility="Collapsed"
-                               Foreground="{StaticResource ForegroundBrush}"/>
+                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <DatePicker x:Name="ToDatePicker" Width="120" Margin="0,0,0,0" Visibility="Collapsed"
                                 SelectedDateChanged="CustomDateRange_Changed" CalendarOpened="DatePicker_CalendarOpened"/>
                     <ComboBox x:Name="ToHourCombo" Width="70" Margin="2,0,0,0" Visibility="Collapsed"
@@ -122,7 +118,7 @@
         </Border>
 
         <!-- Main Tab Control -->
-        <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{StaticResource BackgroundBrush}"
+        <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{DynamicResource BackgroundBrush}"
                     BorderThickness="0" Padding="0">
 
             <!-- Wait Stats Tab -->
@@ -133,7 +129,7 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <Border Grid.Column="0" Background="{StaticResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
+                    <Border Grid.Column="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -145,7 +141,7 @@
                             <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
                                 <Button Content="Top Waits" Click="WaitTypeSelectAll_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
                                 <Button Content="Clear All" Click="WaitTypeClearAll_Click" Padding="6,2" FontSize="11"/>
-                                <TextBlock x:Name="WaitTypeCountText" Text="0 / 30 selected" FontSize="10" Foreground="{StaticResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                <TextBlock x:Name="WaitTypeCountText" Text="0 / 30 selected" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                             </StackPanel>
                             <TextBox Grid.Row="2" x:Name="WaitTypeSearchBox" TextChanged="WaitTypeSearch_TextChanged"
                                      Margin="0,0,0,4" Padding="4,2"/>
@@ -154,7 +150,7 @@
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                   Checked="WaitType_CheckChanged" Unchecked="WaitType_CheckChanged"
-                                                  Foreground="{StaticResource ForegroundBrush}" FontSize="11">
+                                                  Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
                                             <TextBlock Text="{Binding DisplayName}"/>
                                         </CheckBox>
                                     </DataTemplate>
@@ -698,46 +694,46 @@
                             </Grid.RowDefinitions>
 
                             <!-- Memory Summary Panel -->
-                            <Border Grid.Row="0" Background="{StaticResource BackgroundDarkBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,8">
+                            <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,8">
                                 <WrapPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Physical Memory" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Physical Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="PhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="SQL Server Memory" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="SQL Server Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="TotalServerMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Target Memory" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Target Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="TargetServerMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Buffer Pool" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Buffer Pool" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="BufferPoolText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Plan Cache" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Plan Cache" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="PlanCacheText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Available Physical" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Available Physical" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="AvailablePhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Total Page File" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Total Page File" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="TotalPageFileText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Available Page File" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Available Page File" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="AvailablePageFileText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="System Memory State" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="System Memory State" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="MemoryStateText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Memory Model" Foreground="{StaticResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Memory Model" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="SqlMemoryModelText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                 </WrapPanel>
@@ -757,7 +753,7 @@
                             </Grid.ColumnDefinitions>
 
                             <!-- Clerk Type Picker -->
-                            <Border Grid.Column="0" Background="{StaticResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
+                            <Border Grid.Column="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
                                 <Grid>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/>
@@ -769,7 +765,7 @@
                                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
                                         <Button Content="Top Clerks" Click="MemoryClerkSelectTop_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
                                         <Button Content="Clear All" Click="MemoryClerkClearAll_Click" Padding="6,2" FontSize="11"/>
-                                        <TextBlock x:Name="MemoryClerkCountText" Text="0 selected" FontSize="10" Foreground="{StaticResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                        <TextBlock x:Name="MemoryClerkCountText" Text="0 selected" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </StackPanel>
                                     <TextBox Grid.Row="2" x:Name="MemoryClerkSearchBox" TextChanged="MemoryClerkSearch_TextChanged"
                                              Margin="0,0,0,4" Padding="4,2"/>
@@ -778,7 +774,7 @@
                                             <DataTemplate>
                                                 <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                           Checked="MemoryClerk_CheckChanged" Unchecked="MemoryClerk_CheckChanged"
-                                                          Foreground="{StaticResource ForegroundBrush}" FontSize="11">
+                                                          Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
                                                     <TextBlock Text="{Binding DisplayName}"/>
                                                 </CheckBox>
                                             </DataTemplate>
@@ -794,11 +790,11 @@
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <ScottPlot:WpfPlot Grid.Row="0" x:Name="MemoryClerksChart"/>
-                                <Border Grid.Row="1" Background="{StaticResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
+                                <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                        <TextBlock Text="Non-BP Total:" FontWeight="SemiBold" Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                        <TextBlock Text="Non-BP Total:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                         <TextBlock x:Name="MemoryClerksTotalText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                                        <TextBlock Text="Top Non-BP Clerk:" FontWeight="SemiBold" Foreground="{StaticResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                        <TextBlock Text="Top Non-BP Clerk:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                         <TextBlock x:Name="MemoryClerksTopText" Text="--" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </Border>
@@ -1109,7 +1105,7 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <Border Grid.Column="0" Background="{StaticResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
+                    <Border Grid.Column="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -1133,7 +1129,7 @@
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                   Checked="PerfmonCounter_CheckChanged" Unchecked="PerfmonCounter_CheckChanged"
-                                                  Foreground="{StaticResource ForegroundBrush}" FontSize="11">
+                                                  Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
                                             <TextBlock Text="{Binding DisplayName}"/>
                                         </CheckBox>
                                     </DataTemplate>

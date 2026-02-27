@@ -158,30 +158,30 @@ public partial class ServerTab : UserControl
             grid.CopyingRowClipboardContent += Helpers.DataGridClipboardBehavior.FixHeaderCopy;
         }
 
-        /* Apply dark theme immediately so charts don't flash white before data loads */
-        ApplyDarkTheme(WaitStatsChart);
-        ApplyDarkTheme(QueryDurationTrendChart);
-        ApplyDarkTheme(ProcDurationTrendChart);
-        ApplyDarkTheme(QueryStoreDurationTrendChart);
-        ApplyDarkTheme(ExecutionCountTrendChart);
-        ApplyDarkTheme(CpuChart);
-        ApplyDarkTheme(MemoryChart);
-        ApplyDarkTheme(MemoryClerksChart);
-        ApplyDarkTheme(MemoryGrantSizingChart);
-        ApplyDarkTheme(MemoryGrantActivityChart);
-        ApplyDarkTheme(FileIoReadChart);
-        ApplyDarkTheme(FileIoWriteChart);
-        ApplyDarkTheme(FileIoReadThroughputChart);
-        ApplyDarkTheme(FileIoWriteThroughputChart);
-        ApplyDarkTheme(TempDbChart);
-        ApplyDarkTheme(TempDbFileIoChart);
-        ApplyDarkTheme(LockWaitTrendChart);
-        ApplyDarkTheme(BlockingTrendChart);
-        ApplyDarkTheme(DeadlockTrendChart);
-        ApplyDarkTheme(CurrentWaitsDurationChart);
-        ApplyDarkTheme(CurrentWaitsBlockedChart);
-        ApplyDarkTheme(PerfmonChart);
-        ApplyDarkTheme(CollectorDurationChart);
+        /* Apply theme immediately so charts don't flash white before data loads */
+        ApplyTheme(WaitStatsChart);
+        ApplyTheme(QueryDurationTrendChart);
+        ApplyTheme(ProcDurationTrendChart);
+        ApplyTheme(QueryStoreDurationTrendChart);
+        ApplyTheme(ExecutionCountTrendChart);
+        ApplyTheme(CpuChart);
+        ApplyTheme(MemoryChart);
+        ApplyTheme(MemoryClerksChart);
+        ApplyTheme(MemoryGrantSizingChart);
+        ApplyTheme(MemoryGrantActivityChart);
+        ApplyTheme(FileIoReadChart);
+        ApplyTheme(FileIoWriteChart);
+        ApplyTheme(FileIoReadThroughputChart);
+        ApplyTheme(FileIoWriteThroughputChart);
+        ApplyTheme(TempDbChart);
+        ApplyTheme(TempDbFileIoChart);
+        ApplyTheme(LockWaitTrendChart);
+        ApplyTheme(BlockingTrendChart);
+        ApplyTheme(DeadlockTrendChart);
+        ApplyTheme(CurrentWaitsDurationChart);
+        ApplyTheme(CurrentWaitsBlockedChart);
+        ApplyTheme(PerfmonChart);
+        ApplyTheme(CollectorDurationChart);
 
         /* Chart hover tooltips */
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
@@ -232,6 +232,9 @@ public partial class ServerTab : UserControl
         Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked");
         Helpers.ContextMenuHelper.SetupChartContextMenu(PerfmonChart, "Perfmon_Counters");
         Helpers.ContextMenuHelper.SetupChartContextMenu(CollectorDurationChart, "Collector_Duration");
+
+        Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+        Unloaded += (_, _) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -423,67 +426,85 @@ public partial class ServerTab : UserControl
                 var popup = datePicker.Template.FindName("PART_Popup", datePicker) as System.Windows.Controls.Primitives.Popup;
                 if (popup?.Child is System.Windows.Controls.Calendar calendar)
                 {
-                    ApplyDarkThemeToCalendar(calendar);
+                    ApplyThemeToCalendar(calendar);
                 }
             }));
         }
     }
 
-    private void ApplyDarkThemeToCalendar(System.Windows.Controls.Calendar calendar)
+    private void ApplyThemeToCalendar(System.Windows.Controls.Calendar calendar)
     {
-        var darkBg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#111217")!);
-        var whiteFg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E4E6EB")!);
-        var mutedFg = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#6B7280")!);
+        SolidColorBrush primaryBg, fg, mutedFg, borderBrush;
 
-        calendar.Background = darkBg;
-        calendar.Foreground = whiteFg;
-        calendar.BorderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#2a2d35")!);
+        if (Helpers.ThemeManager.CurrentTheme == "CoolBreeze")
+        {
+            primaryBg   = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#EEF4FA")!);
+            fg          = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#1A2A3A")!);
+            mutedFg     = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#5B7A90")!);
+            borderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#A8BDD0")!);
+        }
+        else if (Helpers.ThemeManager.HasLightBackground)
+        {
+            primaryBg   = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF));
+            fg          = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x1A, 0x1D, 0x23));
+            mutedFg     = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x71, 0x80, 0x96));
+            borderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xDE, 0xE2, 0xE6));
+        }
+        else
+        {
+            primaryBg   = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#111217")!);
+            fg          = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E4E6EB")!);
+            mutedFg     = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#6B7280")!);
+            borderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#2a2d35")!);
+        }
 
-        ApplyDarkThemeRecursively(calendar, darkBg, whiteFg, mutedFg);
+        calendar.Background = primaryBg;
+        calendar.Foreground = fg;
+        calendar.BorderBrush = borderBrush;
+
+        ApplyThemeRecursively(calendar, primaryBg, fg, mutedFg);
     }
 
-    private void ApplyDarkThemeRecursively(DependencyObject parent, Brush darkBg, Brush whiteFg, Brush mutedFg)
+    private void ApplyThemeRecursively(DependencyObject parent, Brush primaryBg, Brush fg, Brush mutedFg)
     {
+        bool HasLightBackground = Helpers.ThemeManager.HasLightBackground;
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
         {
             var child = VisualTreeHelper.GetChild(parent, i);
 
             if (child is System.Windows.Controls.Primitives.CalendarItem calendarItem)
             {
-                calendarItem.Background = darkBg;
-                calendarItem.Foreground = whiteFg;
+                calendarItem.Background = primaryBg;
+                calendarItem.Foreground = fg;
             }
             else if (child is System.Windows.Controls.Primitives.CalendarDayButton dayButton)
             {
                 dayButton.Background = Brushes.Transparent;
-                dayButton.Foreground = whiteFg;
+                dayButton.Foreground = fg;
             }
             else if (child is System.Windows.Controls.Primitives.CalendarButton calButton)
             {
                 calButton.Background = Brushes.Transparent;
-                calButton.Foreground = whiteFg;
+                calButton.Foreground = fg;
             }
             else if (child is Button button)
             {
                 button.Background = Brushes.Transparent;
-                button.Foreground = whiteFg;
+                button.Foreground = fg;
             }
             else if (child is TextBlock textBlock)
             {
-                textBlock.Foreground = whiteFg;
+                textBlock.Foreground = fg;
             }
-            else if (child is Border border)
+            else if (!HasLightBackground)
             {
-                if (border.Background is SolidColorBrush bg && bg.Color.R > 200 && bg.Color.G > 200 && bg.Color.B > 200)
-                    border.Background = darkBg;
-            }
-            else if (child is Grid grid)
-            {
-                if (grid.Background is SolidColorBrush gridBg && gridBg.Color.R > 200 && gridBg.Color.G > 200 && gridBg.Color.B > 200)
-                    grid.Background = darkBg;
+                if (child is Border border && border.Background is SolidColorBrush bg && bg.Color.R > 200 && bg.Color.G > 200 && bg.Color.B > 200)
+                    border.Background = primaryBg;
+                else if (child is Grid grid && grid.Background is SolidColorBrush gridBg && gridBg.Color.R > 200 && gridBg.Color.G > 200 && gridBg.Color.B > 200)
+                    grid.Background = primaryBg;
             }
 
-            ApplyDarkThemeRecursively(child, darkBg, whiteFg, mutedFg);
+            ApplyThemeRecursively(child, primaryBg, fg, mutedFg);
         }
     }
 
@@ -722,7 +743,7 @@ public partial class ServerTab : UserControl
     {
         ClearChart(CpuChart);
         _cpuHover?.Clear();
-        ApplyDarkTheme(CpuChart);
+        ApplyTheme(CpuChart);
 
         if (data.Count == 0) { CpuChart.Refresh(); return; }
 
@@ -753,7 +774,7 @@ public partial class ServerTab : UserControl
     {
         ClearChart(MemoryChart);
         _memoryHover?.Clear();
-        ApplyDarkTheme(MemoryChart);
+        ApplyTheme(MemoryChart);
 
         if (data.Count == 0) { MemoryChart.Refresh(); return; }
 
@@ -813,8 +834,8 @@ public partial class ServerTab : UserControl
         ClearChart(MemoryGrantActivityChart);
         _memoryGrantSizingHover?.Clear();
         _memoryGrantActivityHover?.Clear();
-        ApplyDarkTheme(MemoryGrantSizingChart);
-        ApplyDarkTheme(MemoryGrantActivityChart);
+        ApplyTheme(MemoryGrantSizingChart);
+        ApplyTheme(MemoryGrantActivityChart);
 
         if (data.Count == 0)
         {
@@ -901,7 +922,7 @@ public partial class ServerTab : UserControl
     {
         ClearChart(TempDbChart);
         _tempDbHover?.Clear();
-        ApplyDarkTheme(TempDbChart);
+        ApplyTheme(TempDbChart);
 
         if (data.Count == 0) { TempDbChart.Refresh(); return; }
 
@@ -940,7 +961,7 @@ public partial class ServerTab : UserControl
     {
         ClearChart(TempDbFileIoChart);
         _tempDbFileIoHover?.Clear();
-        ApplyDarkTheme(TempDbFileIoChart);
+        ApplyTheme(TempDbFileIoChart);
 
         if (data.Count == 0) { TempDbFileIoChart.Refresh(); return; }
 
@@ -985,8 +1006,8 @@ public partial class ServerTab : UserControl
         ClearChart(FileIoWriteChart);
         _fileIoReadHover?.Clear();
         _fileIoWriteHover?.Clear();
-        ApplyDarkTheme(FileIoReadChart);
-        ApplyDarkTheme(FileIoWriteChart);
+        ApplyTheme(FileIoReadChart);
+        ApplyTheme(FileIoWriteChart);
 
         if (data.Count == 0) { FileIoReadChart.Refresh(); FileIoWriteChart.Refresh(); return; }
 
@@ -1076,8 +1097,8 @@ public partial class ServerTab : UserControl
         ClearChart(FileIoWriteThroughputChart);
         _fileIoReadThroughputHover?.Clear();
         _fileIoWriteThroughputHover?.Clear();
-        ApplyDarkTheme(FileIoReadThroughputChart);
-        ApplyDarkTheme(FileIoWriteThroughputChart);
+        ApplyTheme(FileIoReadThroughputChart);
+        ApplyTheme(FileIoWriteThroughputChart);
 
         if (data.Count == 0) { FileIoReadThroughputChart.Refresh(); FileIoWriteThroughputChart.Refresh(); return; }
 
@@ -1139,7 +1160,7 @@ public partial class ServerTab : UserControl
     private void UpdateLockWaitTrendChart(List<LockWaitTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(LockWaitTrendChart);
-        ApplyDarkTheme(LockWaitTrendChart);
+        ApplyTheme(LockWaitTrendChart);
 
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
@@ -1201,7 +1222,7 @@ public partial class ServerTab : UserControl
     private void UpdateBlockingTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(BlockingTrendChart);
-        ApplyDarkTheme(BlockingTrendChart);
+        ApplyTheme(BlockingTrendChart);
 
         /* Calculate X-axis range based on selected time window */
         DateTime rangeStart, rangeEnd;
@@ -1280,7 +1301,7 @@ public partial class ServerTab : UserControl
     private void UpdateDeadlockTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(DeadlockTrendChart);
-        ApplyDarkTheme(DeadlockTrendChart);
+        ApplyTheme(DeadlockTrendChart);
 
         /* Calculate X-axis range based on selected time window */
         DateTime rangeStart, rangeEnd;
@@ -1361,7 +1382,7 @@ public partial class ServerTab : UserControl
     private void UpdateCurrentWaitsDurationChart(List<WaitingTaskTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(CurrentWaitsDurationChart);
-        ApplyDarkTheme(CurrentWaitsDurationChart);
+        ApplyTheme(CurrentWaitsDurationChart);
 
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
@@ -1426,7 +1447,7 @@ public partial class ServerTab : UserControl
     private void UpdateCurrentWaitsBlockedChart(List<BlockedSessionTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(CurrentWaitsBlockedChart);
-        ApplyDarkTheme(CurrentWaitsBlockedChart);
+        ApplyTheme(CurrentWaitsBlockedChart);
 
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
@@ -1493,7 +1514,7 @@ public partial class ServerTab : UserControl
     private void UpdateQueryDurationTrendChart(List<QueryTrendPoint> data)
     {
         ClearChart(QueryDurationTrendChart);
-        ApplyDarkTheme(QueryDurationTrendChart);
+        ApplyTheme(QueryDurationTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
 
@@ -1517,7 +1538,7 @@ public partial class ServerTab : UserControl
     private void UpdateProcDurationTrendChart(List<QueryTrendPoint> data)
     {
         ClearChart(ProcDurationTrendChart);
-        ApplyDarkTheme(ProcDurationTrendChart);
+        ApplyTheme(ProcDurationTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
 
@@ -1541,7 +1562,7 @@ public partial class ServerTab : UserControl
     private void UpdateQueryStoreDurationTrendChart(List<QueryTrendPoint> data)
     {
         ClearChart(QueryStoreDurationTrendChart);
-        ApplyDarkTheme(QueryStoreDurationTrendChart);
+        ApplyTheme(QueryStoreDurationTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
 
@@ -1565,7 +1586,7 @@ public partial class ServerTab : UserControl
     private void UpdateExecutionCountTrendChart(List<QueryTrendPoint> data)
     {
         ClearChart(ExecutionCountTrendChart);
-        ApplyDarkTheme(ExecutionCountTrendChart);
+        ApplyTheme(ExecutionCountTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
 
@@ -1703,7 +1724,7 @@ public partial class ServerTab : UserControl
             var selected = _waitTypeItems.Where(i => i.IsSelected).Take(20).ToList();
 
             ClearChart(WaitStatsChart);
-            ApplyDarkTheme(WaitStatsChart);
+            ApplyTheme(WaitStatsChart);
             _waitStatsHover?.Clear();
 
             if (selected.Count == 0) { WaitStatsChart.Refresh(); return; }
@@ -1850,7 +1871,7 @@ public partial class ServerTab : UserControl
             var selected = _memoryClerkItems.Where(i => i.IsSelected).Take(20).ToList();
 
             ClearChart(MemoryClerksChart);
-            ApplyDarkTheme(MemoryClerksChart);
+            ApplyTheme(MemoryClerksChart);
             _memoryClerksHover?.Clear();
 
             if (selected.Count == 0)
@@ -2067,7 +2088,7 @@ public partial class ServerTab : UserControl
 
             ClearChart(PerfmonChart);
             _perfmonHover?.Clear();
-            ApplyDarkTheme(PerfmonChart);
+            ApplyTheme(PerfmonChart);
 
             if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
 
@@ -2190,22 +2211,50 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// Applies the Darling Data dark theme to a ScottPlot chart.
-    /// Matches Dashboard TabHelpers.ApplyDarkModeToChart exactly.
+    /// Matches Dashboard TabHelpers.ApplyThemeToChart exactly.
     /// </summary>
-    private static void ApplyDarkTheme(ScottPlot.WPF.WpfPlot chart)
+    private static void ApplyTheme(ScottPlot.WPF.WpfPlot chart)
     {
-        var darkBackground = ScottPlot.Color.FromHex("#22252b");
-        var darkerBackground = ScottPlot.Color.FromHex("#111217");
-        var textColor = ScottPlot.Color.FromHex("#9DA5B4");
-        var gridColor = ScottPlot.Colors.White.WithAlpha(40);
+        ScottPlot.Color figureBackground, dataBackground, textColor, gridColor, legendBg, legendFg, legendOutline;
 
-        chart.Plot.FigureBackground.Color = darkBackground;
-        chart.Plot.DataBackground.Color = darkerBackground;
+        if (Helpers.ThemeManager.CurrentTheme == "CoolBreeze")
+        {
+            figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
+            dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
+            textColor        = ScottPlot.Color.FromHex("#364D61");
+            gridColor        = ScottPlot.Color.FromHex("#A8BDD0").WithAlpha(120);
+            legendBg         = ScottPlot.Color.FromHex("#EEF4FA");
+            legendFg         = ScottPlot.Color.FromHex("#1A2A3A");
+            legendOutline    = ScottPlot.Color.FromHex("#A8BDD0");
+        }
+        else if (Helpers.ThemeManager.HasLightBackground)
+        {
+            figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
+            dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
+            textColor        = ScottPlot.Color.FromHex("#4A5568");
+            gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
+            legendBg         = ScottPlot.Color.FromHex("#FFFFFF");
+            legendFg         = ScottPlot.Color.FromHex("#1A1D23");
+            legendOutline    = ScottPlot.Color.FromHex("#DEE2E6");
+        }
+        else
+        {
+            figureBackground = ScottPlot.Color.FromHex("#22252b");
+            dataBackground   = ScottPlot.Color.FromHex("#111217");
+            textColor        = ScottPlot.Color.FromHex("#9DA5B4");
+            gridColor        = ScottPlot.Colors.White.WithAlpha(40);
+            legendBg         = ScottPlot.Color.FromHex("#22252b");
+            legendFg         = ScottPlot.Color.FromHex("#E4E6EB");
+            legendOutline    = ScottPlot.Color.FromHex("#2a2d35");
+        }
+
+        chart.Plot.FigureBackground.Color = figureBackground;
+        chart.Plot.DataBackground.Color = dataBackground;
         chart.Plot.Axes.Color(textColor);
         chart.Plot.Grid.MajorLineColor = gridColor;
-        chart.Plot.Legend.BackgroundColor = darkBackground;
-        chart.Plot.Legend.FontColor = ScottPlot.Color.FromHex("#E4E6EB");
-        chart.Plot.Legend.OutlineColor = ScottPlot.Color.FromHex("#2a2d35");
+        chart.Plot.Legend.BackgroundColor = legendBg;
+        chart.Plot.Legend.FontColor = legendFg;
+        chart.Plot.Legend.OutlineColor = legendOutline;
         chart.Plot.Legend.Alignment = ScottPlot.Alignment.LowerCenter;
         chart.Plot.Legend.Orientation = ScottPlot.Orientation.Horizontal;
         chart.Plot.Axes.Margins(bottom: 0); /* No bottom margin - SetChartYLimitsWithLegendPadding handles Y-axis */
@@ -2214,14 +2263,57 @@ public partial class ServerTab : UserControl
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
         chart.Plot.Axes.Left.Label.ForeColor = textColor;
+
+        // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
+        chart.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
+
+        // Ensure ScottPlot renders with the correct colors the very first time it gets pixel dimensions.
+        chart.Loaded -= HandleChartFirstLoaded;
+        if (!chart.IsLoaded)
+            chart.Loaded += HandleChartFirstLoaded;
+    }
+
+    private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)
+    {
+        var chart = (ScottPlot.WPF.WpfPlot)sender;
+        chart.Loaded -= HandleChartFirstLoaded;
+        chart.Refresh();
+    }
+
+    private void OnThemeChanged(string _)
+    {
+        foreach (var field in GetType().GetFields(
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+        {
+            if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+            {
+                ApplyTheme(chart);
+                chart.Refresh();
+            }
+        }
+    }
+
+    private static IEnumerable<ScottPlot.WPF.WpfPlot> GetAllCharts(DependencyObject root)
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
+        {
+            if (child is ScottPlot.WPF.WpfPlot plot)
+                yield return plot;
+            foreach (var nested in GetAllCharts(child))
+                yield return nested;
+        }
     }
 
     /// <summary>
-    /// Reapplies dark mode text colors and font sizes after DateTimeTicksBottom() resets them.
+    /// Reapplies theme-appropriate text colors and font sizes after DateTimeTicksBottom() resets them.
     /// </summary>
     private static void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
-        var textColor = ScottPlot.Color.FromHex("#9DA5B4");
+        var textColor = Helpers.ThemeManager.CurrentTheme == "CoolBreeze"
+            ? ScottPlot.Color.FromHex("#364D61")
+            : Helpers.ThemeManager.HasLightBackground
+                ? ScottPlot.Color.FromHex("#4A5568")
+                : ScottPlot.Color.FromHex("#9DA5B4");
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
@@ -3128,7 +3220,7 @@ public partial class ServerTab : UserControl
     private void UpdateCollectorDurationChart(List<CollectionLogRow> data)
     {
         ClearChart(CollectorDurationChart);
-        ApplyDarkTheme(CollectorDurationChart);
+        ApplyTheme(CollectorDurationChart);
 
         if (data.Count == 0) { CollectorDurationChart.Refresh(); return; }
 
@@ -3308,3 +3400,4 @@ public partial class ServerTab : UserControl
         }
     }
 }
+

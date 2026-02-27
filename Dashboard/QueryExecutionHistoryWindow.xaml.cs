@@ -64,13 +64,21 @@ namespace PerformanceMonitorDashboard
 
             QueryIdentifierText.Text = $"Query Execution History: Query {queryId} in [{databaseName}]";
 
-            ApplyDarkModeToChart();
+            ApplyThemeToChart();
             Loaded += QueryExecutionHistoryWindow_Loaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            Closed += (s, e) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
-        private void ApplyDarkModeToChart()
+        private void ApplyThemeToChart()
         {
-            Helpers.TabHelpers.ApplyDarkModeToChart(HistoryChart);
+            Helpers.TabHelpers.ApplyThemeToChart(HistoryChart);
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            ApplyThemeToChart();
+            HistoryChart.Refresh();
         }
 
         private async void QueryExecutionHistoryWindow_Loaded(object sender, RoutedEventArgs e)

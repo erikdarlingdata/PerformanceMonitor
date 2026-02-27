@@ -10,9 +10,6 @@
         Background="{DynamicResource BackgroundBrush}">
     <Window.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click"/>
                 <MenuItem Header="Copy Row" Click="CopyRow_Click"/>
@@ -116,6 +113,16 @@
                     <TextBlock Text="auto-detected from locale"
                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="Color theme:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="ColorThemeCombo" Width="140" VerticalAlignment="Center"
+                              SelectionChanged="ColorThemeCombo_SelectionChanged">
+                        <ComboBoxItem Content="Dark" Tag="Dark"/>
+                        <ComboBoxItem Content="Light" Tag="Light"/>
+                        <ComboBoxItem Content="Cool Breeze" Tag="CoolBreeze"/>
+                    </ComboBox>
                 </StackPanel>
             </StackPanel>
         </Border>

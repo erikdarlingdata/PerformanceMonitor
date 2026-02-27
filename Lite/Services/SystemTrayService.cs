@@ -31,6 +31,7 @@ public class SystemTrayService : IDisposable
     {
         _mainWindow = mainWindow;
         _backgroundService = backgroundService;
+        Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
     }
 
     /// <summary>
@@ -42,27 +43,29 @@ public class SystemTrayService : IDisposable
 
         _trayIcon = new TaskbarIcon();
 
-        /* Custom dark tooltip (native ToolTipText uses Windows light theme) */
+        bool HasLightBackground = Helpers.ThemeManager.HasLightBackground;
+
+        /* Custom tooltip styled to match current theme */
         _tooltipText = new TextBlock
         {
             Text = "Performance Monitor Lite",
-            Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+            Foreground = new SolidColorBrush(HasLightBackground
+                ? (Color)ColorConverter.ConvertFromString("#1A1D23")
+                : (Color)ColorConverter.ConvertFromString("#E4E6EB")),
             FontSize = 12
         };
         _trayIcon.TrayToolTip = new Border
         {
-            Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b")),
-            BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#33363e")),
+            Background = new SolidColorBrush(HasLightBackground
+                ? (Color)ColorConverter.ConvertFromString("#FFFFFF")
+                : (Color)ColorConverter.ConvertFromString("#22252b")),
+            BorderBrush = new SolidColorBrush(HasLightBackground
+                ? (Color)ColorConverter.ConvertFromString("#DEE2E6")
+                : (Color)ColorConverter.ConvertFromString("#33363e")),
             BorderThickness = new Thickness(1),
             Padding = new Thickness(10, 8, 10, 8),
             CornerRadius = new CornerRadius(4),
             Child = _tooltipText
-        };
-
-        /* Load dark theme for context menu styling */
-        var darkTheme = new ResourceDictionary
-        {
-            Source = new Uri("pack://application:,,,/Themes/DarkTheme.xaml", UriKind.Absolute)
         };
 
         /* Load icon */
@@ -76,9 +79,8 @@ public class SystemTrayService : IDisposable
             /* Icon loading failed - tray icon will be blank but functional */
         }
 
-        /* Build context menu with dark theme */
+        /* Build context menu */
         var contextMenu = new ContextMenu();
-        contextMenu.Resources.MergedDictionaries.Add(darkTheme);
 
         var showItem = new MenuItem { Header = "Show Window", Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent } };
         showItem.Click += (s, e) => ShowMainWindow();
@@ -166,6 +168,7 @@ public class SystemTrayService : IDisposable
 
         if (disposing && _trayIcon != null)
         {
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
             _mainWindow.StateChanged -= MainWindow_StateChanged;
             _trayIcon.Visibility = Visibility.Collapsed;
             _trayIcon.Dispose();
@@ -174,4 +177,10 @@ public class SystemTrayService : IDisposable
 
         _disposed = true;
     }
+
+    private void OnThemeChanged(string _)
+    {
+        _mainWindow.Dispatcher.InvokeAsync(Initialize);
+    }
 }
+

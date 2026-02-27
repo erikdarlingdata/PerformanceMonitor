@@ -3,13 +3,10 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Collection History" Height="600" Width="1100"
         WindowStartupLocation="CenterOwner"
-        Background="{StaticResource BackgroundBrush}">
+        Background="{DynamicResource BackgroundBrush}">
 
     <Window.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
@@ -36,7 +33,7 @@
         </Grid.RowDefinitions>
 
         <!-- Header -->
-        <Border Grid.Row="0" Background="{StaticResource BackgroundLightBrush}" Padding="10" Margin="10,10,10,0" CornerRadius="4">
+        <Border Grid.Row="0" Background="{DynamicResource BackgroundLightBrush}" Padding="10" Margin="10,10,10,0" CornerRadius="4">
             <StackPanel>
                 <TextBlock x:Name="CollectorNameText" FontSize="16" FontWeight="Bold"/>
                 <TextBlock x:Name="SummaryText" Margin="0,5,0,0"/>
@@ -92,7 +89,7 @@
         </DataGrid>
 
         <!-- Footer -->
-        <Border Grid.Row="2" Background="{StaticResource BackgroundLightBrush}" Padding="10" Margin="10,0,10,10" CornerRadius="4">
+        <Border Grid.Row="2" Background="{DynamicResource BackgroundLightBrush}" Padding="10" Margin="10,0,10,10" CornerRadius="4">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="Close" Width="100" Height="30" Click="Close_Click"/>
             </StackPanel>

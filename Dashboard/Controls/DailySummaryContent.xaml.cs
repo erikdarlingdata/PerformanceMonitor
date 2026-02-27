@@ -145,7 +145,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var popup = datePicker.Template.FindName("PART_Popup", datePicker) as System.Windows.Controls.Primitives.Popup;
                     if (popup?.Child is System.Windows.Controls.Calendar calendar)
                     {
-                        TabHelpers.ApplyDarkThemeToCalendar(calendar);
+                        TabHelpers.ApplyThemeToCalendar(calendar);
                     }
                     else
                     {
@@ -153,7 +153,7 @@ namespace PerformanceMonitorDashboard.Controls
                         var calendar2 = FindVisualChild<System.Windows.Controls.Calendar>(datePicker);
                         if (calendar2 != null)
                         {
-                            TabHelpers.ApplyDarkThemeToCalendar(calendar2);
+                            TabHelpers.ApplyThemeToCalendar(calendar2);
                         }
                     }
                 }), System.Windows.Threading.DispatcherPriority.Loaded);

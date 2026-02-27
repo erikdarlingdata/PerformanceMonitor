@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -129,27 +129,28 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartContextMenus();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
 
             // Apply dark theme immediately so charts don't flash white before data loads
-            TabHelpers.ApplyDarkModeToChart(BadPagesChart);
-            TabHelpers.ApplyDarkModeToChart(DumpRequestsChart);
-            TabHelpers.ApplyDarkModeToChart(AccessViolationsChart);
-            TabHelpers.ApplyDarkModeToChart(WriteAccessViolationsChart);
-            TabHelpers.ApplyDarkModeToChart(NonYieldingTasksChart);
-            TabHelpers.ApplyDarkModeToChart(LatchWarningsChart);
-            TabHelpers.ApplyDarkModeToChart(SickSpinlocksChart);
-            TabHelpers.ApplyDarkModeToChart(CpuComparisonChart);
-            TabHelpers.ApplyDarkModeToChart(SevereErrorsChart);
-            TabHelpers.ApplyDarkModeToChart(IOIssuesChart);
-            TabHelpers.ApplyDarkModeToChart(LongestPendingIOChart);
-            TabHelpers.ApplyDarkModeToChart(SchedulerIssuesChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryConditionsChart);
-            TabHelpers.ApplyDarkModeToChart(CPUTasksChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryBrokerChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryBrokerRatioChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMUtilChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMMemoryChart);
+            TabHelpers.ApplyThemeToChart(BadPagesChart);
+            TabHelpers.ApplyThemeToChart(DumpRequestsChart);
+            TabHelpers.ApplyThemeToChart(AccessViolationsChart);
+            TabHelpers.ApplyThemeToChart(WriteAccessViolationsChart);
+            TabHelpers.ApplyThemeToChart(NonYieldingTasksChart);
+            TabHelpers.ApplyThemeToChart(LatchWarningsChart);
+            TabHelpers.ApplyThemeToChart(SickSpinlocksChart);
+            TabHelpers.ApplyThemeToChart(CpuComparisonChart);
+            TabHelpers.ApplyThemeToChart(SevereErrorsChart);
+            TabHelpers.ApplyThemeToChart(IOIssuesChart);
+            TabHelpers.ApplyThemeToChart(LongestPendingIOChart);
+            TabHelpers.ApplyThemeToChart(SchedulerIssuesChart);
+            TabHelpers.ApplyThemeToChart(MemoryConditionsChart);
+            TabHelpers.ApplyThemeToChart(CPUTasksChart);
+            TabHelpers.ApplyThemeToChart(MemoryBrokerChart);
+            TabHelpers.ApplyThemeToChart(MemoryBrokerRatioChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMUtilChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMMemoryChart);
 
             _badPagesHover = new Helpers.ChartHoverHelper(BadPagesChart, "events");
             _dumpRequestsHover = new Helpers.ChartHoverHelper(DumpRequestsChart, "events");
@@ -187,6 +188,21 @@ namespace PerformanceMonitorDashboard.Controls
             _ioIssuesUnfilteredData = null;
             _memoryBrokerUnfilteredData = null;
             _memoryNodeOOMUnfilteredData = null;
+
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -472,7 +488,7 @@ namespace PerformanceMonitorDashboard.Controls
             // Bad Pages Detected Chart
             BadPagesChart.Plot.Clear();
             _badPagesHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(BadPagesChart);
+            TabHelpers.ApplyThemeToChart(BadPagesChart);
             if (hasData)
             {
                 var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
@@ -501,7 +517,7 @@ namespace PerformanceMonitorDashboard.Controls
             // Interval Dump Requests Chart
             DumpRequestsChart.Plot.Clear();
             _dumpRequestsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(DumpRequestsChart);
+            TabHelpers.ApplyThemeToChart(DumpRequestsChart);
             if (hasData)
             {
                 var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
@@ -530,7 +546,7 @@ namespace PerformanceMonitorDashboard.Controls
             // Access Violations Chart
             AccessViolationsChart.Plot.Clear();
             _accessViolationsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(AccessViolationsChart);
+            TabHelpers.ApplyThemeToChart(AccessViolationsChart);
             if (hasData)
             {
                 var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
@@ -559,7 +575,7 @@ namespace PerformanceMonitorDashboard.Controls
             // Write Access Violations Chart
             WriteAccessViolationsChart.Plot.Clear();
             _writeAccessViolationsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(WriteAccessViolationsChart);
+            TabHelpers.ApplyThemeToChart(WriteAccessViolationsChart);
             if (hasData)
             {
                 var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
@@ -600,7 +616,7 @@ namespace PerformanceMonitorDashboard.Controls
             // Non-Yielding Tasks Chart
             NonYieldingTasksChart.Plot.Clear();
             _nonYieldingTasksHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(NonYieldingTasksChart);
+            TabHelpers.ApplyThemeToChart(NonYieldingTasksChart);
             if (hasData)
             {
                 var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
@@ -629,7 +645,7 @@ namespace PerformanceMonitorDashboard.Controls
             // Latch Warnings Chart
             LatchWarningsChart.Plot.Clear();
             _latchWarningsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(LatchWarningsChart);
+            TabHelpers.ApplyThemeToChart(LatchWarningsChart);
             if (hasData)
             {
                 var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
@@ -663,7 +679,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             SickSpinlocksChart.Plot.Clear();
             _sickSpinlocksHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(SickSpinlocksChart);
+            TabHelpers.ApplyThemeToChart(SickSpinlocksChart);
             if (hasData)
             {
                 // Group by spinlock type and create a series for each
@@ -726,7 +742,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             CpuComparisonChart.Plot.Clear();
             _cpuComparisonHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(CpuComparisonChart);
+            TabHelpers.ApplyThemeToChart(CpuComparisonChart);
             if (hasData)
             {
                 // System CPU series
@@ -822,7 +838,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             SevereErrorsChart.Plot.Clear();
             _severeErrorsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(SevereErrorsChart);
+            TabHelpers.ApplyThemeToChart(SevereErrorsChart);
 
             var dataList = data?.ToList() ?? new List<HealthParserSevereErrorItem>();
             bool hasData = false;
@@ -967,7 +983,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             IOIssuesChart.Plot.Clear();
             _ioIssuesHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(IOIssuesChart);
+            TabHelpers.ApplyThemeToChart(IOIssuesChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).OrderBy(d => d.EventTime).ToList() ?? new List<HealthParserIOIssueItem>();
             bool hasData = false;
@@ -1044,7 +1060,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             LongestPendingIOChart.Plot.Clear();
             _longestPendingIoHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(LongestPendingIOChart);
+            TabHelpers.ApplyThemeToChart(LongestPendingIOChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue && !string.IsNullOrEmpty(d.LongestPendingRequestsFilePath)).ToList() ?? new List<HealthParserIOIssueItem>();
             bool hasData = false;
@@ -1167,7 +1183,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             SchedulerIssuesChart.Plot.Clear();
             _schedulerIssuesHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(SchedulerIssuesChart);
+            TabHelpers.ApplyThemeToChart(SchedulerIssuesChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserSchedulerIssueItem>();
             bool hasData = false;
@@ -1321,7 +1337,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             MemoryConditionsChart.Plot.Clear();
             _memoryConditionsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(MemoryConditionsChart);
+            TabHelpers.ApplyThemeToChart(MemoryConditionsChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserMemoryConditionItem>();
             bool hasData = false;
@@ -1421,7 +1437,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             CPUTasksChart.Plot.Clear();
             _cpuTasksHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(CPUTasksChart);
+            TabHelpers.ApplyThemeToChart(CPUTasksChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserCPUTasksItem>();
             bool hasData = false;
@@ -1637,7 +1653,7 @@ namespace PerformanceMonitorDashboard.Controls
                     _legendPanels[chart] = null;
                 }
                 chart.Plot.Clear();
-                TabHelpers.ApplyDarkModeToChart(chart);
+                TabHelpers.ApplyThemeToChart(chart);
             }
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserMemoryBrokerItem>();
@@ -1857,7 +1873,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             MemoryNodeOOMChart.Plot.Clear();
             _memoryNodeOomHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserMemoryNodeOOMItem>();
             bool hasData = false;
@@ -1918,7 +1934,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             MemoryNodeOOMUtilChart.Plot.Clear();
             _memoryNodeOomUtilHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMUtilChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMUtilChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue && d.MemoryUtilizationPct.HasValue).ToList() ?? new List<HealthParserMemoryNodeOOMItem>();
             bool hasData = false;
@@ -1967,7 +1983,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             MemoryNodeOOMMemoryChart.Plot.Clear();
             _memoryNodeOomMemoryHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(MemoryNodeOOMMemoryChart);
+            TabHelpers.ApplyThemeToChart(MemoryNodeOOMMemoryChart);
 
             var dataList = data?.Where(d => d.EventTime.HasValue).ToList() ?? new List<HealthParserMemoryNodeOOMItem>();
             bool hasData = false;

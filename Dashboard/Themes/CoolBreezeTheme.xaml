@@ -1,39 +1,39 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:sys="clr-namespace:System;assembly=mscorlib"
-                    xmlns:helpers="clr-namespace:PerformanceMonitorLite.Helpers">
+                    xmlns:helpers="clr-namespace:PerformanceMonitorDashboard.Helpers">
 
     <!-- ============================================ -->
-    <!-- Darling Data Dark Theme                      -->
+    <!-- Darling Data Cool Breeze Theme                      -->
     <!-- Flat/Minimal Design                          -->
     <!-- ============================================ -->
 
     <!-- Brand Colors -->
-    <Color x:Key="AccentColor">#2eaef1</Color>
-    <Color x:Key="AccentHoverColor">#5bc4f5</Color>
-    <Color x:Key="AccentPressedColor">#1a9ae0</Color>
+    <Color x:Key="AccentColor">#1E6FA8</Color>
+    <Color x:Key="AccentHoverColor">#2B87C8</Color>
+    <Color x:Key="AccentPressedColor">#155A8A</Color>
 
-    <!-- Background Colors (Grafana-inspired blue-gray tints) -->
-    <Color x:Key="BackgroundDarkColor">#111217</Color>
-    <Color x:Key="AlternatingRowColor">#1c1f25</Color>
-    <Color x:Key="BackgroundColor">#181b1f</Color>
-    <Color x:Key="BackgroundLightColor">#22252b</Color>
-    <Color x:Key="BackgroundLighterColor">#2a2d35</Color>
+    <!-- Background Colors -->
+    <Color x:Key="BackgroundDarkColor">#CFDDE9</Color>
+    <Color x:Key="AlternatingRowColor">#C5D5E4</Color>
+    <Color x:Key="BackgroundColor">#DAE6F0</Color>
+    <Color x:Key="BackgroundLightColor">#EEF4FA</Color>
+    <Color x:Key="BackgroundLighterColor">#BDD0E1</Color>
 
-    <!-- Text Colors (off-white to reduce eye strain) -->
-    <Color x:Key="ForegroundColor">#E4E6EB</Color>
-    <Color x:Key="ForegroundDimColor">#9DA5B4</Color>
-    <Color x:Key="ForegroundMutedColor">#6B7280</Color>
+    <!-- Text Colors (dark on light backgrounds) -->
+    <Color x:Key="ForegroundColor">#1A2A3A</Color>
+    <Color x:Key="ForegroundDimColor">#364D61</Color>
+    <Color x:Key="ForegroundMutedColor">#5B7A90</Color>
 
     <!-- Border Colors (subtle, low-contrast) -->
-    <Color x:Key="BorderColor">#2a2d35</Color>
-    <Color x:Key="BorderLightColor">#33363e</Color>
+    <Color x:Key="BorderColor">#A8BDD0</Color>
+    <Color x:Key="BorderLightColor">#8AACC4</Color>
 
-    <!-- Status Colors (Material Design 300 — softer against dark backgrounds) -->
-    <Color x:Key="SuccessColor">#81C784</Color>
-    <Color x:Key="WarningColor">#FFD54F</Color>
-    <Color x:Key="ErrorColor">#E57373</Color>
-    <Color x:Key="InfoColor">#2eaef1</Color>
+    <!-- Status Colors (Material Design 700 — visible against light backgrounds) -->
+    <Color x:Key="SuccessColor">#2E7D32</Color>
+    <Color x:Key="WarningColor">#F57F17</Color>
+    <Color x:Key="ErrorColor">#C62828</Color>
+    <Color x:Key="InfoColor">#1E6FA8</Color>
 
     <!-- Spacing Scale -->
     <sys:Double x:Key="SpacingXS">2</sys:Double>
@@ -97,7 +97,7 @@
     <!-- ============================================ -->
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
-        <Setter Property="Foreground" Value="#E4E6EB"/>
+        <Setter Property="Foreground" Value="#1A2A3A"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,6"/>
@@ -174,9 +174,56 @@
         </Setter>
     </Style>
 
+    <!-- Time Range Button Style (hour picker with visible hover) -->
+    <Style x:Key="TimeRangeButton" TargetType="Button">
+        <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
+        <Setter Property="Foreground" Value="{StaticResource ForegroundDimBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding" Value="10,5"/>
+        <Setter Property="MinWidth" Value="60"/>
+        <Setter Property="Margin" Value="2,0"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="border"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="3"
+                            Padding="{TemplateBinding Padding}"
+                            TextElement.Foreground="{TemplateBinding Foreground}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
+                            <Setter TargetName="border" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                            <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="border" Property="Background" Value="{StaticResource AccentPressedBrush}"/>
+                            <Setter Property="Foreground" Value="White"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- No Data Message Style (for empty DataGrids) -->
     <Style x:Key="NoDataMessage" TargetType="TextBlock">
         <Setter Property="Text" Value="No data for selected time range"/>
+        <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="HorizontalAlignment" Value="Center"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="Visibility" Value="Collapsed"/>
+    </Style>
+
+    <!-- Empty State Message Style (context-specific text set per usage) -->
+    <Style x:Key="EmptyStateMessage" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
         <Setter Property="FontSize" Value="14"/>
         <Setter Property="HorizontalAlignment" Value="Center"/>
@@ -203,8 +250,8 @@
 
     <!-- ToggleButton Style (respects Background in all states) -->
     <Style TargetType="ToggleButton">
-        <Setter Property="Background" Value="#2a2d35"/>
-        <Setter Property="Foreground" Value="#E4E6EB"/>
+        <Setter Property="Background" Value="#E8ECF0"/>
+        <Setter Property="Foreground" Value="#1A2A3A"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,5"/>
         <Setter Property="Template">
@@ -229,6 +276,12 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+                <Setter Property="Background" Value="#2E7D32"/>
+                <Setter Property="Foreground" Value="White"/>
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- Tab Close Button Style -->
@@ -279,7 +332,7 @@
     <!-- Success Button Style (for Refresh) -->
     <Style x:Key="SuccessButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
         <Setter Property="Background" Value="{StaticResource SuccessBrush}"/>
-        <Setter Property="Foreground" Value="#E4E6EB"/>
+        <Setter Property="Foreground" Value="#EEF4FA"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -315,11 +368,11 @@
     <!-- Named style for filter TextBoxes in DataGrid column headers -->
     <Style x:Key="FilterTextBoxStyle" TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="Foreground" Value="#E4E6EB"/>
+        <Setter Property="Foreground" Value="#1A2A3A"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="4,2"/>
-        <Setter Property="CaretBrush" Value="#E4E6EB"/>
+        <Setter Property="CaretBrush" Value="#1A2A3A"/>
         <Setter Property="SelectionBrush" Value="{StaticResource AccentBrush}"/>
     </Style>
 
@@ -358,13 +411,9 @@
     <!-- Column Filter Button Style when filter is active -->
     <Style x:Key="ColumnFilterButtonActiveStyle" TargetType="Button" BasedOn="{StaticResource ColumnFilterButtonStyle}">
         <Setter Property="Foreground" Value="#FFD700"/>
-        <Setter Property="Background" Value="#33FFD700"/>
-        <Setter Property="Content" Value="&#xE16E;"/>
-        <Setter Property="ToolTip" Value="Filter active — click to modify"/>
         <Style.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
                 <Setter Property="Foreground" Value="#FFEC8B"/>
-                <Setter Property="Background" Value="#55FFD700"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -542,7 +591,7 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="border" Property="Background" Value="{StaticResource AccentBrush}"/>
-                            <Setter Property="Foreground" Value="#E4E6EB"/>
+                            <Setter Property="Foreground" Value="#EEF4FA"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
@@ -662,7 +711,7 @@
     <!-- Column header style when filter is active - subtle blue highlight -->
     <Style x:Key="FilteredColumnHeaderStyle" TargetType="DataGridColumnHeader"
            BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
-        <Setter Property="Background" Value="#3D5A80"/>
+        <Setter Property="Background" Value="#9DBFD9"/>
     </Style>
 
     <!-- Right-aligned text style for numeric DataGrid columns -->
@@ -688,7 +737,7 @@
         <Style.Triggers>
             <Trigger Property="IsSelected" Value="True">
                 <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
-                <Setter Property="Foreground" Value="#E4E6EB"/>
+                <Setter Property="Foreground" Value="#EEF4FA"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -758,8 +807,8 @@
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CornerRadius" Value="3"/>
-        <Setter Property="Padding" Value="10"/>
+        <Setter Property="CornerRadius" Value="6"/>
+        <Setter Property="Padding" Value="16"/>
     </Style>
 
     <!-- Card Style for Chart Containers -->
@@ -767,26 +816,26 @@
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CornerRadius" Value="3"/>
-        <Setter Property="Margin" Value="5"/>
+        <Setter Property="CornerRadius" Value="6"/>
+        <Setter Property="Margin" Value="6"/>
     </Style>
 
     <!-- ============================================ -->
     <!-- DatePickerTextBox Style (internal control)   -->
     <!-- ============================================ -->
     <Style TargetType="DatePickerTextBox">
-        <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+        <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="DatePickerTextBox">
-                    <Grid Background="{StaticResource BackgroundDarkBrush}">
+                    <Grid Background="{StaticResource BackgroundLightBrush}">
                         <Border x:Name="Border"
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}">
-                            <ScrollViewer x:Name="PART_ContentHost" Background="{StaticResource BackgroundDarkBrush}"
+                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
                                           HorizontalContentAlignment="Stretch"
                                           VerticalContentAlignment="Center"/>
                         </Border>
@@ -806,7 +855,7 @@
     <!-- DatePicker Style                             -->
     <!-- ============================================ -->
     <Style TargetType="DatePicker">
-        <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+        <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
@@ -865,7 +914,7 @@
 
     <!-- Calendar main style with full template -->
     <Style TargetType="Calendar">
-        <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+        <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
@@ -877,7 +926,7 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3">
                         <CalendarItem x:Name="PART_CalendarItem"
-                                      Background="{StaticResource BackgroundDarkBrush}"
+                                      Background="{StaticResource BackgroundBrush}"
                                       BorderThickness="0"/>
                     </Border>
                 </ControlTemplate>
@@ -887,7 +936,7 @@
 
     <!-- CalendarItem style (the container for month/year views) -->
     <Style TargetType="CalendarItem">
-        <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+        <Setter Property="Background" Value="{StaticResource BackgroundBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Template">
@@ -930,7 +979,7 @@
                             </Grid>
 
                             <!-- Day grid or Month/Year grid -->
-                            <Grid Grid.Row="1" Background="{StaticResource BackgroundDarkBrush}">
+                            <Grid Grid.Row="1" Background="{StaticResource BackgroundBrush}">
                                 <Grid x:Name="PART_MonthView" Visibility="Visible">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/>
@@ -1162,13 +1211,18 @@
     <!-- ============================================ -->
     <!-- ToolTip Style                                -->
     <!-- ============================================ -->
-    <Style TargetType="ToolTip">
+    <Style x:Key="DarkToolTip" TargetType="ToolTip">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderLightBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="10,8"/>
+        <Setter Property="MaxWidth" Value="600"/>
     </Style>
 
+    <!-- Apply DarkToolTip as the default for all tooltips -->
+    <Style TargetType="ToolTip" BasedOn="{StaticResource DarkToolTip}"/>
 
 </ResourceDictionary>
+
+

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -133,6 +133,7 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartSaveMenus();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
+            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
 
             _queryDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsQueryChart, "ms/sec");
             _procDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsProcChart, "ms/sec");
@@ -169,15 +170,30 @@ namespace PerformanceMonitorDashboard.Controls
             _queryStoreUnfilteredData = null;
             _qsRegressionsUnfilteredData = null;
             _lrqPatternsUnfilteredData = null;
+
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+        }
+
+        private void OnThemeChanged(string _)
+        {
+            foreach (var field in GetType().GetFields(
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+            {
+                if (field.GetValue(this) is ScottPlot.WPF.WpfPlot chart)
+                {
+                    Helpers.TabHelpers.ApplyThemeToChart(chart);
+                    chart.Refresh();
+                }
+            }
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
             // Initialize charts with dark mode immediately (before data is loaded)
-            TabHelpers.ApplyDarkModeToChart(QueryPerfTrendsQueryChart);
-            TabHelpers.ApplyDarkModeToChart(QueryPerfTrendsProcChart);
-            TabHelpers.ApplyDarkModeToChart(QueryPerfTrendsQsChart);
-            TabHelpers.ApplyDarkModeToChart(QueryPerfTrendsExecChart);
+            TabHelpers.ApplyThemeToChart(QueryPerfTrendsQueryChart);
+            TabHelpers.ApplyThemeToChart(QueryPerfTrendsProcChart);
+            TabHelpers.ApplyThemeToChart(QueryPerfTrendsQsChart);
+            TabHelpers.ApplyThemeToChart(QueryPerfTrendsExecChart);
             QueryPerfTrendsQueryChart.Refresh();
             QueryPerfTrendsProcChart.Refresh();
             QueryPerfTrendsQsChart.Refresh();
@@ -1594,7 +1610,7 @@ namespace PerformanceMonitorDashboard.Controls
                 }
                 chart.Plot.Clear();
                 hover?.Clear();
-                TabHelpers.ApplyDarkModeToChart(chart);
+                TabHelpers.ApplyThemeToChart(chart);
 
                 var dataList = (trendData ?? Enumerable.Empty<DurationTrendItem>())
                     .OrderBy(d => d.CollectionTime)
@@ -1649,7 +1665,7 @@ namespace PerformanceMonitorDashboard.Controls
             }
             QueryPerfTrendsExecChart.Plot.Clear();
             _execTrendsHover?.Clear();
-            TabHelpers.ApplyDarkModeToChart(QueryPerfTrendsExecChart);
+            TabHelpers.ApplyThemeToChart(QueryPerfTrendsExecChart);
 
             var dataList = (execTrends ?? Enumerable.Empty<ExecutionTrendItem>())
                 .OrderBy(d => d.CollectionTime)
