@@ -12,7 +12,7 @@ using System.Windows.Data;
 
 namespace PerformanceMonitorDashboard.Converters
 {
-    public class QueryTextCleanupConverter : IValueConverter
+    public partial class QueryTextCleanupConverter : IValueConverter
     {
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
@@ -28,7 +28,7 @@ namespace PerformanceMonitorDashboard.Converters
             text = text.Replace("\t", " ", StringComparison.Ordinal);
 
             // Replace multiple spaces with single space
-            text = Regex.Replace(text, @"\s+", " ");
+            text = MultipleSpacesRegExp().Replace(text, " ");
 
             // Trim leading/trailing whitespace
             text = text.Trim();
@@ -40,5 +40,8 @@ namespace PerformanceMonitorDashboard.Converters
         {
             throw new NotImplementedException();
         }
+
+        [GeneratedRegex(@"\s+")]
+        private static partial Regex MultipleSpacesRegExp();
     }
 }

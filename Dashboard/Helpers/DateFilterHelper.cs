@@ -11,7 +11,7 @@ using System.Text.RegularExpressions;
 
 namespace PerformanceMonitorDashboard.Helpers
 {
-    public static class DateFilterHelper
+    public static partial class DateFilterHelper
     {
         public static bool MatchesFilter(object? value, string? filterText)
         {
@@ -148,7 +148,7 @@ namespace PerformanceMonitorDashboard.Helpers
             }
 
             // "last N hours/days/weeks" expressions
-            var lastMatch = Regex.Match(expressionLower, @"last\s+(\d+)\s+(hour|hours|day|days|week|weeks|month|months)");
+            var lastMatch = LastNHoursDaysWeeksMonthsRegExp().Match(expressionLower);
             if (lastMatch.Success)
             {
                 int count = int.Parse(lastMatch.Groups[1].Value, CultureInfo.InvariantCulture);
@@ -231,5 +231,8 @@ namespace PerformanceMonitorDashboard.Helpers
                    expression == "tomorrow" ||
                    Regex.IsMatch(expression, @"last\s+\d+\s+(hour|hours|day|days|week|weeks|month|months)");
         }
+
+        [GeneratedRegex(@"last\s+(\d+)\s+(hour|hours|day|days|week|weeks|month|months)")]
+        private static partial Regex LastNHoursDaysWeeksMonthsRegExp();
     }
 }
