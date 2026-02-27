@@ -221,15 +221,13 @@ public static class PlanAnalyzer
         }
 
         // Rule 4: UDF timing — any node spending time in UDFs (actual plans)
-        if (node.UdfCpuTimeUs > 0 || node.UdfElapsedTimeUs > 0)
+        if (node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
         {
-            var cpuMs = node.UdfCpuTimeUs / 1000.0;
-            var elapsedMs = node.UdfElapsedTimeUs / 1000.0;
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "UDF Execution",
-                Message = $"Scalar UDF executing on this operator. UDF elapsed: {elapsedMs:F1}ms, UDF CPU: {cpuMs:F1}ms",
-                Severity = elapsedMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
+                Message = $"Scalar UDF executing on this operator. UDF elapsed: {node.UdfElapsedTimeMs:N0}ms, UDF CPU: {node.UdfCpuTimeMs:N0}ms",
+                Severity = node.UdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
             });
         }
 
