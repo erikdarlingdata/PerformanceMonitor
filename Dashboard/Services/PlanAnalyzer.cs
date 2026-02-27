@@ -272,11 +272,26 @@ public static class PlanAnalyzer
             });
         }
 
-        // Rule 7: Spill detection — promote severity for large spills
+        // Rule 7: Spill detection — calculate operator time and set severity
+        // based on what percentage of statement elapsed time the spill accounts for
         foreach (var w in node.Warnings.ToList())
         {
-            if (w.SpillDetails != null && w.SpillDetails.WritesToTempDb > 1000)
-                w.Severity = PlanWarningSeverity.Critical;
+            if (w.SpillDetails != null && node.ActualElapsedMs > 0)
+            {
+                var operatorMs = GetOperatorOwnElapsedMs(node);
+                var stmtMs = stmt.QueryTimeStats?.ElapsedTimeMs ?? 0;
+
+                if (stmtMs > 0)
+                {
+                    var pct = (double)operatorMs / stmtMs;
+                    w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+
+                    if (pct >= 0.5)
+                        w.Severity = PlanWarningSeverity.Critical;
+                    else if (pct >= 0.1)
+                        w.Severity = PlanWarningSeverity.Warning;
+                }
+            }
         }
 
         // Rule 8: Parallel thread skew (actual plans with per-thread stats)
@@ -624,6 +639,34 @@ public static class PlanAnalyzer
 
         foreach (var child in node.Children)
             FindMemoryConsumers(child, consumers);
+    }
+
+    /// <summary>
+    /// Calculates an operator's own elapsed time by subtracting child time.
+    /// In batch mode, operator times are self-contained. In row mode, times are
+    /// cumulative (include children), so we subtract the dominant child's time.
+    /// Parallelism (exchange) operators are skipped because they have timing bugs.
+    /// </summary>
+    private static long GetOperatorOwnElapsedMs(PlanNode node)
+    {
+        if (node.ActualExecutionMode == "Batch")
+            return node.ActualElapsedMs;
+
+        // Row mode: subtract the dominant child's elapsed time
+        var maxChildElapsed = 0L;
+        foreach (var child in node.Children)
+        {
+            var childElapsed = child.ActualElapsedMs;
+
+            // Exchange operators have timing bugs — skip to their child
+            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+                childElapsed = child.Children.Max(c => c.ActualElapsedMs);
+
+            if (childElapsed > maxChildElapsed)
+                maxChildElapsed = childElapsed;
+        }
+
+        return Math.Max(0, node.ActualElapsedMs - maxChildElapsed);
     }
 
     private static string Truncate(string value, int maxLength)
