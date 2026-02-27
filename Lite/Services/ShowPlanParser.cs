@@ -1179,8 +1179,8 @@ public static class ShowPlanParser
             node.ActualExecutionMode = actualExecMode;
             node.ActualSegmentReads = totalSegmentReads;
             node.ActualSegmentSkips = totalSegmentSkips;
-            node.UdfCpuTimeUs = totalUdfCpu;
-            node.UdfElapsedTimeUs = maxUdfElapsed;
+            node.UdfCpuTimeMs = totalUdfCpu;
+            node.UdfElapsedTimeMs = maxUdfElapsed;
 
             // Store per-thread data for parallel skew analysis
             foreach (var thread in runtimeEl.Elements(Ns + "RunTimeCountersPerThread"))

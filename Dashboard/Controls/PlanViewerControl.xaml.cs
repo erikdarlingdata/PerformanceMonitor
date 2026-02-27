@@ -688,17 +688,17 @@ public partial class PlanViewerControl : UserControl
 
             // Timing
             if (node.ActualElapsedMs > 0 || node.ActualCPUMs > 0
-                || node.UdfCpuTimeUs > 0 || node.UdfElapsedTimeUs > 0)
+                || node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
             {
                 AddPropertySection("Actual Timing");
                 if (node.ActualElapsedMs > 0)
                     AddPropertyRow("Elapsed Time", $"{node.ActualElapsedMs:N0} ms");
                 if (node.ActualCPUMs > 0)
                     AddPropertyRow("CPU Time", $"{node.ActualCPUMs:N0} ms");
-                if (node.UdfElapsedTimeUs > 0)
-                    AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeUs:N0} us");
-                if (node.UdfCpuTimeUs > 0)
-                    AddPropertyRow("UDF CPU", $"{node.UdfCpuTimeUs:N0} us");
+                if (node.UdfElapsedTimeMs > 0)
+                    AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeMs:N0} ms");
+                if (node.UdfCpuTimeMs > 0)
+                    AddPropertyRow("UDF CPU", $"{node.UdfCpuTimeMs:N0} ms");
             }
 
             // I/O
