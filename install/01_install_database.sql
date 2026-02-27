@@ -274,10 +274,6 @@ BEGIN
             DEFAULT 5,
         retention_days integer NOT NULL
             DEFAULT 30,
-        collect_query bit NOT NULL
-            DEFAULT CONVERT(bit, 'true'),
-        collect_plan bit NOT NULL
-            DEFAULT CONVERT(bit, 'true'),
         [description] nvarchar(500) NULL,
         created_date datetime2(7) NOT NULL
             DEFAULT SYSDATETIME(),
@@ -319,47 +315,6 @@ BEGIN
             (DATA_COMPRESSION = PAGE);
 
     PRINT 'Created config.collection_schedule table';
-END;
-
-/*
-Add collect_query and collect_plan columns for existing installations
-Controls whether collectors store query text and execution plans
-Both default to enabled (1) for backwards compatibility
-*/
-IF NOT EXISTS
-(
-    SELECT
-        1/0
-    FROM sys.columns
-    WHERE object_id = OBJECT_ID(N'config.collection_schedule')
-    AND   name = N'collect_query'
-)
-BEGIN
-    ALTER TABLE
-        config.collection_schedule
-    ADD collect_query bit NOT NULL
-        CONSTRAINT DF_collection_schedule_collect_query
-        DEFAULT CONVERT(bit, 'true');
-
-    PRINT 'Added collect_query column to config.collection_schedule';
-END;
-
-IF NOT EXISTS
-(
-    SELECT
-        1/0
-    FROM sys.columns
-    WHERE object_id = OBJECT_ID(N'config.collection_schedule')
-    AND   name = N'collect_plan'
-)
-BEGIN
-    ALTER TABLE
-        config.collection_schedule
-    ADD collect_plan bit NOT NULL
-        CONSTRAINT DF_collection_schedule_collect_plan
-        DEFAULT CONVERT(bit, 'true');
-
-    PRINT 'Added collect_plan column to config.collection_schedule';
 END;
 
 /*

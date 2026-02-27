@@ -27,10 +27,13 @@
                     <Separator Margin="12,4"/>
                     <Button Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
                             ToolTip="Save plan as .sqlplan file"/>
-                    <Separator x:Name="StatementsButtonSeparator" Margin="12,4" Visibility="Collapsed"/>
-                    <Button x:Name="StatementsButton" Content="Statements" Click="ToggleStatements_Click"
-                            Height="28" Padding="8,0" Visibility="Collapsed"
-                            ToolTip="Show/hide statement list"/>
+                    <Separator Margin="12,4"/>
+                    <TextBlock x:Name="StatementLabel" Text="Statement:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"
+                               Visibility="Collapsed"/>
+                    <ComboBox x:Name="StatementSelector" MinWidth="200" Height="28"
+                              SelectionChanged="StatementSelector_Changed"
+                              Visibility="Collapsed"/>
                 </StackPanel>
                 <TextBlock x:Name="CostText" DockPanel.Dock="Right" VerticalAlignment="Center"
                            HorizontalAlignment="Right"
@@ -89,76 +92,20 @@
                      Padding="8,4"/>
         </Expander>
 
-        <!-- Statements Panel + Plan Canvas + Properties Panel -->
+        <!-- Plan Canvas + Properties Panel -->
         <Grid Grid.Row="4">
             <Grid.ColumnDefinitions>
-                <!-- Col 0: Statements Panel (hidden by default) -->
-                <ColumnDefinition x:Name="StatementsColumn" Width="0"/>
-                <!-- Col 1: Statements Splitter (hidden by default) -->
-                <ColumnDefinition x:Name="StatementsSplitterColumn" Width="0"/>
-                <!-- Col 2: Plan Canvas -->
                 <ColumnDefinition Width="*"/>
-                <!-- Col 3: Properties Splitter (hidden by default) -->
                 <ColumnDefinition Width="Auto"/>
-                <!-- Col 4: Properties Panel (hidden by default) -->
                 <ColumnDefinition x:Name="PropertiesColumn" Width="0"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Statements Panel -->
-            <Border x:Name="StatementsPanel" Grid.Column="0"
-                    Background="{DynamicResource BackgroundDarkBrush}"
-                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0"
-                    Visibility="Collapsed">
-                <DockPanel>
-                    <!-- Header -->
-                    <Border DockPanel.Dock="Top" Padding="10,8"
-                            Background="{DynamicResource BackgroundBrush}"
-                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
-                        <DockPanel>
-                            <Button DockPanel.Dock="Right" Content="&#x2715;" Click="CloseStatements_Click"
-                                    Width="24" Height="24" Padding="0" FontSize="12"
-                                    VerticalAlignment="Center" ToolTip="Close Statements"
-                                    Background="Transparent" BorderThickness="0"
-                                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                            <TextBlock x:Name="StatementsHeader" Text="Statements"
-                                       FontWeight="SemiBold" FontSize="13"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       VerticalAlignment="Center"/>
-                        </DockPanel>
-                    </Border>
-
-                    <!-- Statement Grid -->
-                    <DataGrid x:Name="StatementsGrid"
-                              AutoGenerateColumns="False"
-                              CanUserSortColumns="True"
-                              CanUserReorderColumns="False"
-                              CanUserResizeColumns="True"
-                              IsReadOnly="True"
-                              SelectionMode="Single"
-                              GridLinesVisibility="Horizontal"
-                              HeadersVisibility="Column"
-                              SelectionChanged="StatementsGrid_SelectionChanged"
-                              FontSize="11"
-                              Background="{DynamicResource BackgroundDarkBrush}"
-                              BorderThickness="0"/>
-                </DockPanel>
-            </Border>
-
-            <!-- Statements Splitter -->
-            <GridSplitter x:Name="StatementsSplitter" Grid.Column="1" Width="5"
-                          HorizontalAlignment="Center" VerticalAlignment="Stretch"
-                          Background="{DynamicResource BorderBrush}"
-                          Visibility="Collapsed"/>
-
             <!-- Plan Canvas -->
-            <ScrollViewer Grid.Column="2" x:Name="PlanScrollViewer"
+            <ScrollViewer Grid.Column="0" x:Name="PlanScrollViewer"
                           HorizontalScrollBarVisibility="Auto"
                           VerticalScrollBarVisibility="Auto"
                           Background="{DynamicResource BackgroundBrush}"
-                          PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel"
-                          PreviewMouseLeftButtonDown="PlanScrollViewer_PreviewMouseLeftButtonDown"
-                          PreviewMouseMove="PlanScrollViewer_PreviewMouseMove"
-                          PreviewMouseLeftButtonUp="PlanScrollViewer_PreviewMouseLeftButtonUp">
+                          PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel">
                 <Canvas x:Name="PlanCanvas" ClipToBounds="False">
                     <Canvas.LayoutTransform>
                         <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
@@ -167,7 +114,7 @@
             </ScrollViewer>
 
             <!-- Empty State -->
-            <StackPanel x:Name="EmptyState" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center">
+            <StackPanel x:Name="EmptyState" Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Center">
                 <TextBlock Text="No Plan Loaded" FontSize="20" FontWeight="Light"
                            Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
                 <TextBlock Text="Right-click a query row and choose 'View Plan' to display an execution plan here"
@@ -175,14 +122,14 @@
                            HorizontalAlignment="Center" Margin="0,8,0,0"/>
             </StackPanel>
 
-            <!-- Properties Splitter -->
-            <GridSplitter x:Name="PropertiesSplitter" Grid.Column="3" Width="5"
+            <!-- GridSplitter -->
+            <GridSplitter x:Name="PropertiesSplitter" Grid.Column="1" Width="5"
                           HorizontalAlignment="Center" VerticalAlignment="Stretch"
                           Background="{DynamicResource BorderBrush}"
                           Visibility="Collapsed"/>
 
             <!-- Properties Panel -->
-            <Border x:Name="PropertiesPanel" Grid.Column="4"
+            <Border x:Name="PropertiesPanel" Grid.Column="2"
                     Background="{DynamicResource BackgroundDarkBrush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0"
                     Visibility="Collapsed">

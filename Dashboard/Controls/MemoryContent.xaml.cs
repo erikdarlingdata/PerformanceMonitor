@@ -82,14 +82,6 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartContextMenus();
             Loaded += OnLoaded;
 
-            // Apply dark theme immediately so charts don't flash white before data loads
-            TabHelpers.ApplyDarkModeToChart(MemoryStatsOverviewChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryGrantSizingChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryGrantActivityChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryClerksChart);
-            TabHelpers.ApplyDarkModeToChart(PlanCacheChart);
-            TabHelpers.ApplyDarkModeToChart(MemoryPressureEventsChart);
-
             _memoryStatsOverviewHover = new Helpers.ChartHoverHelper(MemoryStatsOverviewChart, "MB");
             _memoryGrantSizingHover = new Helpers.ChartHoverHelper(MemoryGrantSizingChart, "MB");
             _memoryGrantActivityHover = new Helpers.ChartHoverHelper(MemoryGrantActivityChart, "count");
