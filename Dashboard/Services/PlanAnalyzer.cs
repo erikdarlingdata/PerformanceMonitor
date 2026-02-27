@@ -341,7 +341,9 @@ public static class PlanAnalyzer
         }
 
         // Rule 11: Scan with residual predicate (skip if non-SARGable already flagged)
-        if (nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate))
+        // A PROBE() alone is just a bitmap filter — not a real residual predicate.
+        if (nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
+            !IsProbeOnly(node.Predicate))
         {
             node.Warnings.Add(new PlanWarning
             {
@@ -536,6 +538,25 @@ public static class PlanAnalyzer
                !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase) &&
                !node.PhysicalOp.Contains("Constant", StringComparison.OrdinalIgnoreCase) &&
                !node.PhysicalOp.Contains("Columnstore", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Returns true when the predicate contains ONLY PROBE() bitmap filter(s)
+    /// with no real residual predicate. PROBE alone is a bitmap filter pushed
+    /// down from a hash join — not interesting by itself. If a real predicate
+    /// exists alongside PROBE (e.g. "[col]=(1) AND PROBE(...)"), returns false.
+    /// </summary>
+    private static bool IsProbeOnly(string predicate)
+    {
+        // Strip all PROBE(...) expressions — PROBE args can contain nested parens
+        var stripped = Regex.Replace(predicate, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
+            RegexOptions.IgnoreCase).Trim();
+
+        // Remove leftover AND/OR connectors and whitespace
+        stripped = Regex.Replace(stripped, @"\b(AND|OR)\b", "", RegexOptions.IgnoreCase).Trim();
+
+        // If nothing meaningful remains, it was PROBE-only
+        return stripped.Length == 0;
     }
 
     /// <summary>
