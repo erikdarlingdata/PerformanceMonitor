@@ -399,16 +399,16 @@ public static class PlanAnalyzer
             }
         }
 
-        // Rule 15: Join OR clause (Concatenation + Constant Scan under join/Merge Interval)
-        // Best signal: Merge Interval → TopN Sort → Concatenation → Constant Scans
-        // Also fires under a join ancestor (broader catch)
+        // Rule 15: Join OR clause
+        // Pattern: Nested Loops → Merge Interval → TopN Sort → [Compute Scalar] → Concatenation → [Compute Scalar] → 2+ Constant Scans
         if (node.PhysicalOp == "Concatenation")
         {
             var constantScanBranches = node.Children
                 .Count(c => c.PhysicalOp == "Constant Scan" ||
-                            c.Children.Any(gc => gc.PhysicalOp == "Constant Scan"));
+                            (c.PhysicalOp == "Compute Scalar" &&
+                             c.Children.Any(gc => gc.PhysicalOp == "Constant Scan")));
 
-            if (constantScanBranches >= 2 && (HasMergeIntervalAncestor(node) || HasJoinAncestor(node)))
+            if (constantScanBranches >= 2 && IsOrExpansionChain(node))
             {
                 node.Warnings.Add(new PlanWarning
                 {
@@ -426,25 +426,25 @@ public static class PlanAnalyzer
         {
             var innerChild = node.Children[1];
 
-            if (innerChild.HasActualStats && innerChild.ActualExecutions > 1000)
+            if (innerChild.HasActualStats && innerChild.ActualExecutions > 100000)
             {
                 var dop = stmt.DegreeOfParallelism > 0 ? stmt.DegreeOfParallelism : 1;
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Nested Loops High Executions",
                     Message = $"Nested Loops inner side executed {innerChild.ActualExecutions:N0} times (DOP {dop}). A Hash Join or Merge Join may be more efficient for this row count.",
-                    Severity = innerChild.ActualExecutions > 100000
+                    Severity = innerChild.ActualExecutions > 1000000
                         ? PlanWarningSeverity.Critical
                         : PlanWarningSeverity.Warning
                 });
             }
-            else if (!innerChild.HasActualStats && innerChild.EstimateRebinds > 1000)
+            else if (!innerChild.HasActualStats && innerChild.EstimateRebinds > 100000)
             {
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Nested Loops High Executions",
                     Message = $"Nested Loops inner side estimated to execute {innerChild.EstimateRebinds + 1:N0} times. A Hash Join or Merge Join may be more efficient for this row count.",
-                    Severity = innerChild.EstimateRebinds > 100000
+                    Severity = innerChild.EstimateRebinds > 1000000
                         ? PlanWarningSeverity.Critical
                         : PlanWarningSeverity.Warning
                 });
@@ -452,24 +452,29 @@ public static class PlanAnalyzer
         }
 
         // Rule 17: Many-to-many Merge Join
-        if (node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase))
+        // In actual plans, the Merge Join operator reports logical reads when the worktable is used.
+        // When ActualLogicalReads is 0, the worktable wasn't hit and the warning is noise.
+        if (node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase) &&
+            (!node.HasActualStats || node.ActualLogicalReads > 0))
         {
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Many-to-Many Merge Join",
-                Message = "Many-to-many Merge Join requires a worktable to handle duplicate values. This can be expensive with large numbers of duplicates.",
+                Message = node.HasActualStats
+                    ? $"Many-to-many Merge Join used a worktable ({node.ActualLogicalReads:N0} logical reads). This can be expensive with large numbers of duplicates."
+                    : "Many-to-many Merge Join requires a worktable to handle duplicate values. This can be expensive with large numbers of duplicates.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
 
         // Rule 22: Table variables (Object name starts with @)
         if (!string.IsNullOrEmpty(node.ObjectName) &&
-            node.ObjectName.Contains("@"))
+            node.ObjectName.StartsWith("@"))
         {
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Table Variable",
-                Message = "Table variable detected. Table variables have no statistics, so the optimizer always estimates 1 row regardless of actual cardinality. Consider using a temp table (#table) for better estimates.",
+                Message = "Table variable detected. Table variables lack column statistics and may lead to poor join choices. Consider using a temp table (#table) for better estimates. On SQL Server 2019+, table variable deferred compilation can improve cardinality estimates.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -505,7 +510,7 @@ public static class PlanAnalyzer
                 while (scanCandidate.PhysicalOp == "Compute Scalar" && scanCandidate.Children.Count > 0)
                     scanCandidate = scanCandidate.Children[0];
 
-                if (IsRowstoreScan(scanCandidate))
+                if (IsScanOperator(scanCandidate))
                 {
                     var predInfo = !string.IsNullOrEmpty(scanCandidate.Predicate)
                         ? " The scan has a residual predicate, so it may read many rows before the Top is satisfied."
@@ -531,6 +536,17 @@ public static class PlanAnalyzer
                !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase) &&
                !node.PhysicalOp.Contains("Constant", StringComparison.OrdinalIgnoreCase) &&
                !node.PhysicalOp.Contains("Columnstore", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Returns true for any scan operator including columnstore.
+    /// Excludes spools and constant scans.
+    /// </summary>
+    private static bool IsScanOperator(PlanNode node)
+    {
+        return node.PhysicalOp.Contains("Scan", StringComparison.OrdinalIgnoreCase) &&
+               !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase) &&
+               !node.PhysicalOp.Contains("Constant", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -613,34 +629,31 @@ public static class PlanAnalyzer
     }
 
     /// <summary>
-    /// Checks whether a node has a Merge Interval ancestor (OR expansion pattern).
+    /// Verifies the OR expansion chain walking up from a Concatenation node:
+    /// Nested Loops → Merge Interval → TopN Sort → [Compute Scalar] → Concatenation
     /// </summary>
-    private static bool HasMergeIntervalAncestor(PlanNode node)
+    private static bool IsOrExpansionChain(PlanNode concatenationNode)
     {
-        var ancestor = node.Parent;
-        while (ancestor != null)
-        {
-            if (ancestor.PhysicalOp == "Merge Interval")
-                return true;
-            ancestor = ancestor.Parent;
-        }
-        return false;
-    }
+        // Walk up, skipping Compute Scalar
+        var parent = concatenationNode.Parent;
+        while (parent != null && parent.PhysicalOp == "Compute Scalar")
+            parent = parent.Parent;
 
-    /// <summary>
-    /// Checks whether a node has any join ancestor.
-    /// </summary>
-    private static bool HasJoinAncestor(PlanNode node)
-    {
-        var ancestor = node.Parent;
-        while (ancestor != null)
-        {
-            if (ancestor.LogicalOp != null &&
-                ancestor.LogicalOp.Contains("Join", StringComparison.OrdinalIgnoreCase))
-                return true;
-            ancestor = ancestor.Parent;
-        }
-        return false;
+        // Expect TopN Sort
+        if (parent == null || parent.LogicalOp != "TopN Sort")
+            return false;
+
+        // Walk up to Merge Interval
+        parent = parent.Parent;
+        if (parent == null || parent.PhysicalOp != "Merge Interval")
+            return false;
+
+        // Walk up to Nested Loops
+        parent = parent.Parent;
+        if (parent == null || parent.PhysicalOp != "Nested Loops")
+            return false;
+
+        return true;
     }
 
     /// <summary>
