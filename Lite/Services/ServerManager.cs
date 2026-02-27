@@ -330,49 +330,51 @@ public class ServerManager
             using var connection = new SqlConnection(builder.ConnectionString);
             await connection.OpenAsync();
 
-            // Query server start time, version, and UTC offset to verify connectivity
-            using var command = new SqlCommand(@"
-                SELECT
-                    sqlserver_start_time,
-                    @@VERSION AS sql_version,
-                    CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
-                    DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
-                    CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
-                    CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds
-                FROM sys.dm_os_sys_info", connection);
-            command.CommandTimeout = ConnectionCheckTimeoutSeconds;
+            // Connection succeeded — server is reachable regardless of DMV permissions below.
+            status.IsOnline = true;
+            status.ErrorMessage = null;
+            status.UserCancelledMfa = false; // Clear cancellation flag on successful connection
 
-            using var reader = await command.ExecuteReaderAsync();
-            if (await reader.ReadAsync())
+            // Query server metadata (version, start time, UTC offset).
+            // Wrapped in its own try/catch: a permissions failure on sys.dm_os_sys_info
+            // must NOT flip IsOnline back to false — the login itself worked.
+            try
             {
-                status.IsOnline = true;
-                status.ErrorMessage = null;
-                status.UserCancelledMfa = false; // Clear cancellation flag on successful connection
+                using var command = new SqlCommand(@"
+                    SELECT
+                        sqlserver_start_time,
+                        @@VERSION AS sql_version,
+                        CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
+                        DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
+                        CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
+                        CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds
+                    FROM sys.dm_os_sys_info", connection);
+                command.CommandTimeout = ConnectionCheckTimeoutSeconds;
 
-                if (!reader.IsDBNull(0))
+                using var reader = await command.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
                 {
-                    status.ServerStartTime = reader.GetDateTime(0);
+                    if (!reader.IsDBNull(0))
+                        status.ServerStartTime = reader.GetDateTime(0);
+                    if (!reader.IsDBNull(1))
+                        status.SqlServerVersion = reader.GetString(1);
+                    if (!reader.IsDBNull(2))
+                        status.SqlMajorVersion = Convert.ToInt32(reader.GetValue(2));
+                    if (!reader.IsDBNull(3))
+                        status.UtcOffsetMinutes = Convert.ToInt32(reader.GetValue(3));
+                    if (!reader.IsDBNull(4))
+                        status.SqlEngineEdition = Convert.ToInt32(reader.GetValue(4));
+                    if (!reader.IsDBNull(5))
+                        status.IsAwsRds = Convert.ToInt32(reader.GetValue(5)) == 1;
                 }
-                if (!reader.IsDBNull(1))
-                {
-                    status.SqlServerVersion = reader.GetString(1);
-                }
-                if (!reader.IsDBNull(2))
-                {
-                    status.SqlMajorVersion = Convert.ToInt32(reader.GetValue(2));
-                }
-                if (!reader.IsDBNull(3))
-                {
-                    status.UtcOffsetMinutes = Convert.ToInt32(reader.GetValue(3));
-                }
-                if (!reader.IsDBNull(4))
-                {
-                    status.SqlEngineEdition = Convert.ToInt32(reader.GetValue(4));
-                }
-                if (!reader.IsDBNull(5))
-                {
-                    status.IsAwsRds = Convert.ToInt32(reader.GetValue(5)) == 1;
-                }
+            }
+            catch (SqlException metaEx)
+            {
+                // Metadata query failed (e.g. no VIEW SERVER STATE permission) but the
+                // server IS reachable — keep IsOnline = true, just record the warning.
+                status.ErrorMessage = $"Connected, but metadata query failed: {metaEx.Message}";
+                _logger?.LogWarning("Metadata query failed for server '{DisplayName}' (server is still online): {Message}",
+                    server.DisplayName, metaEx.Message);
             }
 
             _logger?.LogDebug("Connectivity check passed for server '{DisplayName}'", server.DisplayName);

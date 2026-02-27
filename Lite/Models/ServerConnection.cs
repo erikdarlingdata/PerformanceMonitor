@@ -89,6 +89,30 @@ public class ServerConnection
     public bool? IsOnline { get; set; }
 
     /// <summary>
+    /// Whether one or more collectors are currently failing for this server.
+    /// null = not yet determined; true = some collectors have consecutive errors; false = all healthy.
+    /// </summary>
+    [JsonIgnore]
+    public bool? HasCollectorErrors { get; set; }
+
+    /// <summary>
+    /// Computed dot status for the sidebar indicator. One of: "Unknown", "Online", "Warning", "Offline".
+    /// Drives the Ellipse fill via DataTrigger in MainWindow.xaml.
+    /// </summary>
+    [JsonIgnore]
+    public string DotStatus
+    {
+        get
+        {
+            if (IsOnline == true)
+                return HasCollectorErrors == true ? "Warning" : "Online";
+            if (IsOnline == false)
+                return "Offline";
+            return "Unknown"; // null — not yet checked
+        }
+    }
+
+    /// <summary>
     /// Display-only property for showing status in UI.
     /// </summary>
     [JsonIgnore]
