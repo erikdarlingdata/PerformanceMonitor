@@ -154,6 +154,17 @@ BEGIN
         END;
 
         /*
+        Read collection flag for plans
+        */
+        DECLARE
+            @collect_plan bit = 1;
+
+        SELECT
+            @collect_plan = cs.collect_plan
+        FROM config.collection_schedule AS cs
+        WHERE cs.collector_name = N'procedure_stats_collector';
+
+        /*
         Collect procedure, trigger, and function statistics
         Single query with UNION ALL to collect from all three DMVs
         */
@@ -223,7 +234,12 @@ BEGIN
             total_spills = ps.total_spills,
             min_spills = ps.min_spills,
             max_spills = ps.max_spills,
-            query_plan_text = CONVERT(nvarchar(max), tqp.query_plan)
+            query_plan_text =
+                CASE
+                    WHEN @collect_plan = 1
+                    THEN CONVERT(nvarchar(max), tqp.query_plan)
+                    ELSE NULL
+                END
         FROM sys.dm_exec_procedure_stats AS ps
         OUTER APPLY
             sys.dm_exec_text_query_plan
@@ -385,7 +401,12 @@ BEGIN
             total_spills = ts.total_spills,
             min_spills = ts.min_spills,
             max_spills = ts.max_spills,
-            query_plan_text = CONVERT(nvarchar(max), tqp.query_plan)
+            query_plan_text =
+                CASE
+                    WHEN @collect_plan = 1
+                    THEN CONVERT(nvarchar(max), tqp.query_plan)
+                    ELSE NULL
+                END
         FROM sys.dm_exec_trigger_stats AS ts
         CROSS APPLY sys.dm_exec_sql_text(ts.sql_handle) AS st
         OUTER APPLY
@@ -444,7 +465,12 @@ BEGIN
             total_spills = NULL,
             min_spills = NULL,
             max_spills = NULL,
-            query_plan_text = CONVERT(nvarchar(max), tqp.query_plan)
+            query_plan_text =
+                CASE
+                    WHEN @collect_plan = 1
+                    THEN CONVERT(nvarchar(max), tqp.query_plan)
+                    ELSE NULL
+                END
         FROM sys.dm_exec_function_stats AS fs
         OUTER APPLY
             sys.dm_exec_text_query_plan

@@ -201,6 +201,19 @@ BEGIN
         END;
 
         /*
+        Read collection flags for query text and plans
+        */
+        DECLARE
+            @collect_query bit = 1,
+            @collect_plan bit = 1;
+
+        SELECT
+            @collect_query = cs.collect_query,
+            @collect_plan = cs.collect_plan
+        FROM config.collection_schedule AS cs
+        WHERE cs.collector_name = N'query_store_collector';
+
+        /*
         Create temp table to hold Query Store data from all databases
         */
         CREATE TABLE
@@ -408,8 +421,20 @@ BEGIN
                         WHEN q.object_id > 0
                         AND  o.object_id IS NOT NULL
                         THEN o.object_name
-                    END,
-                query_sql_text = qt.query_sql_text,
+                    END,';
+
+            IF @collect_query = 1
+            BEGIN
+                SET @sql += N'
+                query_sql_text = qt.query_sql_text,';
+            END;
+            ELSE
+            BEGIN
+                SET @sql += N'
+                query_sql_text = NULL,';
+            END;
+
+            SET @sql += N'
                 query_hash = q.query_hash,
                 count_executions = rs.count_executions,
                 avg_duration = rs.avg_duration,
@@ -501,8 +526,20 @@ BEGIN
                 is_forced_plan = p.is_forced_plan,
                 p.force_failure_count,
                 p.last_force_failure_reason_desc,
-                p.compatibility_level,
-                query_plan_text = CONVERT(nvarchar(max), p.query_plan),
+                p.compatibility_level,';
+
+            IF @collect_plan = 1
+            BEGIN
+                SET @sql += N'
+                query_plan_text = CONVERT(nvarchar(max), p.query_plan),';
+            END;
+            ELSE
+            BEGIN
+                SET @sql += N'
+                query_plan_text = NULL,';
+            END;
+
+            SET @sql += N'
                 compilation_metrics =
                     (
                         SELECT

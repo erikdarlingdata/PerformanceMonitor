@@ -154,6 +154,19 @@ BEGIN
         END;
 
         /*
+        Read collection flags for query text and plans
+        */
+        DECLARE
+            @collect_query bit = 1,
+            @collect_plan bit = 1;
+
+        SELECT
+            @collect_query = cs.collect_query,
+            @collect_plan = cs.collect_plan
+        FROM config.collection_schedule AS cs
+        WHERE cs.collector_name = N'query_stats_collector';
+
+        /*
         Collect query statistics directly from DMV
         Only collects queries executed since last collection
         Excludes PerformanceMonitor and system databases (including 32761, 32767)
@@ -255,6 +268,8 @@ BEGIN
             max_spills = qs.max_spills,
             query_text =
                 CASE
+                    WHEN @collect_query = 0
+                    THEN NULL
                     WHEN qs.statement_start_offset = 0
                     AND  qs.statement_end_offset = -1
                     THEN st.text
@@ -272,7 +287,12 @@ BEGIN
                             ) / 2 + 1
                         )
                 END,
-            query_plan_text = tqp.query_plan
+            query_plan_text =
+                CASE
+                    WHEN @collect_plan = 1
+                    THEN tqp.query_plan
+                    ELSE NULL
+                END
         FROM sys.dm_exec_query_stats AS qs
         OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
         OUTER APPLY
