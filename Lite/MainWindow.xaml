@@ -11,9 +11,6 @@
         Background="{DynamicResource BackgroundBrush}">
     <Window.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
             <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
         </ResourceDictionary>
     </Window.Resources>

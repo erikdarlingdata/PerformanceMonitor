@@ -6,13 +6,6 @@
              mc:Ignorable="d"
              Visibility="Collapsed"
              d:DesignHeight="200" d:DesignWidth="400">
-    <UserControl.Resources>
-        <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
-        </ResourceDictionary>
-    </UserControl.Resources>
     <Grid Background="{DynamicResource BackgroundBrush}">
         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
             <TextBlock x:Name="SpinnerText"

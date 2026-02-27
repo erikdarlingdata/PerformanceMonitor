@@ -8,9 +8,6 @@
         Background="{DynamicResource BackgroundBrush}">
     <Window.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>

@@ -1,16 +1,13 @@
-<Window x:Class="PerformanceMonitorLite.Windows.QueryStoreHistoryWindow"
+﻿<Window x:Class="PerformanceMonitorLite.Windows.QueryStoreHistoryWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:scottplot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
         Title="Query Store History" Width="1200" Height="800"
         WindowStartupLocation="CenterOwner"
-        Background="{StaticResource BackgroundBrush}">
+        Background="{DynamicResource BackgroundBrush}">
 
     <Window.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
@@ -40,14 +37,14 @@
         <!-- Header -->
         <StackPanel Grid.Row="0" Margin="0,0,0,10">
             <TextBlock x:Name="QueryIdentifierText" FontSize="16" FontWeight="Bold"
-                       Foreground="{StaticResource ForegroundBrush}"/>
+                       Foreground="{DynamicResource ForegroundBrush}"/>
             <TextBlock x:Name="SummaryText" FontSize="12" Margin="0,4,0,0"
-                       Foreground="{StaticResource ForegroundDimBrush}"/>
+                       Foreground="{DynamicResource ForegroundDimBrush}"/>
         </StackPanel>
 
         <!-- Chart -->
-        <Border Grid.Row="1" Background="{StaticResource BackgroundLightBrush}"
-                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="3">
+        <Border Grid.Row="1" Background="{DynamicResource BackgroundLightBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="3">
             <Grid>
                 <ComboBox x:Name="MetricSelector" Width="180" Height="26"
                           VerticalAlignment="Top" HorizontalAlignment="Right" Margin="0,6,10,0"

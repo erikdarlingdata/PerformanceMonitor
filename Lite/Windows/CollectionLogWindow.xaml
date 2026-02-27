@@ -3,13 +3,10 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Collection History" Height="600" Width="1100"
         WindowStartupLocation="CenterOwner"
-        Background="{StaticResource BackgroundBrush}">
+        Background="{DynamicResource BackgroundBrush}">
 
     <Window.Resources>
         <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTheme.xaml"/>
-            </ResourceDictionary.MergedDictionaries>
             <ContextMenu x:Key="DataGridContextMenu">
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>

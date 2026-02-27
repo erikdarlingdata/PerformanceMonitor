@@ -41,6 +41,8 @@ public partial class QueryStatsHistoryWindow : Window
 
         QueryIdentifierText.Text = $"Query Stats History: {queryHash} in [{databaseName}]";
         Loaded += async (_, _) => await LoadHistoryAsync();
+        Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+        Closed += (s, e) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
     }
 
     private async System.Threading.Tasks.Task LoadHistoryAsync()
@@ -177,18 +179,33 @@ public partial class QueryStatsHistoryWindow : Window
 
     private static void ApplyDarkTheme(ScottPlot.WPF.WpfPlot chart)
     {
-        var darkBg = ScottPlot.Color.FromHex("#22252b");
-        var darkerBg = ScottPlot.Color.FromHex("#111217");
-        var text = ScottPlot.Color.FromHex("#9DA5B4");
-        var grid = ScottPlot.Colors.White.WithAlpha(40);
+        ScottPlot.Color figureBackground, dataBackground, textColor, gridColor;
+        if (Helpers.ThemeManager.IsLight)
+        {
+            figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
+            dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
+            textColor        = ScottPlot.Color.FromHex("#4A5568");
+            gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
+        }
+        else
+        {
+            figureBackground = ScottPlot.Color.FromHex("#22252b");
+            dataBackground   = ScottPlot.Color.FromHex("#111217");
+            textColor        = ScottPlot.Color.FromHex("#9DA5B4");
+            gridColor        = ScottPlot.Colors.White.WithAlpha(40);
+        }
+        chart.Plot.FigureBackground.Color = figureBackground;
+        chart.Plot.DataBackground.Color = dataBackground;
+        chart.Plot.Axes.Color(textColor);
+        chart.Plot.Grid.MajorLineColor = gridColor;
+        chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
+        chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
+    }
 
-        chart.Plot.FigureBackground.Color = darkBg;
-        chart.Plot.DataBackground.Color = darkerBg;
-        chart.Plot.Axes.Color(text);
-        chart.Plot.Grid.MajorLineColor = grid;
-
-        chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = text;
-        chart.Plot.Axes.Left.TickLabelStyle.ForeColor = text;
+    private void OnThemeChanged(string _)
+    {
+        ApplyDarkTheme(HistoryChart);
+        HistoryChart.Refresh();
     }
 
     private void CopyCell_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyCell(sender);
