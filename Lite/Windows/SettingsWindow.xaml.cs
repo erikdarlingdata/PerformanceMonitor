@@ -118,6 +118,8 @@ public partial class SettingsWindow : Window
         SaveAlertSettings();
         SaveSmtpSettings();
 
+        _saved = true;
+
         var message = mcpChanged
             ? "Settings saved. MCP changes take effect after restarting the application."
             : "Settings saved.";
@@ -309,8 +311,20 @@ public partial class SettingsWindow : Window
         }
     }
 
+    private bool _isLoadingTheme;
+    private readonly string _originalTheme = Helpers.ThemeManager.CurrentTheme;
+    private bool _saved;
+
+    private void ColorThemeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isLoadingTheme) return;
+        if (ColorThemeCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string theme)
+            Helpers.ThemeManager.Apply(theme);
+    }
+
     private void LoadColorTheme()
     {
+        _isLoadingTheme = true;
         foreach (ComboBoxItem item in ColorThemeCombo.Items)
         {
             if (item.Tag?.ToString() == App.ColorTheme)
@@ -321,6 +335,7 @@ public partial class SettingsWindow : Window
         }
         if (ColorThemeCombo.SelectedItem == null)
             ColorThemeCombo.SelectedIndex = 0;
+        _isLoadingTheme = false;
     }
 
     private void SaveColorTheme()
@@ -669,6 +684,15 @@ public partial class SettingsWindow : Window
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!_saved)
+            Helpers.ThemeManager.Apply(_originalTheme);
         Close();
+    }
+
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        if (!_saved)
+            Helpers.ThemeManager.Apply(_originalTheme);
+        base.OnClosing(e);
     }
 }

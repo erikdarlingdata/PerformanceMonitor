@@ -117,7 +117,8 @@
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                     <TextBlock Text="Color theme:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                    <ComboBox x:Name="ColorThemeCombo" Width="140" VerticalAlignment="Center">
+                    <ComboBox x:Name="ColorThemeCombo" Width="140" VerticalAlignment="Center"
+                              SelectionChanged="ColorThemeCombo_SelectionChanged">
                         <ComboBoxItem Content="Dark" Tag="Dark"/>
                         <ComboBoxItem Content="Light" Tag="Light"/>
                         <ComboBoxItem Content="Cool Breeze" Tag="CoolBreeze"/>

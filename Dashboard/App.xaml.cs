@@ -39,10 +39,7 @@ namespace PerformanceMonitorDashboard
 
             // Apply saved color theme before the main window is shown
             var prefs = new Services.UserPreferencesService().GetPreferences();
-            if (prefs.ColorTheme != "Dark")
-            {
-                ThemeManager.Apply(prefs.ColorTheme);
-            }
+            ThemeManager.Apply(prefs.ColorTheme ?? "Dark");
 
             // Register global exception handlers
             AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;

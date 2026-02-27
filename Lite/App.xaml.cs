@@ -168,10 +168,7 @@ public partial class App : Application
         LoadAlertSettings();
 
         // Apply saved color theme before the main window is shown
-        if (ColorTheme != "Dark")
-        {
-            Helpers.ThemeManager.Apply(ColorTheme);
-        }
+        Helpers.ThemeManager.Apply(ColorTheme);
 
         // Initialize logging
         var logDirectory = Path.Combine(exeDirectory, "logs");
