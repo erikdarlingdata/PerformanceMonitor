@@ -612,13 +612,13 @@ namespace PerformanceMonitorDashboard.Services
             string waitForFilter = excludeWaitFor ? "AND r.wait_type <> N'WAITFOR'" : "";
 
             // Sanity check to prevent SQL syntax errors   
-            if (maxLongRunningQueryCount <= 5) 
+            if (maxLongRunningQueryCount <= 5)
             {
                 maxLongRunningQueryCount = 5;
             };
 
             // Use TOP to limit the number of long-running queries returned, with a reasonable default of 5.
-            string LongRunningQueryCount = "TOP (" + maxLongRunningQueryCount + ")";
+            string LongRunningQueryCount = @$"TOP ({maxLongRunningQueryCount})";
 
             string query = @$"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
