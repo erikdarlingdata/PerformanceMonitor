@@ -106,7 +106,8 @@
                           VerticalScrollBarVisibility="Auto"
                           Background="{DynamicResource BackgroundBrush}"
                           PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel">
-                <Canvas x:Name="PlanCanvas" ClipToBounds="False">
+                <Canvas x:Name="PlanCanvas" ClipToBounds="False"
+                        HorizontalAlignment="Left" VerticalAlignment="Top">
                     <Canvas.LayoutTransform>
                         <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
                     </Canvas.LayoutTransform>

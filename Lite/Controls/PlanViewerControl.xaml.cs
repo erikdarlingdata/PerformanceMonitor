@@ -135,6 +135,7 @@ public partial class PlanViewerControl : UserControl
         _currentStatement = statement;
         PlanCanvas.Children.Clear();
         _selectedNodeBorder = null;
+        PlanScrollViewer.ScrollToHome();
 
         if (statement.RootNode == null) return;
 
