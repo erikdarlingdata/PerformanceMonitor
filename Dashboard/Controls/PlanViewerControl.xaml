@@ -8,6 +8,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -74,8 +75,15 @@
             </StackPanel>
         </Border>
 
+        <!-- Wait Stats Banner (actual plans only) -->
+        <Border x:Name="WaitStatsBanner" Grid.Row="3" Padding="10,8"
+                Background="#1A2A3D" Visibility="Collapsed"
+                BorderBrush="#2A4A6A" BorderThickness="0,0,0,1">
+            <StackPanel x:Name="WaitStatsContent"/>
+        </Border>
+
         <!-- Query Text (collapsible) -->
-        <Expander Grid.Row="3" x:Name="QueryTextExpander" Header="  Query Text"
+        <Expander Grid.Row="4" x:Name="QueryTextExpander" Header="  Query Text"
                   IsExpanded="False" Visibility="Collapsed"
                   Foreground="{DynamicResource ForegroundBrush}"
                   Background="{DynamicResource BackgroundDarkBrush}"
@@ -90,7 +98,7 @@
         </Expander>
 
         <!-- Statements Panel + Plan Canvas + Properties Panel -->
-        <Grid Grid.Row="4">
+        <Grid Grid.Row="5">
             <Grid.ColumnDefinitions>
                 <!-- Col 0: Statements Panel (hidden by default) -->
                 <ColumnDefinition x:Name="StatementsColumn" Width="0"/>
