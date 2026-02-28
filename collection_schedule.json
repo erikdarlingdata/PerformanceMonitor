@@ -1,0 +1,144 @@
+{
+  "collectors": [
+    {
+      "name": "wait_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Wait statistics from sys.dm_os_wait_stats"
+    },
+    {
+      "name": "query_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Query statistics from sys.dm_exec_query_stats"
+    },
+    {
+      "name": "procedure_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Stored procedure statistics from sys.dm_exec_procedure_stats"
+    },
+    {
+      "name": "query_store",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Query Store data (top 100 queries per database)"
+    },
+    {
+      "name": "query_snapshots",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 7,
+      "description": "Currently running queries snapshot"
+    },
+    {
+      "name": "cpu_utilization",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "CPU utilization from ring buffer"
+    },
+    {
+      "name": "file_io_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "File I/O statistics from sys.dm_io_virtual_file_stats"
+    },
+    {
+      "name": "memory_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Memory statistics from sys.dm_os_sys_memory and performance counters"
+    },
+    {
+      "name": "memory_clerks",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Memory clerk allocations from sys.dm_os_memory_clerks"
+    },
+    {
+      "name": "tempdb_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "TempDB space usage from sys.dm_db_file_space_usage"
+    },
+    {
+      "name": "perfmon_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Key performance counters from sys.dm_os_performance_counters"
+    },
+    {
+      "name": "deadlocks",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Deadlocks from system_health extended event session"
+    },
+    {
+      "name": "server_config",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Server configuration (on-load only)"
+    },
+    {
+      "name": "database_config",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Database configuration (on-load only)"
+    },
+    {
+      "name": "memory_grant_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Memory grant statistics from sys.dm_exec_query_memory_grants"
+    },
+    {
+      "name": "waiting_tasks",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 7,
+      "description": "Point-in-time waiting tasks from sys.dm_os_waiting_tasks"
+    },
+    {
+      "name": "blocked_process_report",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Blocked process reports from XE ring buffer session (opt-out)"
+    },
+    {
+      "name": "database_scoped_config",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Database-scoped configurations (on-load only)"
+    },
+    {
+      "name": "trace_flags",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Active trace flags via DBCC TRACESTATUS (on-load only)"
+    },
+    {
+      "name": "running_jobs",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 7,
+      "description": "Currently running SQL Agent jobs with duration comparison"
+    }
+  ]
+}

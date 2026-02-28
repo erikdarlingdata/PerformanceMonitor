@@ -24,6 +24,8 @@ namespace PerformanceMonitorDashboard
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            NativeMethods.SetAppUserModelId("DarlingData.PerformanceMonitor.Dashboard");
+
             // Check for existing instance
             _singleInstanceMutex = new Mutex(true, MutexName, out _ownsMutex);
 

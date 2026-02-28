@@ -306,14 +306,13 @@ namespace PerformanceMonitorDashboard.Helpers
         /// </summary>
         public static void ApplyThemeToCalendar(System.Windows.Controls.Calendar calendar)
         {
-            SolidColorBrush primaryBg, secondaryBg, fg, mutedFg, borderBrush;
+            SolidColorBrush primaryBg, secondaryBg, fg, borderBrush;
 
             if (ThemeManager.CurrentTheme == "CoolBreeze")
             {
                 primaryBg   = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#EEF4FA"));
                 secondaryBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#DAE6F0"));
                 fg          = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1A2A3A"));
-                mutedFg     = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#5B7A90"));
                 borderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#A8BDD0"));
             }
             else if (ThemeManager.HasLightBackground)
@@ -321,7 +320,6 @@ namespace PerformanceMonitorDashboard.Helpers
                 primaryBg   = new SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF));
                 secondaryBg = new SolidColorBrush(Color.FromRgb(0xF5, 0xF7, 0xFA));
                 fg          = new SolidColorBrush(Color.FromRgb(0x1A, 0x1D, 0x23));
-                mutedFg     = new SolidColorBrush(Color.FromRgb(0x71, 0x80, 0x96));
                 borderBrush = new SolidColorBrush(Color.FromRgb(0xDE, 0xE2, 0xE6));
             }
             else
@@ -329,7 +327,6 @@ namespace PerformanceMonitorDashboard.Helpers
                 primaryBg   = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#111217"));
                 secondaryBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#22252b"));
                 fg          = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB"));
-                mutedFg     = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#6B7280"));
                 borderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35"));
             }
 
@@ -337,10 +334,10 @@ namespace PerformanceMonitorDashboard.Helpers
             calendar.Foreground = fg;
             calendar.BorderBrush = borderBrush;
 
-            ApplyThemeRecursively(calendar, primaryBg, secondaryBg, fg, mutedFg, ThemeManager.HasLightBackground);
+            ApplyThemeRecursively(calendar, primaryBg, secondaryBg, fg, ThemeManager.HasLightBackground);
         }
 
-        private static void ApplyThemeRecursively(DependencyObject parent, Brush primaryBg, Brush secondaryBg, Brush fg, Brush mutedFg, bool HasLightBackground)
+        private static void ApplyThemeRecursively(DependencyObject parent, Brush primaryBg, Brush secondaryBg, Brush fg, bool HasLightBackground)
         {
             for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
             {
@@ -385,7 +382,7 @@ namespace PerformanceMonitorDashboard.Helpers
                     }
                 }
 
-                ApplyThemeRecursively(child, primaryBg, secondaryBg, fg, mutedFg, HasLightBackground);
+                ApplyThemeRecursively(child, primaryBg, secondaryBg, fg, HasLightBackground);
             }
         }
 

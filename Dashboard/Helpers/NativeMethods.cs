@@ -24,9 +24,17 @@ namespace PerformanceMonitorDashboard.Helpers
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool PostMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string appId);
+
         public static void BroadcastShowMessage()
         {
             PostMessage((IntPtr)HWND_BROADCAST, WM_SHOWMONITOR, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        public static void SetAppUserModelId(string appId)
+        {
+            SetCurrentProcessExplicitAppUserModelID(appId);
         }
     }
 }

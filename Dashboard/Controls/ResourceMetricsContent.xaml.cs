@@ -1839,7 +1839,7 @@ namespace PerformanceMonitorDashboard.Controls
             WaitTypeCountText.Text = $"{count} / 30 selected";
             WaitTypeCountText.Foreground = count >= 30
                 ? new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#E57373")!)
-                : (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
+                : (System.Windows.Media.Brush)FindResource("ForegroundBrush");
         }
 
         private void WaitTypeSearch_TextChanged(object sender, TextChangedEventArgs e)

@@ -60,7 +60,7 @@
 
     <SolidColorBrush x:Key="ForegroundBrush" Color="{StaticResource ForegroundColor}"/>
     <SolidColorBrush x:Key="ForegroundDimBrush" Color="{StaticResource ForegroundDimColor}"/>
-    <SolidColorBrush x:Key="ForegroundMutedBrush" Color="{StaticResource ForegroundMutedColor}"/>
+    <SolidColorBrush x:Key="ForegroundMutedBrush" Color="{StaticResource ForegroundColor}"/>
 
     <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>

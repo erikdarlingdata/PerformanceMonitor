@@ -434,27 +434,24 @@ public partial class ServerTab : UserControl
 
     private void ApplyThemeToCalendar(System.Windows.Controls.Calendar calendar)
     {
-        SolidColorBrush primaryBg, fg, mutedFg, borderBrush;
+        SolidColorBrush primaryBg, fg, borderBrush;
 
         if (Helpers.ThemeManager.CurrentTheme == "CoolBreeze")
         {
             primaryBg   = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#EEF4FA")!);
             fg          = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#1A2A3A")!);
-            mutedFg     = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#5B7A90")!);
             borderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#A8BDD0")!);
         }
         else if (Helpers.ThemeManager.HasLightBackground)
         {
             primaryBg   = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF));
             fg          = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x1A, 0x1D, 0x23));
-            mutedFg     = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x71, 0x80, 0x96));
             borderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xDE, 0xE2, 0xE6));
         }
         else
         {
             primaryBg   = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#111217")!);
             fg          = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E4E6EB")!);
-            mutedFg     = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#6B7280")!);
             borderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#2a2d35")!);
         }
 
@@ -462,10 +459,10 @@ public partial class ServerTab : UserControl
         calendar.Foreground = fg;
         calendar.BorderBrush = borderBrush;
 
-        ApplyThemeRecursively(calendar, primaryBg, fg, mutedFg);
+        ApplyThemeRecursively(calendar, primaryBg, fg);
     }
 
-    private void ApplyThemeRecursively(DependencyObject parent, Brush primaryBg, Brush fg, Brush mutedFg)
+    private void ApplyThemeRecursively(DependencyObject parent, Brush primaryBg, Brush fg)
     {
         bool HasLightBackground = Helpers.ThemeManager.HasLightBackground;
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
@@ -504,7 +501,7 @@ public partial class ServerTab : UserControl
                     grid.Background = primaryBg;
             }
 
-            ApplyThemeRecursively(child, primaryBg, fg, mutedFg);
+            ApplyThemeRecursively(child, primaryBg, fg);
         }
     }
 
@@ -1667,7 +1664,7 @@ public partial class ServerTab : UserControl
         WaitTypeCountText.Text = $"{count} / 30 selected";
         WaitTypeCountText.Foreground = count >= 30
             ? new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E57373")!)
-            : (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
+            : (System.Windows.Media.Brush)FindResource("ForegroundBrush");
     }
 
     private void ApplyWaitTypeFilter()
