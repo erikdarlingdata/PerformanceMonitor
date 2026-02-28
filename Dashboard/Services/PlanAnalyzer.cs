@@ -51,9 +51,9 @@ public static class PlanAnalyzer
             var reason = stmt.NonParallelPlanReason switch
             {
                 "MaxDOPSetToOne" => "MAXDOP is set to 1",
-                "EstimatedDOPIsOne" => "Estimated DOP is 1",
+                "EstimatedDOPIsOne" => "Estimated DOP is 1 (the plan's estimated cost was below the cost threshold for parallelism)",
                 "NoParallelPlansInDesktopOrExpressEdition" => "Express/Desktop edition does not support parallelism",
-                "CouldNotGenerateValidParallelPlan" => "Optimizer could not generate a valid parallel plan",
+                "CouldNotGenerateValidParallelPlan" => "Optimizer could not generate a valid parallel plan. Common causes: scalar UDFs, inserts into table variables, certain system functions, or OPTION (MAXDOP 1) hints",
                 "QueryHintNoParallelSet" => "OPTION (MAXDOP 1) hint forces serial execution",
                 _ => stmt.NonParallelPlanReason
             };
@@ -61,7 +61,7 @@ public static class PlanAnalyzer
             stmt.PlanWarnings.Add(new PlanWarning
             {
                 WarningType = "Serial Plan",
-                Message = $"Query forced to run serially: {reason}",
+                Message = $"Query running serially: {reason}.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -80,7 +80,7 @@ public static class PlanAnalyzer
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Excessive Memory Grant",
-                        Message = $"Granted {grant.GrantedMemoryKB:N0} KB but only used {grant.MaxUsedMemoryKB:N0} KB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries, causing them to wait. This is usually caused by overestimated row counts — update statistics or use OPTION (RECOMPILE) so the optimizer sees the real row counts.",
+                        Message = $"Granted {grant.GrantedMemoryKB:N0} KB but only used {grant.MaxUsedMemoryKB:N0} KB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -92,7 +92,7 @@ public static class PlanAnalyzer
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
                     WarningType = "Memory Grant Wait",
-                    Message = $"Query waited {grant.GrantWaitTimeMs:N0}ms for a memory grant before it could start running. This means other queries were using all available workspace memory. Reduce memory consumption by fixing overestimated row counts (update statistics), simplifying sorts/hashes, or increasing server memory.",
+                    Message = $"Query waited {grant.GrantWaitTimeMs:N0}ms for a memory grant before it could start running. Other queries were using all available workspace memory.",
                     Severity = grant.GrantWaitTimeMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                 });
             }
@@ -111,7 +111,7 @@ public static class PlanAnalyzer
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
                     WarningType = "Large Memory Grant",
-                    Message = $"Query granted {grantMB:F0} MB of memory — this is a significant amount that blocks other queries from getting memory.{guidance} Reduce the data volume being sorted or hashed by filtering rows earlier, removing unnecessary columns from ORDER BY, or breaking the query into smaller steps.",
+                    Message = $"Query granted {grantMB:F0} MB of memory.{guidance}",
                     Severity = grantMB >= 4096 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                 });
             }
@@ -123,7 +123,7 @@ public static class PlanAnalyzer
             stmt.PlanWarnings.Add(new PlanWarning
             {
                 WarningType = "Compile Memory Exceeded",
-                Message = "Optimization was aborted early because the compile memory limit was exceeded. The plan may be suboptimal. Simplify the query or break it into smaller parts.",
+                Message = "Optimization was aborted early because the compile memory limit was exceeded. The plan is likely suboptimal. Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = PlanWarningSeverity.Critical
             });
         }
@@ -134,7 +134,7 @@ public static class PlanAnalyzer
             stmt.PlanWarnings.Add(new PlanWarning
             {
                 WarningType = "High Compile CPU",
-                Message = $"Query took {stmt.CompileCPUMs:N0}ms of CPU just to compile a plan (before any data was read). This is usually caused by too many joins, subqueries, or CTEs in a single statement. Break the query into smaller steps using #temp tables to reduce the search space the optimizer has to evaluate.",
+                Message = $"Query took {stmt.CompileCPUMs:N0}ms of CPU just to compile a plan (before any data was read). Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = stmt.CompileCPUMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
             });
         }
@@ -146,7 +146,7 @@ public static class PlanAnalyzer
             stmt.PlanWarnings.Add(new PlanWarning
             {
                 WarningType = "UDF Execution",
-                Message = $"Scalar UDF cost in this statement: {stmt.QueryUdfElapsedTimeMs:N0}ms elapsed, {stmt.QueryUdfCpuTimeMs:N0}ms CPU. Scalar UDFs run once per row and force single-threaded execution. Inline the UDF logic directly into the query. On SQL Server 2019+, scalar UDF inlining may handle this automatically.",
+                Message = $"Scalar UDF cost in this statement: {stmt.QueryUdfElapsedTimeMs:N0}ms elapsed, {stmt.QueryUdfCpuTimeMs:N0}ms CPU. Scalar UDFs run once per row and prevent parallelism. Rewrite as an inline table-valued function, or dump results to a #temp table and apply the UDF only to the final result set.",
                 Severity = stmt.QueryUdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
             });
         }
@@ -169,7 +169,7 @@ public static class PlanAnalyzer
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Local Variables",
-                        Message = $"Local variables detected: {names}. SQL Server cannot \"sniff\" the values of local variables at compile time, so it uses average statistics (density vector) instead of your actual values. This often produces bad row estimates. Fix: add OPTION (RECOMPILE) to the query so the optimizer sees the real values at runtime, or pass the values as stored procedure parameters instead of local variables.",
+                        Message = $"Local variables detected: {names}. SQL Server cannot sniff local variable values at compile time, so it uses average density estimates instead of your actual values. Test with OPTION (RECOMPILE) to see if the plan improves. For a permanent fix, use dynamic SQL or a stored procedure to pass the values as parameters instead of local variables.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -199,7 +199,7 @@ public static class PlanAnalyzer
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Filter Operator",
-                Message = $"Rows are flowing through the entire plan only to be thrown away by this Filter. Move the filtering logic earlier — add the predicate to a WHERE clause or an index so rows are eliminated at the source, not after all the expensive work is done. Predicate: {Truncate(node.Predicate, 200)}",
+                Message = $"Filter operator discarding rows late in the plan. Rows were read, joined, or processed only to be thrown away here. Predicate: {Truncate(node.Predicate, 200)}",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -226,7 +226,7 @@ public static class PlanAnalyzer
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "UDF Execution",
-                Message = $"Scalar UDF executing on this operator ({node.UdfElapsedTimeMs:N0}ms elapsed, {node.UdfCpuTimeMs:N0}ms CPU). Scalar UDFs run once per row, prevent parallelism, and hide their cost from the optimizer. Inline the UDF logic directly into the query, or on SQL Server 2019+ check if scalar UDF inlining is enabled (SELECT is_inlineable FROM sys.sql_modules).",
+                Message = $"Scalar UDF executing on this operator ({node.UdfElapsedTimeMs:N0}ms elapsed, {node.UdfCpuTimeMs:N0}ms CPU). Scalar UDFs run once per row and prevent parallelism. Rewrite as an inline table-valued function, or dump the query results to a #temp table first and apply the UDF only to the final result set.",
                 Severity = node.UdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
             });
         }
@@ -239,7 +239,7 @@ public static class PlanAnalyzer
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Row Estimate Mismatch",
-                    Message = $"Estimated {node.EstimateRows:N0} rows but actual 0 rows returned. SQL Server allocated resources for rows that never materialized. Update statistics on the underlying tables (UPDATE STATISTICS tablename WITH FULLSCAN), or if using parameters, the plan may be cached for different data — try OPTION (RECOMPILE).",
+                    Message = $"Estimated {node.EstimateRows:N0} rows but actual 0 rows returned. SQL Server allocated resources for rows that never materialized.",
                     Severity = node.EstimateRows >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                 });
             }
@@ -253,7 +253,7 @@ public static class PlanAnalyzer
                     node.Warnings.Add(new PlanWarning
                     {
                         WarningType = "Row Estimate Mismatch",
-                        Message = $"Estimated {node.EstimateRows:N0} rows, actual {node.ActualRows:N0} ({factor:F0}x {direction}). Bad estimates cause SQL Server to choose wrong join types, memory grants, and parallelism. Update statistics (UPDATE STATISTICS tablename WITH FULLSCAN). If using local variables or parameters with skewed data, try OPTION (RECOMPILE).",
+                        Message = $"Estimated {node.EstimateRows:N0} rows, actual {node.ActualRows:N0} ({factor:F0}x {direction}). Bad estimates cause SQL Server to choose wrong join types, memory grants, and parallelism.",
                         Severity = factor >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                     });
                 }
@@ -267,7 +267,7 @@ public static class PlanAnalyzer
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Scalar UDF",
-                Message = $"Scalar {type} UDF: {udf.FunctionName}. Scalar UDFs execute once per row and force the entire query to run single-threaded (no parallelism). Rewrite the UDF logic as inline SQL in the query. On SQL Server 2019+, scalar UDF inlining may do this automatically — check with SELECT is_inlineable FROM sys.sql_modules WHERE object_id = OBJECT_ID('{udf.FunctionName}').",
+                Message = $"Scalar {type} UDF: {udf.FunctionName}. Scalar UDFs run once per row and prevent parallelism. Rewrite as an inline table-valued function, or dump results to a #temp table and apply the UDF only to the final result set.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -310,7 +310,7 @@ public static class PlanAnalyzer
                     node.Warnings.Add(new PlanWarning
                     {
                         WarningType = "Parallel Skew",
-                        Message = $"Thread {maxThread.ThreadId} processed {skewRatio:P0} of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). The work is heavily skewed to one thread, so parallelism isn't helping much. This is usually caused by skewed data distribution. Check if the data can be partitioned more evenly, or if the query can be restructured to distribute work across threads.",
+                        Message = $"Thread {maxThread.ThreadId} processed {skewRatio:P0} of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -323,7 +323,7 @@ public static class PlanAnalyzer
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Key Lookup",
-                Message = $"Key Lookup — SQL Server found the rows using a nonclustered index but had to go back to the clustered index to get additional columns. Add the missing columns as INCLUDE columns on the nonclustered index to make it a \"covering\" index and eliminate the lookup. Predicate: {Truncate(node.Predicate, 200)}",
+                Message = $"Key Lookup — SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns. Alter the nonclustered index to add the predicate column as a key column or as an INCLUDE column. Predicate: {Truncate(node.Predicate, 200)}",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -332,10 +332,26 @@ public static class PlanAnalyzer
         var nonSargableReason = DetectNonSargablePredicate(node);
         if (nonSargableReason != null)
         {
+            var nonSargableAdvice = nonSargableReason switch
+            {
+                "Implicit conversion (CONVERT_IMPLICIT)" =>
+                    "Implicit conversion (CONVERT_IMPLICIT) prevents an index seek. Match the parameter or variable data type to the column data type.",
+                "ISNULL/COALESCE wrapping column" =>
+                    "ISNULL/COALESCE wrapping a column prevents an index seek. Rewrite the predicate to avoid wrapping the column, e.g. use \"WHERE col = @val OR col IS NULL\" instead of \"WHERE ISNULL(col, '') = @val\".",
+                "Leading wildcard LIKE pattern" =>
+                    "Leading wildcard LIKE (e.g. LIKE '%text') prevents an index seek — SQL Server must scan every row. If possible, use full-text indexing or reverse the search pattern.",
+                "CASE expression in predicate" =>
+                    "CASE expression in a predicate prevents an index seek. Rewrite using separate WHERE clauses combined with OR, or split into multiple queries.",
+                _ when nonSargableReason.StartsWith("Function call") =>
+                    $"{nonSargableReason} prevents an index seek. Remove the function from the column side — apply it to the parameter instead, or create a computed column with the expression and index that.",
+                _ =>
+                    $"{nonSargableReason} prevents an index seek, forcing a scan."
+            };
+
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Non-SARGable Predicate",
-                Message = $"{nonSargableReason} prevents SQL Server from using an index seek, forcing it to scan every row instead. Remove the function/conversion from the column side of the predicate — apply it to the parameter or literal instead. If that's not possible, create a computed column with the expression and index that. Predicate: {Truncate(node.Predicate!, 200)}",
+                Message = $"{nonSargableAdvice} Predicate: {Truncate(node.Predicate!, 200)}",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -348,7 +364,7 @@ public static class PlanAnalyzer
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Scan With Predicate",
-                Message = $"SQL Server is reading every row in the table and then checking each one against this predicate. Create an index on the columns in the predicate to turn this scan into a seek. Predicate: {Truncate(node.Predicate, 200)}",
+                Message = $"Scan with residual predicate — SQL Server is reading every row and filtering after the fact. Create an index on the predicate columns. Predicate: {Truncate(node.Predicate, 200)}",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -362,8 +378,8 @@ public static class PlanAnalyzer
             if (hasMismatch || hasConvert)
             {
                 var reason = hasMismatch
-                    ? "Mismatched data types between the column and the parameter/literal. SQL Server is converting every row's value to compare, which prevents index seeks. Fix the parameter type in your application code to match the column type exactly (e.g., don't pass nvarchar to a varchar column, or int to a bigint column)."
-                    : "CONVERT/CAST wrapping a column in the predicate. SQL Server must convert every row's value, which prevents index seeks and forces a scan. Move the conversion to the other side of the comparison — convert the parameter/literal instead of the column.";
+                    ? "Mismatched data types between the column and the parameter/literal. SQL Server is converting every row to compare, preventing index seeks. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
+                    : "CONVERT/CAST wrapping a column in the predicate. SQL Server is converting every row to compare, preventing index seeks. Match your data types — convert the parameter/literal instead of the column.";
 
                 node.Warnings.Add(new PlanWarning
                 {
@@ -395,7 +411,7 @@ public static class PlanAnalyzer
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Lazy Spool Ineffective",
-                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits) — {ratio}. The spool is caching results but rarely reusing them, so it's adding overhead for no benefit. This usually means the inner side of a Nested Loops join is being re-executed with different values each time. An index on the inner table's join columns may help.",
+                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits) — {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
                     Severity = severity
                 });
             }
@@ -434,7 +450,7 @@ public static class PlanAnalyzer
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Nested Loops High Executions",
-                    Message = $"Nested Loops inner side executed {innerChild.ActualExecutions:N0} times (DOP {dop}). That's {innerChild.ActualExecutions:N0} separate lookups into the inner table. For this many rows, a Hash Join or Merge Join would be more efficient. Check if bad row estimates on the outer side caused the optimizer to choose Nested Loops — update statistics or try OPTION (HASH JOIN) as a test.",
+                    Message = $"Nested Loops inner side executed {innerChild.ActualExecutions:N0} times (DOP {dop}). This is likely caused by parameter sniffing or a bad row estimate on the outer side — the optimizer chose Nested Loops expecting far fewer rows.",
                     Severity = innerChild.ActualExecutions > 1000000
                         ? PlanWarningSeverity.Critical
                         : PlanWarningSeverity.Warning
@@ -445,7 +461,7 @@ public static class PlanAnalyzer
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Nested Loops High Executions",
-                    Message = $"Nested Loops inner side estimated to execute {innerChild.EstimateRebinds + 1:N0} times. That many separate lookups into the inner table is expensive. For this many rows, a Hash Join or Merge Join would be more efficient. Check if the outer side row estimate is accurate — update statistics or try OPTION (HASH JOIN) as a test.",
+                    Message = $"Nested Loops inner side estimated to execute {innerChild.EstimateRebinds + 1:N0} times. This may be caused by parameter sniffing or a poor estimate on the outer side.",
                     Severity = innerChild.EstimateRebinds > 1000000
                         ? PlanWarningSeverity.Critical
                         : PlanWarningSeverity.Warning
@@ -463,8 +479,8 @@ public static class PlanAnalyzer
             {
                 WarningType = "Many-to-Many Merge Join",
                 Message = node.HasActualStats
-                    ? $"Many-to-many Merge Join — SQL Server created a worktable in TempDB ({node.ActualLogicalReads:N0} logical reads) because both sides have duplicate values in the join columns. Reduce duplicates by adding columns to the join, filtering earlier, or using a Hash Join instead (OPTION (HASH JOIN) as a test)."
-                    : "Many-to-many Merge Join — SQL Server will create a worktable in TempDB because both sides have duplicate values in the join columns. Reduce duplicates by adding columns to the join, filtering earlier, or using a Hash Join instead.",
+                    ? $"Many-to-many Merge Join — SQL Server created a worktable in TempDB ({node.ActualLogicalReads:N0} logical reads) because both sides have duplicate values in the join columns."
+                    : "Many-to-many Merge Join — SQL Server will create a worktable in TempDB because both sides have duplicate values in the join columns.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -476,7 +492,7 @@ public static class PlanAnalyzer
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Table Variable",
-                Message = "Table variable detected. SQL Server always estimates 1 row for table variables regardless of actual size, which causes bad join and memory grant decisions. Replace with a #temp table — temp tables have statistics so the optimizer can make informed choices. On SQL Server 2019+ with compatibility level 150+, table variable deferred compilation may fix this automatically.",
+                Message = "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -488,7 +504,7 @@ public static class PlanAnalyzer
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Table-Valued Function",
-                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. This causes bad join choices and memory grants. Rewrite as an inline table-valued function (single SELECT statement) or move the logic directly into the query.",
+                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -520,7 +536,7 @@ public static class PlanAnalyzer
                     inner.Warnings.Add(new PlanWarning
                     {
                         WarningType = "Top Above Scan",
-                        Message = $"Top operator reads from {scanCandidate.PhysicalOp} (Node {scanCandidate.NodeId}) on the inner side of Nested Loops (Node {node.NodeId}).{predInfo} This scan runs once per outer row — potentially thousands or millions of times. Create an index on the join/filter columns with appropriate ordering to convert the scan into a seek.",
+                        Message = $"Top operator reads from {scanCandidate.PhysicalOp} (Node {scanCandidate.NodeId}) on the inner side of Nested Loops (Node {node.NodeId}).{predInfo} Create an index on the predicate columns to convert the scan into a seek.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -642,7 +658,7 @@ public static class PlanAnalyzer
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
                     WarningType = "CTE Multiple References",
-                    Message = $"CTE \"{cteName}\" is referenced {refCount} times. SQL Server re-executes the entire CTE each time it's referenced — it does not cache or materialize the results. Replace the CTE with a #temp table: SELECT ... INTO #temp FROM (...), then reference #temp in each place you currently use \"{cteName}\".",
+                    Message = $"CTE \"{cteName}\" is referenced {refCount} times. SQL Server re-executes the entire CTE each time — it does not materialize the results. Materialize into a #temp table instead.",
                     Severity = PlanWarningSeverity.Warning
                 });
             }
