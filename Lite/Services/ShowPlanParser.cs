@@ -835,8 +835,9 @@ public static class ShowPlanParser
             // Table cardinality and rows to be read (on <RelOp> per XSD)
             node.TableCardinality = ParseDouble(relOpEl.Attribute("TableCardinality")?.Value);
             node.EstimatedRowsRead = ParseDouble(relOpEl.Attribute("EstimatedRowsRead")?.Value);
+            node.EstimateRowsWithoutRowGoal = ParseDouble(relOpEl.Attribute("EstimateRowsWithoutRowGoal")?.Value);
             if (node.EstimatedRowsRead == 0)
-                node.EstimatedRowsRead = ParseDouble(relOpEl.Attribute("EstimateRowsWithoutRowGoal")?.Value);
+                node.EstimatedRowsRead = node.EstimateRowsWithoutRowGoal;
 
             // TOP operator properties
             var topExprEl = physicalOpEl.Element(Ns + "TopExpression")?.Descendants(Ns + "ScalarOperator").FirstOrDefault();
@@ -1491,7 +1492,7 @@ public static class ShowPlanParser
             result.Add(new PlanWarning
             {
                 WarningType = "Exchange Spill",
-                Message = $"Exchange spill — Writes: {ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value):N0}",
+                Message = $"Exchange spill — {ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value):N0} writes to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {

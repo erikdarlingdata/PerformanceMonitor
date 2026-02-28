@@ -182,6 +182,18 @@ public static class PlanAnalyzer
             DetectMultiReferenceCte(stmt);
         }
 
+        // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
+        if (!string.IsNullOrEmpty(stmt.StatementText) &&
+            Regex.IsMatch(stmt.StatementText, @"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase))
+        {
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Optimize For Unknown",
+                Message = "OPTIMIZE FOR UNKNOWN forces average density estimates for all parameters instead of using the actual sniffed values. This rarely produces a better plan — it just trades one bad estimate for a different bad estimate. Address the root cause: add better indexes so the plan is less sensitive to parameter values, use OPTION (RECOMPILE) for volatile parameters, or restructure the query.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
         // Rule 25: Ineffective parallelism — parallel plan where CPU ≈ elapsed
         if (stmt.DegreeOfParallelism > 1 && stmt.QueryTimeStats != null)
         {
@@ -296,11 +308,40 @@ public static class PlanAnalyzer
         }
 
         // Rule 7: Spill detection — calculate operator time and set severity
-        // based on what percentage of statement elapsed time the spill accounts for
+        // based on what percentage of statement elapsed time the spill accounts for.
+        // Exchange spills on Parallelism operators get special handling since their
+        // timing is unreliable but the write count tells the story.
         foreach (var w in node.Warnings.ToList())
         {
-            if (w.SpillDetails != null && node.ActualElapsedMs > 0)
+            if (w.SpillDetails == null)
+                continue;
+
+            var isExchangeSpill = w.SpillDetails.SpillType == "Exchange";
+
+            if (isExchangeSpill)
             {
+                // Exchange spills: severity based on write count since timing is unreliable
+                var writes = w.SpillDetails.WritesToTempDb;
+                if (writes >= 1_000_000)
+                    w.Severity = PlanWarningSeverity.Critical;
+                else if (writes >= 10_000)
+                    w.Severity = PlanWarningSeverity.Warning;
+
+                // Surface Parallelism operator time when available (actual plans)
+                if (node.ActualElapsedMs > 0)
+                {
+                    var operatorMs = GetParallelismOperatorElapsedMs(node);
+                    var stmtMs = stmt.QueryTimeStats?.ElapsedTimeMs ?? 0;
+                    if (stmtMs > 0 && operatorMs > 0)
+                    {
+                        var pct = (double)operatorMs / stmtMs;
+                        w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+                    }
+                }
+            }
+            else if (node.ActualElapsedMs > 0)
+            {
+                // Sort/Hash spills: severity based on operator time percentage
                 var operatorMs = GetOperatorOwnElapsedMs(node);
                 var stmtMs = stmt.QueryTimeStats?.ElapsedTimeMs ?? 0;
 
@@ -340,8 +381,22 @@ public static class PlanAnalyzer
             }
         }
 
-        // Rule 10: Key Lookup with residual predicate
-        if (node.Lookup && !string.IsNullOrEmpty(node.Predicate))
+        // Rule 10: Key Lookup / RID Lookup with residual predicate
+        // Check RID Lookup first — it's more specific (PhysicalOp) and also has Lookup=true
+        if (node.PhysicalOp == "RID Lookup")
+        {
+            var message = "RID Lookup — this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
+            if (!string.IsNullOrEmpty(node.Predicate))
+                message += $" Predicate: {Truncate(node.Predicate, 200)}";
+
+            node.Warnings.Add(new PlanWarning
+            {
+                WarningType = "RID Lookup",
+                Message = message,
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+        else if (node.Lookup && !string.IsNullOrEmpty(node.Predicate))
         {
             node.Warnings.Add(new PlanWarning
             {
@@ -565,6 +620,74 @@ public static class PlanAnalyzer
                 }
             }
         }
+
+        // Rule 26: Row Goal (informational) — optimizer reduced estimate due to TOP/EXISTS/IN
+        if (node.EstimateRowsWithoutRowGoal > 0 && node.EstimateRows > 0 &&
+            node.EstimateRowsWithoutRowGoal > node.EstimateRows)
+        {
+            var reduction = node.EstimateRowsWithoutRowGoal / node.EstimateRows;
+            node.Warnings.Add(new PlanWarning
+            {
+                WarningType = "Row Goal",
+                Message = $"Row goal active: estimate reduced from {node.EstimateRowsWithoutRowGoal:N0} to {node.EstimateRows:N0} ({reduction:N0}x reduction) due to TOP, EXISTS, IN, or FAST hint. The optimizer chose this plan shape expecting to stop reading early. If the query reads all rows anyway, the plan choice may be suboptimal.",
+                Severity = PlanWarningSeverity.Info
+            });
+        }
+
+        // Rule 28: Row Count Spool — NOT IN with nullable column
+        // Pattern: Row Count Spool with high rewinds, child scan has IS NULL predicate,
+        // and statement text contains NOT IN
+        if (node.PhysicalOp == "Row Count Spool")
+        {
+            var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
+            if (rewinds > 10000 && HasNotInPattern(node, stmt))
+            {
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Row Count Spool (NOT IN)",
+                    Message = $"Row Count Spool with {rewinds:N0} rewinds. This pattern occurs when NOT IN is used with a nullable column — SQL Server cannot use an efficient Anti Semi Join because it must check for NULL values on every outer row. Rewrite as NOT EXISTS, or add WHERE column IS NOT NULL to the subquery.",
+                    Severity = rewinds > 1_000_000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
+                });
+            }
+        }
+
+        // Rule 29: Enhance implicit conversion warnings — Seek Plan is more severe
+        foreach (var w in node.Warnings.ToList())
+        {
+            if (w.WarningType == "Implicit Conversion" && w.Message.StartsWith("Seek Plan", StringComparison.Ordinal))
+            {
+                w.Severity = PlanWarningSeverity.Critical;
+                w.Message = $"Implicit conversion prevented an index seek, forcing a scan instead. Fix the data type mismatch: ensure the parameter or variable type matches the column type exactly. {w.Message}";
+            }
+        }
+    }
+
+    /// <summary>
+    /// Detects the NOT IN with nullable column pattern: statement has NOT IN,
+    /// and a parent Nested Loops Anti Semi Join has an IS NULL residual predicate.
+    /// </summary>
+    private static bool HasNotInPattern(PlanNode spoolNode, PlanStatement stmt)
+    {
+        // Check statement text for NOT IN
+        if (string.IsNullOrEmpty(stmt.StatementText) ||
+            !Regex.IsMatch(stmt.StatementText, @"\bNOT\s+IN\b", RegexOptions.IgnoreCase))
+            return false;
+
+        // Walk up to find the parent Nested Loops Anti Semi Join with IS NULL predicate
+        var parent = spoolNode.Parent;
+        while (parent != null)
+        {
+            if (parent.PhysicalOp == "Nested Loops" &&
+                parent.LogicalOp.Contains("Anti Semi", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrEmpty(parent.Predicate) &&
+                parent.Predicate.Contains("IS NULL", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            parent = parent.Parent;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -766,6 +889,15 @@ public static class PlanAnalyzer
                 maxChildElapsed = childElapsed;
         }
 
+        return Math.Max(0, node.ActualElapsedMs - maxChildElapsed);
+    }
+
+    private static long GetParallelismOperatorElapsedMs(PlanNode node)
+    {
+        if (node.Children.Count == 0)
+            return node.ActualElapsedMs;
+
+        var maxChildElapsed = node.Children.Max(c => c.ActualElapsedMs);
         return Math.Max(0, node.ActualElapsedMs - maxChildElapsed);
     }
 

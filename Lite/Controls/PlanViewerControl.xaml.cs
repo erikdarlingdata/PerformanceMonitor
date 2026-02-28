@@ -728,6 +728,8 @@ public partial class PlanViewerControl : UserControl
         AddPropertyRow("Est. Rows All Execs", $"{node.EstimateRows * Math.Max(1, estExecs):N1}");
         if (node.EstimatedRowsRead > 0)
             AddPropertyRow("Est. Rows to Read", $"{node.EstimatedRowsRead:N1}");
+        if (node.EstimateRowsWithoutRowGoal > 0)
+            AddPropertyRow("Est. Rows (No Row Goal)", $"{node.EstimateRowsWithoutRowGoal:N1}");
         if (node.TableCardinality > 0)
             AddPropertyRow("Table Cardinality", $"{node.TableCardinality:N0}");
         AddPropertyRow("Avg Row Size", $"{node.EstimatedRowSize} B");
