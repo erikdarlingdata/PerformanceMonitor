@@ -160,6 +160,10 @@ public static class ShowPlanParser
             StatementEstRows = ParseDouble(stmtEl.Attribute("StatementEstRows")?.Value)
         };
 
+        // StmtUseDb: capture the Database attribute
+        if (stmtEl.Name.LocalName == "StmtUseDb")
+            stmt.StmtUseDatabaseName = stmtEl.Attribute("Database")?.Value;
+
         var queryPlanEl = stmtEl.Element(Ns + "QueryPlan");
 
         // XSD gap: Dispatcher/PSP (on StmtSimple, not inside QueryPlan)
@@ -436,6 +440,9 @@ public static class ShowPlanParser
         stmt.DispatcherPlanHandle = queryPlanEl.Attribute("DispatcherPlanHandle")?.Value;
         stmt.ExclusiveProfileTimeActive = queryPlanEl.Attribute("ExclusiveProfileTimeActive")?.Value is "true" or "1";
 
+        // QueryPlan-level MemoryGrant attribute (unsignedLong)
+        stmt.QueryPlanMemoryGrantKB = ParseLong(queryPlanEl.Attribute("MemoryGrant")?.Value);
+
         // XSD gap: OptimizationReplay
         var optReplayEl = queryPlanEl.Element(Ns + "OptimizationReplay");
         if (optReplayEl != null)
@@ -702,6 +709,10 @@ public static class ShowPlanParser
             }
             if (seekParts.Count > 0)
                 node.SeekPredicates = string.Join(" AND ", seekParts);
+
+            // GuessedSelectivity — check if optimizer guessed selectivity on predicates
+            if (ScopedDescendants(physicalOpEl, Ns + "GuessedSelectivity").Any())
+                node.GuessedSelectivity = true;
 
             // Residual predicate
             var predEl = physicalOpEl.Elements(Ns + "Predicate").FirstOrDefault();
@@ -1061,6 +1072,41 @@ public static class ShowPlanParser
             node.RemoteSource = physicalOpEl.Attribute("RemoteSource")?.Value;
             node.RemoteObject = physicalOpEl.Attribute("RemoteObject")?.Value;
             node.RemoteQuery = physicalOpEl.Attribute("RemoteQuery")?.Value;
+
+            // ForeignKeyReferenceCheck attributes
+            node.ForeignKeyReferencesCount = (int)ParseDouble(physicalOpEl.Attribute("ForeignKeyReferencesCount")?.Value);
+            node.NoMatchingIndexCount = (int)ParseDouble(physicalOpEl.Attribute("NoMatchingIndexCount")?.Value);
+            node.PartialMatchingIndexCount = (int)ParseDouble(physicalOpEl.Attribute("PartialMatchingIndexCount")?.Value);
+
+            // ConstantScan Values — parse Values/Row/ScalarOperator children
+            var valuesEl = physicalOpEl.Element(Ns + "Values");
+            if (valuesEl != null)
+            {
+                var rowParts = new List<string>();
+                foreach (var rowEl in valuesEl.Elements(Ns + "Row"))
+                {
+                    var scalars = rowEl.Elements(Ns + "ScalarOperator")
+                        .Select(s => s.Attribute("ScalarString")?.Value ?? "")
+                        .Where(s => !string.IsNullOrEmpty(s));
+                    var rowStr = string.Join(", ", scalars);
+                    if (!string.IsNullOrEmpty(rowStr))
+                        rowParts.Add($"({rowStr})");
+                }
+                if (rowParts.Count > 0)
+                    node.ConstantScanValues = string.Join(", ", rowParts);
+            }
+
+            // UDX UsedUDXColumns — column references for CLR aggregate operators
+            var udxColsEl = physicalOpEl.Element(Ns + "UsedUDXColumns");
+            if (udxColsEl != null)
+            {
+                var udxCols = udxColsEl.Elements(Ns + "ColumnReference")
+                    .Select(c => FormatColumnRef(c))
+                    .Where(s => !string.IsNullOrEmpty(s));
+                var udxColStr = string.Join(", ", udxCols);
+                if (!string.IsNullOrEmpty(udxColStr))
+                    node.UdxUsedColumns = udxColStr;
+            }
         }
 
         // Output columns
@@ -1082,6 +1128,11 @@ public static class ShowPlanParser
 
         // Warnings
         node.Warnings = ParseWarnings(relOpEl);
+
+        // SpillOccurred detail flag (node-level boolean)
+        var warningsCheckEl = relOpEl.Element(Ns + "Warnings");
+        if (warningsCheckEl?.Element(Ns + "SpillOccurred") != null)
+            node.SpillOccurredDetail = true;
 
         // Wave 3.2: MemoryFractions (on RelOp)
         var memFracEl = relOpEl.Element(Ns + "MemoryFractions");
