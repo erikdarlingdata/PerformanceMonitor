@@ -114,6 +114,7 @@ public partial class PlanViewerControl : UserControl
         PlanScrollViewer.Visibility = Visibility.Collapsed;
         MissingIndexBanner.Visibility = Visibility.Collapsed;
         WarningsBanner.Visibility = Visibility.Collapsed;
+        WaitStatsBanner.Visibility = Visibility.Collapsed;
         CloseStatementsPanel();
         CostText.Text = "";
         CostText.Visibility = Visibility.Collapsed;
@@ -144,6 +145,7 @@ public partial class PlanViewerControl : UserControl
         // Update banners
         ShowMissingIndexes(statement.MissingIndexes);
         ShowWarnings(statement.RootNode);
+        ShowWaitStats(statement.WaitStats);
 
         // Update cost text
         CostText.Text = $"Statement Cost: {statement.StatementSubTreeCost:F4}";
@@ -1400,6 +1402,154 @@ public partial class PlanViewerControl : UserControl
         warnings.AddRange(node.Warnings);
         foreach (var child in node.Children)
             CollectWarnings(child, warnings);
+    }
+
+    private void ShowWaitStats(List<WaitStatInfo> waits)
+    {
+        WaitStatsContent.Children.Clear();
+
+        if (waits.Count == 0)
+        {
+            WaitStatsBanner.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var sorted = waits.OrderByDescending(w => w.WaitTimeMs).ToList();
+        var maxWait = sorted[0].WaitTimeMs;
+        var totalWait = sorted.Sum(w => w.WaitTimeMs);
+
+        // Header
+        WaitStatsContent.Children.Add(new TextBlock
+        {
+            Text = $"Wait Stats \u2014 {totalWait:N0}ms total",
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4FA3FF")),
+            Margin = new Thickness(0, 0, 0, 6)
+        });
+
+        // Stacked summary bar showing category breakdown
+        if (sorted.Count > 1)
+        {
+            var summaryBar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Height = 8,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+
+            var categories = sorted
+                .GroupBy(w => GetWaitCategory(w.WaitType))
+                .OrderByDescending(g => g.Sum(w => w.WaitTimeMs))
+                .ToList();
+
+            foreach (var cat in categories)
+            {
+                var catMs = cat.Sum(w => w.WaitTimeMs);
+                var fraction = totalWait > 0 ? (double)catMs / totalWait : 0;
+                summaryBar.Children.Add(new Border
+                {
+                    Width = Math.Max(2, fraction * 500),
+                    Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(GetWaitCategoryColor(cat.Key))),
+                    CornerRadius = new CornerRadius(2),
+                    Margin = new Thickness(0, 0, 1, 0)
+                });
+            }
+
+            WaitStatsContent.Children.Add(summaryBar);
+        }
+
+        // Per-wait-type rows with horizontal bars
+        foreach (var w in sorted)
+        {
+            var barFraction = maxWait > 0 ? (double)w.WaitTimeMs / maxWait : 0;
+            var color = GetWaitCategoryColor(GetWaitCategory(w.WaitType));
+
+            var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            // Wait type name
+            var nameText = new TextBlock
+            {
+                Text = w.WaitType,
+                FontSize = 11,
+                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            Grid.SetColumn(nameText, 0);
+            row.Children.Add(nameText);
+
+            // Bar
+            var bar = new Border
+            {
+                Height = 14,
+                Width = Math.Max(4, barFraction * 300),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)),
+                CornerRadius = new CornerRadius(2),
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            Grid.SetColumn(bar, 1);
+            row.Children.Add(bar);
+
+            // Duration text
+            var durationText = new TextBlock
+            {
+                Text = $"{w.WaitTimeMs:N0}ms ({w.WaitCount:N0} waits)",
+                FontSize = 11,
+                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#B0B6C0")),
+                VerticalAlignment = VerticalAlignment.Center,
+                MinWidth = 120
+            };
+            Grid.SetColumn(durationText, 2);
+            row.Children.Add(durationText);
+
+            WaitStatsContent.Children.Add(row);
+        }
+
+        WaitStatsBanner.Visibility = Visibility.Visible;
+    }
+
+    private static string GetWaitCategory(string waitType)
+    {
+        if (waitType.StartsWith("SOS_SCHEDULER_YIELD", StringComparison.Ordinal) ||
+            waitType.StartsWith("CXPACKET", StringComparison.Ordinal) ||
+            waitType.StartsWith("CXCONSUMER", StringComparison.Ordinal) ||
+            waitType.StartsWith("CXSYNC_PORT", StringComparison.Ordinal) ||
+            waitType.StartsWith("CXSYNC_CONSUMER", StringComparison.Ordinal))
+            return "CPU";
+
+        if (waitType.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) ||
+            waitType.StartsWith("WRITELOG", StringComparison.Ordinal) ||
+            waitType.StartsWith("IO_COMPLETION", StringComparison.Ordinal) ||
+            waitType.StartsWith("ASYNC_IO_COMPLETION", StringComparison.Ordinal))
+            return "I/O";
+
+        if (waitType.StartsWith("LCK_M_", StringComparison.Ordinal))
+            return "Lock";
+
+        if (waitType == "RESOURCE_SEMAPHORE" || waitType == "CMEMTHREAD")
+            return "Memory";
+
+        if (waitType == "ASYNC_NETWORK_IO")
+            return "Network";
+
+        return "Other";
+    }
+
+    private static string GetWaitCategoryColor(string category)
+    {
+        return category switch
+        {
+            "CPU" => "#4FA3FF",
+            "I/O" => "#FFB347",
+            "Lock" => "#E57373",
+            "Memory" => "#9B59B6",
+            "Network" => "#2ECC71",
+            _ => "#6BB5FF"
+        };
     }
 
     #endregion
