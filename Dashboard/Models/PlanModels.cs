@@ -110,6 +110,12 @@ public class PlanStatement
     public bool ExclusiveProfileTimeActive { get; set; }
     public string? OptimizationReplayScript { get; set; }
 
+    // QueryPlan-level MemoryGrant attribute (unsignedLong)
+    public long QueryPlanMemoryGrantKB { get; set; }
+
+    // StmtUseDb: USE database statement
+    public string? StmtUseDatabaseName { get; set; }
+
     // XSD gap: BaseStmtInfoType
     public int QueryCompilationReplay { get; set; }
 
@@ -317,6 +323,23 @@ public class PlanNode
     public string? RemoteSource { get; set; }
     public string? RemoteObject { get; set; }
     public string? RemoteQuery { get; set; }
+
+    // GuessedSelectivity — optimizer guessed selectivity on predicates
+    public bool GuessedSelectivity { get; set; }
+
+    // ForeignKeyReferenceCheck attributes
+    public int ForeignKeyReferencesCount { get; set; }
+    public int NoMatchingIndexCount { get; set; }
+    public int PartialMatchingIndexCount { get; set; }
+
+    // ConstantScan Values (parsed rows as displayable string)
+    public string? ConstantScanValues { get; set; }
+
+    // SpillOccurred detail flag (node-level, from Warnings element)
+    public bool SpillOccurredDetail { get; set; }
+
+    // UDX UsedUDXColumns (column references for CLR aggregate operators)
+    public string? UdxUsedColumns { get; set; }
 }
 
 public class MissingIndex
