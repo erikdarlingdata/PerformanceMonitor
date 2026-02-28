@@ -76,7 +76,7 @@ A single WPF desktop application that monitors SQL Server instances remotely. Qu
 
 **Best for:** Quick triage, Azure SQL Database, locked-down servers, consultants, firefighting.
 
-**Requirements:** Windows 10+ / Server 2016+, `VIEW SERVER STATE` on target server (`VIEW DATABASE STATE` for Query Store).
+**Requirements:** Windows 10+ / Server 2016+, [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) (required by DuckDB), `VIEW SERVER STATE` on target server (`VIEW DATABASE STATE` for Query Store).
 
 ### Comparison
 
