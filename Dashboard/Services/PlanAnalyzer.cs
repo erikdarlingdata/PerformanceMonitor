@@ -181,6 +181,29 @@ public static class PlanAnalyzer
         {
             DetectMultiReferenceCte(stmt);
         }
+
+        // Rule 25: Ineffective parallelism — parallel plan where CPU ≈ elapsed
+        if (stmt.DegreeOfParallelism > 1 && stmt.QueryTimeStats != null)
+        {
+            var cpu = stmt.QueryTimeStats.CpuTimeMs;
+            var elapsed = stmt.QueryTimeStats.ElapsedTimeMs;
+
+            if (elapsed >= 1000 && cpu > 0)
+            {
+                var ratio = (double)cpu / elapsed;
+                if (ratio <= 1.3)
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Ineffective Parallelism",
+                        Message = $"Parallel plan (DOP {stmt.DegreeOfParallelism}) but CPU time ({cpu:N0}ms) is nearly equal to elapsed time ({elapsed:N0}ms). " +
+                                  $"The work ran essentially serially despite the overhead of parallelism. " +
+                                  $"Look for parallel thread skew, blocking exchanges, or serial zones in the plan that prevent effective parallel execution.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
+        }
     }
 
     private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt)

@@ -41,9 +41,16 @@ public partial class PlanViewerControl : UserControl
     private static readonly SolidColorBrush EdgeBrush = new(Color.FromRgb(0x6B, 0x72, 0x80));
     private static readonly SolidColorBrush SectionHeaderBrush = new(Color.FromRgb(0x4F, 0xA3, 0xFF));
     private static readonly SolidColorBrush PropSeparatorBrush = new(Color.FromRgb(0x2A, 0x2D, 0x35));
+    private static readonly SolidColorBrush OrangeBrush = new(Color.FromRgb(0xFF, 0xB3, 0x47));
 
     // Current property section for collapsible groups
     private StackPanel? _currentPropertySection;
+
+    // Canvas panning
+    private bool _isPanning;
+    private Point _panStart;
+    private double _panStartOffsetX;
+    private double _panStartOffsetY;
 
     public PlanViewerControl()
     {
@@ -121,9 +128,7 @@ public partial class PlanViewerControl : UserControl
         _selectedNodeBorder = null;
         EmptyState.Visibility = Visibility.Visible;
         PlanScrollViewer.Visibility = Visibility.Collapsed;
-        MissingIndexBanner.Visibility = Visibility.Collapsed;
-        WarningsBanner.Visibility = Visibility.Collapsed;
-        WaitStatsBanner.Visibility = Visibility.Collapsed;
+        InsightsPanel.Visibility = Visibility.Collapsed;
         StatementLabel.Visibility = Visibility.Collapsed;
         StatementSelector.Visibility = Visibility.Collapsed;
         CostText.Text = "";
@@ -150,12 +155,15 @@ public partial class PlanViewerControl : UserControl
         RenderEdges(statement.RootNode);
 
         // Render nodes
-        RenderNodes(statement.RootNode);
+        var allWarnings = new List<PlanWarning>();
+        CollectWarnings(statement.RootNode, allWarnings);
+        RenderNodes(statement.RootNode, allWarnings.Count);
 
-        // Update banners
+        // Update insights panel
         ShowMissingIndexes(statement.MissingIndexes);
-        ShowWarnings(statement.RootNode);
         ShowWaitStats(statement.WaitStats);
+        ShowRuntimeSummary(statement);
+        UpdateInsightsHeader();
 
         // Update cost text
         CostText.Text = $"Statement Cost: {statement.StatementSubTreeCost:F4}";
@@ -163,9 +171,9 @@ public partial class PlanViewerControl : UserControl
 
     #region Node Rendering
 
-    private void RenderNodes(PlanNode node)
+    private void RenderNodes(PlanNode node, int totalWarningCount = -1)
     {
-        var visual = CreateNodeVisual(node);
+        var visual = CreateNodeVisual(node, totalWarningCount);
         Canvas.SetLeft(visual, node.X);
         Canvas.SetTop(visual, node.Y);
         PlanCanvas.Children.Add(visual);
@@ -174,7 +182,7 @@ public partial class PlanViewerControl : UserControl
             RenderNodes(child);
     }
 
-    private Border CreateNodeVisual(PlanNode node)
+    private Border CreateNodeVisual(PlanNode node, int totalWarningCount = -1)
     {
         var isExpensive = node.IsExpensive;
 
@@ -366,6 +374,34 @@ public partial class PlanViewerControl : UserControl
                 HorizontalAlignment = HorizontalAlignment.Center,
                 ToolTip = node.FullObjectName ?? node.ObjectName
             });
+        }
+
+        // Total warning count badge on root node
+        if (totalWarningCount > 0)
+        {
+            var badgeRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 0)
+            };
+            badgeRow.Children.Add(new TextBlock
+            {
+                Text = "\u26A0",
+                FontSize = 13,
+                Foreground = OrangeBrush,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 4, 0)
+            });
+            badgeRow.Children.Add(new TextBlock
+            {
+                Text = $"{totalWarningCount} warning{(totalWarningCount == 1 ? "" : "s")}",
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = OrangeBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            stack.Children.Add(badgeRow);
         }
 
         border.Child = stack;
@@ -1366,39 +1402,67 @@ public partial class PlanViewerControl : UserControl
 
     #endregion
 
-    #region Banners
+    #region Insights Panel
 
     private void ShowMissingIndexes(List<MissingIndex> indexes)
     {
+        MissingIndexContent.Children.Clear();
+
         if (indexes.Count > 0)
         {
-            MissingIndexList.ItemsSource = indexes;
-            MissingIndexBanner.Visibility = Visibility.Visible;
+            MissingIndexHeader.Text = $"  Missing Index Suggestions ({indexes.Count})";
+
+            foreach (var mi in indexes)
+            {
+                var itemPanel = new StackPanel { Margin = new Thickness(0, 4, 0, 0) };
+
+                var headerRow = new StackPanel { Orientation = Orientation.Horizontal };
+                headerRow.Children.Add(new TextBlock
+                {
+                    Text = mi.Table,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                    FontSize = 12
+                });
+                headerRow.Children.Add(new TextBlock
+                {
+                    Text = $" \u2014 Impact: ",
+                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                    FontSize = 12
+                });
+                headerRow.Children.Add(new TextBlock
+                {
+                    Text = $"{mi.Impact:F1}%",
+                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFB347")),
+                    FontSize = 12
+                });
+                itemPanel.Children.Add(headerRow);
+
+                if (!string.IsNullOrEmpty(mi.CreateStatement))
+                {
+                    itemPanel.Children.Add(new TextBox
+                    {
+                        Text = mi.CreateStatement,
+                        FontFamily = new FontFamily("Consolas"),
+                        FontSize = 11,
+                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                        Background = Brushes.Transparent,
+                        BorderThickness = new Thickness(0),
+                        IsReadOnly = true,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(12, 2, 0, 0)
+                    });
+                }
+
+                MissingIndexContent.Children.Add(itemPanel);
+            }
+
+            MissingIndexEmpty.Visibility = Visibility.Collapsed;
         }
         else
         {
-            MissingIndexBanner.Visibility = Visibility.Collapsed;
-        }
-    }
-
-    private void ShowWarnings(PlanNode root)
-    {
-        var allWarnings = new List<PlanWarning>();
-        CollectWarnings(root, allWarnings);
-
-        if (allWarnings.Count > 0)
-        {
-            var criticalCount = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical);
-            var warningCount = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Warning);
-            var parts = new List<string>();
-            if (criticalCount > 0) parts.Add($"{criticalCount} critical");
-            if (warningCount > 0) parts.Add($"{warningCount} warning(s)");
-            WarningsSummaryText.Text = $"Plan has {string.Join(", ", parts)} — hover over nodes with \u26A0 for details";
-            WarningsBanner.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            WarningsBanner.Visibility = Visibility.Collapsed;
+            MissingIndexHeader.Text = "Missing Index Suggestions";
+            MissingIndexEmpty.Visibility = Visibility.Visible;
         }
     }
 
@@ -1415,106 +1479,78 @@ public partial class PlanViewerControl : UserControl
 
         if (waits.Count == 0)
         {
-            WaitStatsBanner.Visibility = Visibility.Collapsed;
+            WaitStatsHeader.Text = "Wait Stats";
+            WaitStatsEmpty.Visibility = Visibility.Visible;
             return;
         }
+
+        WaitStatsEmpty.Visibility = Visibility.Collapsed;
 
         var sorted = waits.OrderByDescending(w => w.WaitTimeMs).ToList();
         var maxWait = sorted[0].WaitTimeMs;
         var totalWait = sorted.Sum(w => w.WaitTimeMs);
 
-        // Header
-        WaitStatsContent.Children.Add(new TextBlock
+        WaitStatsHeader.Text = $"  Wait Stats \u2014 {totalWait:N0}ms total";
+
+        var longestName = sorted.Max(w => w.WaitType.Length);
+        var nameColWidth = longestName * 6.5 + 10;
+
+        var maxBarWidth = 300;
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(nameColWidth) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(maxBarWidth + 16) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        for (int i = 0; i < sorted.Count; i++)
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        for (int i = 0; i < sorted.Count; i++)
         {
-            Text = $"Wait Stats \u2014 {totalWait:N0}ms total",
-            FontWeight = FontWeights.SemiBold,
-            Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4FA3FF")),
-            Margin = new Thickness(0, 0, 0, 6)
-        });
-
-        // Stacked summary bar showing category breakdown
-        if (sorted.Count > 1)
-        {
-            var summaryBar = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Height = 8,
-                Margin = new Thickness(0, 0, 0, 8)
-            };
-
-            var categories = sorted
-                .GroupBy(w => GetWaitCategory(w.WaitType))
-                .OrderByDescending(g => g.Sum(w => w.WaitTimeMs))
-                .ToList();
-
-            foreach (var cat in categories)
-            {
-                var catMs = cat.Sum(w => w.WaitTimeMs);
-                var fraction = totalWait > 0 ? (double)catMs / totalWait : 0;
-                summaryBar.Children.Add(new Border
-                {
-                    Width = Math.Max(2, fraction * 500),
-                    Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(GetWaitCategoryColor(cat.Key))),
-                    CornerRadius = new CornerRadius(2),
-                    Margin = new Thickness(0, 0, 1, 0)
-                });
-            }
-
-            WaitStatsContent.Children.Add(summaryBar);
-        }
-
-        // Per-wait-type rows with horizontal bars
-        foreach (var w in sorted)
-        {
+            var w = sorted[i];
             var barFraction = maxWait > 0 ? (double)w.WaitTimeMs / maxWait : 0;
             var color = GetWaitCategoryColor(GetWaitCategory(w.WaitType));
 
-            var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            // Wait type name
             var nameText = new TextBlock
             {
                 Text = w.WaitType,
-                FontSize = 11,
+                FontSize = 12,
                 Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 8, 0)
+                Margin = new Thickness(0, 2, 10, 2)
             };
+            Grid.SetRow(nameText, i);
             Grid.SetColumn(nameText, 0);
-            row.Children.Add(nameText);
+            grid.Children.Add(nameText);
 
-            // Bar
-            var bar = new Border
+            var colorBar = new Border
             {
+                Width = Math.Max(4, barFraction * maxBarWidth),
                 Height = 14,
-                Width = Math.Max(4, barFraction * 300),
-                HorizontalAlignment = HorizontalAlignment.Left,
                 Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)),
                 CornerRadius = new CornerRadius(2),
-                Margin = new Thickness(0, 0, 8, 0)
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 2, 8, 2)
             };
-            Grid.SetColumn(bar, 1);
-            row.Children.Add(bar);
+            Grid.SetRow(colorBar, i);
+            Grid.SetColumn(colorBar, 1);
+            grid.Children.Add(colorBar);
 
-            // Duration text
             var durationText = new TextBlock
             {
                 Text = $"{w.WaitTimeMs:N0}ms ({w.WaitCount:N0} waits)",
-                FontSize = 11,
-                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#B0B6C0")),
+                FontSize = 12,
+                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
                 VerticalAlignment = VerticalAlignment.Center,
-                MinWidth = 120
+                Margin = new Thickness(0, 2, 0, 2)
             };
+            Grid.SetRow(durationText, i);
             Grid.SetColumn(durationText, 2);
-            row.Children.Add(durationText);
-
-            WaitStatsContent.Children.Add(row);
+            grid.Children.Add(durationText);
         }
 
-        WaitStatsBanner.Visibility = Visibility.Visible;
+        WaitStatsContent.Children.Add(grid);
     }
 
     private static string GetWaitCategory(string waitType)
@@ -1557,6 +1593,107 @@ public partial class PlanViewerControl : UserControl
         };
     }
 
+    private void ShowRuntimeSummary(PlanStatement statement)
+    {
+        RuntimeSummaryContent.Children.Clear();
+
+        var labelColor = "#E4E6EB";
+        var valueColor = "#E4E6EB";
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        int rowIndex = 0;
+
+        void AddRow(string label, string value)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var labelText = new TextBlock
+            {
+                Text = label,
+                FontSize = 11,
+                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(labelColor)),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Margin = new Thickness(0, 1, 8, 1)
+            };
+            Grid.SetRow(labelText, rowIndex);
+            Grid.SetColumn(labelText, 0);
+            grid.Children.Add(labelText);
+
+            var valueText = new TextBlock
+            {
+                Text = value,
+                FontSize = 11,
+                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(valueColor)),
+                Margin = new Thickness(0, 1, 0, 1)
+            };
+            Grid.SetRow(valueText, rowIndex);
+            Grid.SetColumn(valueText, 1);
+            grid.Children.Add(valueText);
+
+            rowIndex++;
+        }
+
+        if (statement.QueryTimeStats != null)
+        {
+            AddRow("Elapsed", $"{statement.QueryTimeStats.ElapsedTimeMs:N0}ms");
+            AddRow("CPU", $"{statement.QueryTimeStats.CpuTimeMs:N0}ms");
+        }
+
+        if (statement.MemoryGrant != null)
+        {
+            var mg = statement.MemoryGrant;
+            AddRow("Memory grant", $"{mg.GrantedMemoryKB:N0} KB granted, {mg.MaxUsedMemoryKB:N0} KB used");
+            if (mg.GrantWaitTimeMs > 0)
+                AddRow("Grant wait", $"{mg.GrantWaitTimeMs:N0}ms");
+        }
+
+        if (statement.DegreeOfParallelism > 0)
+            AddRow("DOP", statement.DegreeOfParallelism.ToString());
+        else if (statement.NonParallelPlanReason != null)
+            AddRow("Serial", statement.NonParallelPlanReason);
+
+        if (statement.ThreadStats != null)
+        {
+            var ts = statement.ThreadStats;
+            AddRow("Branches", ts.Branches.ToString());
+            var totalReserved = ts.Reservations.Sum(r => r.ReservedThreads);
+            if (totalReserved > 0)
+            {
+                var threadText = ts.UsedThreads == totalReserved
+                    ? $"{ts.UsedThreads} used ({totalReserved} reserved)"
+                    : $"{ts.UsedThreads} used of {totalReserved} reserved ({totalReserved - ts.UsedThreads} inactive)";
+                AddRow("Threads", threadText);
+            }
+            else
+            {
+                AddRow("Threads", $"{ts.UsedThreads} used");
+            }
+        }
+
+        if (statement.CardinalityEstimationModelVersion > 0)
+            AddRow("CE model", statement.CardinalityEstimationModelVersion.ToString());
+
+        if (statement.CompileTimeMs > 0)
+            AddRow("Compile time", $"{statement.CompileTimeMs:N0}ms");
+        if (statement.CachedPlanSizeKB > 0)
+            AddRow("Cached plan size", $"{statement.CachedPlanSizeKB:N0} KB");
+
+        if (!string.IsNullOrEmpty(statement.StatementOptmLevel))
+            AddRow("Optimization", statement.StatementOptmLevel);
+        if (!string.IsNullOrEmpty(statement.StatementOptmEarlyAbortReason))
+            AddRow("Early abort", statement.StatementOptmEarlyAbortReason);
+
+        RuntimeSummaryContent.Children.Add(grid);
+    }
+
+    private void UpdateInsightsHeader()
+    {
+        InsightsPanel.Visibility = Visibility.Visible;
+        InsightsHeader.Text = "  Plan Insights";
+    }
+
     #endregion
 
     #region Zoom
@@ -1591,6 +1728,77 @@ public partial class PlanViewerControl : UserControl
             e.Handled = true;
             SetZoom(_zoomLevel + (e.Delta > 0 ? ZoomStep : -ZoomStep));
         }
+    }
+
+    #endregion
+
+    #region Canvas Panning
+
+    private void PlanScrollViewer_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        // Don't intercept scrollbar interactions
+        if (IsScrollBarAtPoint(e))
+            return;
+
+        // Don't pan if clicking on a node
+        if (IsNodeAtPoint(e))
+            return;
+
+        _isPanning = true;
+        _panStart = e.GetPosition(PlanScrollViewer);
+        _panStartOffsetX = PlanScrollViewer.HorizontalOffset;
+        _panStartOffsetY = PlanScrollViewer.VerticalOffset;
+        PlanScrollViewer.Cursor = Cursors.SizeAll;
+        PlanScrollViewer.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void PlanScrollViewer_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isPanning) return;
+
+        var current = e.GetPosition(PlanScrollViewer);
+        var dx = current.X - _panStart.X;
+        var dy = current.Y - _panStart.Y;
+
+        PlanScrollViewer.ScrollToHorizontalOffset(Math.Max(0, _panStartOffsetX - dx));
+        PlanScrollViewer.ScrollToVerticalOffset(Math.Max(0, _panStartOffsetY - dy));
+        e.Handled = true;
+    }
+
+    private void PlanScrollViewer_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_isPanning) return;
+        _isPanning = false;
+        PlanScrollViewer.Cursor = Cursors.Arrow;
+        PlanScrollViewer.ReleaseMouseCapture();
+        e.Handled = true;
+    }
+
+    /// <summary>Check if the mouse event originated from a ScrollBar.</summary>
+    private static bool IsScrollBarAtPoint(MouseButtonEventArgs e)
+    {
+        var source = e.OriginalSource as DependencyObject;
+        while (source != null)
+        {
+            if (source is System.Windows.Controls.Primitives.ScrollBar)
+                return true;
+            source = VisualTreeHelper.GetParent(source);
+        }
+        return false;
+    }
+
+    /// <summary>Check if the mouse event originated from a node Border (has PlanNode in Tag).</summary>
+    private static bool IsNodeAtPoint(MouseButtonEventArgs e)
+    {
+        var source = e.OriginalSource as DependencyObject;
+        while (source != null)
+        {
+            if (source is Border b && b.Tag is PlanNode)
+                return true;
+            source = VisualTreeHelper.GetParent(source);
+        }
+        return false;
     }
 
     #endregion
