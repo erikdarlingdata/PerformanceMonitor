@@ -7,8 +7,6 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -39,51 +37,87 @@
             </DockPanel>
         </Border>
 
-        <!-- Missing Index Banner -->
-        <Border x:Name="MissingIndexBanner" Grid.Row="1" Padding="10,8"
-                Background="#3D2A0E" Visibility="Collapsed"
-                BorderBrush="#7A5A1E" BorderThickness="0,0,0,1">
-            <StackPanel>
-                <TextBlock Text="Missing Index Suggestions" FontWeight="SemiBold"
-                           Foreground="#FFB347" Margin="0,0,0,4"/>
-                <ItemsControl x:Name="MissingIndexList">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel Margin="0,2">
-                                <TextBlock Foreground="#E4E6EB" FontSize="11" TextWrapping="Wrap">
-                                    <Run Text="{Binding Table, Mode=OneWay}" FontWeight="SemiBold"/>
-                                    <Run Text=" — Impact: "/>
-                                    <Run Text="{Binding Impact, StringFormat={}{0:F1}%, Mode=OneWay}" Foreground="#FFB347"/>
-                                </TextBlock>
-                                <TextBlock Text="{Binding CreateStatement, Mode=OneWay}" FontFamily="Consolas" FontSize="10"
-                                           Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap"
-                                           Margin="12,2,0,0"/>
+        <!-- Insights Panel: Runtime Summary + Missing Indexes + Wait Stats (collapsible) -->
+        <Border x:Name="InsightsPanel" Grid.Row="1" Visibility="Collapsed"
+                Background="{DynamicResource BackgroundDarkBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+            <Expander x:Name="InsightsExpander" IsExpanded="True"
+                      Foreground="{DynamicResource ForegroundBrush}"
+                      Background="Transparent"
+                      BorderThickness="0"
+                      Padding="0">
+                <Expander.Header>
+                    <TextBlock x:Name="InsightsHeader" Text="  Plan Insights"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </Expander.Header>
+                <Grid MaxHeight="220">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" MinWidth="180"/>
+                        <ColumnDefinition Width="Auto" MinWidth="200"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Runtime Summary (left) -->
+                    <Border Grid.Column="0" Padding="10,4,10,8"
+                            Background="{DynamicResource BackgroundDarkBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+                        <StackPanel>
+                            <TextBlock Text="Runtime Summary"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Margin="0,0,0,4"/>
+                            <StackPanel x:Name="RuntimeSummaryContent"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Missing Indexes (center) -->
+                    <Border Grid.Column="1" Padding="10,4,10,8"
+                            Background="#3D2A0E"
+                            BorderBrush="#7A5A1E" BorderThickness="0,0,1,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <TextBlock x:Name="MissingIndexHeader"
+                                           Text="Missing Index Suggestions"
+                                           FontSize="13"
+                                           FontWeight="SemiBold" Foreground="#FFB347"
+                                           Margin="0,0,0,6"/>
+                                <StackPanel x:Name="MissingIndexContent"/>
+                                <TextBlock x:Name="MissingIndexEmpty"
+                                           Text="No missing index suggestions"
+                                           FontSize="12" Visibility="Collapsed"
+                                           Foreground="{DynamicResource ForegroundBrush}"/>
                             </StackPanel>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </StackPanel>
-        </Border>
+                        </ScrollViewer>
+                    </Border>
 
-        <!-- Warnings Banner -->
-        <Border x:Name="WarningsBanner" Grid.Row="2" Padding="10,6"
-                Background="#3D1A1A" Visibility="Collapsed"
-                BorderBrush="#7A2A2A" BorderThickness="0,0,0,1">
-            <StackPanel Orientation="Horizontal">
-                <TextBlock Text="&#x26A0;" Foreground="#E57373" FontSize="14" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <TextBlock x:Name="WarningsSummaryText" Foreground="#E57373" VerticalAlignment="Center" FontSize="12"/>
-            </StackPanel>
-        </Border>
-
-        <!-- Wait Stats Banner (actual plans only) -->
-        <Border x:Name="WaitStatsBanner" Grid.Row="3" Padding="10,8"
-                Background="#1A2A3D" Visibility="Collapsed"
-                BorderBrush="#2A4A6A" BorderThickness="0,0,0,1">
-            <StackPanel x:Name="WaitStatsContent"/>
+                    <!-- Wait Stats (right, fills remaining space) -->
+                    <Border Grid.Column="2" Padding="10,4,10,8"
+                            Background="#1A2A3D">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <TextBlock x:Name="WaitStatsHeader"
+                                           Text="Wait Stats"
+                                           FontSize="13"
+                                           FontWeight="SemiBold" Foreground="#4FA3FF"
+                                           Margin="0,0,0,6"/>
+                                <StackPanel x:Name="WaitStatsContent"/>
+                                <TextBlock x:Name="WaitStatsEmpty"
+                                           Text="No wait stats (estimated plan)"
+                                           FontSize="12" Visibility="Collapsed"
+                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Border>
+                </Grid>
+            </Expander>
         </Border>
 
         <!-- Query Text (collapsible) -->
-        <Expander Grid.Row="4" x:Name="QueryTextExpander" Header="  Query Text"
+        <Expander Grid.Row="2" x:Name="QueryTextExpander" Header="  Query Text"
                   IsExpanded="False" Visibility="Collapsed"
                   Foreground="{DynamicResource ForegroundBrush}"
                   Background="{DynamicResource BackgroundDarkBrush}"
@@ -98,7 +132,7 @@
         </Expander>
 
         <!-- Statements Panel + Plan Canvas + Properties Panel -->
-        <Grid Grid.Row="5">
+        <Grid Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <!-- Col 0: Statements Panel (hidden by default) -->
                 <ColumnDefinition x:Name="StatementsColumn" Width="0"/>
