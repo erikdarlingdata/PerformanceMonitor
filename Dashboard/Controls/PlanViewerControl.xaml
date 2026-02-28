@@ -140,7 +140,13 @@
                               SelectionChanged="StatementsGrid_SelectionChanged"
                               FontSize="11"
                               Background="{DynamicResource BackgroundDarkBrush}"
-                              BorderThickness="0"/>
+                              BorderThickness="0">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Copy Query Text" Click="CopyStatementText_Click"/>
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
+                    </DataGrid>
                 </DockPanel>
             </Border>
 

@@ -1584,6 +1584,16 @@ public partial class PlanViewerControl : UserControl
             RenderStatement(row.Statement);
     }
 
+    private void CopyStatementText_Click(object sender, RoutedEventArgs e)
+    {
+        if (StatementsGrid.SelectedItem is StatementRow row)
+        {
+            var text = row.Statement.StatementText;
+            if (!string.IsNullOrEmpty(text))
+                Clipboard.SetText(text);
+        }
+    }
+
     private void ToggleStatements_Click(object sender, RoutedEventArgs e)
     {
         if (StatementsPanel.Visibility == Visibility.Visible)
