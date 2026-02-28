@@ -37,7 +37,7 @@ public partial class PlanViewerControl : UserControl
     private static readonly SolidColorBrush TooltipBgBrush = new(Color.FromRgb(0x1A, 0x1D, 0x23));
     private static readonly SolidColorBrush TooltipBorderBrush = new(Color.FromRgb(0x3A, 0x3D, 0x45));
     private static readonly SolidColorBrush TooltipFgBrush = new(Color.FromRgb(0xE4, 0xE6, 0xEB));
-    private static readonly SolidColorBrush MutedBrush = new(Color.FromRgb(0x6B, 0x72, 0x80));
+    private static readonly SolidColorBrush MutedBrush = new(Color.FromRgb(0xE4, 0xE6, 0xEB));
     private static readonly SolidColorBrush EdgeBrush = new(Color.FromRgb(0x6B, 0x72, 0x80));
     private static readonly SolidColorBrush SectionHeaderBrush = new(Color.FromRgb(0x4F, 0xA3, 0xFF));
     private static readonly SolidColorBrush PropSeparatorBrush = new(Color.FromRgb(0x2A, 0x2D, 0x35));
@@ -1102,7 +1102,7 @@ public partial class PlanViewerControl : UserControl
     private void AddPropertyRow(string label, string value, bool isCode = false)
     {
         var grid = new Grid { Margin = new Thickness(10, 3, 10, 3) };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         var labelBlock = new TextBlock
@@ -1110,7 +1110,8 @@ public partial class PlanViewerControl : UserControl
             Text = label,
             FontSize = 11,
             Foreground = MutedBrush,
-            VerticalAlignment = VerticalAlignment.Top
+            VerticalAlignment = VerticalAlignment.Top,
+            TextWrapping = TextWrapping.Wrap
         };
         Grid.SetColumn(labelBlock, 0);
         grid.Children.Add(labelBlock);

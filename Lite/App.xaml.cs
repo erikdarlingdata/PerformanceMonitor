@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -18,6 +19,9 @@ namespace PerformanceMonitorLite;
 
 public partial class App : Application
 {
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string appId);
+
     private const string MutexName = "PerformanceMonitorLite_SingleInstance";
     private Mutex? _singleInstanceMutex;
     private bool _ownsMutex;
@@ -133,6 +137,7 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        SetCurrentProcessExplicitAppUserModelID("DarlingData.PerformanceMonitor.Lite");
 
         // Check for existing instance
         _singleInstanceMutex = new Mutex(true, MutexName, out _ownsMutex);

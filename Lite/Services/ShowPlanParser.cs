@@ -1295,9 +1295,10 @@ public static class ShowPlanParser
                 var keyCols = mi.EqualityColumns.Concat(mi.InequalityColumns).ToList();
                 if (keyCols.Count > 0)
                 {
-                    var create = $"CREATE NONCLUSTERED INDEX [IX_{mi.Table}_{string.Join("_", keyCols.Take(3))}]\nON {mi.Schema}.{mi.Table} ({string.Join(", ", keyCols)})";
+                    var create = $"CREATE NONCLUSTERED INDEX [{mi.Table}_{string.Join("_", keyCols.Take(3))}]\nON {mi.Schema}.{mi.Table} ({string.Join(", ", keyCols)})";
                     if (mi.IncludeColumns.Count > 0)
                         create += $"\nINCLUDE ({string.Join(", ", mi.IncludeColumns)})";
+                    create += ";";
                     mi.CreateStatement = create;
                 }
 
