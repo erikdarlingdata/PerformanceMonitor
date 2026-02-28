@@ -340,6 +340,9 @@ public class PlanNode
 
     // UDX UsedUDXColumns (column references for CLR aggregate operators)
     public string? UdxUsedColumns { get; set; }
+
+    // Row Goal: the optimizer's estimate before TOP/EXISTS reduced it
+    public double EstimateRowsWithoutRowGoal { get; set; }
 }
 
 public class MissingIndex
