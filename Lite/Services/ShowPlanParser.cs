@@ -644,7 +644,7 @@ public static class ShowPlanParser
             {
                 var db = objEl.Attribute("Database")?.Value?.Replace("[", "").Replace("]", "");
                 var schema = objEl.Attribute("Schema")?.Value?.Replace("[", "").Replace("]", "");
-                var table = objEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "");
+                var table = CleanTempTableName(objEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "") ?? "");
                 var index = objEl.Attribute("Index")?.Value?.Replace("[", "").Replace("]", "");
 
                 node.DatabaseName = db;
@@ -1181,6 +1181,7 @@ public static class ShowPlanParser
             long totalLobLogicalReads = 0, totalLobPhysicalReads = 0, totalLobReadAheads = 0;
             long totalSegmentReads = 0, totalSegmentSkips = 0;
             long totalUdfCpu = 0, maxUdfElapsed = 0;
+            long maxInputMemoryGrant = 0, maxOutputMemoryGrant = 0, maxUsedMemoryGrant = 0;
             string? actualExecMode = null;
 
             foreach (var thread in runtimeEl.Elements(Ns + "RunTimeCountersPerThread"))
@@ -1208,6 +1209,14 @@ public static class ShowPlanParser
                 var udfElapsed = ParseLong(thread.Attribute("UdfElapsedTime")?.Value);
                 if (udfElapsed > maxUdfElapsed) maxUdfElapsed = udfElapsed;
 
+                // Per-operator memory grant (same value on all threads, take max)
+                var inputMem = ParseLong(thread.Attribute("InputMemoryGrant")?.Value);
+                var outputMem = ParseLong(thread.Attribute("OutputMemoryGrant")?.Value);
+                var usedMem = ParseLong(thread.Attribute("UsedMemoryGrant")?.Value);
+                if (inputMem > maxInputMemoryGrant) maxInputMemoryGrant = inputMem;
+                if (outputMem > maxOutputMemoryGrant) maxOutputMemoryGrant = outputMem;
+                if (usedMem > maxUsedMemoryGrant) maxUsedMemoryGrant = usedMem;
+
                 actualExecMode ??= thread.Attribute("ActualExecutionMode")?.Value;
 
                 var elapsed = ParseLong(thread.Attribute("ActualElapsedms")?.Value);
@@ -1233,6 +1242,9 @@ public static class ShowPlanParser
             node.ActualSegmentSkips = totalSegmentSkips;
             node.UdfCpuTimeMs = totalUdfCpu;
             node.UdfElapsedTimeMs = maxUdfElapsed;
+            node.InputMemoryGrantKB = maxInputMemoryGrant;
+            node.OutputMemoryGrantKB = maxOutputMemoryGrant;
+            node.UsedMemoryGrantKB = maxUsedMemoryGrant;
 
             // Store per-thread data for parallel skew analysis
             foreach (var thread in runtimeEl.Elements(Ns + "RunTimeCountersPerThread"))
@@ -1324,7 +1336,7 @@ public static class ShowPlanParser
                 {
                     Database = indexEl.Attribute("Database")?.Value?.Replace("[", "").Replace("]", "") ?? "",
                     Schema = indexEl.Attribute("Schema")?.Value?.Replace("[", "").Replace("]", "") ?? "",
-                    Table = indexEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "") ?? "",
+                    Table = CleanTempTableName(indexEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "") ?? ""),
                     Impact = impact
                 };
 
@@ -1643,6 +1655,34 @@ public static class ShowPlanParser
         var result = string.IsNullOrEmpty(tbl) ? col : $"{tbl}.{col}";
         return result.Replace("[", "").Replace("]", "");
     }
+
+    /// <summary>
+    /// Strips the internal padding and hex session suffix from temp table names.
+    /// SQL Server internally pads #temp names with underscores to 116 chars, then appends a hex suffix.
+    /// e.g. "#comment_sil_vous_plait_______________________________0000000000A86" → "#comment_sil_vous_plait"
+    /// </summary>
+    private static string CleanTempTableName(string name)
+    {
+        if (name.Length == 0 || name[0] != '#') return name;
+
+        // Find the end of the real name: trim trailing hex suffix, then trailing underscores
+        // The hex suffix is 8-16 hex chars at the end; the padding is consecutive underscores before it
+        var i = name.Length - 1;
+
+        // Skip trailing hex digits (0-9, A-F, a-f)
+        while (i > 0 && IsHexDigit(name[i])) i--;
+
+        // Skip trailing underscores (the padding)
+        while (i > 0 && name[i] == '_') i--;
+
+        // Only clean if we actually removed a meaningful amount (at least 8 chars of padding+hex)
+        if (name.Length - i > 8)
+            return name[..(i + 1)];
+        return name;
+    }
+
+    private static bool IsHexDigit(char c) =>
+        (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
 
     private static double ParseDouble(string? value)
     {

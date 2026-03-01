@@ -145,7 +145,7 @@ public partial class PlanViewerControl : UserControl
 
         // Update banners
         ShowMissingIndexes(statement.MissingIndexes);
-        ShowWaitStats(statement.WaitStats);
+        ShowWaitStats(statement.WaitStats, statement.QueryTimeStats != null);
         ShowRuntimeSummary(statement);
         UpdateInsightsHeader();
 
@@ -1501,13 +1501,16 @@ public partial class PlanViewerControl : UserControl
             CollectWarnings(child, warnings);
     }
 
-    private void ShowWaitStats(List<WaitStatInfo> waits)
+    private void ShowWaitStats(List<WaitStatInfo> waits, bool isActualPlan)
     {
         WaitStatsContent.Children.Clear();
 
         if (waits.Count == 0)
         {
             WaitStatsHeader.Text = "Wait Stats";
+            WaitStatsEmpty.Text = isActualPlan
+                ? "No wait stats recorded"
+                : "No wait stats (estimated plan)";
             WaitStatsEmpty.Visibility = Visibility.Visible;
             return;
         }
