@@ -146,7 +146,7 @@ BEGIN
             blocking_session_id = ISNULL(wt.blocking_session_id, 0),
             resource_description = NULL,
             database_id = NULL,
-            database_name = DB_NAME(der.database_id),
+            database_name = d.name,
             query_text = NULL,
             statement_text = NULL,
             query_plan = NULL,
@@ -162,6 +162,8 @@ BEGIN
         FROM sys.dm_os_waiting_tasks AS wt
         LEFT JOIN sys.dm_exec_requests AS der
           ON der.session_id = wt.session_id
+        LEFT JOIN sys.databases AS d
+          ON d.database_id = der.database_id
         OUTER APPLY sys.dm_exec_sql_text(der.sql_handle) AS dest
         OUTER APPLY sys.dm_exec_text_query_plan
         (

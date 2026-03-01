@@ -312,6 +312,7 @@ BEGIN
         INNER JOIN sys.databases AS d
           ON pa.dbid = d.database_id
         WHERE qs.last_execution_time >= @cutoff_time
+        AND   d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
         AND   pa.dbid NOT IN
         (
             1, 2, 3, 4, 32761, 32767,
