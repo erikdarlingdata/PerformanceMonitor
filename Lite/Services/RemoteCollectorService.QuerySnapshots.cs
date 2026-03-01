@@ -25,7 +25,7 @@ SET LOCK_TIMEOUT 1000;
 
 SELECT /* PerformanceMonitorLite */
     der.session_id,
-    database_name = DB_NAME(der.database_id),
+    database_name = d.name,
     elapsed_time_formatted =
         CASE
             WHEN der.total_elapsed_time < 0
@@ -72,6 +72,8 @@ JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
 OUTER APPLY sys.dm_exec_sql_text(COALESCE(der.sql_handle, der.plan_handle)) AS dest
 OUTER APPLY sys.dm_exec_text_query_plan(der.plan_handle, der.statement_start_offset, der.statement_end_offset) AS deqp
+LEFT JOIN sys.databases AS d
+  ON d.database_id = der.database_id
 {1}
 WHERE der.session_id <> @@SPID
 AND   der.session_id >= 50

@@ -59,7 +59,7 @@ OPTION(RECOMPILE);"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
-    database_name = DB_NAME(vfs.database_id),
+    database_name = ISNULL(d.name, N'Unknown'),
     file_name = mf.name,
     file_type = mf.type_desc,
     physical_name = mf.physical_name,
@@ -78,6 +78,8 @@ FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
 LEFT JOIN sys.master_files AS mf
   ON  mf.database_id = vfs.database_id
   AND mf.file_id = vfs.file_id
+LEFT JOIN sys.databases AS d
+  ON  d.database_id = vfs.database_id
 WHERE (vfs.database_id > 4 OR vfs.database_id = 2)
 AND   vfs.database_id < 32761
 AND   vfs.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
