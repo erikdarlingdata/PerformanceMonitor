@@ -603,11 +603,29 @@ namespace PerformanceMonitorDashboard.Services
         /// Gets currently running queries that exceed the duration threshold.
         /// Uses live DMV data (sys.dm_exec_requests) for immediate detection.
         /// </summary>
-        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes)
+        private async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(SqlConnection connection, int thresholdMinutes, bool excludeSpServerDiagnostics = true, bool excludeWaitFor = true, int maxLongRunningQueryCount = 5, bool excludeBackupWaits = true)
         {
-            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+            // Exclude internal SP_SERVER_DIAGNOSTICS queries by default, as they often run long and aren't actionable.
+            string spServerDiagnosticsFilter = excludeSpServerDiagnostics ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'" : "";
 
-                SELECT TOP (5)
+            // Exclude WAITFOR queries by default, as they can run indefinitely and may not indicate a problem.
+            string waitForFilter = excludeWaitFor ? "AND r.wait_type <> N'WAITFOR'" : "";
+
+            // Exclude backup waits if specified, as they can run long and aren't typically actionable in this context.
+            string backupsFilter = excludeBackupWaits ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
+
+            // Sanity check to prevent SQL syntax errors   
+            if (maxLongRunningQueryCount <= 5)
+            {
+                maxLongRunningQueryCount = 5;
+            };
+
+            // Use TOP to limit the number of long-running queries returned, with a reasonable default of 5.
+            string LongRunningQueryCount = @$"TOP ({maxLongRunningQueryCount})";
+
+            string query = @$"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT {LongRunningQueryCount}
                     r.session_id,
                     DB_NAME(r.database_id) AS database_name,
                     SUBSTRING(t.text, 1, 300) AS query_text,
@@ -621,10 +639,12 @@ namespace PerformanceMonitorDashboard.Services
                 FROM sys.dm_exec_requests AS r
                 CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
                 JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
-                WHERE r.session_id > 50
-                AND r.total_elapsed_time >= @thresholdMs
-                AND t.text NOT LIKE N'%waitfor delay%'
-                AND t.text NOT LIKE N'%waitfor receive%'
+                WHERE 
+                    r.session_id > 50
+                    AND r.total_elapsed_time >= @thresholdMs
+                    {spServerDiagnosticsFilter}
+                    {waitForFilter}
+                    {backupsFilter}
                 ORDER BY r.total_elapsed_time DESC
                 OPTION(MAXDOP 1, RECOMPILE);";
 
