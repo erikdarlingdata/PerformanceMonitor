@@ -598,10 +598,20 @@ public partial class PlanViewerControl : UserControl
         {
             AddPropertySection("Object");
             AddPropertyRow("Full Name", node.FullObjectName, isCode: true);
+            if (!string.IsNullOrEmpty(node.ServerName))
+                AddPropertyRow("Server", node.ServerName);
             if (!string.IsNullOrEmpty(node.DatabaseName))
                 AddPropertyRow("Database", node.DatabaseName);
+            if (!string.IsNullOrEmpty(node.ObjectAlias))
+                AddPropertyRow("Alias", node.ObjectAlias);
             if (!string.IsNullOrEmpty(node.IndexName))
                 AddPropertyRow("Index", node.IndexName);
+            if (!string.IsNullOrEmpty(node.IndexKind))
+                AddPropertyRow("Index Kind", node.IndexKind);
+            if (node.FilteredIndex)
+                AddPropertyRow("Filtered Index", "True");
+            if (node.TableReferenceId > 0)
+                AddPropertyRow("Table Ref Id", $"{node.TableReferenceId}");
         }
 
         // === Operator Details Section ===
@@ -687,6 +697,101 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
             if (!string.IsNullOrEmpty(node.UdxUsedColumns))
                 AddPropertyRow("UDX Columns", node.UdxUsedColumns, isCode: true);
+            if (node.RowCount)
+                AddPropertyRow("Row Count", "True");
+            if (node.ForceSeekColumnCount > 0)
+                AddPropertyRow("ForceSeek Columns", $"{node.ForceSeekColumnCount}");
+            if (!string.IsNullOrEmpty(node.PartitionId))
+                AddPropertyRow("Partition Id", node.PartitionId, isCode: true);
+            if (node.IsStarJoin)
+                AddPropertyRow("Star Join Root", "True");
+            if (!string.IsNullOrEmpty(node.StarJoinOperationType))
+                AddPropertyRow("Star Join Type", node.StarJoinOperationType);
+            if (!string.IsNullOrEmpty(node.ProbeColumn))
+                AddPropertyRow("Probe Column", node.ProbeColumn, isCode: true);
+            if (node.InRow)
+                AddPropertyRow("In-Row", "True");
+            if (node.ComputeSequence)
+                AddPropertyRow("Compute Sequence", "True");
+            if (node.RollupHighestLevel > 0)
+                AddPropertyRow("Rollup Highest Level", $"{node.RollupHighestLevel}");
+            if (node.RollupLevels.Count > 0)
+                AddPropertyRow("Rollup Levels", string.Join(", ", node.RollupLevels));
+            if (!string.IsNullOrEmpty(node.TvfParameters))
+                AddPropertyRow("TVF Parameters", node.TvfParameters, isCode: true);
+            if (!string.IsNullOrEmpty(node.OriginalActionColumn))
+                AddPropertyRow("Original Action Col", node.OriginalActionColumn, isCode: true);
+            if (!string.IsNullOrEmpty(node.TieColumns))
+                AddPropertyRow("WITH TIES Columns", node.TieColumns, isCode: true);
+            if (!string.IsNullOrEmpty(node.UdxName))
+                AddPropertyRow("UDX Name", node.UdxName);
+            if (node.GroupExecuted)
+                AddPropertyRow("Group Executed", "True");
+            if (node.RemoteDataAccess)
+                AddPropertyRow("Remote Data Access", "True");
+            if (node.OptimizedHalloweenProtectionUsed)
+                AddPropertyRow("Halloween Protection", "True");
+            if (node.StatsCollectionId > 0)
+                AddPropertyRow("Stats Collection Id", $"{node.StatsCollectionId}");
+        }
+
+        // === Scalar UDFs ===
+        if (node.ScalarUdfs.Count > 0)
+        {
+            AddPropertySection("Scalar UDFs");
+            foreach (var udf in node.ScalarUdfs)
+            {
+                var udfDetail = udf.FunctionName;
+                if (udf.IsClrFunction)
+                {
+                    udfDetail += " (CLR)";
+                    if (!string.IsNullOrEmpty(udf.ClrAssembly))
+                        udfDetail += $"\n  Assembly: {udf.ClrAssembly}";
+                    if (!string.IsNullOrEmpty(udf.ClrClass))
+                        udfDetail += $"\n  Class: {udf.ClrClass}";
+                    if (!string.IsNullOrEmpty(udf.ClrMethod))
+                        udfDetail += $"\n  Method: {udf.ClrMethod}";
+                }
+                AddPropertyRow("UDF", udfDetail, isCode: true);
+            }
+        }
+
+        // === Named Parameters (IndexScan) ===
+        if (node.NamedParameters.Count > 0)
+        {
+            AddPropertySection("Named Parameters");
+            foreach (var np in node.NamedParameters)
+                AddPropertyRow(np.Name, np.ScalarString ?? "", isCode: true);
+        }
+
+        // === Per-Operator Indexed Views ===
+        if (node.OperatorIndexedViews.Count > 0)
+        {
+            AddPropertySection("Operator Indexed Views");
+            foreach (var iv in node.OperatorIndexedViews)
+                AddPropertyRow("View", iv, isCode: true);
+        }
+
+        // === Suggested Index (Eager Spool) ===
+        if (!string.IsNullOrEmpty(node.SuggestedIndex))
+        {
+            AddPropertySection("Suggested Index");
+            AddPropertyRow("CREATE INDEX", node.SuggestedIndex, isCode: true);
+        }
+
+        // === Remote Operator ===
+        if (!string.IsNullOrEmpty(node.RemoteDestination) || !string.IsNullOrEmpty(node.RemoteSource)
+            || !string.IsNullOrEmpty(node.RemoteObject) || !string.IsNullOrEmpty(node.RemoteQuery))
+        {
+            AddPropertySection("Remote Operator");
+            if (!string.IsNullOrEmpty(node.RemoteDestination))
+                AddPropertyRow("Destination", node.RemoteDestination);
+            if (!string.IsNullOrEmpty(node.RemoteSource))
+                AddPropertyRow("Source", node.RemoteSource);
+            if (!string.IsNullOrEmpty(node.RemoteObject))
+                AddPropertyRow("Object", node.RemoteObject, isCode: true);
+            if (!string.IsNullOrEmpty(node.RemoteQuery))
+                AddPropertyRow("Query", node.RemoteQuery, isCode: true);
         }
 
         // === Foreign Key References Section ===
@@ -741,9 +846,20 @@ public partial class PlanViewerControl : UserControl
         {
             AddPropertySection("Actual Statistics");
             AddPropertyRow("Actual Rows", $"{node.ActualRows:N0}");
+            if (node.PerThreadStats.Count > 1)
+                foreach (var t in node.PerThreadStats)
+                    AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualRows:N0}", indent: true);
             if (node.ActualRowsRead > 0)
+            {
                 AddPropertyRow("Actual Rows Read", $"{node.ActualRowsRead:N0}");
+                if (node.PerThreadStats.Count > 1)
+                    foreach (var t in node.PerThreadStats.Where(t => t.ActualRowsRead > 0))
+                        AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualRowsRead:N0}", indent: true);
+            }
             AddPropertyRow("Actual Executions", $"{node.ActualExecutions:N0}");
+            if (node.PerThreadStats.Count > 1)
+                foreach (var t in node.PerThreadStats)
+                    AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualExecutions:N0}", indent: true);
             if (node.ActualRebinds > 0)
                 AddPropertyRow("Actual Rebinds", $"{node.ActualRebinds:N0}");
             if (node.ActualRewinds > 0)
@@ -763,9 +879,19 @@ public partial class PlanViewerControl : UserControl
             {
                 AddPropertySection("Actual Timing");
                 if (node.ActualElapsedMs > 0)
+                {
                     AddPropertyRow("Elapsed Time", $"{node.ActualElapsedMs:N0} ms");
+                    if (node.PerThreadStats.Count > 1)
+                        foreach (var t in node.PerThreadStats.Where(t => t.ActualElapsedMs > 0))
+                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualElapsedMs:N0} ms", indent: true);
+                }
                 if (node.ActualCPUMs > 0)
+                {
                     AddPropertyRow("CPU Time", $"{node.ActualCPUMs:N0} ms");
+                    if (node.PerThreadStats.Count > 1)
+                        foreach (var t in node.PerThreadStats.Where(t => t.ActualCPUMs > 0))
+                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualCPUMs:N0} ms", indent: true);
+                }
                 if (node.UdfElapsedTimeMs > 0)
                     AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeMs:N0} ms");
                 if (node.UdfCpuTimeMs > 0)
@@ -780,12 +906,30 @@ public partial class PlanViewerControl : UserControl
             {
                 AddPropertySection("Actual I/O");
                 AddPropertyRow("Logical Reads", $"{node.ActualLogicalReads:N0}");
+                if (node.PerThreadStats.Count > 1)
+                    foreach (var t in node.PerThreadStats.Where(t => t.ActualLogicalReads > 0))
+                        AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualLogicalReads:N0}", indent: true);
                 if (node.ActualPhysicalReads > 0)
+                {
                     AddPropertyRow("Physical Reads", $"{node.ActualPhysicalReads:N0}");
+                    if (node.PerThreadStats.Count > 1)
+                        foreach (var t in node.PerThreadStats.Where(t => t.ActualPhysicalReads > 0))
+                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualPhysicalReads:N0}", indent: true);
+                }
                 if (node.ActualScans > 0)
+                {
                     AddPropertyRow("Scans", $"{node.ActualScans:N0}");
+                    if (node.PerThreadStats.Count > 1)
+                        foreach (var t in node.PerThreadStats.Where(t => t.ActualScans > 0))
+                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualScans:N0}", indent: true);
+                }
                 if (node.ActualReadAheads > 0)
+                {
                     AddPropertyRow("Read-Ahead Reads", $"{node.ActualReadAheads:N0}");
+                    if (node.PerThreadStats.Count > 1)
+                        foreach (var t in node.PerThreadStats.Where(t => t.ActualReadAheads > 0))
+                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualReadAheads:N0}", indent: true);
+                }
                 if (node.ActualSegmentReads > 0)
                     AddPropertyRow("Segment Reads", $"{node.ActualSegmentReads:N0}");
                 if (node.ActualSegmentSkips > 0)
@@ -848,12 +992,16 @@ public partial class PlanViewerControl : UserControl
 
         // === Memory ===
         if (node.MemoryGrantKB > 0 || node.DesiredMemoryKB > 0 || node.MaxUsedMemoryKB > 0
-            || node.MemoryFractionInput > 0 || node.MemoryFractionOutput > 0)
+            || node.MemoryFractionInput > 0 || node.MemoryFractionOutput > 0
+            || node.InputMemoryGrantKB > 0 || node.OutputMemoryGrantKB > 0 || node.UsedMemoryGrantKB > 0)
         {
             AddPropertySection("Memory");
             if (node.MemoryGrantKB > 0) AddPropertyRow("Granted", $"{node.MemoryGrantKB:N0} KB");
             if (node.DesiredMemoryKB > 0) AddPropertyRow("Desired", $"{node.DesiredMemoryKB:N0} KB");
             if (node.MaxUsedMemoryKB > 0) AddPropertyRow("Max Used", $"{node.MaxUsedMemoryKB:N0} KB");
+            if (node.InputMemoryGrantKB > 0) AddPropertyRow("Input Grant", $"{node.InputMemoryGrantKB:N0} KB");
+            if (node.OutputMemoryGrantKB > 0) AddPropertyRow("Output Grant", $"{node.OutputMemoryGrantKB:N0} KB");
+            if (node.UsedMemoryGrantKB > 0) AddPropertyRow("Used Grant", $"{node.UsedMemoryGrantKB:N0} KB");
             if (node.MemoryFractionInput > 0) AddPropertyRow("Fraction Input", $"{node.MemoryFractionInput:F4}");
             if (node.MemoryFractionOutput > 0) AddPropertyRow("Fraction Output", $"{node.MemoryFractionOutput:F4}");
         }
@@ -967,6 +1115,85 @@ public partial class PlanViewerControl : UserControl
                     AddPropertyRow("QS Hint Source", s.QueryStoreStatementHintSource);
             }
 
+            // === Feature Flags ===
+            if (s.ContainsInterleavedExecutionCandidates || s.ContainsInlineScalarTsqlUdfs
+                || s.ContainsLedgerTables || s.ExclusiveProfileTimeActive || s.QueryCompilationReplay > 0
+                || s.QueryVariantID > 0)
+            {
+                AddPropertySection("Feature Flags");
+                if (s.ContainsInterleavedExecutionCandidates)
+                    AddPropertyRow("Interleaved Execution", "True");
+                if (s.ContainsInlineScalarTsqlUdfs)
+                    AddPropertyRow("Inline Scalar UDFs", "True");
+                if (s.ContainsLedgerTables)
+                    AddPropertyRow("Ledger Tables", "True");
+                if (s.ExclusiveProfileTimeActive)
+                    AddPropertyRow("Exclusive Profile Time", "True");
+                if (s.QueryCompilationReplay > 0)
+                    AddPropertyRow("Compilation Replay", $"{s.QueryCompilationReplay}");
+                if (s.QueryVariantID > 0)
+                    AddPropertyRow("Query Variant ID", $"{s.QueryVariantID}");
+            }
+
+            // === PSP Dispatcher ===
+            if (s.Dispatcher != null)
+            {
+                AddPropertySection("PSP Dispatcher");
+                if (!string.IsNullOrEmpty(s.DispatcherPlanHandle))
+                    AddPropertyRow("Plan Handle", s.DispatcherPlanHandle, isCode: true);
+                foreach (var psp in s.Dispatcher.ParameterSensitivePredicates)
+                {
+                    var range = $"[{psp.LowBoundary:N0} — {psp.HighBoundary:N0}]";
+                    var predText = psp.PredicateText ?? "";
+                    AddPropertyRow("Predicate", $"{predText} {range}", isCode: true);
+                    foreach (var stat in psp.Statistics)
+                    {
+                        var statLabel = !string.IsNullOrEmpty(stat.TableName)
+                            ? $"  {stat.TableName}.{stat.StatisticsName}"
+                            : $"  {stat.StatisticsName}";
+                        AddPropertyRow(statLabel, $"Modified: {stat.ModificationCount:N0}, Sampled: {stat.SamplingPercent:F1}%", indent: true);
+                    }
+                }
+                foreach (var opt in s.Dispatcher.OptionalParameterPredicates)
+                {
+                    if (!string.IsNullOrEmpty(opt.PredicateText))
+                        AddPropertyRow("Optional Predicate", opt.PredicateText, isCode: true);
+                }
+            }
+
+            // === Cardinality Feedback ===
+            if (s.CardinalityFeedback.Count > 0)
+            {
+                AddPropertySection("Cardinality Feedback");
+                foreach (var cf in s.CardinalityFeedback)
+                    AddPropertyRow($"Node {cf.Key}", $"{cf.Value:N0}");
+            }
+
+            // === Optimization Replay ===
+            if (!string.IsNullOrEmpty(s.OptimizationReplayScript))
+            {
+                AddPropertySection("Optimization Replay");
+                AddPropertyRow("Script", s.OptimizationReplayScript, isCode: true);
+            }
+
+            // === Template Plan Guide ===
+            if (!string.IsNullOrEmpty(s.TemplatePlanGuideName))
+            {
+                AddPropertyRow("Template Plan Guide", s.TemplatePlanGuideName);
+                if (!string.IsNullOrEmpty(s.TemplatePlanGuideDB))
+                    AddPropertyRow("Template Guide DB", s.TemplatePlanGuideDB);
+            }
+
+            // === Handles ===
+            if (!string.IsNullOrEmpty(s.ParameterizedPlanHandle) || !string.IsNullOrEmpty(s.BatchSqlHandle))
+            {
+                AddPropertySection("Handles");
+                if (!string.IsNullOrEmpty(s.ParameterizedPlanHandle))
+                    AddPropertyRow("Parameterized Plan", s.ParameterizedPlanHandle, isCode: true);
+                if (!string.IsNullOrEmpty(s.BatchSqlHandle))
+                    AddPropertyRow("Batch SQL Handle", s.BatchSqlHandle, isCode: true);
+            }
+
             // === Set Options ===
             if (s.SetOptions != null)
             {
@@ -991,6 +1218,18 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Available DOP", $"{hw.EstimatedAvailableDOP}");
                 if (hw.MaxCompileMemory > 0)
                     AddPropertyRow("Max Compile Memory", $"{hw.MaxCompileMemory:N0} KB");
+            }
+
+            // === Plan Version ===
+            if (_currentPlan != null && (!string.IsNullOrEmpty(_currentPlan.BuildVersion) || !string.IsNullOrEmpty(_currentPlan.Build)))
+            {
+                AddPropertySection("Plan Version");
+                if (!string.IsNullOrEmpty(_currentPlan.BuildVersion))
+                    AddPropertyRow("Build Version", _currentPlan.BuildVersion);
+                if (!string.IsNullOrEmpty(_currentPlan.Build))
+                    AddPropertyRow("Build", _currentPlan.Build);
+                if (_currentPlan.ClusteredMode)
+                    AddPropertyRow("Clustered Mode", "True");
             }
 
             // === Optimizer Stats Usage ===
@@ -1030,6 +1269,10 @@ public partial class PlanViewerControl : UserControl
                 AddPropertySection("Query Time Stats");
                 AddPropertyRow("CPU Time", $"{s.QueryTimeStats.CpuTimeMs:N0} ms");
                 AddPropertyRow("Elapsed Time", $"{s.QueryTimeStats.ElapsedTimeMs:N0} ms");
+                if (s.QueryUdfCpuTimeMs > 0)
+                    AddPropertyRow("UDF CPU Time", $"{s.QueryUdfCpuTimeMs:N0} ms");
+                if (s.QueryUdfElapsedTimeMs > 0)
+                    AddPropertyRow("UDF Elapsed Time", $"{s.QueryUdfElapsedTimeMs:N0} ms");
             }
 
             // === Thread Stats (actual plans) ===
@@ -1053,7 +1296,7 @@ public partial class PlanViewerControl : UserControl
             if (s.WaitStats.Count > 0)
             {
                 AddPropertySection("Wait Stats");
-                foreach (var w in s.WaitStats)
+                foreach (var w in s.WaitStats.OrderByDescending(w => w.WaitTimeMs))
                     AddPropertyRow(w.WaitType, $"{w.WaitTimeMs:N0} ms ({w.WaitCount:N0} waits)");
             }
 
@@ -1177,7 +1420,7 @@ public partial class PlanViewerControl : UserControl
         _currentPropertySection = contentPanel;
     }
 
-    private void AddPropertyRow(string label, string value, bool isCode = false)
+    private void AddPropertyRow(string label, string value, bool isCode = false, bool indent = false)
     {
         var grid = new Grid { Margin = new Thickness(10, 3, 10, 3) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
@@ -1186,10 +1429,11 @@ public partial class PlanViewerControl : UserControl
         var labelBlock = new TextBlock
         {
             Text = label,
-            FontSize = 11,
+            FontSize = indent ? 10 : 11,
             Foreground = MutedBrush,
             VerticalAlignment = VerticalAlignment.Top,
-            TextWrapping = TextWrapping.Wrap
+            TextWrapping = TextWrapping.Wrap,
+            Margin = indent ? new Thickness(16, 0, 0, 0) : new Thickness(0)
         };
         Grid.SetColumn(labelBlock, 0);
         grid.Children.Add(labelBlock);
@@ -1197,7 +1441,7 @@ public partial class PlanViewerControl : UserControl
         var valueBlock = new TextBlock
         {
             Text = value,
-            FontSize = 11,
+            FontSize = indent ? 10 : 11,
             Foreground = TooltipFgBrush,
             TextWrapping = TextWrapping.Wrap
         };
