@@ -133,7 +133,7 @@ BEGIN
             database_name =
                 ISNULL
                 (
-                    DB_NAME(vfs.database_id),
+                    d.name,
                     N'UNKNOWN'
                 ),
             file_id = vfs.file_id,
@@ -162,6 +162,8 @@ BEGIN
             io_stall_queued_write_ms = vfs.io_stall_queued_write_ms,
             sample_ms = vfs.sample_ms
         FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs
+        LEFT JOIN sys.databases AS d
+          ON  d.database_id = vfs.database_id
         LEFT JOIN sys.master_files AS mf
           ON  mf.database_id = vfs.database_id
           AND mf.file_id = vfs.file_id

@@ -255,9 +255,10 @@ BEGIN
             FROM sys.dm_exec_plan_attributes(ps.plan_handle) AS pa
             WHERE pa.attribute = N'dbid'
         ) AS pa
-        LEFT JOIN sys.databases AS d
+        INNER JOIN sys.databases AS d
           ON pa.dbid = d.database_id
         WHERE ps.last_execution_time >= @cutoff_time
+        AND   d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
         AND   pa.dbid NOT IN
         (
             1, 3, 4, 32761, 32767,
@@ -423,9 +424,10 @@ BEGIN
             FROM sys.dm_exec_plan_attributes(ts.plan_handle) AS pa
             WHERE pa.attribute = N'dbid'
         ) AS pa
-        LEFT JOIN sys.databases AS d
+        INNER JOIN sys.databases AS d
           ON pa.dbid = d.database_id
         WHERE ts.last_execution_time >= @cutoff_time
+        AND   d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
         AND   pa.dbid NOT IN
         (
             1, 3, 4, 32761, 32767,
@@ -486,9 +488,10 @@ BEGIN
             FROM sys.dm_exec_plan_attributes(fs.plan_handle) AS pa
             WHERE pa.attribute = N'dbid'
         ) AS pa
-        LEFT JOIN sys.databases AS d
+        INNER JOIN sys.databases AS d
           ON pa.dbid = d.database_id
         WHERE fs.last_execution_time >= @cutoff_time
+        AND   d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
         AND   pa.dbid NOT IN
         (
             1, 3, 4, 32761, 32767,
