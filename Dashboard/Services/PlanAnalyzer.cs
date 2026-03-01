@@ -644,7 +644,7 @@ public static class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
-                    WarningType = "Row Count Spool (NOT IN)",
+                    WarningType = "NOT IN with Nullable Column",
                     Message = $"Row Count Spool with {rewinds:N0} rewinds. This pattern occurs when NOT IN is used with a nullable column — SQL Server cannot use an efficient Anti Semi Join because it must check for NULL values on every outer row. Rewrite as NOT EXISTS, or add WHERE column IS NOT NULL to the subquery.",
                     Severity = rewinds > 1_000_000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                 });
@@ -664,7 +664,9 @@ public static class PlanAnalyzer
 
     /// <summary>
     /// Detects the NOT IN with nullable column pattern: statement has NOT IN,
-    /// and a parent Nested Loops Anti Semi Join has an IS NULL residual predicate.
+    /// and a nearby Nested Loops Anti Semi Join has an IS NULL residual predicate.
+    /// Checks ancestors and their children (siblings of ancestors) since the IS NULL
+    /// predicate may be on a sibling Anti Semi Join rather than a direct parent.
     /// </summary>
     private static bool HasNotInPattern(PlanNode spoolNode, PlanStatement stmt)
     {
@@ -673,22 +675,32 @@ public static class PlanAnalyzer
             !Regex.IsMatch(stmt.StatementText, @"\bNOT\s+IN\b", RegexOptions.IgnoreCase))
             return false;
 
-        // Walk up to find the parent Nested Loops Anti Semi Join with IS NULL predicate
+        // Walk up the tree checking ancestors and their children
         var parent = spoolNode.Parent;
         while (parent != null)
         {
-            if (parent.PhysicalOp == "Nested Loops" &&
-                parent.LogicalOp.Contains("Anti Semi", StringComparison.OrdinalIgnoreCase) &&
-                !string.IsNullOrEmpty(parent.Predicate) &&
-                parent.Predicate.Contains("IS NULL", StringComparison.OrdinalIgnoreCase))
-            {
+            if (IsAntiSemiJoinWithIsNull(parent))
                 return true;
+
+            // Check siblings: the IS NULL predicate may be on a sibling Anti Semi Join
+            // (e.g. outer NL Anti Semi Join has two children: inner NL Anti Semi Join + Row Count Spool)
+            foreach (var sibling in parent.Children)
+            {
+                if (sibling != spoolNode && IsAntiSemiJoinWithIsNull(sibling))
+                    return true;
             }
+
             parent = parent.Parent;
         }
 
         return false;
     }
+
+    private static bool IsAntiSemiJoinWithIsNull(PlanNode node) =>
+        node.PhysicalOp == "Nested Loops" &&
+        node.LogicalOp.Contains("Anti Semi", StringComparison.OrdinalIgnoreCase) &&
+        !string.IsNullOrEmpty(node.Predicate) &&
+        node.Predicate.Contains("IS NULL", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Returns true for rowstore scan operators (Index Scan, Clustered Index Scan,

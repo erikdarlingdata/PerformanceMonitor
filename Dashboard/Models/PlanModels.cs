@@ -280,6 +280,9 @@ public class PlanNode
     public long ActualSegmentSkips { get; set; }
     public long UdfCpuTimeMs { get; set; }
     public long UdfElapsedTimeMs { get; set; }
+    public long InputMemoryGrantKB { get; set; }
+    public long OutputMemoryGrantKB { get; set; }
+    public long UsedMemoryGrantKB { get; set; }
 
     // XSD gap: RelOp-level metadata
     public bool GroupExecuted { get; set; }
