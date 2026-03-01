@@ -1914,6 +1914,10 @@ public partial class PlanViewerControl : UserControl
         {
             AddRow("Elapsed", $"{statement.QueryTimeStats.ElapsedTimeMs:N0}ms");
             AddRow("CPU", $"{statement.QueryTimeStats.CpuTimeMs:N0}ms");
+            if (statement.QueryUdfCpuTimeMs > 0)
+                AddRow("UDF CPU", $"{statement.QueryUdfCpuTimeMs:N0}ms");
+            if (statement.QueryUdfElapsedTimeMs > 0)
+                AddRow("UDF elapsed", $"{statement.QueryUdfElapsedTimeMs:N0}ms");
         }
 
         if (statement.MemoryGrant != null)
