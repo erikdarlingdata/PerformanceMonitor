@@ -76,9 +76,10 @@ CROSS APPLY
     FROM sys.dm_exec_plan_attributes(s.plan_handle) AS pa
     WHERE pa.attribute = N''dbid''
 ) AS pa
-LEFT JOIN sys.databases AS d
+INNER JOIN sys.databases AS d
   ON pa.dbid = d.database_id
-WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+WHERE d.state = 0
+AND   pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 
 UNION ALL
@@ -130,9 +131,10 @@ CROSS APPLY
     FROM sys.dm_exec_plan_attributes(s.plan_handle) AS pa
     WHERE pa.attribute = N''dbid''
 ) AS pa
-LEFT JOIN sys.databases AS d
+INNER JOIN sys.databases AS d
   ON pa.dbid = d.database_id
-WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+WHERE d.state = 0
+AND   pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 
 UNION ALL
@@ -171,9 +173,10 @@ CROSS APPLY
     FROM sys.dm_exec_plan_attributes(s.plan_handle) AS pa
     WHERE pa.attribute = N''dbid''
 ) AS pa
-LEFT JOIN sys.databases AS d
+INNER JOIN sys.databases AS d
   ON pa.dbid = d.database_id
-WHERE pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
+WHERE d.state = 0
+AND   pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 ) AS combined
 ORDER BY total_elapsed_time DESC

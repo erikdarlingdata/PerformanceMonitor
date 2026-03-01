@@ -32,10 +32,12 @@ SELECT /* PerformanceMonitorLite */
     wait_type = wt.wait_type,
     wait_duration_ms = wt.wait_duration_ms,
     blocking_session_id = wt.blocking_session_id,
-    database_name = DB_NAME(er.database_id)
+    database_name = d.name
 FROM sys.dm_os_waiting_tasks AS wt
 LEFT JOIN sys.dm_exec_requests AS er
   ON er.session_id = wt.session_id
+LEFT JOIN sys.databases AS d
+  ON d.database_id = er.database_id
 WHERE wt.session_id >= 50
 AND   wt.session_id <> @@SPID
 AND   wt.wait_type IS NOT NULL
