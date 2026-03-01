@@ -52,6 +52,9 @@ BEGIN
         @rows_marked bigint = 0,
         @rows_parsed bigint = 0,
         @start_time datetime2(7) = SYSDATETIME(),
+        @utc_offset_minutes integer = DATEDIFF(MINUTE, GETUTCDATE(), SYSDATETIME()),
+        @start_date_local datetime2(7) = NULL,
+        @end_date_local datetime2(7) = NULL,
         @error_message nvarchar(4000),
         @error_number integer,
         @blockviewer_database sysname = NULL,
@@ -136,23 +139,44 @@ BEGIN
                 AND   bx.event_time IS NOT NULL
                 OPTION(RECOMPILE);
 
+                /*
+                Convert UTC event_time to local time for sp_HumanEventsBlockViewer
+                The proc expects local time inputs and converts to UTC internally
+                Raw table event_time is UTC (from XE @timestamp attribute)
+                */
+                SELECT
+                    @start_date_local = DATEADD(MINUTE, @utc_offset_minutes, @start_date),
+                    @end_date_local = DATEADD(MINUTE, @utc_offset_minutes, @end_date);
+
                 IF @debug = 1
                 BEGIN
-                    SET @debug_msg = N'Derived date range from unprocessed rows: ' + ISNULL(CONVERT(nvarchar(30), @start_date, 121), N'NULL') + N' to ' + ISNULL(CONVERT(nvarchar(30), @end_date, 121), N'NULL');
+                    SET @debug_msg = N'Derived date range (UTC): ' + ISNULL(CONVERT(nvarchar(30), @start_date, 121), N'NULL') + N' to ' + ISNULL(CONVERT(nvarchar(30), @end_date, 121), N'NULL');
+                    RAISERROR(@debug_msg, 0, 1) WITH NOWAIT;
+                    SET @debug_msg = N'Converted to local: ' + ISNULL(CONVERT(nvarchar(30), @start_date_local, 121), N'NULL') + N' to ' + ISNULL(CONVERT(nvarchar(30), @end_date_local, 121), N'NULL');
                     RAISERROR(@debug_msg, 0, 1) WITH NOWAIT;
                 END;
+            END;
+            ELSE
+            BEGIN
+                /*
+                User provided explicit dates (assumed local time)
+                No conversion needed — pass through directly
+                */
+                SELECT
+                    @start_date_local = @start_date,
+                    @end_date_local = @end_date;
             END;
 
             /*
             Delete existing parsed blocking events for the time range to prevent duplicates
             sp_HumanEventsBlockViewer will re-insert fresh parsed data
             */
-            IF @start_date IS NOT NULL AND @end_date IS NOT NULL
+            IF @start_date_local IS NOT NULL AND @end_date_local IS NOT NULL
             BEGIN
                 DELETE b
                 FROM collect.blocking_BlockedProcessReport AS b
-                WHERE b.event_time >= @start_date
-                AND   b.event_time <= @end_date;
+                WHERE b.event_time >= @start_date_local
+                AND   b.event_time <= @end_date_local;
 
                 SELECT
                     @rows_deleted = ROWCOUNT_BIG();
@@ -192,19 +216,20 @@ BEGIN
                 N'@log_retention_days integer, @max_events_to_process integer, @start_date datetime2(7), @end_date datetime2(7), @debug bit',
                 @log_retention_days = @log_retention_days,
                 @max_events_to_process = @max_events_to_process,
-                @start_date = @start_date,
-                @end_date = @end_date,
+                @start_date = @start_date_local,
+                @end_date = @end_date_local,
                 @debug = @debug;
 
             /*
             Verify sp_HumanEventsBlockViewer produced parsed results before marking rows as processed
             If no results were inserted, leave rows unprocessed so they are retried next run
+            Parsed results use local time (sp_HumanEventsBlockViewer converts UTC to local)
             */
             SELECT
                 @rows_parsed = COUNT_BIG(*)
             FROM collect.blocking_BlockedProcessReport AS b
-            WHERE b.event_time >= @start_date
-            AND   b.event_time <= @end_date
+            WHERE b.event_time >= @start_date_local
+            AND   b.event_time <= @end_date_local
             OPTION(RECOMPILE);
 
             IF @rows_parsed > 0
