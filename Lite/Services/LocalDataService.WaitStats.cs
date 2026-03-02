@@ -216,25 +216,25 @@ LIMIT 3";
 
         command.CommandText = @$"
                 SELECT
-                    session_id,
-                    database_name,
-                    SUBSTRING(query_text, 1, 300) AS query_text,
-                    total_elapsed_time_ms / 1000 AS elapsed_seconds,
-                    cpu_time_ms,
-                    reads,
-                    writes,
-                    wait_type,
-                    blocking_session_id
-                FROM v_query_snapshots
-                WHERE server_id = $1
-                    AND collection_time = (SELECT MAX(collection_time) FROM v_query_snapshots WHERE server_id = $1)
-                    AND session_id > 50
+                    r.session_id,
+                    r.database_name,
+                    SUBSTRING(r.query_text, 1, 300) AS query_text,
+                    r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
+                    r.cpu_time_ms,
+                    r.reads,
+                    r.writes,
+                    r.wait_type,
+                    r.blocking_session_id
+                FROM v_query_snapshots AS r
+                WHERE r.server_id = $1
+                    AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
+                    AND r.session_id > 50
                     {spServerDiagnosticsFilter}
                     {waitForFilter}
                     {backupsFilter}
                     {miscWaitsFilter}
-                    AND total_elapsed_time_ms >= $2
-                ORDER BY total_elapsed_time_ms DESC
+                    AND r.total_elapsed_time_ms >= $2
+                ORDER BY r.total_elapsed_time_ms DESC
                 LIMIT 5;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
