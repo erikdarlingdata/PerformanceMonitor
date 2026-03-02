@@ -143,7 +143,7 @@ namespace PerformanceMonitorDashboard
             var startupPrefs = _preferencesService.GetPreferences();
             TabHelpers.CsvSeparator = startupPrefs.CsvSeparator;
 
-            LoadServerList();
+            await LoadServerListAsync();
             InitializeNotificationService();
             OpenNocTab();
             OpenAlertsTab();
@@ -339,7 +339,7 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void LoadServerList()
+        private async System.Threading.Tasks.Task LoadServerListAsync()
         {
             var servers = _serverManager.GetAllServers();
 
@@ -351,12 +351,12 @@ namespace PerformanceMonitorDashboard
             }
 
             // Add default sort for the list of servers by server display name.
-            _serverListItems.OrderBy(s => s.DisplayName).ToList().ForEach(s => _serverListItems.Move(_serverListItems.IndexOf(s), _serverListItems.Count - 1)); 
+            _serverListItems.OrderBy(s => s.DisplayName).ToList().ForEach(s => _serverListItems.Move(_serverListItems.IndexOf(s), _serverListItems.Count - 1));
 
             // Also refresh the landing page if it exists
             if (_landingPage != null)
             {
-                _ = _landingPage.ReloadServersAsync();
+                await _landingPage.ReloadServersAsync();
             }
         }
 
@@ -711,7 +711,7 @@ namespace PerformanceMonitorDashboard
             OpenServerTab(server);
         }
 
-        private void AddServer_Click(object sender, RoutedEventArgs e)
+        private async void AddServer_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new AddServerDialog();
             if (dialog.ShowDialog() == true)
@@ -723,7 +723,7 @@ namespace PerformanceMonitorDashboard
                 try
                 {
                     _serverManager.AddServer(server, username, password);
-                    LoadServerList();
+                    await LoadServerListAsync();
 
                     MessageBox.Show(
                         $"Server '{server.DisplayName}' added successfully!\n\n" +
@@ -745,7 +745,7 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void EditServer_Click(object sender, RoutedEventArgs e)
+        private async void EditServer_Click(object sender, RoutedEventArgs e)
         {
             if (ServerListView.SelectedItem is ServerListItem item)
             {
@@ -760,7 +760,7 @@ namespace PerformanceMonitorDashboard
                     try
                     {
                         _serverManager.UpdateServer(updatedServer, username, password);
-                        LoadServerList();
+                        await LoadServerListAsync();
 
                         if (_openTabs.TryGetValue(server.Id, out var tabItem))
                         {
@@ -831,7 +831,7 @@ namespace PerformanceMonitorDashboard
                     _latestHealthStatus.Remove(server.Id);
 
                     _serverManager.DeleteServer(server.Id);
-                    LoadServerList();
+                    await LoadServerListAsync();
 
                     MessageBox.Show(
                         $"Server '{server.DisplayName}' removed successfully!",
@@ -851,25 +851,25 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void ToggleFavorite_Click(object sender, RoutedEventArgs e)
+        private async void ToggleFavorite_Click(object sender, RoutedEventArgs e)
         {
             if (ServerListView.SelectedItem is ServerListItem item)
             {
                 var server = item.Server;
                 server.IsFavorite = !server.IsFavorite;
                 _serverManager.UpdateServer(server, null, null);
-                LoadServerList();
+                await LoadServerListAsync();
             }
         }
 
-        private void ManageServers_Click(object sender, RoutedEventArgs e)
+        private async void ManageServers_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new ManageServersWindow(_serverManager);
             dialog.Owner = this;
 
             if (dialog.ShowDialog() == true && dialog.ServersModified)
             {
-                LoadServerList();
+                await LoadServerListAsync();
             }
         }
 
