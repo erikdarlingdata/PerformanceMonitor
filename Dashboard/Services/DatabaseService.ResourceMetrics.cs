@@ -444,13 +444,13 @@ namespace PerformanceMonitorDashboard.Services
                                 wait_time_ms_per_second =
                                     CASE
                                         WHEN wd.interval_seconds > 0
-                                        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+                                        THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
                                         ELSE 0
                                     END,
                                 signal_wait_time_ms_per_second =
                                     CASE
                                         WHEN wd.interval_seconds > 0
-                                        THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+                                        THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
                                         ELSE 0
                                     END,
                                 wd.waiting_tasks_count
@@ -521,13 +521,13 @@ namespace PerformanceMonitorDashboard.Services
                                 wait_time_ms_per_second =
                                     CASE
                                         WHEN wd.interval_seconds > 0
-                                        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+                                        THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
                                         ELSE 0
                                     END,
                                 signal_wait_time_ms_per_second =
                                     CASE
                                         WHEN wd.interval_seconds > 0
-                                        THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+                                        THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
                                         ELSE 0
                                     END,
                                 wd.waiting_tasks_count
@@ -1879,19 +1879,19 @@ SELECT
     wait_time_ms_per_second =
         CASE
             WHEN wd.interval_seconds > 0
-            THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+            THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
             ELSE 0
         END,
     signal_wait_time_ms_per_second =
         CASE
             WHEN wd.interval_seconds > 0
-            THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+            THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
             ELSE 0
         END,
     avg_ms_per_wait =
         CASE
             WHEN wd.waiting_tasks_delta > 0
-            THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
+            THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta AS decimal(18, 4))
             ELSE 0
         END
 FROM wait_deltas AS wd
@@ -1957,19 +1957,19 @@ SELECT
     wait_time_ms_per_second =
         CASE
             WHEN wd.interval_seconds > 0
-            THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+            THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
             ELSE 0
         END,
     signal_wait_time_ms_per_second =
         CASE
             WHEN wd.interval_seconds > 0
-            THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+            THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
             ELSE 0
         END,
     avg_ms_per_wait =
         CASE
             WHEN wd.waiting_tasks_delta > 0
-            THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
+            THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta AS decimal(18, 4))
             ELSE 0
         END
 FROM wait_deltas AS wd
@@ -2066,15 +2066,15 @@ SELECT
     wd.wait_type,
     wait_time_ms_per_second =
         CASE WHEN wd.interval_seconds > 0
-        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+        THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
         ELSE 0 END,
     signal_wait_time_ms_per_second =
         CASE WHEN wd.interval_seconds > 0
-        THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+        THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
         ELSE 0 END,
     avg_ms_per_wait =
         CASE WHEN wd.waiting_tasks_delta > 0
-        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
+        THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta AS decimal(18, 4))
         ELSE 0 END
 FROM wait_deltas AS wd
 WHERE wd.wait_time_ms_delta > 0
@@ -2124,15 +2124,15 @@ SELECT
     wd.wait_type,
     wait_time_ms_per_second =
         CASE WHEN wd.interval_seconds > 0
-        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+        THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
         ELSE 0 END,
     signal_wait_time_ms_per_second =
         CASE WHEN wd.interval_seconds > 0
-        THEN CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds
+        THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
         ELSE 0 END,
     avg_ms_per_wait =
         CASE WHEN wd.waiting_tasks_delta > 0
-        THEN CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta
+        THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.waiting_tasks_delta AS decimal(18, 4))
         ELSE 0 END
 FROM wait_deltas AS wd
 WHERE wd.wait_time_ms_delta > 0

@@ -563,7 +563,7 @@ namespace PerformanceMonitorDashboard.Services
                     waiting_tasks_count_delta,
                     avg_ms_per_wait =
                         CASE WHEN waiting_tasks_count_delta > 0
-                        THEN CAST(wait_time_ms_delta AS decimal(19, 2)) / waiting_tasks_count_delta
+                        THEN CAST(CAST(wait_time_ms_delta AS decimal(19, 2)) / waiting_tasks_count_delta AS decimal(18, 4))
                         ELSE 0 END
                 FROM collect.wait_stats
                 WHERE wait_type IN (N'THREADPOOL', N'RESOURCE_SEMAPHORE', N'RESOURCE_SEMAPHORE_QUERY_COMPILE')

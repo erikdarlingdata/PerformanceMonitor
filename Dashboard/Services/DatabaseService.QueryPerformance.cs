@@ -2328,7 +2328,7 @@ namespace PerformanceMonitorDashboard.Services
         )
         SELECT
             ed.collection_time,
-            executions_per_second = CAST(ed.total_execution_count AS decimal(19, 4)) / ed.interval_seconds
+            executions_per_second = CAST(CAST(ed.total_execution_count AS decimal(19, 4)) / ed.interval_seconds AS decimal(18, 4))
         FROM exec_deltas AS ed
         WHERE ed.interval_seconds > 0
         ORDER BY
@@ -2362,7 +2362,7 @@ namespace PerformanceMonitorDashboard.Services
         )
         SELECT
             ed.collection_time,
-            executions_per_second = CAST(ed.total_execution_count AS decimal(19, 4)) / ed.interval_seconds
+            executions_per_second = CAST(CAST(ed.total_execution_count AS decimal(19, 4)) / ed.interval_seconds AS decimal(18, 4))
         FROM exec_deltas AS ed
         WHERE ed.interval_seconds > 0
         ORDER BY
@@ -2747,7 +2747,7 @@ namespace PerformanceMonitorDashboard.Services
             wait_time_ms_per_second =
                 CASE
                     WHEN ld.interval_seconds > 0
-                    THEN CAST(ld.wait_time_ms_delta AS decimal(19, 4)) / ld.interval_seconds
+                    THEN CAST(CAST(ld.wait_time_ms_delta AS decimal(19, 4)) / ld.interval_seconds AS decimal(18, 4))
                     ELSE 0
                 END
         FROM lock_deltas AS ld
@@ -2790,7 +2790,7 @@ namespace PerformanceMonitorDashboard.Services
             wait_time_ms_per_second =
                 CASE
                     WHEN ld.interval_seconds > 0
-                    THEN CAST(ld.wait_time_ms_delta AS decimal(19, 4)) / ld.interval_seconds
+                    THEN CAST(CAST(ld.wait_time_ms_delta AS decimal(19, 4)) / ld.interval_seconds AS decimal(18, 4))
                     ELSE 0
                 END
         FROM lock_deltas AS ld
