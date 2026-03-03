@@ -112,7 +112,7 @@ BEGIN
         /*
         Collect CPU utilization data from ring buffers
         Only collects samples newer than the most recent sample we have
-        On first run (NULL max_sample_time), looks back 1 hour to populate initial data
+        On first run (NULL max_sample_time), looks back 7 days to populate initial data
         Avoids duplicate collection of same ring buffer events
         */
         INSERT INTO
@@ -156,7 +156,7 @@ BEGIN
             SECOND,
             -((@current_ms_ticks - t.timestamp) / 1000),
             @start_time
-        ) > ISNULL(@max_sample_time, DATEADD(HOUR, -1, @start_time))
+        ) > ISNULL(@max_sample_time, DATEADD(DAY, -7, @start_time))
         ORDER BY
             t.timestamp DESC
         OPTION(RECOMPILE);
