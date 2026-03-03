@@ -196,6 +196,10 @@ BEGIN
 
         /*
         Collect currently executing queries using sp_WhoIsActive
+        sp_WhoIsActive inserts by ordinal position, not column name.
+        If sp_WhoIsActive was updated and column order changed,
+        existing daily tables will have a schema mismatch.
+        Detect this and recreate the table if needed.
         */
         SET @sql = N'
         EXECUTE ' + QUOTENAME(@whoisactive_database) + N'.dbo.sp_WhoIsActive
@@ -208,8 +212,83 @@ BEGIN
             @get_memory_info = 1,
             @destination_table = ''' + @full_table_name + N''';';
 
-        EXECUTE sys.sp_executesql
-            @sql;
+        BEGIN TRY
+            EXECUTE sys.sp_executesql
+                @sql;
+        END TRY
+        BEGIN CATCH
+            IF ERROR_NUMBER() = 257 /*Implicit conversion = column order mismatch*/
+            BEGIN
+                IF @debug = 1
+                BEGIN
+                    RAISERROR(N'Schema mismatch detected on %s, recreating table', 0, 1, @full_table_name) WITH NOWAIT;
+                END;
+
+                /*Drop the mismatched table*/
+                SET @sql =
+                    N'DROP TABLE ' +
+                    @full_table_name +
+                    N';';
+
+                EXECUTE sys.sp_executesql
+                    @sql;
+
+                /*Recreate from current sp_WhoIsActive schema*/
+                SET @schema = N'';
+
+                SET @sql = N'
+                EXECUTE ' + QUOTENAME(@whoisactive_database) + N'.dbo.sp_WhoIsActive
+                    @get_transaction_info = 1,
+                    @get_outer_command = 1,
+                    @get_plans = 1,
+                    @get_task_info = 2,
+                    @get_additional_info = 1,
+                    @find_block_leaders = 1,
+                    @get_memory_info = 1,
+                    @not_filter_type = ''database'',
+                    @not_filter = ''PerformanceMonitor'',
+                    @return_schema = 1,
+                    @schema = @schema OUTPUT;';
+
+                EXECUTE sys.sp_executesql
+                    @sql,
+                    N'@schema nvarchar(max) OUTPUT',
+                    @schema = @schema OUTPUT;
+
+                SET @schema =
+                    REPLACE
+                    (
+                        @schema,
+                        N'<table_name>',
+                        @full_table_name
+                    );
+
+                EXECUTE sys.sp_executesql
+                    @schema;
+
+                /*Retry the insert*/
+                SET @sql = N'
+                EXECUTE ' + QUOTENAME(@whoisactive_database) + N'.dbo.sp_WhoIsActive
+                    @get_transaction_info = 1,
+                    @get_outer_command = 1,
+                    @get_plans = 1,
+                    @get_task_info = 2,
+                    @get_additional_info = 1,
+                    @find_block_leaders = 1,
+                    @get_memory_info = 1,
+                    @destination_table = ''' + @full_table_name + N''';';
+
+                EXECUTE sys.sp_executesql
+                    @sql;
+
+                /*Recreate views for new schema*/
+                EXECUTE collect.query_snapshots_create_views;
+            END;
+            ELSE
+            BEGIN
+                THROW;
+            END;
+        END CATCH;
 
         /*
         Get row count from last insertion
