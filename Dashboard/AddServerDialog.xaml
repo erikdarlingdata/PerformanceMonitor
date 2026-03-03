@@ -7,20 +7,6 @@
         ResizeMode="NoResize"
         Background="{DynamicResource BackgroundBrush}"
         Foreground="{DynamicResource ForegroundBrush}">
-    <Window.Resources>
-        <Style TargetType="TextBox">
-            <Setter Property="Background" Value="{DynamicResource BackgroundLightBrush}"/>
-            <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
-            <Setter Property="CaretBrush" Value="{DynamicResource ForegroundBrush}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-        </Style>
-        <Style TargetType="PasswordBox">
-            <Setter Property="Background" Value="{DynamicResource BackgroundLightBrush}"/>
-            <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
-            <Setter Property="CaretBrush" Value="{DynamicResource ForegroundBrush}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-        </Style>
-    </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -36,21 +22,21 @@
         <!-- Form Fields -->
         <StackPanel Grid.Row="1">
             <!-- Server Name/Address -->
-            <TextBlock Text="Server Name/Address:" FontWeight="Bold" Margin="0,0,0,5"
+            <TextBlock Text="Server Name/Address:" Margin="0,0,0,4"
                        Foreground="{DynamicResource ForegroundBrush}"/>
-            <TextBox x:Name="ServerNameTextBox" Height="25" Margin="0,0,0,15"
+            <TextBox x:Name="ServerNameTextBox" Margin="0,0,0,12"
                      ToolTip="e.g., localhost, server.domain.com, 192.168.1.100, server\instance"/>
 
             <!-- Display Name -->
-            <TextBlock Text="Display Name (optional):" FontWeight="Bold" Margin="0,0,0,5"
+            <TextBlock Text="Display Name (optional):" Margin="0,0,0,4"
                        Foreground="{DynamicResource ForegroundBrush}"/>
-            <TextBox x:Name="DisplayNameTextBox" Height="25" Margin="0,0,0,15"
+            <TextBox x:Name="DisplayNameTextBox" Margin="0,0,0,12"
                      ToolTip="Friendly name to display in the server list"/>
 
             <!-- Authentication Type -->
-            <TextBlock Text="Authentication:" FontWeight="Bold" Margin="0,0,0,5"
+            <TextBlock Text="Authentication:" Margin="0,0,0,4"
                        Foreground="{DynamicResource ForegroundBrush}"/>
-            <StackPanel Margin="0,0,0,15">
+            <StackPanel Margin="0,0,0,12">
                 <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication"
                              GroupName="Auth" IsChecked="True"
                              Foreground="{DynamicResource ForegroundBrush}"
@@ -67,30 +53,34 @@
             </StackPanel>
 
             <!-- SQL Authentication Fields -->
-            <StackPanel x:Name="SqlAuthPanel" Visibility="Collapsed" Margin="0,0,0,15">
-                <TextBlock Text="Username:" FontWeight="Bold" Margin="0,0,0,5"
+            <StackPanel x:Name="SqlAuthPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                <TextBlock Text="Username:" Margin="0,0,0,4"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <TextBox x:Name="UsernameTextBox" Height="25" Margin="0,0,0,15"/>
+                <TextBox x:Name="UsernameTextBox" Margin="0,0,0,8"/>
 
-                <TextBlock Text="Password:" FontWeight="Bold" Margin="0,0,0,5"
+                <TextBlock Text="Password:" Margin="0,0,0,4"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <PasswordBox x:Name="PasswordBox" Height="25" Margin="0,0,0,0"/>
+                <PasswordBox x:Name="PasswordBox"
+                             Background="{DynamicResource BackgroundDarkBrush}"
+                             Foreground="{DynamicResource ForegroundBrush}"
+                             BorderBrush="{DynamicResource BorderBrush}"
+                             Padding="6,4"/>
             </StackPanel>
 
             <!-- Microsoft Entra MFA Fields -->
-            <StackPanel x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,15">
-                <TextBlock Text="Username (optional):" FontWeight="Bold" Margin="0,0,0,5"
+            <StackPanel x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                <TextBlock Text="Username (optional):" Margin="0,0,0,4"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <TextBox x:Name="EntraMfaUsernameBox" Height="25" Margin="0,0,0,0"
+                <TextBox x:Name="EntraMfaUsernameBox"
                          ToolTip="Optional: Pre-populate the authentication dialog with this email address"/>
             </StackPanel>
 
             <!-- Connection Options -->
-            <TextBlock Text="Connection Options:" FontWeight="Bold" Margin="0,0,0,5"
+            <TextBlock Text="Connection Options:" Margin="0,0,0,4"
                        Foreground="{DynamicResource ForegroundBrush}"/>
-            <StackPanel Margin="0,0,0,15">
+            <StackPanel Margin="0,0,0,12">
                 <!-- Encryption Mode -->
-                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
                     <TextBlock Text="Encryption:" Width="140" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <ComboBox x:Name="EncryptModeComboBox" Width="150"
@@ -115,7 +105,7 @@
                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>
 
                 <!-- Description -->
-                <TextBlock Text="Description (optional):" FontWeight="Bold" Margin="0,4,0,5"
+                <TextBlock Text="Description (optional):" Margin="0,4,0,4"
                            Foreground="{DynamicResource ForegroundBrush}"/>
                 <TextBox x:Name="DescriptionTextBox" Height="60" TextWrapping="Wrap"
                          AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
