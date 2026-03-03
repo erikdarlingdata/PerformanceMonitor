@@ -77,10 +77,12 @@ public static class PlanAnalyzer
                 var wasteRatio = (double)grant.GrantedMemoryKB / grant.MaxUsedMemoryKB;
                 if (wasteRatio >= 10 && grant.GrantedMemoryKB >= 1048576)
                 {
+                    var grantMB = grant.GrantedMemoryKB / 1024.0;
+                    var usedMB = grant.MaxUsedMemoryKB / 1024.0;
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Excessive Memory Grant",
-                        Message = $"Granted {grant.GrantedMemoryKB:N0} KB but only used {grant.MaxUsedMemoryKB:N0} KB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
+                        Message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -217,31 +219,64 @@ public static class PlanAnalyzer
             }
         }
 
-        // Rule 30: Overly wide missing index suggestions
-        // Flag when SQL Server suggests an index with too many include columns (> 5)
-        // or too many key columns (> 4) — these "kitchen sink" indexes are rarely practical.
-        foreach (var mi in stmt.MissingIndexes)
+        // Rule 30: Missing index quality evaluation
         {
-            var keyCount = mi.EqualityColumns.Count + mi.InequalityColumns.Count;
-            var includeCount = mi.IncludeColumns.Count;
+            // Detect duplicate suggestions for the same table
+            var tableSuggestionCount = stmt.MissingIndexes
+                .GroupBy(mi => $"{mi.Schema}.{mi.Table}", StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
 
-            if (includeCount > 5)
+            foreach (var mi in stmt.MissingIndexes)
             {
-                stmt.PlanWarnings.Add(new PlanWarning
+                var keyCount = mi.EqualityColumns.Count + mi.InequalityColumns.Count;
+                var includeCount = mi.IncludeColumns.Count;
+                var tableKey = $"{mi.Schema}.{mi.Table}";
+
+                // Low-impact suggestion (< 25% improvement)
+                if (mi.Impact < 25)
                 {
-                    WarningType = "Wide Index Suggestion",
-                    Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
-                    Severity = PlanWarningSeverity.Warning
-                });
-            }
-            else if (keyCount > 4)
-            {
-                stmt.PlanWarnings.Add(new PlanWarning
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Low Impact Index",
+                        Message = $"Missing index suggestion for {mi.Table} has only {mi.Impact:F0}% estimated impact. Low-impact indexes add maintenance overhead (insert/update/delete cost) that may not justify the modest query improvement.",
+                        Severity = PlanWarningSeverity.Info
+                    });
+                }
+
+                // Wide INCLUDE columns (> 5)
+                if (includeCount > 5)
                 {
-                    WarningType = "Wide Index Suggestion",
-                    Message = $"Missing index suggestion for {mi.Table} has {keyCount} key columns ({mi.EqualityColumns.Count} equality + {mi.InequalityColumns.Count} inequality). Wide key columns increase index size and maintenance cost. Evaluate whether all key columns are needed for seek predicates.",
-                    Severity = PlanWarningSeverity.Warning
-                });
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Wide Index Suggestion",
+                        Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+                // Wide key columns (> 4)
+                else if (keyCount > 4)
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Wide Index Suggestion",
+                        Message = $"Missing index suggestion for {mi.Table} has {keyCount} key columns ({mi.EqualityColumns.Count} equality + {mi.InequalityColumns.Count} inequality). Wide key columns increase index size and maintenance cost. Evaluate whether all key columns are needed for seek predicates.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+
+                // Multiple suggestions for same table
+                if (tableSuggestionCount.TryGetValue(tableKey, out var count))
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Duplicate Index Suggestions",
+                        Message = $"{count} missing index suggestions target {mi.Table}. Multiple suggestions for the same table often overlap — consolidate into fewer, broader indexes rather than creating all of them.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                    // Only warn once per table
+                    tableSuggestionCount.Remove(tableKey);
+                }
             }
         }
     }
@@ -466,7 +501,7 @@ public static class PlanAnalyzer
                 "ISNULL/COALESCE wrapping column" =>
                     "ISNULL/COALESCE wrapping a column prevents an index seek. Rewrite the predicate to avoid wrapping the column, e.g. use \"WHERE col = @val OR col IS NULL\" instead of \"WHERE ISNULL(col, '') = @val\".",
                 "Leading wildcard LIKE pattern" =>
-                    "Leading wildcard LIKE (e.g. LIKE '%text') prevents an index seek — SQL Server must scan every row. If possible, use full-text indexing or reverse the search pattern.",
+                    "Leading wildcard LIKE prevents an index seek — SQL Server must scan every row. If substring search performance is critical, consider a full-text index or a trigram-based approach.",
                 "CASE expression in predicate" =>
                     "CASE expression in a predicate prevents an index seek. Rewrite using separate WHERE clauses combined with OR, or split into multiple queries.",
                 _ when nonSargableReason.StartsWith("Function call") =>
