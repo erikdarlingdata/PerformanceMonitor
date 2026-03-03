@@ -60,11 +60,7 @@
 
                 <TextBlock Text="Password:" Margin="0,0,0,4"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <PasswordBox x:Name="PasswordBox"
-                             Background="{DynamicResource BackgroundDarkBrush}"
-                             Foreground="{DynamicResource ForegroundBrush}"
-                             BorderBrush="{DynamicResource BorderBrush}"
-                             Padding="6,4"/>
+                <PasswordBox x:Name="PasswordBox"/>
             </StackPanel>
 
             <!-- Microsoft Entra MFA Fields -->
