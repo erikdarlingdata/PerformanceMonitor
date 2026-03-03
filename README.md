@@ -22,7 +22,7 @@
 | **Requires** | sysadmin + SQL Agent running | `VIEW SERVER STATE` (that's it) |
 | **Get started** | Run the installer, open the dashboard | Download, run, add a server, done |
 
-Both editions include real-time alerts (system tray + email), charts and graphs, dark theme, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude.
+Both editions include real-time alerts (system tray + email), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude.
 
 ---
 
@@ -38,11 +38,13 @@ Both editions include real-time alerts (system tray + email), charts and graphs,
 
 ## What You Get
 
-🔍 **30+ specialized T-SQL collectors** running on configurable schedules — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, and more
+🔍 **32 specialized T-SQL collectors** running on configurable schedules — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments.
 
 🚨 **Real-time alerts** for blocking, deadlocks, and high CPU — system tray notifications plus styled HTML emails with full XML attachments for offline analysis
 
-📊 **NOC-style dashboard** with green/yellow/red health cards, auto-refresh, configurable time ranges, and dark theme
+📊 **NOC-style dashboard** with green/yellow/red health cards, auto-refresh, configurable time ranges, and dark/light themes
+
+📋 **Graphical plan viewer** with native ShowPlan rendering, 30-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
 
 🤖 **Built-in MCP server** with 27-31 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
 
@@ -155,8 +157,10 @@ The installer automatically tests the connection, executes SQL scripts, download
 | `SERVER` | SQL Server instance name (positional, required) |
 | `USERNAME PASSWORD` | SQL Authentication credentials (positional, optional) |
 | `--reinstall` | Drop existing database and perform clean install |
+| `--preserve-jobs` | Keep existing SQL Agent job schedules during upgrade |
 | `--encrypt=optional\|mandatory\|strict` | Connection encryption level (default: mandatory) |
 | `--trust-cert` | Trust server certificate without validation (default: require valid cert) |
+| `--help` | Show usage information and exit |
 
 **Environment variable:** Set `PM_SQL_PASSWORD` to avoid passing the password on the command line.
 
@@ -190,7 +194,8 @@ ORDER BY collection_time DESC;
 ### What Gets Installed
 
 - **PerformanceMonitor database** with collection tables and reporting views
-- **30 collector stored procedures** for gathering metrics (including SQL Agent job monitoring)
+- **32 collector stored procedures** for gathering metrics (including SQL Agent job monitoring)
+- **Configurable collection** — query text and execution plan capture can be disabled per-collector via `config.collection_schedule` (`collect_query`, `collect_plan` columns) for sensitive or high-volume environments
 - **Delta framework** for calculating per-second rates from cumulative DMVs
 - **Community dependencies:** sp_WhoIsActive, sp_HealthParser, sp_HumanEventsBlockViewer, sp_BlitzLock
 - **SQL Agent jobs:** Collection (every 1 minute), Data Retention (daily at 2:00 AM), and Hung Job Monitor (collection job watchdog, every 5 minutes)
@@ -259,13 +264,16 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | AWS RDS for SQL Server | Supported | Supported |
 | Azure SQL Database | Not supported | Supported |
 | Multi-server from one seat | Per-server install | Built-in |
-| Collectors | 30 | 20 |
+| Collectors | 32 | 20 |
 | Agent job monitoring | Duration vs historical avg/p95 | Duration vs historical avg/p95 |
 | Data storage | SQL Server (on target) | DuckDB + Parquet (local) |
-| Execution plans | Collected and stored | Download on demand |
+| Execution plans | Collected and stored (can be disabled per-collector) | Download on demand |
+| Graphical plan viewer | Built-in with 30-rule PlanAnalyzer | Built-in with 30-rule PlanAnalyzer |
+| Standalone plan viewer | Open/paste/drag `.sqlplan` files | Open/paste/drag `.sqlplan` files |
 | Community tools (sp_WhoIsActive, sp_BlitzLock) | Installed automatically | Not needed |
 | Alerts (tray + email) | Blocking, deadlocks, CPU | Blocking, deadlocks, CPU |
 | Dashboard | Separate app | Built-in |
+| Themes | Dark and light | Dark and light |
 | Portability | Server-bound | Single executable |
 | MCP server (LLM integration) | Built into Dashboard (27 tools) | Built-in (31 tools) |
 
@@ -301,7 +309,7 @@ Plus a NOC-style landing page with server health cards (green/yellow/red severit
 | **Perfmon** | Selectable SQL Server performance counters over time |
 | **Configuration** | Server configuration, database configuration, scoped configuration, trace flags |
 
-Both editions feature auto-refresh, configurable time ranges, right-click CSV export, system tray integration, and dark theme.
+Both editions feature auto-refresh, configurable time ranges, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC).
 
 ---
 
@@ -463,7 +471,7 @@ Common issues:
 Monitor/
 │
 │   Full Edition (server-installed collectors + separate dashboard)
-├── install/          # 55 SQL installation scripts
+├── install/          # 54 SQL installation scripts
 ├── upgrades/         # Version-specific upgrade scripts
 ├── Installer/        # CLI installer for Full Edition database (C#)
 ├── InstallerGui/     # GUI installer for Full Edition database (WPF)

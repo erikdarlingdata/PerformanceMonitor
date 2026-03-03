@@ -775,6 +775,14 @@ END";
                     {
                         await connection.OpenAsync().ConfigureAwait(false);
 
+                        /*Capture timestamp before running so we only check errors from this run.
+                          Use SYSDATETIME() (local) because collection_time is stored in server local time.*/
+                        DateTime validationStart;
+                        using (var command = new SqlCommand("SELECT SYSDATETIME();", connection))
+                        {
+                            validationStart = (DateTime)(await command.ExecuteScalarAsync().ConfigureAwait(false))!;
+                        }
+
                         /*Run master collector once with @force_run_all to collect everything immediately*/
                         Console.Write("Executing master collector... ");
                         using (var command = new SqlCommand("EXECUTE PerformanceMonitor.collect.scheduled_master_collector @force_run_all = 1, @debug = 0;", connection))
@@ -785,37 +793,46 @@ END";
                         Console.WriteLine("✓ Success");
 
                         /*
-                        Verify data was collected
+                        Verify data was collected — only from this validation run, not historical errors
                         */
                         Console.WriteLine();
                         Console.Write("Verifying data collection... ");
 
-                        /* First check total count in collection_log */
-                        int totalLogEntries = 0;
-                        using (var command = new SqlCommand(@"
-                            SELECT COUNT(*) FROM PerformanceMonitor.config.collection_log;", connection))
-                        {
-                            totalLogEntries = (int)(await command.ExecuteScalarAsync().ConfigureAwait(false) ?? 0);
-                        }
-
-                        /* Check successful collections (all time - we just installed) */
+                        /* Check successful collections from this run */
                         int collectedCount = 0;
                         using (var command = new SqlCommand(@"
                             SELECT
                                 COUNT(DISTINCT collector_name)
                             FROM PerformanceMonitor.config.collection_log
-                            WHERE collection_status = 'SUCCESS';", connection))
+                            WHERE collection_status = 'SUCCESS'
+                            AND   collection_time >= @validation_start;", connection))
                         {
+                            command.Parameters.AddWithValue("@validation_start", validationStart);
                             collectedCount = (int)(await command.ExecuteScalarAsync().ConfigureAwait(false) ?? 0);
+                        }
+
+                        /* Total log entries from this run */
+                        int totalLogEntries = 0;
+                        using (var command = new SqlCommand(@"
+                            SELECT COUNT(*)
+                            FROM PerformanceMonitor.config.collection_log
+                            WHERE collection_time >= @validation_start;", connection))
+                        {
+                            command.Parameters.AddWithValue("@validation_start", validationStart);
+                            totalLogEntries = (int)(await command.ExecuteScalarAsync().ConfigureAwait(false) ?? 0);
                         }
 
                         Console.WriteLine($"✓ {collectedCount} collectors ran successfully (total log entries: {totalLogEntries})");
 
-                        /* Show failed collectors if any */
+                        /* Show failed collectors from this run */
                         int errorCount = 0;
                         using (var command = new SqlCommand(@"
-                            SELECT COUNT(*) FROM PerformanceMonitor.config.collection_log WHERE collection_status = 'ERROR';", connection))
+                            SELECT COUNT(*)
+                            FROM PerformanceMonitor.config.collection_log
+                            WHERE collection_status = 'ERROR'
+                            AND   collection_time >= @validation_start;", connection))
                         {
+                            command.Parameters.AddWithValue("@validation_start", validationStart);
                             errorCount = (int)(await command.ExecuteScalarAsync().ConfigureAwait(false) ?? 0);
                         }
 
@@ -829,8 +846,10 @@ END";
                                     error_message
                                 FROM PerformanceMonitor.config.collection_log
                                 WHERE collection_status = 'ERROR'
+                                AND   collection_time >= @validation_start
                                 ORDER BY collection_time DESC;", connection))
                             {
+                                command.Parameters.AddWithValue("@validation_start", validationStart);
                                 using (var reader = await command.ExecuteReaderAsync().ConfigureAwait(false))
                                 {
                                     while (await reader.ReadAsync().ConfigureAwait(false))
@@ -857,8 +876,10 @@ END";
                                     error_message
                                 FROM PerformanceMonitor.config.collection_log
                                 WHERE collection_status = 'SUCCESS'
+                                AND   collection_time >= @validation_start
                                 ORDER BY collection_time DESC;", connection))
                             {
+                                command.Parameters.AddWithValue("@validation_start", validationStart);
                                 using (var reader = await command.ExecuteReaderAsync().ConfigureAwait(false))
                                 {
                                     while (await reader.ReadAsync().ConfigureAwait(false))

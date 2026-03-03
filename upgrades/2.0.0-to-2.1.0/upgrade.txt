@@ -1,1 +1,2 @@
 01_collection_schedule_optional_text.sql
+02_default_trace_events_new_columns.sql

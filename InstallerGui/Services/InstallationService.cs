@@ -659,6 +659,14 @@ END;";
             using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
+            /*Capture timestamp before running so we only check errors from this run.
+              Use SYSDATETIME() (local) because collection_time is stored in server local time.*/
+            DateTime validationStart;
+            using (var command = new SqlCommand("SELECT SYSDATETIME();", connection))
+            {
+                validationStart = (DateTime)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+            }
+
             /*Run master collector with @force_run_all*/
             progress?.Report(new InstallationProgress
             {
@@ -680,7 +688,7 @@ END;";
                 Status = "Success"
             });
 
-            /*Check results*/
+            /*Check results — only from this validation run, not historical errors*/
             int successCount = 0;
             int errorCount = 0;
 
@@ -688,8 +696,10 @@ END;";
                 SELECT
                     success_count = COUNT_BIG(DISTINCT CASE WHEN collection_status = 'SUCCESS' THEN collector_name END),
                     error_count = SUM(CASE WHEN collection_status = 'ERROR' THEN 1 ELSE 0 END)
-                FROM PerformanceMonitor.config.collection_log;", connection))
+                FROM PerformanceMonitor.config.collection_log
+                WHERE collection_time >= @validation_start;", connection))
             {
+                command.Parameters.AddWithValue("@validation_start", validationStart);
                 using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
@@ -711,7 +721,9 @@ END;";
                     SELECT collector_name, error_message
                     FROM PerformanceMonitor.config.collection_log
                     WHERE collection_status = 'ERROR'
+                    AND   collection_time >= @validation_start
                     ORDER BY collection_time DESC;", connection);
+                command.Parameters.AddWithValue("@validation_start", validationStart);
 
                 using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
