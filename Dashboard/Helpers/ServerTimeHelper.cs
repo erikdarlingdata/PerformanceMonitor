@@ -53,5 +53,31 @@ namespace PerformanceMonitorDashboard.Helpers
             var utcTime = serverTime.AddMinutes(-_utcOffsetMinutes);
             return utcTime.ToLocalTime();
         }
+
+        /// <summary>
+        /// The current display mode preference. Read from UserPreferences at startup,
+        /// updated when the user changes the setting.
+        /// </summary>
+        public static TimeDisplayMode CurrentDisplayMode { get; set; } = TimeDisplayMode.ServerTime;
+
+        /// <summary>
+        /// Converts a server DateTime for display based on the selected display mode.
+        /// </summary>
+        public static DateTime ConvertForDisplay(DateTime serverTime, TimeDisplayMode mode) => mode switch
+        {
+            TimeDisplayMode.LocalTime => ToLocalTime(serverTime),
+            TimeDisplayMode.UTC => serverTime.AddMinutes(-_utcOffsetMinutes),
+            _ => serverTime
+        };
+
+        /// <summary>
+        /// Returns a short timezone label for the current display mode (e.g., "UTC", "PST", "UTC-8:00").
+        /// </summary>
+        public static string GetTimezoneLabel(TimeDisplayMode mode) => mode switch
+        {
+            TimeDisplayMode.LocalTime => TimeZoneInfo.Local.StandardName,
+            TimeDisplayMode.UTC => "UTC",
+            _ => $"UTC{(_utcOffsetMinutes >= 0 ? "+" : "")}{_utcOffsetMinutes / 60}:{Math.Abs(_utcOffsetMinutes % 60):D2}"
+        };
     }
 }

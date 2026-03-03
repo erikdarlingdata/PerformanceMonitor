@@ -79,7 +79,7 @@
                   ContextMenu="{DynamicResource DataGridContextMenu}"
                   Margin="10">
             <DataGrid.Columns>
-                <DataGridTextColumn Binding="{Binding EndTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                <DataGridTextColumn Binding="{Binding EndTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EndTime" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -175,7 +175,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding StartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                <DataGridTextColumn Binding="{Binding StartTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StartTime" Click="Filter_Click" Margin="0,0,4,0"/>

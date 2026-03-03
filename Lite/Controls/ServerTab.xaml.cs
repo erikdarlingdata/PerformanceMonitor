@@ -662,7 +662,8 @@ public partial class ServerTab : UserControl
             await UpdateMemoryClerksChartFromPickerAsync();
             await UpdatePerfmonChartFromPickerAsync();
 
-            ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss}";
+            var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
+            ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
 
             /* Notify parent of alert counts for tab badge.
                Include the latest event timestamp so acknowledgement is only

@@ -139,9 +139,11 @@ namespace PerformanceMonitorDashboard
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
-            // Sync CSV separator from preferences
+            // Sync preferences
             var startupPrefs = _preferencesService.GetPreferences();
             TabHelpers.CsvSeparator = startupPrefs.CsvSeparator;
+            if (Enum.TryParse<Helpers.TimeDisplayMode>(startupPrefs.TimeDisplayMode, out var tdm))
+                Helpers.ServerTimeHelper.CurrentDisplayMode = tdm;
 
             await LoadServerListAsync();
             InitializeNotificationService();

@@ -182,7 +182,7 @@
                           CanUserSortColumns="True" CanUserResizeColumns="True"
                           GridLinesVisibility="All" RowStyle="{StaticResource DefaultRowStyle}">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="160">
+                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="160">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="SevereErrorsFilter_Click" Margin="0,0,4,0"/>
@@ -190,7 +190,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="160">
+                    <DataGridTextColumn Binding="{Binding EventTime, Converter={StaticResource ServerTimeConverter}}" Width="160">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTime" Click="SevereErrorsFilter_Click" Margin="0,0,4,0"/>

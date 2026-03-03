@@ -11,6 +11,9 @@ namespace PerformanceMonitorDashboard.Models
 {
     public class UserPreferences
     {
+        // Time display mode: ServerTime, LocalTime, UTC
+        public string TimeDisplayMode { get; set; } = "ServerTime";
+
         // Default date range preferences (hours back)
         public int DefaultHoursBack { get; set; } = 24;
 

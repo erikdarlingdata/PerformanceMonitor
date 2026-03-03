@@ -81,7 +81,7 @@
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="ActiveQueriesFilter_Click" Margin="0,0,4,0"/>
@@ -225,7 +225,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding StartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding StartTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StartTime" Click="ActiveQueriesFilter_Click" Margin="0,0,4,0"/>
@@ -233,7 +233,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding TranStartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding TranStartTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TranStartTime" Click="ActiveQueriesFilter_Click" Margin="0,0,4,0"/>
@@ -567,7 +567,7 @@
                       RowStyle="{DynamicResource DefaultRowStyle}"
                       MouseDoubleClick="QueryStatsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
@@ -607,7 +607,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding CreationTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding CreationTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CreationTime" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
@@ -615,7 +615,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastExecutionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastExecutionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTime" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
@@ -861,7 +861,7 @@
                       RowStyle="{DynamicResource DefaultRowStyle}"
                       MouseDoubleClick="ProcStatsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="ProcStatsFilter_Click" Margin="0,0,4,0"/>
@@ -909,7 +909,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding CachedTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding CachedTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CachedTime" Click="ProcStatsFilter_Click" Margin="0,0,4,0"/>
@@ -917,7 +917,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastExecutionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastExecutionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTime" Click="ProcStatsFilter_Click" Margin="0,0,4,0"/>
@@ -1124,7 +1124,7 @@
                       RowStyle="{DynamicResource DefaultRowStyle}"
                       MouseDoubleClick="QueryStoreDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
@@ -1172,7 +1172,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding FirstExecutionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding FirstExecutionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FirstExecutionTime" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
@@ -1180,7 +1180,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastExecutionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastExecutionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTime" Click="QueryStoreFilter_Click" Margin="0,0,4,0"/>
@@ -1528,7 +1528,7 @@
                       RowStyle="{DynamicResource DefaultRowStyle}"
                       MouseDoubleClick="QueryStoreRegressionsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Binding="{Binding LastExecutionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastExecutionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTime" Click="QsRegressionsFilter_Click" Margin="0,0,4,0"/>
@@ -1777,7 +1777,7 @@
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
-                    <DataGridTextColumn Binding="{Binding LastExecution, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastExecution, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecution" Click="LrqPatternsFilter_Click" Margin="0,0,4,0"/>

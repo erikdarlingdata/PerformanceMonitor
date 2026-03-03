@@ -87,6 +87,17 @@
                                   Content="Focus server tab when clicking a server card"
                                   Margin="0,0,0,20"/>
 
+                        <!-- Time Display Section -->
+                        <TextBlock Text="Time Display" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                            <TextBlock Text="Show timestamps in:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <ComboBox x:Name="TimeDisplayModeComboBox" Width="140">
+                                <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
+                                <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
+                                <ComboBoxItem Content="UTC" Tag="UTC"/>
+                            </ComboBox>
+                        </StackPanel>
+
                         <!-- Color Theme Section -->
                         <TextBlock Text="Color Theme" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,0">

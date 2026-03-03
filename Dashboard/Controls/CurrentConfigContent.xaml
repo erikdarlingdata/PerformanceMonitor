@@ -80,7 +80,7 @@
                             </StackPanel>
                         </DataGridCheckBoxColumn.Header>
                     </DataGridCheckBoxColumn>
-                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastChanged, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastChanged" Click="ServerConfigFilter_Click" Margin="0,0,4,0"/>
@@ -142,7 +142,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastChanged, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastChanged" Click="DatabaseConfigFilter_Click" Margin="0,0,4,0"/>
@@ -196,7 +196,7 @@
                             </StackPanel>
                         </DataGridCheckBoxColumn.Header>
                     </DataGridCheckBoxColumn>
-                    <DataGridTextColumn Binding="{Binding LastChanged, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                    <DataGridTextColumn Binding="{Binding LastChanged, Converter={StaticResource ServerTimeConverter}}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastChanged" Click="TraceFlagsFilter_Click" Margin="0,0,4,0"/>

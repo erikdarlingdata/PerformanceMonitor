@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Helpers;
 
@@ -99,7 +100,7 @@ internal sealed class ChartHoverHelper
 
         if (bestPoint.IsReal && bestDistance < 2500) // ~50px radius
         {
-            var time = DateTime.FromOADate(bestPoint.X);
+            var time = ServerTimeHelper.ConvertForDisplay(DateTime.FromOADate(bestPoint.X), ServerTimeHelper.CurrentDisplayMode);
             _text.Text = $"{bestLabel}\n{bestPoint.Y:N1} {_unit}\n{time:HH:mm:ss}";
             _popup.HorizontalOffset = pos.X + 15;
             _popup.VerticalOffset = pos.Y + 15;

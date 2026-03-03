@@ -1,12 +1,14 @@
 <Application x:Class="PerformanceMonitorDashboard.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:helpers="clr-namespace:PerformanceMonitorDashboard.Helpers"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Themes/DarkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+            <helpers:ServerTimeConverter x:Key="ServerTimeConverter"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

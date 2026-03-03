@@ -84,6 +84,9 @@ public partial class App : Application
     /* System tray settings */
     public static bool MinimizeToTray { get; set; } = true;
 
+    /* Time display mode ("ServerTime", "LocalTime", "UTC") */
+    public static string TimeDisplayMode { get; set; } = "ServerTime";
+
     /* Color theme ("Dark" or "Light") */
     public static string ColorTheme { get; set; } = "Dark";
 
@@ -260,6 +263,18 @@ public partial class App : Application
 
             /* System tray settings */
             if (root.TryGetProperty("minimize_to_tray", out v)) MinimizeToTray = v.GetBoolean();
+
+            /* Time display mode */
+            if (root.TryGetProperty("time_display_mode", out v))
+            {
+                var t = v.GetString();
+                if (t == "ServerTime" || t == "LocalTime" || t == "UTC")
+                {
+                    TimeDisplayMode = t;
+                    if (Enum.TryParse<Helpers.TimeDisplayMode>(t, out var tdm))
+                        Services.ServerTimeHelper.CurrentDisplayMode = tdm;
+                }
+            }
 
             /* Color theme */
             if (root.TryGetProperty("color_theme", out v))

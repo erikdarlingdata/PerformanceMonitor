@@ -46,7 +46,7 @@
                     </StackPanel>
                 </DataGridTextColumn.Header>
             </DataGridTextColumn>
-            <DataGridTextColumn Binding="{Binding LogDate, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="160">
+            <DataGridTextColumn Binding="{Binding LogDate, Converter={StaticResource ServerTimeConverter}}" Width="160">
                 <DataGridTextColumn.Header>
                     <StackPanel Orientation="Horizontal">
                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LogDate" Click="CriticalIssuesFilter_Click" Margin="0,0,4,0"/>

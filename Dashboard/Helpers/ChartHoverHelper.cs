@@ -108,7 +108,7 @@ internal sealed class ChartHoverHelper
 
             if (found)
             {
-                var time = DateTime.FromOADate(bestPoint.X);
+                var time = ServerTimeHelper.ConvertForDisplay(DateTime.FromOADate(bestPoint.X), ServerTimeHelper.CurrentDisplayMode);
                 _text.Text = $"{bestLabel}\n{bestPoint.Y:N1} {_unit}\n{time:HH:mm:ss}";
                 _popup.HorizontalOffset = pos.X + 15;
                 _popup.VerticalOffset = pos.Y + 15;

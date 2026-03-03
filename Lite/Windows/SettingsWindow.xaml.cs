@@ -41,6 +41,7 @@ public partial class SettingsWindow : Window
         LoadConnectionTimeout();
         LoadCsvSeparator();
         LoadColorTheme();
+        LoadTimeDisplayMode();
         LoadAlertSettings();
         LoadSmtpSettings();
     }
@@ -115,6 +116,7 @@ public partial class SettingsWindow : Window
         SaveConnectionTimeout();
         SaveCsvSeparator();
         SaveColorTheme();
+        SaveTimeDisplayMode();
         SaveAlertSettings();
         SaveSmtpSettings();
 
@@ -368,6 +370,54 @@ public partial class SettingsWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("Settings", $"Failed to save color theme: {ex.Message}");
+        }
+    }
+
+    private void LoadTimeDisplayMode()
+    {
+        foreach (ComboBoxItem item in TimeDisplayModeCombo.Items)
+        {
+            if (item.Tag?.ToString() == App.TimeDisplayMode)
+            {
+                TimeDisplayModeCombo.SelectedItem = item;
+                break;
+            }
+        }
+        if (TimeDisplayModeCombo.SelectedItem == null)
+            TimeDisplayModeCombo.SelectedIndex = 0;
+    }
+
+    private void SaveTimeDisplayMode()
+    {
+        if (TimeDisplayModeCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string mode)
+        {
+            App.TimeDisplayMode = mode;
+            if (System.Enum.TryParse<Helpers.TimeDisplayMode>(mode, out var tdm))
+                ServerTimeHelper.CurrentDisplayMode = tdm;
+        }
+
+        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
+        try
+        {
+            JsonNode? root;
+            if (File.Exists(settingsPath))
+            {
+                var json = File.ReadAllText(settingsPath);
+                root = JsonNode.Parse(json) ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["time_display_mode"] = App.TimeDisplayMode;
+
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(settingsPath, root.ToJsonString(options));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save time display mode: {ex.Message}");
         }
     }
 

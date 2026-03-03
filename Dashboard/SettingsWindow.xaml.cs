@@ -106,6 +106,18 @@ namespace PerformanceMonitorDashboard
             // Navigation settings
             FocusServerTabCheckBox.IsChecked = prefs.FocusServerTabOnClick;
 
+            // Time display mode
+            foreach (ComboBoxItem item in TimeDisplayModeComboBox.Items)
+            {
+                if (item.Tag?.ToString() == prefs.TimeDisplayMode)
+                {
+                    TimeDisplayModeComboBox.SelectedItem = item;
+                    break;
+                }
+            }
+            if (TimeDisplayModeComboBox.SelectedItem == null)
+                TimeDisplayModeComboBox.SelectedIndex = 0;
+
             // Color theme
             foreach (System.Windows.Controls.ComboBoxItem item in ColorThemeComboBox.Items)
             {
@@ -507,6 +519,14 @@ namespace PerformanceMonitorDashboard
 
             // Save navigation settings
             prefs.FocusServerTabOnClick = FocusServerTabCheckBox.IsChecked == true;
+
+            // Save time display mode
+            if (TimeDisplayModeComboBox.SelectedItem is ComboBoxItem tdmItem && tdmItem.Tag != null)
+            {
+                prefs.TimeDisplayMode = tdmItem.Tag.ToString()!;
+                if (Enum.TryParse<TimeDisplayMode>(prefs.TimeDisplayMode, out var tdm))
+                    ServerTimeHelper.CurrentDisplayMode = tdm;
+            }
 
             // Save color theme
             if (ColorThemeComboBox.SelectedItem is ComboBoxItem themeItem && themeItem.Tag != null)

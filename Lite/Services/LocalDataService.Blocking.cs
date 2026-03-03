@@ -52,11 +52,36 @@ public static class ServerTimeHelper
         return utcTime.ToLocalTime();
     }
 
+    /// <summary>
+    /// The current display mode preference. Read from App settings at startup.
+    /// </summary>
+    public static Helpers.TimeDisplayMode CurrentDisplayMode { get; set; } = Helpers.TimeDisplayMode.ServerTime;
+
+    /// <summary>
+    /// Converts a server DateTime for display based on the selected display mode.
+    /// </summary>
+    public static DateTime ConvertForDisplay(DateTime serverTime, Helpers.TimeDisplayMode mode) => mode switch
+    {
+        Helpers.TimeDisplayMode.LocalTime => ToLocalTime(serverTime),
+        Helpers.TimeDisplayMode.UTC => serverTime.AddMinutes(-_utcOffsetMinutes),
+        _ => serverTime
+    };
+
+    /// <summary>
+    /// Returns a short timezone label for the current display mode.
+    /// </summary>
+    public static string GetTimezoneLabel(Helpers.TimeDisplayMode mode) => mode switch
+    {
+        Helpers.TimeDisplayMode.LocalTime => TimeZoneInfo.Local.StandardName,
+        Helpers.TimeDisplayMode.UTC => "UTC",
+        _ => $"UTC{(_utcOffsetMinutes >= 0 ? "+" : "")}{_utcOffsetMinutes / 60}:{Math.Abs(_utcOffsetMinutes % 60):D2}"
+    };
+
     public static string FormatServerTime(DateTime utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => utcTime.AddMinutes(_utcOffsetMinutes).ToString(format);
+        => ConvertForDisplay(utcTime.AddMinutes(_utcOffsetMinutes), CurrentDisplayMode).ToString(format);
 
     public static string FormatServerTime(DateTime? utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => utcTime.HasValue ? utcTime.Value.AddMinutes(_utcOffsetMinutes).ToString(format) : "";
+        => utcTime.HasValue ? ConvertForDisplay(utcTime.Value.AddMinutes(_utcOffsetMinutes), CurrentDisplayMode).ToString(format) : "";
 }
 
 public partial class LocalDataService

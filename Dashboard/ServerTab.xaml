@@ -273,7 +273,7 @@
                                                     </StackPanel>
                                                 </DataGridTextColumn.Header>
                                             </DataGridTextColumn>
-                                            <DataGridTextColumn Binding="{Binding LastSuccessTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                            <DataGridTextColumn Binding="{Binding LastSuccessTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                                 <DataGridTextColumn.Header>
                                                     <StackPanel Orientation="Horizontal">
                                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessTime" Click="CollectionHealthFilter_Click" Margin="0,0,4,0"/>
@@ -354,7 +354,7 @@
                                             <TextBlock Text="Job Name" FontWeight="Bold"/>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding StartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding StartTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <TextBlock Text="Start Time" FontWeight="Bold"/>
                                         </DataGridTextColumn.Header>
@@ -587,7 +587,7 @@
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding EventTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding EventTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTime" Click="BlockingEventsFilter_Click" Margin="0,0,4,0"/>
@@ -744,7 +744,7 @@
                                             </StackPanel>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="BlockingEventsFilter_Click" Margin="0,0,4,0"/>
@@ -776,7 +776,7 @@
                                       RowStyle="{StaticResource DefaultRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding EventDate, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding EventDate, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventDate" Click="DeadlocksFilter_Click" Margin="0,0,4,0"/>
@@ -944,7 +944,7 @@
                                             </StackPanel>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CollectionTime, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                                    <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
                                         <DataGridTextColumn.Header>
                                             <StackPanel Orientation="Horizontal">
                                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="DeadlocksFilter_Click" Margin="0,0,4,0"/>
