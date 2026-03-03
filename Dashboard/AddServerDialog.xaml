@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Add SQL Server"
-        Height="550" Width="500"
+        SizeToContent="Height" Width="500" MaxHeight="700"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         Background="{DynamicResource BackgroundBrush}"
@@ -24,7 +24,7 @@
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -34,97 +34,93 @@
                    Foreground="{DynamicResource ForegroundBrush}"/>
 
         <!-- Form Fields -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel>
-                <!-- Display Name -->
-                <TextBlock Text="Display Name:" FontWeight="Bold" Margin="0,0,0,5"
-                           Foreground="{DynamicResource ForegroundBrush}"/>
-                <TextBox x:Name="DisplayNameTextBox" Height="25" Margin="0,0,0,15"
-                         ToolTip="Friendly name to display in the server list"/>
+        <StackPanel Grid.Row="1">
+            <!-- Server Name/Address -->
+            <TextBlock Text="Server Name/Address:" FontWeight="Bold" Margin="0,0,0,5"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBox x:Name="ServerNameTextBox" Height="25" Margin="0,0,0,15"
+                     ToolTip="e.g., localhost, server.domain.com, 192.168.1.100, server\instance"/>
 
-                <!-- Server Name/Address -->
-                <TextBlock Text="Server Name/Address:" FontWeight="Bold" Margin="0,0,0,5"
-                           Foreground="{DynamicResource ForegroundBrush}"/>
-                <TextBox x:Name="ServerNameTextBox" Height="25" Margin="0,0,0,15"
-                         ToolTip="e.g., localhost, server.domain.com, 192.168.1.100, server\instance"/>
+            <!-- Display Name -->
+            <TextBlock Text="Display Name (optional):" FontWeight="Bold" Margin="0,0,0,5"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBox x:Name="DisplayNameTextBox" Height="25" Margin="0,0,0,15"
+                     ToolTip="Friendly name to display in the server list"/>
 
-                <!-- Authentication Type -->
-                <TextBlock Text="Authentication:" FontWeight="Bold" Margin="0,0,0,5"
+            <!-- Authentication Type -->
+            <TextBlock Text="Authentication:" FontWeight="Bold" Margin="0,0,0,5"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <StackPanel Margin="0,0,0,15">
+                <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication"
+                             GroupName="Auth" IsChecked="True"
+                             Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthType_Changed" Margin="0,0,0,4"/>
+                <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication"
+                             GroupName="Auth"
+                             Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthType_Changed" Margin="0,0,0,4"/>
+                <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft Entra MFA"
+                             GroupName="Auth"
+                             Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthType_Changed"
+                             ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
+            </StackPanel>
+
+            <!-- SQL Authentication Fields -->
+            <StackPanel x:Name="SqlAuthPanel" Visibility="Collapsed" Margin="0,0,0,15">
+                <TextBlock Text="Username:" FontWeight="Bold" Margin="0,0,0,5"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <StackPanel Margin="0,0,0,15">
-                    <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication"
-                                 GroupName="Auth" IsChecked="True"
-                                 Foreground="{DynamicResource ForegroundBrush}"
-                                 Checked="AuthType_Changed" Margin="0,0,0,4"/>
-                    <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication"
-                                 GroupName="Auth"
-                                 Foreground="{DynamicResource ForegroundBrush}"
-                                 Checked="AuthType_Changed" Margin="0,0,0,4"/>
-                    <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft Entra MFA"
-                                 GroupName="Auth"
-                                 Foreground="{DynamicResource ForegroundBrush}"
-                                 Checked="AuthType_Changed"
-                                 ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
+                <TextBox x:Name="UsernameTextBox" Height="25" Margin="0,0,0,15"/>
+
+                <TextBlock Text="Password:" FontWeight="Bold" Margin="0,0,0,5"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <PasswordBox x:Name="PasswordBox" Height="25" Margin="0,0,0,0"/>
+            </StackPanel>
+
+            <!-- Microsoft Entra MFA Fields -->
+            <StackPanel x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,15">
+                <TextBlock Text="Username (optional):" FontWeight="Bold" Margin="0,0,0,5"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBox x:Name="EntraMfaUsernameBox" Height="25" Margin="0,0,0,0"
+                         ToolTip="Optional: Pre-populate the authentication dialog with this email address"/>
+            </StackPanel>
+
+            <!-- Connection Options -->
+            <TextBlock Text="Connection Options:" FontWeight="Bold" Margin="0,0,0,5"
+                       Foreground="{DynamicResource ForegroundBrush}"/>
+            <StackPanel Margin="0,0,0,15">
+                <!-- Encryption Mode -->
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <TextBlock Text="Encryption:" Width="140" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="EncryptModeComboBox" Width="150"
+                              SelectedIndex="1"
+                              ToolTip="Optional: Encrypt if server supports it&#x0a;Mandatory: Always encrypt (fails if not supported)&#x0a;Strict: Full validation required">
+                        <ComboBoxItem Content="Optional"/>
+                        <ComboBoxItem Content="Mandatory"/>
+                        <ComboBoxItem Content="Strict"/>
+                    </ComboBox>
                 </StackPanel>
 
-                <!-- SQL Authentication Fields -->
-                <StackPanel x:Name="SqlAuthPanel" Visibility="Collapsed" Margin="0,0,0,15">
-                    <TextBlock Text="Username:" FontWeight="Bold" Margin="0,0,0,5"
-                               Foreground="{DynamicResource ForegroundBrush}"/>
-                    <TextBox x:Name="UsernameTextBox" Height="25" Margin="0,0,0,15"/>
-
-                    <TextBlock Text="Password:" FontWeight="Bold" Margin="0,0,0,5"
-                               Foreground="{DynamicResource ForegroundBrush}"/>
-                    <PasswordBox x:Name="PasswordBox" Height="25" Margin="0,0,0,0"/>
-                </StackPanel>
-
-                <!-- Microsoft Entra MFA Fields -->
-                <StackPanel x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,15">
-                    <TextBlock Text="Username (optional):" FontWeight="Bold" Margin="0,0,0,5"
-                               Foreground="{DynamicResource ForegroundBrush}"/>
-                    <TextBox x:Name="EntraMfaUsernameBox" Height="25" Margin="0,0,0,0"
-                             ToolTip="Optional: Pre-populate the authentication dialog with this email address"/>
-                </StackPanel>
-
-                <!-- Description -->
-                <TextBlock Text="Description (optional):" FontWeight="Bold" Margin="0,0,0,5"
-                           Foreground="{DynamicResource ForegroundBrush}"/>
-                <TextBox x:Name="DescriptionTextBox" Height="60" TextWrapping="Wrap"
-                         AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Margin="0,0,0,15"/>
+                <!-- Trust Server Certificate -->
+                <CheckBox x:Name="TrustServerCertificateCheckBox"
+                          Content="Trust server certificate (skip certificate validation)"
+                          IsChecked="False"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="When checked, accepts any server certificate without validation.&#x0a;Uncheck for stricter security (requires valid certificate)."
+                          Margin="0,0,0,6"/>
 
                 <!-- Is Favorite -->
-                <CheckBox x:Name="IsFavoriteCheckBox" Content="Mark as favorite (appears at top of list)" Margin="0,0,0,15"
-                          Foreground="{DynamicResource ForegroundBrush}"/>
+                <CheckBox x:Name="IsFavoriteCheckBox" Content="Mark as favorite (appears at top of list)"
+                          Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>
 
-                <!-- Connection Security Settings -->
-                <TextBlock Text="Connection Security:" FontWeight="Bold" Margin="0,0,0,5"
+                <!-- Description -->
+                <TextBlock Text="Description (optional):" FontWeight="Bold" Margin="0,4,0,5"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="10" Margin="0,0,0,15"
-                        Background="{DynamicResource BackgroundLightBrush}">
-                    <StackPanel>
-                        <!-- Encryption Mode -->
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                            <TextBlock Text="Encryption:" Width="140" VerticalAlignment="Center"
-                                       Foreground="{DynamicResource ForegroundBrush}"/>
-                            <ComboBox x:Name="EncryptModeComboBox" Width="150"
-                                      SelectedIndex="1"
-                                      ToolTip="Optional: Encrypt if server supports it&#x0a;Mandatory: Always encrypt (fails if not supported)&#x0a;Strict: Full validation required">
-                                <ComboBoxItem Content="Optional"/>
-                                <ComboBoxItem Content="Mandatory"/>
-                                <ComboBoxItem Content="Strict"/>
-                            </ComboBox>
-                        </StackPanel>
-
-                        <!-- Trust Server Certificate -->
-                        <CheckBox x:Name="TrustServerCertificateCheckBox"
-                                  Content="Trust Server Certificate (skip certificate validation)"
-                                  IsChecked="False"
-                                  Foreground="{DynamicResource ForegroundBrush}"
-                                  ToolTip="When checked, accepts any server certificate without validation.&#x0a;Uncheck for stricter security (requires valid certificate)."/>
-                    </StackPanel>
-                </Border>
+                <TextBox x:Name="DescriptionTextBox" Height="60" TextWrapping="Wrap"
+                         AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
             </StackPanel>
-        </ScrollViewer>
+        </StackPanel>
 
         <!-- Status -->
         <TextBlock x:Name="StatusText" Grid.Row="2"
