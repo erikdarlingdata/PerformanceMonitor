@@ -1441,6 +1441,38 @@ public partial class PlanViewerControl : UserControl
         }
     }
 
+    private void PlanViewerControl_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        Focus();
+    }
+
+    private void PlanViewerControl_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control
+            && e.OriginalSource is not TextBox)
+        {
+            var text = Clipboard.GetText();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                e.Handled = true;
+                try
+                {
+                    System.Xml.Linq.XDocument.Parse(text);
+                }
+                catch (System.Xml.XmlException ex)
+                {
+                    MessageBox.Show(
+                        $"The plan XML is not valid:\n\n{ex.Message}",
+                        "Invalid Plan XML",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                    return;
+                }
+                LoadPlan(text, "Pasted Plan");
+            }
+        }
+    }
+
     #endregion
 
     #region Save & Statement Selection

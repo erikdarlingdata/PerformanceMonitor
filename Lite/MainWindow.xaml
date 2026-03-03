@@ -156,10 +156,18 @@
                 </ListView>
 
                 <!-- Sidebar Footer -->
-                <Border Grid.Row="2" Padding="12" Background="{DynamicResource BackgroundLightBrush}">
+                <Border Grid.Row="2" Padding="12" Background="{DynamicResource BackgroundLightBrush}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
                     <StackPanel>
                         <Button x:Name="AddServerButton" Content="+ Add Server" Click="AddServerButton_Click"/>
                         <Button x:Name="ManageServersButton" Content="Manage Servers" Click="ManageServersButton_Click" Margin="0,8,0,0"/>
+                        <Button Click="OpenExternalPlanButton_Click" Margin="0,8,0,0"
+                                ToolTip="Open or paste an execution plan (independent of any server)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE9F5;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="Open External Plan" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="SettingsButton" Click="SettingsButton_Click" Margin="0,8,0,0">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -270,6 +278,24 @@
                     </TabItem>
                     <TabItem Header="Alert History" x:Name="AlertsTab">
                         <controls:AlertsHistoryTab x:Name="AlertsHistoryContent"/>
+                    </TabItem>
+                    <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
+                        <TabItem.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Plan Viewer" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                <Button Style="{DynamicResource TabCloseButton}"
+                                        Click="MainWindowPlanViewerClose_Click"
+                                        Margin="4,0,0,0"/>
+                            </StackPanel>
+                        </TabItem.Header>
+                        <Grid AllowDrop="True" PreviewDrop="MainWindowPlanViewer_Drop"
+                              PreviewDragOver="MainWindowPlanViewer_DragOver"
+                              Background="Transparent"
+                              Focusable="True" KeyDown="MainWindowPlanViewer_KeyDown">
+                            <TabControl x:Name="MainWindowPlanTabControl"
+                                        Background="Transparent"
+                                        BorderThickness="0"/>
+                        </Grid>
                     </TabItem>
                 </TabControl>
             </Grid>

@@ -2726,6 +2726,20 @@ public partial class ServerTab : UserControl
 
     private void OpenPlanTab(string planXml, string label, string? queryText = null)
     {
+        try
+        {
+            System.Xml.Linq.XDocument.Parse(planXml);
+        }
+        catch (System.Xml.XmlException ex)
+        {
+            MessageBox.Show(
+                $"The plan XML is not valid:\n\n{ex.Message}",
+                "Invalid Plan XML",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
         HidePlanLoading();
         var viewer = new PlanViewerControl();
         viewer.LoadPlan(planXml, label, queryText);
@@ -2763,143 +2777,6 @@ public partial class ServerTab : UserControl
                 PlanTabControl.Visibility = Visibility.Collapsed;
                 PlanEmptyState.Visibility = Visibility.Visible;
             }
-        }
-    }
-
-    private void OpenPlanFile_Click(object sender, RoutedEventArgs e)
-    {
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            Filter = "SQL Plan Files (*.sqlplan)|*.sqlplan|XML Files (*.xml)|*.xml|All Files (*.*)|*.*",
-            DefaultExt = ".sqlplan"
-        };
-        if (dialog.ShowDialog() != true) return;
-        LoadPlanFromFile(dialog.FileName);
-    }
-
-    private void PlanViewer_DragOver(object sender, DragEventArgs e)
-    {
-        if (e.Data.GetDataPresent(DataFormats.FileDrop))
-        {
-            var files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files?.Length > 0 && IsPlanFile(files[0]))
-            {
-                e.Effects = DragDropEffects.Copy;
-                e.Handled = true;
-                return;
-            }
-        }
-        e.Effects = DragDropEffects.None;
-        e.Handled = true;
-    }
-
-    private void PlanViewer_Drop(object sender, DragEventArgs e)
-    {
-        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
-        var files = e.Data.GetData(DataFormats.FileDrop) as string[];
-        if (files?.Length > 0 && IsPlanFile(files[0]))
-            LoadPlanFromFile(files[0]);
-    }
-
-    private void PastePlanXml_Click(object sender, RoutedEventArgs e)
-    {
-        var win = new Window
-        {
-            Title = "Paste Execution Plan XML",
-            Width = 700,
-            Height = 500,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Owner = Window.GetWindow(this),
-            Background = (System.Windows.Media.Brush)FindResource("BackgroundBrush")
-        };
-
-        var grid = new Grid { Margin = new Thickness(12) };
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-        var label = new TextBlock
-        {
-            Text = "Paste execution plan XML below and click Load Plan:",
-            Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush"),
-            Margin = new Thickness(0, 0, 0, 8)
-        };
-        Grid.SetRow(label, 0);
-
-        var textBox = new TextBox
-        {
-            AcceptsReturn = true,
-            AcceptsTab = true,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-            FontSize = 11,
-            Background = (System.Windows.Media.Brush)FindResource("BackgroundLightBrush"),
-            Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush"),
-            BorderThickness = new Thickness(1),
-            Padding = new Thickness(6),
-            TextWrapping = TextWrapping.NoWrap
-        };
-        Grid.SetRow(textBox, 1);
-
-        var btnPanel = new StackPanel
-        {
-            Orientation = System.Windows.Controls.Orientation.Horizontal,
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
-            Margin = new Thickness(0, 8, 0, 0)
-        };
-        var loadBtn = new Button { Content = "Load Plan", Width = 90, Height = 28, Padding = new Thickness(0) };
-        var cancelBtn = new Button { Content = "Cancel", Width = 70, Height = 28, Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(0) };
-        btnPanel.Children.Add(loadBtn);
-        btnPanel.Children.Add(cancelBtn);
-        Grid.SetRow(btnPanel, 2);
-
-        grid.Children.Add(label);
-        grid.Children.Add(textBox);
-        grid.Children.Add(btnPanel);
-        win.Content = grid;
-
-        cancelBtn.Click += (_, _) => win.Close();
-        loadBtn.Click += (_, _) =>
-        {
-            var xml = textBox.Text.Trim();
-            if (string.IsNullOrEmpty(xml)) return;
-            win.Close();
-            try
-            {
-                OpenPlanTab(xml, "Pasted Plan");
-                PlanViewerTabItem.IsSelected = true;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to parse plan XML:\n{ex.Message}", "Plan Parse Error",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        };
-
-        win.ShowDialog();
-    }
-
-    private static bool IsPlanFile(string path)
-    {
-        var ext = System.IO.Path.GetExtension(path);
-        return string.Equals(ext, ".sqlplan", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(ext, ".xml", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private void LoadPlanFromFile(string path)
-    {
-        try
-        {
-            var xml = System.IO.File.ReadAllText(path);
-            var label = System.IO.Path.GetFileName(path);
-            OpenPlanTab(xml, label);
-            PlanViewerTabItem.IsSelected = true;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Failed to load plan file:\n{ex.Message}", "Load Error",
-                MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 

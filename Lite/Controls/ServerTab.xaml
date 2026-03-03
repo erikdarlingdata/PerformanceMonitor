@@ -656,7 +656,7 @@
 
             <!-- Plan Viewer Tab -->
             <TabItem Header="Plan Viewer" x:Name="PlanViewerTabItem">
-                <Grid AllowDrop="True" PreviewDrop="PlanViewer_Drop" PreviewDragOver="PlanViewer_DragOver" Background="Transparent">
+                <Grid Background="Transparent">
                     <Grid x:Name="PlanEmptyState">
                         <!-- Dashed drop-zone border fills the whole tab -->
                         <Rectangle Margin="24"
@@ -676,16 +676,6 @@
                             <TextBlock Text="Right-click a query row and choose 'View Plan' or 'Get Actual Plan'"
                                        FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
                                        HorizontalAlignment="Center" Margin="0,8,0,0"/>
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,20,0,0">
-                                <Button Content="Open .sqlplan File" Click="OpenPlanFile_Click"
-                                        Height="28" Padding="12,0" ToolTip="Open a .sqlplan or .xml file from disk"/>
-                                <Button Content="Paste XML" Click="PastePlanXml_Click"
-                                        Height="28" Padding="12,0" Margin="8,0,0,0"
-                                        ToolTip="Paste execution plan XML to render it"/>
-                            </StackPanel>
-                            <TextBlock Text="or drag &amp; drop a .sqlplan file anywhere in this area"
-                                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,12,0,0"/>
                         </StackPanel>
                     </Grid>
                     <StackPanel x:Name="PlanLoadingState" HorizontalAlignment="Center"
