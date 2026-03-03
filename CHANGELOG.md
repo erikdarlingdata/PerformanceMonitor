@@ -55,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operator time per-thread calculation synced across all plan viewers ([#392])
 - Theme StaticResource/DynamicResource binding fix for runtime theme switching
 - Memory grant MB display, missing index quality scoring, wildcard LIKE detection ([#393])
+- **Installer validation** reporting historical collection errors as current failures — now filters to current run only ([#400])
+- **query_snapshots schema mismatch** after sp_WhoIsActive upgrade — collector auto-recreates daily table when column order changes ([#401])
+- **Missing upgrade script** for `default_trace_events` columns (`duration_us`, `end_time`) on 2.0.0→2.1.0 upgrade path ([#400])
 
 ## [2.0.0] - 2026-02-25
 
