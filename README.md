@@ -19,7 +19,7 @@
 |---|---|---|
 | **What it does** | Installs a `PerformanceMonitor` database with 30 T-SQL collectors running via SQL Agent. Separate dashboard app connects to view everything. | Single desktop app that monitors remotely. Stores data locally in DuckDB + Parquet. Nothing touches your server. |
 | **Best for** | Production 24/7 monitoring, long-term baselining | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting |
-| **Requires** | sysadmin + SQL Agent running | `VIEW SERVER STATE` (that's it) |
+| **Requires** | SQL Agent running ([see permissions](#permissions)) | `VIEW SERVER STATE` ([see permissions](#permissions)) |
 | **Get started** | Run the installer, open the dashboard | Download, run, add a server, done |
 
 Both editions include real-time alerts (system tray + email), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude.
@@ -461,7 +461,76 @@ Common issues:
 1. **No data after connecting** — Wait for the first collection cycle (1–5 minutes). Check logs for connection errors.
 2. **Query Store tab empty** — Query Store must be enabled on the target database (`ALTER DATABASE [YourDB] SET QUERY_STORE = ON`).
 3. **Blocked process reports empty** — Both editions attempt to auto-configure the blocked process threshold to 5 seconds via `sp_configure`. On **AWS RDS**, `sp_configure` is not available — you must set `blocked process threshold (s)` through an RDS Parameter Group (see "AWS RDS Parameter Group Configuration" above). On **Azure SQL Database**, the threshold is fixed at 20 seconds and cannot be changed. If you still see no data on other platforms, verify the login has `ALTER SETTINGS` permission.
-4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has `VIEW SERVER STATE`.
+4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has the required [permissions](#permissions). For Azure SQL Database, use a contained database user with `VIEW DATABASE STATE`.
+
+---
+
+## Permissions
+
+### Full Edition (On-Premises)
+
+The installer needs `sysadmin` to create the database, Agent jobs, and configure `sp_configure` settings. After installation, the collection jobs can run under a **least-privilege login** with these grants:
+
+```sql
+USE [master];
+CREATE LOGIN [SQLServerPerfMon] WITH PASSWORD = N'YourStrongPassword';
+GRANT VIEW SERVER STATE TO [SQLServerPerfMon];
+
+USE [PerformanceMonitor];
+CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
+ALTER ROLE [db_owner] ADD MEMBER [SQLServerPerfMon];
+
+USE [msdb];
+CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
+ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [SQLServerPerfMon];
+```
+
+| Grant | Why |
+|---|---|
+| `VIEW SERVER STATE` | All DMV access (wait stats, query stats, memory, CPU, file I/O, etc.) |
+| `db_owner` on PerformanceMonitor | Collectors insert data, create/alter tables, execute procedures. Scoped to just this database — not sysadmin. |
+| `SQLAgentReaderRole` on msdb | Read `sysjobs`, `sysjobactivity`, `sysjobhistory` for the running jobs collector |
+
+**Optional** (gracefully skipped if missing):
+- `ALTER SETTINGS` — installer sets `blocked process threshold` via `sp_configure`. Skipped with a warning if unavailable.
+- `ALTER TRACE` — default trace collector. Skipped if denied.
+- `DBCC TRACESTATUS` — server config collector skips trace flag detection if denied.
+
+Change the SQL Agent job owner to the new login after installation if you want to run under least privilege end-to-end.
+
+### Lite Edition (On-Premises)
+
+Nothing is installed on the target server. The login only needs:
+
+```sql
+USE [master];
+GRANT VIEW SERVER STATE TO [YourLogin];
+
+-- Optional: for SQL Agent job monitoring
+USE [msdb];
+CREATE USER [YourLogin] FOR LOGIN [YourLogin];
+ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [YourLogin];
+```
+
+### Azure SQL Database (Lite Only)
+
+Azure SQL Database doesn't support server-level logins. Create a **contained database user** directly on the target database:
+
+```sql
+-- Connect to your target database (not master)
+CREATE USER [SQLServerPerfMon] WITH PASSWORD = 'YourStrongPassword';
+GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
+```
+
+When connecting in Lite, specify the database name in the connection. SQL Agent and msdb are not available on Azure SQL Database — those collectors are skipped automatically.
+
+### Azure SQL Managed Instance
+
+Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Agent is available.
+
+### AWS RDS for SQL Server
+
+Use the RDS master user for installation. The master user has the necessary permissions. For ongoing collection, `VIEW SERVER STATE` and msdb access work the same as on-premises, but `sp_configure` is not available (use RDS Parameter Groups instead — see above).
 
 ---
 
