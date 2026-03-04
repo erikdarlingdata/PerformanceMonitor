@@ -417,6 +417,25 @@ namespace PerformanceMonitorInstallerGui
                     cancellationToken);
 
                 /*
+                Log installation history to database
+                */
+                try
+                {
+                    await InstallationService.LogInstallationHistoryAsync(
+                        _connectionString,
+                        AppAssemblyVersion,
+                        AppVersion,
+                        _installationResult.StartTime,
+                        _installationResult.FilesSucceeded,
+                        _installationResult.FilesFailed,
+                        _installationResult.Success);
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"Warning: Could not log installation history: {ex.Message}", "Warning");
+                }
+
+                /*
                 Run validation if requested
                 */
                 if (_installationResult.Success && ValidationCheckBox.IsChecked == true)
