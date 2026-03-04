@@ -30,6 +30,8 @@ public static class PlanIconMapper
         ["Index Scan"] = "index_scan",
         ["Index Seek"] = "index_seek",
         ["Index Spool"] = "index_spool",
+        ["Eager Index Spool"] = "index_spool",
+        ["Lazy Index Spool"] = "index_spool",
         ["Index Update"] = "index_update",
 
         // Columnstore
@@ -74,7 +76,11 @@ public static class PlanIconMapper
 
         // Spool
         ["Table Spool"] = "table_spool",
+        ["Eager Table Spool"] = "table_spool",
+        ["Lazy Table Spool"] = "table_spool",
         ["Row Count Spool"] = "row_count_spool",
+        ["Eager Row Count Spool"] = "row_count_spool",
+        ["Lazy Row Count Spool"] = "row_count_spool",
         ["Window Spool"] = "table_spool",
         ["Eager Spool"] = "table_spool",
         ["Lazy Spool"] = "table_spool",

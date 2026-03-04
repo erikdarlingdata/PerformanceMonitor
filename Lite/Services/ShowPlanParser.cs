@@ -631,6 +631,19 @@ public static class ShowPlanParser
             StatsCollectionId = ParseLong(relOpEl.Attribute("StatsCollectionId")?.Value)
         };
 
+        // Spool operators: prepend Eager/Lazy from LogicalOp to PhysicalOp
+        // XML has PhysicalOp="Index Spool" but LogicalOp="Eager Spool" — show "Eager Index Spool"
+        if (node.PhysicalOp.EndsWith("Spool", StringComparison.OrdinalIgnoreCase)
+            && node.LogicalOp.StartsWith("Eager", StringComparison.OrdinalIgnoreCase))
+        {
+            node.PhysicalOp = "Eager " + node.PhysicalOp;
+        }
+        else if (node.PhysicalOp.EndsWith("Spool", StringComparison.OrdinalIgnoreCase)
+            && node.LogicalOp.StartsWith("Lazy", StringComparison.OrdinalIgnoreCase))
+        {
+            node.PhysicalOp = "Lazy " + node.PhysicalOp;
+        }
+
         // Map to icon
         node.IconName = PlanIconMapper.GetIconName(node.PhysicalOp);
 
@@ -1429,10 +1442,32 @@ public static class ShowPlanParser
 
         if (warningsEl.Attribute("UnmatchedIndexes")?.Value is "true" or "1")
         {
+            var unmatchedMsg = "Indexes could not be matched due to parameterization";
+            var unmatchedEl = warningsEl.Element(Ns + "UnmatchedIndexes");
+            if (unmatchedEl != null)
+            {
+                var unmatchedDetails = new List<string>();
+                foreach (var paramEl in unmatchedEl.Elements(Ns + "Parameterization"))
+                {
+                    var db = paramEl.Attribute("Database")?.Value?.Replace("[", "").Replace("]", "");
+                    var schema = paramEl.Attribute("Schema")?.Value?.Replace("[", "").Replace("]", "");
+                    var table = paramEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "");
+                    var index = paramEl.Attribute("Index")?.Value?.Replace("[", "").Replace("]", "");
+                    var parts = new List<string>();
+                    if (!string.IsNullOrEmpty(db)) parts.Add(db);
+                    if (!string.IsNullOrEmpty(schema)) parts.Add(schema);
+                    if (!string.IsNullOrEmpty(table)) parts.Add(table);
+                    if (!string.IsNullOrEmpty(index)) parts.Add(index);
+                    if (parts.Count > 0)
+                        unmatchedDetails.Add(string.Join(".", parts));
+                }
+                if (unmatchedDetails.Count > 0)
+                    unmatchedMsg += ": " + string.Join(", ", unmatchedDetails);
+            }
             result.Add(new PlanWarning
             {
                 WarningType = "Unmatched Indexes",
-                Message = "Indexes could not be matched due to parameterization",
+                Message = unmatchedMsg,
                 Severity = PlanWarningSeverity.Warning
             });
         }
