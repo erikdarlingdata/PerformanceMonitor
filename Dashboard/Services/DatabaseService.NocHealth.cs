@@ -620,7 +620,7 @@ namespace PerformanceMonitorDashboard.Services
             bool excludeBackups = true,
             bool excludeMiscWaits = true)
         {
-            maxResults = Math.Clamp(maxResults, 1, int.MaxValue);
+            maxResults = Math.Clamp(maxResults, 1, 1000);
 
             string spServerDiagnosticsFilter = excludeSpServerDiagnostics
                 ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'" : "";
@@ -633,7 +633,7 @@ namespace PerformanceMonitorDashboard.Services
 
             string query = @$"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-                SELECT TOP({maxResults})
+                SELECT TOP(@maxResults)
                     r.session_id,
                     DB_NAME(r.database_id) AS database_name,
                     SUBSTRING(t.text, 1, 300) AS query_text,
@@ -664,6 +664,7 @@ namespace PerformanceMonitorDashboard.Services
                 using var cmd = new SqlCommand(query, connection);
                 cmd.CommandTimeout = 10;
                 cmd.Parameters.Add(new SqlParameter("@thresholdMs", SqlDbType.BigInt) { Value = (long)thresholdMinutes * 60 * 1000 });
+                cmd.Parameters.Add(new SqlParameter("@maxResults", SqlDbType.Int) { Value = maxResults});
                 using var reader = await cmd.ExecuteReaderAsync();
 
                 while (await reader.ReadAsync())

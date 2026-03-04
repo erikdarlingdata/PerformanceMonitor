@@ -204,8 +204,6 @@ LIMIT 3";
         bool excludeBackups = true,
         bool excludeMiscWaits = true)
     {
-        maxResults = Math.Clamp(maxResults, 1, int.MaxValue);
-
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -219,7 +217,7 @@ LIMIT 3";
             ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
         string miscWaitsFilter = excludeMiscWaits
             ? "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')" : "";
-
+        maxResults = Math.Clamp(maxResults, 1, 1000);
 
         command.CommandText = @$"
                 SELECT
@@ -242,10 +240,11 @@ LIMIT 3";
                     {miscWaitsFilter}
                     AND r.total_elapsed_time_ms >= $2
                 ORDER BY r.total_elapsed_time_ms DESC
-                LIMIT {maxResults};";
+                LIMIT $3;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = thresholdMs });
+        command.Parameters.Add(new DuckDBParameter { Value = maxResults });
 
         var items = new List<LongRunningQueryInfo>();
         using var reader = await command.ExecuteReaderAsync();
