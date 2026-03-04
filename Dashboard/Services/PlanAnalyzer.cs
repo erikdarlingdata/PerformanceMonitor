@@ -10,24 +10,16 @@ namespace PerformanceMonitorDashboard.Services;
 /// Post-parse analysis pass that walks a parsed plan tree and adds warnings
 /// for common performance anti-patterns. Called after ShowPlanParser.Parse().
 /// </summary>
-public static class PlanAnalyzer
+public static partial class PlanAnalyzer
 {
-    private static readonly Regex FunctionInPredicateRegex = new(
-        @"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex FunctionInPredicateRegex = FunctionInPredicateRegExp();
 
-    private static readonly Regex LeadingWildcardLikeRegex = new(
-        @"\blike\b[^'""]*?N?'%",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex LeadingWildcardLikeRegex = LeadingWildcardLikeRegExp();
 
-    private static readonly Regex CaseInPredicateRegex = new(
-        @"\bCASE\s+(WHEN\b|$)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex CaseInPredicateRegex = CaseInPredicateRegExp();
 
     // Matches CTE definitions: WITH name AS ( or , name AS (
-    private static readonly Regex CteDefinitionRegex = new(
-        @"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex CteDefinitionRegex = CteDefinitionRegExp();
 
     public static void Analyze(ParsedPlan plan)
     {
@@ -686,7 +678,7 @@ public static class PlanAnalyzer
 
         // Rule 22: Table variables (Object name starts with @)
         if (!string.IsNullOrEmpty(node.ObjectName) &&
-            node.ObjectName.StartsWith("@"))
+            node.ObjectName.StartsWith('@'))
         {
             node.Warnings.Add(new PlanWarning
             {
@@ -890,7 +882,7 @@ public static class PlanAnalyzer
             return "Implicit conversion (CONVERT_IMPLICIT)";
 
         // ISNULL / COALESCE wrapping column
-        if (Regex.IsMatch(predicate, @"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase))
+        if (IsNullCoalesceRegExp().IsMatch(predicate))
             return "ISNULL/COALESCE wrapping column";
 
         // Common function calls on columns
@@ -930,7 +922,7 @@ public static class PlanAnalyzer
             var refPattern = new Regex(
                 $@"\b(FROM|JOIN)\s+{Regex.Escape(cteName)}\b",
                 RegexOptions.IgnoreCase);
-            var refCount = refPattern.Matches(text).Count;
+            var refCount = refPattern.Count(text);
 
             if (refCount > 1)
             {
@@ -1243,4 +1235,15 @@ public static class PlanAnalyzer
     {
         return value.Length <= maxLength ? value : value[..maxLength] + "...";
     }
+
+    [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex FunctionInPredicateRegExp();
+    [GeneratedRegex(@"\blike\b[^'""]*?N?'%", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex LeadingWildcardLikeRegExp();
+    [GeneratedRegex(@"\bCASE\s+(WHEN\b|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex CaseInPredicateRegExp();
+    [GeneratedRegex(@"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex CteDefinitionRegExp();
+    [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex IsNullCoalesceRegExp();
 }

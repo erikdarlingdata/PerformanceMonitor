@@ -62,7 +62,7 @@ namespace PerformanceMonitorInstallerGui.Services
     /// <summary>
     /// Service for installing the Performance Monitor database
     /// </summary>
-    public class InstallationService : IDisposable
+    public partial class InstallationService : IDisposable
     {
         private readonly HttpClient _httpClient;
         private bool _disposed;
@@ -70,9 +70,7 @@ namespace PerformanceMonitorInstallerGui.Services
         /*
         Compiled regex patterns for better performance
         */
-        private static readonly Regex SqlFilePattern = new(
-            @"^\d{2}[a-z]?_.*\.sql$",
-            RegexOptions.Compiled);
+        private static readonly Regex SqlFilePattern = SqlFileRegExp();
 
         private static readonly Regex SqlCmdDirectivePattern = new(
             @"^:r\s+.*$",
@@ -1429,5 +1427,8 @@ END;";
                 /*Don't let history logging failure break the installation*/
             }
         }
+
+        [GeneratedRegex(@"^\d{2}[a-z]?_.*\.sql$", RegexOptions.Compiled)]
+        private static partial Regex SqlFileRegExp();
     }
 }

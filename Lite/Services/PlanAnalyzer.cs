@@ -10,11 +10,9 @@ namespace PerformanceMonitorLite.Services;
 /// Post-parse analysis pass that walks a parsed plan tree and adds warnings
 /// for common performance anti-patterns. Called after ShowPlanParser.Parse().
 /// </summary>
-public static class PlanAnalyzer
+public static partial class PlanAnalyzer
 {
-    private static readonly Regex FunctionInPredicateRegex = new(
-        @"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex FunctionInPredicateRegex = FunctionInPredicateRegExp();
 
     private static readonly Regex LeadingWildcardLikeRegex = new(
         @"\blike\b[^'""]*?N?'%",
@@ -686,7 +684,7 @@ public static class PlanAnalyzer
 
         // Rule 22: Table variables (Object name starts with @)
         if (!string.IsNullOrEmpty(node.ObjectName) &&
-            node.ObjectName.StartsWith("@"))
+            node.ObjectName.StartsWith('@'))
         {
             node.Warnings.Add(new PlanWarning
             {
@@ -930,7 +928,7 @@ public static class PlanAnalyzer
             var refPattern = new Regex(
                 $@"\b(FROM|JOIN)\s+{Regex.Escape(cteName)}\b",
                 RegexOptions.IgnoreCase);
-            var refCount = refPattern.Matches(text).Count;
+            var refCount = refPattern.Count(text);
 
             if (refCount > 1)
             {
@@ -1243,4 +1241,7 @@ public static class PlanAnalyzer
     {
         return value.Length <= maxLength ? value : value[..maxLength] + "...";
     }
+
+    [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    private static partial Regex FunctionInPredicateRegExp();
 }
