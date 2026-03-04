@@ -459,7 +459,7 @@ public static partial class PlanAnalyzer
 
         // Rule 10: Key Lookup / RID Lookup with residual predicate
         // Check RID Lookup first — it's more specific (PhysicalOp) and also has Lookup=true
-        if (node.PhysicalOp == "RID Lookup")
+        if (node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
         {
             var message = "RID Lookup — this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
             if (!string.IsNullOrEmpty(node.Predicate))
