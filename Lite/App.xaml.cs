@@ -64,6 +64,11 @@ public partial class App : Application
     public static int AlertPoisonWaitThresholdMs { get; set; } = 500;
     public static bool AlertLongRunningQueryEnabled { get; set; } = true;
     public static int AlertLongRunningQueryThresholdMinutes { get; set; } = 30;
+    public static int AlertLongRunningQueryMaxResults { get; set; } = 5;
+    public static bool AlertLongRunningQueryExcludeSpServerDiagnostics { get; set; } = true;
+    public static bool AlertLongRunningQueryExcludeWaitFor { get; set; } = true;
+    public static bool AlertLongRunningQueryExcludeBackups { get; set; } = true;
+    public static bool AlertLongRunningQueryExcludeMiscWaits { get; set; } = true;
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
     public static bool AlertLongRunningJobEnabled { get; set; } = true;
@@ -242,6 +247,11 @@ public partial class App : Application
             if (root.TryGetProperty("alert_poison_wait_threshold_ms", out v)) AlertPoisonWaitThresholdMs = v.GetInt32();
             if (root.TryGetProperty("alert_long_running_query_enabled", out v)) AlertLongRunningQueryEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.GetInt32();
+            if (root.TryGetProperty("alert_long_running_query_max_results", out v)) AlertLongRunningQueryMaxResults = (int)Math.Clamp(v.GetInt64(), 1, 1000);
+            if (root.TryGetProperty("alert_long_running_query_exclude_sp_server_diagnostics", out v)) AlertLongRunningQueryExcludeSpServerDiagnostics = v.GetBoolean();
+            if (root.TryGetProperty("alert_long_running_query_exclude_waitfor", out v)) AlertLongRunningQueryExcludeWaitFor = v.GetBoolean();
+            if (root.TryGetProperty("alert_long_running_query_exclude_backups", out v)) AlertLongRunningQueryExcludeBackups = v.GetBoolean();
+            if (root.TryGetProperty("alert_long_running_query_exclude_misc_waits", out v)) AlertLongRunningQueryExcludeMiscWaits = v.GetBoolean();
             if (root.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.GetInt32();
             if (root.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.GetBoolean();
