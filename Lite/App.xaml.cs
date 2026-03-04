@@ -69,6 +69,7 @@ public partial class App : Application
     public static bool AlertLongRunningQueryExcludeWaitFor { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeBackups { get; set; } = true;
     public static bool AlertLongRunningQueryExcludeMiscWaits { get; set; } = true;
+    public static List<string> AlertExcludedDatabases { get; set; } = new();
     public static bool AlertTempDbSpaceEnabled { get; set; } = true;
     public static int AlertTempDbSpaceThresholdPercent { get; set; } = 80;
     public static bool AlertLongRunningJobEnabled { get; set; } = true;
@@ -252,6 +253,15 @@ public partial class App : Application
             if (root.TryGetProperty("alert_long_running_query_exclude_waitfor", out v)) AlertLongRunningQueryExcludeWaitFor = v.GetBoolean();
             if (root.TryGetProperty("alert_long_running_query_exclude_backups", out v)) AlertLongRunningQueryExcludeBackups = v.GetBoolean();
             if (root.TryGetProperty("alert_long_running_query_exclude_misc_waits", out v)) AlertLongRunningQueryExcludeMiscWaits = v.GetBoolean();
+            if (root.TryGetProperty("alert_excluded_databases", out v) && v.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                AlertExcludedDatabases = new List<string>();
+                foreach (var elem in v.EnumerateArray())
+                {
+                    var db = elem.GetString();
+                    if (!string.IsNullOrWhiteSpace(db)) AlertExcludedDatabases.Add(db);
+                }
+            }
             if (root.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.GetInt32();
             if (root.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.GetBoolean();

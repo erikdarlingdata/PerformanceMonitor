@@ -8,6 +8,7 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorDashboard.Helpers;
@@ -167,6 +168,7 @@ namespace PerformanceMonitorDashboard
             LrqExcludeWaitForCheckBox.IsChecked = prefs.LongRunningQueryExcludeWaitFor;
             LrqExcludeBackupsCheckBox.IsChecked = prefs.LongRunningQueryExcludeBackups;
             LrqExcludeMiscWaitsCheckBox.IsChecked = prefs.LongRunningQueryExcludeMiscWaits;
+            AlertExcludedDatabasesTextBox.Text = string.Join(", ", prefs.AlertExcludedDatabases);
             NotifyOnTempDbSpaceCheckBox.IsChecked = prefs.NotifyOnTempDbSpace;
             TempDbSpaceThresholdTextBox.Text = prefs.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
             NotifyOnLongRunningJobsCheckBox.IsChecked = prefs.NotifyOnLongRunningJobs;
@@ -599,6 +601,11 @@ namespace PerformanceMonitorDashboard
             prefs.LongRunningQueryExcludeWaitFor = LrqExcludeWaitForCheckBox.IsChecked == true;
             prefs.LongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true;
             prefs.LongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
+            prefs.AlertExcludedDatabases = AlertExcludedDatabasesTextBox.Text
+                .Split(',')
+                .Select(s => s.Trim())
+                .Where(s => s.Length > 0)
+                .ToList();
 
             prefs.NotifyOnTempDbSpace = NotifyOnTempDbSpaceCheckBox.IsChecked == true;
             if (int.TryParse(TempDbSpaceThresholdTextBox.Text, out int tempDbThreshold) && tempDbThreshold > 0 && tempDbThreshold <= 100)

@@ -1124,6 +1124,13 @@ public partial class MainWindow : Window
             {
                 var longRunning = await _dataService.GetLongRunningQueriesAsync(summary.ServerId, App.AlertLongRunningQueryThresholdMinutes, App.AlertLongRunningQueryMaxResults, App.AlertLongRunningQueryExcludeSpServerDiagnostics, App.AlertLongRunningQueryExcludeWaitFor, App.AlertLongRunningQueryExcludeBackups, App.AlertLongRunningQueryExcludeMiscWaits);
 
+                if (App.AlertExcludedDatabases.Count > 0)
+                    longRunning = longRunning
+                        .Where(q => string.IsNullOrEmpty(q.DatabaseName) ||
+                            !App.AlertExcludedDatabases.Any(e =>
+                                string.Equals(e, q.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                        .ToList();
+
                 if (longRunning.Count > 0)
                 {
                     _activeLongRunningQueryAlert[key] = true;

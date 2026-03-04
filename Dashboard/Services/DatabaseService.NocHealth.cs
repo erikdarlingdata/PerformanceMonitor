@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorDashboard.Helpers;
@@ -129,7 +130,8 @@ namespace PerformanceMonitorDashboard.Services
             bool excludeSpServerDiagnostics = true,
             bool excludeWaitFor = true,
             bool excludeBackups = true,
-            bool excludeMiscWaits = true)
+            bool excludeMiscWaits = true,
+            IReadOnlyList<string>? excludedDatabases = null)
         {
             var result = new AlertHealthResult();
 
@@ -141,7 +143,7 @@ namespace PerformanceMonitorDashboard.Services
                 result.IsOnline = true;
 
                 var cpuTask = GetCpuPercentAsync(connection, engineEdition);
-                var blockingTask = GetBlockingValuesAsync(connection);
+                var blockingTask = GetBlockingValuesAsync(connection, excludedDatabases ?? Array.Empty<string>());
                 var deadlockTask = GetDeadlockCountAsync(connection);
                 var poisonWaitTask = GetPoisonWaitDeltasAsync(connection);
                 var longRunningTask = GetLongRunningQueriesAsync(connection, longRunningQueryThresholdMinutes, longRunningQueryMaxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits);
@@ -177,9 +179,12 @@ namespace PerformanceMonitorDashboard.Services
         /// Returns blocking values directly (without writing to a ServerHealthStatus).
         /// Used by GetAlertHealthAsync for lightweight alert checks.
         /// </summary>
-        private async Task<(long TotalBlocked, decimal LongestBlockedSeconds)> GetBlockingValuesAsync(SqlConnection connection)
+        private async Task<(long TotalBlocked, decimal LongestBlockedSeconds)> GetBlockingValuesAsync(SqlConnection connection, IReadOnlyList<string> excludedDatabases)
         {
-            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+            var dbFilter = excludedDatabases.Count > 0
+                ? $"AND DB_NAME(s.dbid) NOT IN ({string.Join(", ", excludedDatabases.Select(db => $"N'{db.Replace("'", "''")}'"))})"
+                : "";
+            var query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
                 SELECT
                     total_blocked = COUNT_BIG(*),
@@ -187,6 +192,7 @@ namespace PerformanceMonitorDashboard.Services
                 FROM sys.sysprocesses AS s
                 WHERE s.blocked <> 0
                 AND   s.lastwaittype LIKE N'LCK%'
+                {dbFilter}
                 OPTION(MAXDOP 1, RECOMPILE);";
 
             try

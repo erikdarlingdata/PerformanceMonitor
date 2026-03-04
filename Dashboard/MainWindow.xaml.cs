@@ -1065,7 +1065,7 @@ namespace PerformanceMonitorDashboard
                     var connectionString = server.GetConnectionString(_credentialService);
                     var databaseService = new DatabaseService(connectionString);
                     var connStatus = _serverManager.GetConnectionStatus(server.Id);
-                    var health = await databaseService.GetAlertHealthAsync(connStatus.SqlEngineEdition, prefs.LongRunningQueryThresholdMinutes, prefs.LongRunningJobMultiplier, prefs.LongRunningQueryMaxResults, prefs.LongRunningQueryExcludeSpServerDiagnostics, prefs.LongRunningQueryExcludeWaitFor, prefs.LongRunningQueryExcludeBackups, prefs.LongRunningQueryExcludeMiscWaits);
+                    var health = await databaseService.GetAlertHealthAsync(connStatus.SqlEngineEdition, prefs.LongRunningQueryThresholdMinutes, prefs.LongRunningJobMultiplier, prefs.LongRunningQueryMaxResults, prefs.LongRunningQueryExcludeSpServerDiagnostics, prefs.LongRunningQueryExcludeWaitFor, prefs.LongRunningQueryExcludeBackups, prefs.LongRunningQueryExcludeMiscWaits, prefs.AlertExcludedDatabases);
 
                     if (health.IsOnline)
                     {
@@ -1169,7 +1169,7 @@ namespace PerformanceMonitorDashboard
                         deadlockDelta.ToString(),
                         prefs.DeadlockThreshold.ToString(), true, "tray");
 
-                    var deadlockContext = await BuildDeadlockContextAsync(databaseService);
+                    var deadlockContext = await BuildDeadlockContextAsync(databaseService, prefs.AlertExcludedDatabases);
 
                     await _emailAlertService.TrySendAlertEmailAsync(
                         "Deadlocks Detected",
@@ -1264,15 +1264,23 @@ namespace PerformanceMonitorDashboard
             }
 
             /* Long-running query alerts */
+            var lrqList = health.LongRunningQueries;
+            if (prefs.AlertExcludedDatabases.Count > 0)
+                lrqList = lrqList
+                    .Where(q => string.IsNullOrEmpty(q.DatabaseName) ||
+                        !prefs.AlertExcludedDatabases.Any(e =>
+                            string.Equals(e, q.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+
             bool longRunningTriggered = prefs.NotifyOnLongRunningQueries
-                && health.LongRunningQueries.Count > 0;
+                && lrqList.Count > 0;
 
             if (longRunningTriggered)
             {
                 _activeLongRunningQueryAlert[serverId] = true;
                 if (!_lastLongRunningQueryAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= AlertCooldown)
                 {
-                    var worst = health.LongRunningQueries[0];
+                    var worst = lrqList[0];
                     var elapsedMinutes = worst.ElapsedSeconds / 60;
                     var preview = Truncate(worst.QueryText, 80);
                     _notificationService?.ShowLongRunningQueryNotification(
@@ -1283,12 +1291,12 @@ namespace PerformanceMonitorDashboard
                         $"Session #{worst.SessionId} running {elapsedMinutes}m",
                         $"{prefs.LongRunningQueryThresholdMinutes}m", true, "tray");
 
-                    var lrqContext = BuildLongRunningQueryContext(health.LongRunningQueries);
+                    var lrqContext = BuildLongRunningQueryContext(lrqList);
 
                     await _emailAlertService.TrySendAlertEmailAsync(
                         "Long-Running Query",
                         serverName,
-                        $"{health.LongRunningQueries.Count} query(s), longest {elapsedMinutes}m",
+                        $"{lrqList.Count} query(s), longest {elapsedMinutes}m",
                         $"{prefs.LongRunningQueryThresholdMinutes}m",
                         serverId,
                         lrqContext);
@@ -1436,12 +1444,19 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private static async Task<AlertContext?> BuildDeadlockContextAsync(DatabaseService databaseService)
+        private static async Task<AlertContext?> BuildDeadlockContextAsync(DatabaseService databaseService, IReadOnlyList<string>? excludedDatabases = null)
         {
             try
             {
                 var deadlocks = await databaseService.GetDeadlocksAsync(hoursBack: 1);
                 if (deadlocks == null || deadlocks.Count == 0) return null;
+
+                if (excludedDatabases != null && excludedDatabases.Count > 0)
+                    deadlocks = deadlocks
+                        .Where(d => string.IsNullOrEmpty(d.DatabaseName) ||
+                            !excludedDatabases.Any(e =>
+                                string.Equals(e, d.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                        .ToList();
 
                 var context = new AlertContext();
                 var firstGraph = (string?)null;

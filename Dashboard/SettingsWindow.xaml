@@ -239,6 +239,12 @@
                             <CheckBox x:Name="LrqExcludeMiscWaitsCheckBox"
                                       Content="Exclude miscellaneous waits (XE_LIVE_TARGET_TVF)"
                                       Margin="0,0,0,0"/>
+                            <!-- Database Exclusions -->
+                            <TextBlock Text="Database Exclusions" FontWeight="Bold" FontSize="12" Margin="0,12,0,6"/>
+                            <TextBlock Text="Exclude databases from alerts (comma-separated):" Margin="0,0,0,4"/>
+                            <TextBox x:Name="AlertExcludedDatabasesTextBox" Margin="0,0,0,4"/>
+                            <TextBlock Text="e.g. DBAtools, msdb, tempdb — applies to long-running query and blocking alerts"
+                                       FontSize="11" FontStyle="Italic" Foreground="Gray" TextWrapping="Wrap"/>
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                 <CheckBox x:Name="NotifyOnTempDbSpaceCheckBox"
                                           Content="TempDB space usage over"

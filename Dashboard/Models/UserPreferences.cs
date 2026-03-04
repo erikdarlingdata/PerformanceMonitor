@@ -125,6 +125,9 @@ namespace PerformanceMonitorDashboard.Models
         // Update check settings
         public bool CheckForUpdatesOnStartup { get; set; } = true;
 
+        // Alert database exclusions
+        public List<string> AlertExcludedDatabases { get; set; } = new();
+
         // Alert suppression (persisted)
         public List<string> SilencedServers { get; set; } = new();
         public List<string> SilencedServerTabs { get; set; } = new();
