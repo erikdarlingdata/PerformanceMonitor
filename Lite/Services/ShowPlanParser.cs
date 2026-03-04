@@ -832,6 +832,19 @@ public static class ShowPlanParser
             node.Lookup = physicalOpEl.Attribute("Lookup")?.Value is "true" or "1";
             node.DynamicSeek = physicalOpEl.Attribute("DynamicSeek")?.Value is "true" or "1";
 
+            // Override PhysicalOp, LogicalOp, and icon when Lookup=true.
+            // SQL Server's XML emits PhysicalOp="Clustered Index Seek" with <IndexScan Lookup="1">
+            // rather than "Key Lookup (Clustered)" — correct the label here so all display
+            // paths (node card, tooltip, properties panel) show the right operator name.
+            if (node.Lookup)
+            {
+                var isHeap = node.IndexKind?.Equals("Heap", StringComparison.OrdinalIgnoreCase) == true
+                             || node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase);
+                node.PhysicalOp = isHeap ? "RID Lookup (Heap)" : "Key Lookup (Clustered)";
+                node.LogicalOp  = isHeap ? "RID Lookup" : "Key Lookup";
+                node.IconName   = isHeap ? "rid_lookup" : "bookmark_lookup";
+            }
+
             // Table cardinality and rows to be read (on <RelOp> per XSD)
             node.TableCardinality = ParseDouble(relOpEl.Attribute("TableCardinality")?.Value);
             node.EstimatedRowsRead = ParseDouble(relOpEl.Attribute("EstimatedRowsRead")?.Value);

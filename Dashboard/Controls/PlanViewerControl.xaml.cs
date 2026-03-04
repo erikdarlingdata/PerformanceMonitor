@@ -534,7 +534,8 @@ public partial class PlanViewerControl : UserControl
 
         // Header
         var headerText = node.PhysicalOp;
-        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp))
+        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp)
+            && !node.PhysicalOp.Contains(node.LogicalOp, StringComparison.OrdinalIgnoreCase))
             headerText += $" ({node.LogicalOp})";
         PropertiesHeader.Text = headerText;
         PropertiesSubHeader.Text = $"Node ID: {node.NodeId}";
@@ -1481,7 +1482,8 @@ public partial class PlanViewerControl : UserControl
 
         // Header
         var headerText = node.PhysicalOp;
-        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp))
+        if (node.LogicalOp != node.PhysicalOp && !string.IsNullOrEmpty(node.LogicalOp)
+            && !node.PhysicalOp.Contains(node.LogicalOp, StringComparison.OrdinalIgnoreCase))
             headerText += $" ({node.LogicalOp})";
         stack.Children.Add(new TextBlock
         {
