@@ -71,9 +71,10 @@ internal sealed class ChartHoverHelper
         try
         {
             var pos = e.GetPosition(_chart);
+            var dpi = VisualTreeHelper.GetDpi(_chart);
             var pixel = new ScottPlot.Pixel(
-                (float)(pos.X * _chart.DisplayScale),
-                (float)(pos.Y * _chart.DisplayScale));
+                (float)(pos.X * dpi.DpiScaleX),
+                (float)(pos.Y * dpi.DpiScaleY));
             var mouseCoords = _chart.Plot.GetCoordinates(pixel);
 
             /* Use X-axis (time) proximity as the primary filter, Y-axis distance
