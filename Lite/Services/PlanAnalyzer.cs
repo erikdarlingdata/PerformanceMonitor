@@ -14,18 +14,12 @@ public static partial class PlanAnalyzer
 {
     private static readonly Regex FunctionInPredicateRegex = FunctionInPredicateRegExp();
 
-    private static readonly Regex LeadingWildcardLikeRegex = new(
-        @"\blike\b[^'""]*?N?'%",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex LeadingWildcardLikeRegex = LeadingWildcardLikeRegExp();
 
-    private static readonly Regex CaseInPredicateRegex = new(
-        @"\bCASE\s+(WHEN\b|$)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex CaseInPredicateRegex = CaseInPredicateRegExp();
 
     // Matches CTE definitions: WITH name AS ( or , name AS (
-    private static readonly Regex CteDefinitionRegex = new(
-        @"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex CteDefinitionRegex = CteDefinitionRegExp();
 
     public static void Analyze(ParsedPlan plan)
     {
@@ -184,7 +178,7 @@ public static partial class PlanAnalyzer
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
         if (!string.IsNullOrEmpty(stmt.StatementText) &&
-            Regex.IsMatch(stmt.StatementText, @"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase))
+            OptimizeForUnknownRegExp().IsMatch(stmt.StatementText))
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -791,7 +785,7 @@ public static partial class PlanAnalyzer
     {
         // Check statement text for NOT IN
         if (string.IsNullOrEmpty(stmt.StatementText) ||
-            !Regex.IsMatch(stmt.StatementText, @"\bNOT\s+IN\b", RegexOptions.IgnoreCase))
+            !NotInRegExp().IsMatch(stmt.StatementText))
             return false;
 
         // Walk up the tree checking ancestors and their children
@@ -888,7 +882,7 @@ public static partial class PlanAnalyzer
             return "Implicit conversion (CONVERT_IMPLICIT)";
 
         // ISNULL / COALESCE wrapping column
-        if (Regex.IsMatch(predicate, @"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase))
+        if (IsNullCoalesceRegExp().IsMatch(predicate))
             return "ISNULL/COALESCE wrapping column";
 
         // Common function calls on columns
@@ -1242,6 +1236,18 @@ public static partial class PlanAnalyzer
         return value.Length <= maxLength ? value : value[..maxLength] + "...";
     }
 
-    [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
+    [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase)]
     private static partial Regex FunctionInPredicateRegExp();
+    [GeneratedRegex(@"\blike\b[^'""]*?N?'%", RegexOptions.IgnoreCase)]
+    private static partial Regex LeadingWildcardLikeRegExp();
+    [GeneratedRegex(@"\bCASE\s+(WHEN\b|$)", RegexOptions.IgnoreCase)]
+    private static partial Regex CaseInPredicateRegExp();
+    [GeneratedRegex(@"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex CteDefinitionRegExp();
+    [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex IsNullCoalesceRegExp();
+    [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase)]
+    private static partial Regex OptimizeForUnknownRegExp();
+    [GeneratedRegex(@"\bNOT\s+IN\b", RegexOptions.IgnoreCase)]
+    private static partial Regex NotInRegExp();
 }

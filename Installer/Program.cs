@@ -1799,7 +1799,7 @@ END";
             return reportPath;
         }
 
-        [GeneratedRegex(@"^\s*GO\s*(?:--[^\r\n]*)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled)]
+        [GeneratedRegex(@"^\s*GO\s*(?:--[^\r\n]*)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline)]
         private static partial Regex GoBatchRegExp();
     }
 }

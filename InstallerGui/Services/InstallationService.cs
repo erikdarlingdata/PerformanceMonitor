@@ -1428,7 +1428,7 @@ END;";
             }
         }
 
-        [GeneratedRegex(@"^\d{2}[a-z]?_.*\.sql$", RegexOptions.Compiled)]
+        [GeneratedRegex(@"^\d{2}[a-z]?_.*\.sql$")]
         private static partial Regex SqlFileRegExp();
     }
 }
