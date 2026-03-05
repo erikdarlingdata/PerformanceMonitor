@@ -739,8 +739,8 @@ namespace PerformanceMonitorDashboard.Services
                 total_spills = MAX(qs.total_spills),
                 min_spills = MIN(qs.min_spills),
                 max_spills = MAX(qs.max_spills),
-                query_text = MAX(qs.query_text),
-                query_plan_text = MAX(qs.query_plan_text),
+                query_text = CAST(DECOMPRESS(MAX(qs.query_text)) AS nvarchar(max)),
+                query_plan_text = CAST(DECOMPRESS(MAX(qs.query_plan_text)) AS nvarchar(max)),
                 query_plan_hash = MAX(qs.query_plan_hash),
                 sql_handle = MAX(qs.sql_handle),
                 plan_handle = MAX(qs.plan_handle)
@@ -753,7 +753,7 @@ namespace PerformanceMonitorDashboard.Services
                     OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
                     OR (qs.creation_time <= @fromDate AND qs.last_execution_time >= @toDate)))
             )
-            AND qs.query_text NOT LIKE N'WAITFOR%'
+            AND CAST(DECOMPRESS(qs.query_text) AS nvarchar(max)) NOT LIKE N'WAITFOR%'
             GROUP BY
                 qs.database_name,
                 qs.query_hash,
@@ -922,7 +922,7 @@ namespace PerformanceMonitorDashboard.Services
                 total_spills = MAX(ps.total_spills),
                 min_spills = MIN(ps.min_spills),
                 max_spills = MAX(ps.max_spills),
-                query_plan_text = MAX(ps.query_plan_text),
+                query_plan_text = CAST(DECOMPRESS(MAX(ps.query_plan_text)) AS nvarchar(max)),
                 sql_handle = MAX(ps.sql_handle),
                 plan_handle = MAX(ps.plan_handle)
             FROM collect.procedure_stats AS ps
@@ -1101,7 +1101,7 @@ namespace PerformanceMonitorDashboard.Services
             plan_type = MAX(qsd.plan_type),
             is_forced_plan = MAX(CONVERT(tinyint, qsd.is_forced_plan)),
             compatibility_level = MAX(qsd.compatibility_level),
-            query_sql_text = CONVERT(nvarchar(max), MAX(qsd.query_sql_text)),
+            query_sql_text = CAST(DECOMPRESS(MAX(qsd.query_sql_text)) AS nvarchar(max)),
             query_plan_hash = CONVERT(nvarchar(20), MAX(qsd.query_plan_hash), 1),
             force_failure_count = SUM(qsd.force_failure_count),
             last_force_failure_reason_desc = MAX(qsd.last_force_failure_reason_desc),
@@ -1121,7 +1121,7 @@ namespace PerformanceMonitorDashboard.Services
                 OR (qsd.server_last_execution_time >= @fromDate AND qsd.server_last_execution_time <= @toDate)
                 OR (qsd.server_first_execution_time <= @fromDate AND qsd.server_last_execution_time >= @toDate)))
         )
-        AND qsd.query_sql_text NOT LIKE N'WAITFOR%'
+        AND CAST(DECOMPRESS(qsd.query_sql_text) AS nvarchar(max)) NOT LIKE N'WAITFOR%'
         GROUP BY
             qsd.database_name,
             qsd.query_id
@@ -2228,7 +2228,7 @@ namespace PerformanceMonitorDashboard.Services
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         SELECT
-            qsd.query_plan_text
+            CAST(DECOMPRESS(qsd.query_plan_text) AS nvarchar(max)) AS query_plan_text
         FROM collect.query_store_data AS qsd
         WHERE qsd.collection_id = @collection_id;";
 
@@ -2276,7 +2276,7 @@ namespace PerformanceMonitorDashboard.Services
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         SELECT
-            qs.query_plan_text
+            CAST(DECOMPRESS(qs.query_plan_text) AS nvarchar(max)) AS query_plan_text
         FROM collect.query_stats AS qs
         WHERE qs.collection_id = @collection_id;";
 

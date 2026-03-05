@@ -30,12 +30,12 @@ CREATE OR ALTER VIEW
     report.query_stats_with_formatted_plans
 AS
 SELECT
-    *,
+    qs.*,
     query_plan_formatted =
         CASE
-            WHEN TRY_CAST(qs.query_plan_text AS xml) IS NOT NULL
-            THEN TRY_CAST(qs.query_plan_text AS xml)
-            WHEN TRY_CAST(qs.query_plan_text AS xml) IS NULL
+            WHEN TRY_CAST(d.plan_text AS xml) IS NOT NULL
+            THEN TRY_CAST(d.plan_text AS xml)
+            WHEN TRY_CAST(d.plan_text AS xml) IS NULL
             THEN
                 (
                     SELECT
@@ -44,14 +44,19 @@ SELECT
                             N'-- This is a huge query plan.' + NCHAR(13) + NCHAR(10) +
                             N'-- Remove the headers and footers, save it as a .sqlplan file, and re-open it.' + NCHAR(13) + NCHAR(10) +
                             NCHAR(13) + NCHAR(10) +
-                            REPLACE(qs.query_plan_text, N'<RelOp', NCHAR(13) + NCHAR(10) + N'<RelOp') +
+                            REPLACE(d.plan_text, N'<RelOp', NCHAR(13) + NCHAR(10) + N'<RelOp') +
                             NCHAR(13) + NCHAR(10) COLLATE Latin1_General_Bin2
                     FOR XML
                         PATH(N''),
                         TYPE
                 )
         END
-FROM collect.query_stats AS qs;
+FROM collect.query_stats AS qs
+CROSS APPLY
+(
+    SELECT
+        plan_text = CAST(DECOMPRESS(qs.query_plan_text) AS nvarchar(max))
+) AS d;
 GO
 
 
@@ -62,12 +67,12 @@ CREATE OR ALTER VIEW
     report.procedure_stats_with_formatted_plans
 AS
 SELECT
-    *,
+    ps.*,
     query_plan_formatted =
         CASE
-            WHEN TRY_CAST(ps.query_plan_text AS xml) IS NOT NULL
-            THEN TRY_CAST(ps.query_plan_text AS xml)
-            WHEN TRY_CAST(ps.query_plan_text AS xml) IS NULL
+            WHEN TRY_CAST(d.plan_text AS xml) IS NOT NULL
+            THEN TRY_CAST(d.plan_text AS xml)
+            WHEN TRY_CAST(d.plan_text AS xml) IS NULL
             THEN
                 (
                     SELECT
@@ -76,14 +81,19 @@ SELECT
                             N'-- This is a huge query plan.' + NCHAR(13) + NCHAR(10) +
                             N'-- Remove the headers and footers, save it as a .sqlplan file, and re-open it.' + NCHAR(13) + NCHAR(10) +
                             NCHAR(13) + NCHAR(10) +
-                            REPLACE(ps.query_plan_text, N'<RelOp', NCHAR(13) + NCHAR(10) + N'<RelOp') +
+                            REPLACE(d.plan_text, N'<RelOp', NCHAR(13) + NCHAR(10) + N'<RelOp') +
                             NCHAR(13) + NCHAR(10) COLLATE Latin1_General_Bin2
                     FOR XML
                         PATH(N''),
                         TYPE
                 )
         END
-FROM collect.procedure_stats AS ps;
+FROM collect.procedure_stats AS ps
+CROSS APPLY
+(
+    SELECT
+        plan_text = CAST(DECOMPRESS(ps.query_plan_text) AS nvarchar(max))
+) AS d;
 GO
 
 
@@ -97,9 +107,9 @@ SELECT
     qsd.*,
     query_plan_formatted =
         CASE
-            WHEN TRY_CAST(qsd.query_plan_text AS xml) IS NOT NULL
-            THEN TRY_CAST(qsd.query_plan_text AS xml)
-            WHEN TRY_CAST(qsd.query_plan_text AS xml) IS NULL
+            WHEN TRY_CAST(d.plan_text AS xml) IS NOT NULL
+            THEN TRY_CAST(d.plan_text AS xml)
+            WHEN TRY_CAST(d.plan_text AS xml) IS NULL
             THEN
                 (
                     SELECT
@@ -108,7 +118,7 @@ SELECT
                             N'-- This is a huge query plan.' + NCHAR(13) + NCHAR(10) +
                             N'-- Remove the headers and footers, save it as a .sqlplan file, and re-open it.' + NCHAR(13) + NCHAR(10) +
                             NCHAR(13) + NCHAR(10) +
-                            REPLACE(qsd.query_plan_text, N'<RelOp', NCHAR(13) + NCHAR(10) + N'<RelOp') +
+                            REPLACE(d.plan_text, N'<RelOp', NCHAR(13) + NCHAR(10) + N'<RelOp') +
                             NCHAR(13) + NCHAR(10) COLLATE Latin1_General_Bin2
                     FOR XML
                         PATH(N''),
@@ -116,6 +126,11 @@ SELECT
                 )
         END
 FROM collect.query_store_data AS qsd
+CROSS APPLY
+(
+    SELECT
+        plan_text = CAST(DECOMPRESS(qsd.query_plan_text) AS nvarchar(max))
+) AS d
 GO
 
 /*
@@ -159,8 +174,8 @@ WITH
             total_logical_writes = SUM(qs.total_logical_writes),
             total_physical_reads = SUM(qs.total_physical_reads),
             max_grant_kb = MAX(qs.max_grant_kb),
-            query_text_sample = CONVERT(nvarchar(4000), MAX(qs.query_text)),
-            query_plan_xml = MAX(qs.query_plan_text)
+            query_text_sample = CONVERT(nvarchar(4000), CAST(DECOMPRESS(MAX(qs.query_text)) AS nvarchar(max))),
+            query_plan_xml = CAST(DECOMPRESS(MAX(qs.query_plan_text)) AS nvarchar(max))
         FROM collect.query_stats AS qs
         GROUP BY
             qs.database_name,
@@ -213,7 +228,7 @@ WITH
                 QUOTENAME(ps.schema_name) +
                 N'.' +
                 QUOTENAME(ps.object_name),
-            query_plan_xml = MAX(ps.query_plan_text)
+            query_plan_xml = CAST(DECOMPRESS(MAX(ps.query_plan_text)) AS nvarchar(max))
         FROM collect.procedure_stats AS ps
         GROUP BY
             ps.database_name,
@@ -241,8 +256,8 @@ WITH
         qsd.total_logical_writes,
         qsd.total_physical_reads,
         max_grant_kb = qsd.max_query_max_used_memory,
-        query_text_sample = CONVERT(nvarchar(4000), qsd2.query_sql_text),
-        query_plan_xml = qsd2.query_plan_text
+        query_text_sample = CONVERT(nvarchar(4000), CAST(DECOMPRESS(qsd2.query_sql_text) AS nvarchar(max))),
+        query_plan_xml = CAST(DECOMPRESS(qsd2.query_plan_text) AS nvarchar(max))
     FROM
     (
         SELECT TOP (20)
@@ -348,8 +363,8 @@ SELECT
     total_spills = MAX(qs.total_spills),
     min_spills = MIN(qs.min_spills),
     max_spills = MAX(qs.max_spills),
-    query_text = CONVERT(nvarchar(max), MAX(qs.query_text)),
-    query_plan_xml = MAX(qs.query_plan_text),
+    query_text = CAST(DECOMPRESS(MAX(qs.query_text)) AS nvarchar(max)),
+    query_plan_xml = CAST(DECOMPRESS(MAX(qs.query_plan_text)) AS nvarchar(max)),
     query_plan_hash = CONVERT(nvarchar(20), MAX(qs.query_plan_hash), 1),
     sql_handle = CONVERT(nvarchar(130), MAX(qs.sql_handle), 1),
     plan_handle = CONVERT(nvarchar(130), MAX(qs.plan_handle), 1)
@@ -403,7 +418,7 @@ SELECT
     avg_spills = MAX(ps.total_spills) / NULLIF(MAX(ps.execution_count), 0),
     min_spills = MIN(ps.min_spills),
     max_spills = MAX(ps.max_spills),
-    query_plan_xml = MAX(ps.query_plan_text),
+    query_plan_xml = CAST(DECOMPRESS(MAX(ps.query_plan_text)) AS nvarchar(max)),
     sql_handle = CONVERT(nvarchar(130), MAX(ps.sql_handle), 1),
     plan_handle = CONVERT(nvarchar(130), MAX(ps.plan_handle), 1)
 FROM collect.procedure_stats AS ps
@@ -471,8 +486,8 @@ SELECT
     is_forced_plan = MAX(CONVERT(tinyint, qsd.is_forced_plan)),
     compatibility_level = MAX(qsd.compatibility_level),
     /*Query text and plan - take sample*/
-    query_sql_text = CONVERT(nvarchar(max), MAX(qsd.query_sql_text)),
-    query_plan_xml = MAX(qsd.query_plan_text),
+    query_sql_text = CAST(DECOMPRESS(MAX(qsd.query_sql_text)) AS nvarchar(max)),
+    query_plan_xml = CAST(DECOMPRESS(MAX(qsd.query_plan_text)) AS nvarchar(max)),
     query_plan_hash = CONVERT(nvarchar(20), MAX(qsd.query_plan_hash), 1)
 FROM collect.query_store_data AS qsd
 GROUP BY

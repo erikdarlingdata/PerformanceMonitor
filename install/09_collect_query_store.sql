@@ -274,7 +274,8 @@ BEGIN
             compatibility_level smallint NULL,
             query_plan_text nvarchar(max) NULL,
             compilation_metrics xml NULL,
-            query_plan_hash binary(8) NULL
+            query_plan_hash binary(8) NULL,
+            row_hash binary(32) NULL
         );
 
         /*
@@ -666,7 +667,52 @@ BEGIN
         END;
 
         /*
+        Compute row_hash on staging data
+        Hash of metric columns that change between collection cycles
+        Binary concat: works on SQL 2016+, no CONCAT_WS dependency
+        */
+        UPDATE
+            #query_store_data
+        SET
+            row_hash =
+                HASHBYTES
+                (
+                    'SHA2_256',
+                    CAST(count_executions AS binary(8)) +
+                    CAST(avg_duration AS binary(8)) +
+                    CAST(avg_cpu_time AS binary(8)) +
+                    CAST(avg_logical_io_reads AS binary(8)) +
+                    CAST(avg_logical_io_writes AS binary(8)) +
+                    CAST(avg_physical_io_reads AS binary(8)) +
+                    CAST(avg_rowcount AS binary(8))
+                );
+
+        /*
+        Ensure tracking table exists
+        */
+        IF OBJECT_ID(N'collect.query_store_data_latest_hash', N'U') IS NULL
+        BEGIN
+            CREATE TABLE
+                collect.query_store_data_latest_hash
+            (
+                database_name sysname NOT NULL,
+                query_id bigint NOT NULL,
+                plan_id bigint NOT NULL,
+                row_hash binary(32) NOT NULL,
+                last_seen datetime2(7) NOT NULL
+                    DEFAULT SYSDATETIME(),
+                CONSTRAINT
+                    PK_query_store_data_latest_hash
+                PRIMARY KEY CLUSTERED
+                    (database_name, query_id, plan_id)
+                WITH
+                    (DATA_COMPRESSION = PAGE)
+            );
+        END;
+
+        /*
         Insert collected data into the permanent table
+        COMPRESS on LOB columns, skip unchanged rows via hash comparison
         */
         INSERT INTO
             collect.query_store_data
@@ -726,7 +772,8 @@ BEGIN
             compatibility_level,
             query_plan_text,
             compilation_metrics,
-            query_plan_hash
+            query_plan_hash,
+            row_hash
         )
         SELECT
             qsd.database_name,
@@ -738,7 +785,7 @@ BEGIN
             qsd.server_first_execution_time,
             qsd.server_last_execution_time,
             qsd.module_name,
-            qsd.query_sql_text,
+            COMPRESS(qsd.query_sql_text),
             qsd.query_hash,
             qsd.count_executions,
             qsd.avg_duration,
@@ -782,13 +829,83 @@ BEGIN
             qsd.last_force_failure_reason_desc,
             qsd.plan_forcing_type,
             qsd.compatibility_level,
-            qsd.query_plan_text,
-            qsd.compilation_metrics,
-            qsd.query_plan_hash
+            COMPRESS(qsd.query_plan_text),
+            COMPRESS(CAST(qsd.compilation_metrics AS nvarchar(max))),
+            qsd.query_plan_hash,
+            qsd.row_hash
         FROM #query_store_data AS qsd
+        LEFT JOIN collect.query_store_data_latest_hash AS h
+            ON  h.database_name = qsd.database_name
+            AND h.query_id = qsd.query_id
+            AND h.plan_id = qsd.plan_id
+            AND h.row_hash = qsd.row_hash
+        WHERE h.database_name IS NULL /*no match = new or changed*/
         OPTION(RECOMPILE, KEEPFIXED PLAN);
 
         SET @rows_collected = ROWCOUNT_BIG();
+
+        /*
+        Update tracking table with current hashes
+        */
+        MERGE collect.query_store_data_latest_hash AS t
+        USING
+        (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                row_hash
+            FROM
+            (
+                SELECT
+                    qsd.database_name,
+                    qsd.query_id,
+                    qsd.plan_id,
+                    qsd.row_hash,
+                    rn = ROW_NUMBER() OVER
+                    (
+                        PARTITION BY
+                            qsd.database_name,
+                            qsd.query_id,
+                            qsd.plan_id
+                        ORDER BY
+                            qsd.utc_last_execution_time DESC
+                    )
+                FROM #query_store_data AS qsd
+            ) AS ranked
+            WHERE ranked.rn = 1
+        ) AS s
+            ON  t.database_name = s.database_name
+            AND t.query_id = s.query_id
+            AND t.plan_id = s.plan_id
+        WHEN MATCHED
+        THEN UPDATE SET
+            t.row_hash = s.row_hash,
+            t.last_seen = SYSDATETIME()
+        WHEN NOT MATCHED
+        THEN INSERT
+        (
+            database_name,
+            query_id,
+            plan_id,
+            row_hash,
+            last_seen
+        )
+        VALUES
+        (
+            s.database_name,
+            s.query_id,
+            s.plan_id,
+            s.row_hash,
+            SYSDATETIME()
+        );
+
+        IF @debug = 1
+        BEGIN
+            DECLARE @staging_count bigint;
+            SELECT @staging_count = COUNT_BIG(*) FROM #query_store_data;
+            RAISERROR(N'Staged %I64d rows, inserted %I64d changed rows', 0, 1, @staging_count, @rows_collected) WITH NOWAIT;
+        END;
 
         /*
         Log successful collection
@@ -848,4 +965,5 @@ GO
 
 PRINT 'Query Store collector created successfully';
 PRINT 'Collects comprehensive runtime statistics from all Query Store enabled databases';
+PRINT 'LOB columns compressed with COMPRESS(), unchanged rows skipped via row_hash';
 GO

@@ -265,10 +265,11 @@ BEGIN
             total_worker_time_delta /
               NULLIF(sample_interval_seconds, 0) / 1000.
         ),
-        /*Query text and execution plan*/
-        query_text nvarchar(max) NULL,
-        query_plan_text nvarchar(max) NULL,
-        query_plan xml NULL,
+        /*Query text and execution plan (compressed with COMPRESS/DECOMPRESS)*/
+        query_text varbinary(max) NULL,
+        query_plan_text varbinary(max) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_query_stats
         PRIMARY KEY CLUSTERED
@@ -446,9 +447,10 @@ BEGIN
             total_worker_time_delta /
               NULLIF(sample_interval_seconds, 0) / 1000.
         ),
-        /*Execution plan*/
-        query_plan_text nvarchar(max) NULL,
-        query_plan xml NULL,
+        /*Execution plan (compressed with COMPRESS/DECOMPRESS)*/
+        query_plan_text varbinary(max) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_procedure_stats
         PRIMARY KEY CLUSTERED
@@ -491,7 +493,7 @@ BEGIN
         server_first_execution_time datetime2(7) NOT NULL,
         server_last_execution_time datetime2(7) NOT NULL,
         module_name nvarchar(261) NULL,
-        query_sql_text nvarchar(max) NULL,
+        query_sql_text varbinary(max) NULL,
         query_hash binary(8) NULL,
         /*Execution count*/
         count_executions bigint NOT NULL,
@@ -549,9 +551,11 @@ BEGIN
         last_force_failure_reason_desc nvarchar(128) NULL,
         plan_forcing_type nvarchar(60) NULL,
         compatibility_level smallint NULL,
-        query_plan_text nvarchar(max) NULL,
-        compilation_metrics xml NULL,
+        query_plan_text varbinary(max) NULL,
+        compilation_metrics varbinary(max) NULL,
         query_plan_hash binary(8) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_query_store_data
         PRIMARY KEY CLUSTERED

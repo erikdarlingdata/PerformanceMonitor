@@ -1,0 +1,4 @@
+01_compress_query_stats.sql
+02_compress_query_store_data.sql
+03_compress_procedure_stats.sql
+04_create_tracking_tables.sql

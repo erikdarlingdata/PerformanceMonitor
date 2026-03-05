@@ -168,10 +168,11 @@ BEGIN
             total_worker_time_delta /
               NULLIF(sample_interval_seconds, 0) / 1000.
         ),
-        /*Query text and execution plan*/
-        query_text nvarchar(MAX) NULL,
-        query_plan_text nvarchar(MAX) NULL,
-        query_plan xml NULL,
+        /*Query text and execution plan (compressed with COMPRESS/DECOMPRESS)*/
+        query_text varbinary(max) NULL,
+        query_plan_text varbinary(max) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_query_stats
         PRIMARY KEY CLUSTERED
@@ -181,6 +182,34 @@ BEGIN
     );
 
     PRINT 'Created collect.query_stats table';
+END;
+
+/*
+2b. Query Stats Dedup Tracking
+One row per natural key, updated on each collection cycle
+*/
+IF OBJECT_ID(N'collect.query_stats_latest_hash', N'U') IS NULL
+BEGIN
+    CREATE TABLE
+        collect.query_stats_latest_hash
+    (
+        sql_handle varbinary(64) NOT NULL,
+        statement_start_offset integer NOT NULL,
+        statement_end_offset integer NOT NULL,
+        plan_handle varbinary(64) NOT NULL,
+        row_hash binary(32) NOT NULL,
+        last_seen datetime2(7) NOT NULL
+            DEFAULT SYSDATETIME(),
+        CONSTRAINT
+            PK_query_stats_latest_hash
+        PRIMARY KEY CLUSTERED
+            (sql_handle, statement_start_offset,
+             statement_end_offset, plan_handle)
+        WITH
+            (DATA_COMPRESSION = PAGE)
+    );
+
+    PRINT 'Created collect.query_stats_latest_hash table';
 END;
 
 /*
@@ -429,9 +458,10 @@ BEGIN
             total_worker_time_delta /
               NULLIF(sample_interval_seconds, 0) / 1000.
         ),
-        /*Execution plan*/
-        query_plan_text nvarchar(max) NULL,
-        query_plan xml NULL,
+        /*Execution plan (compressed with COMPRESS/DECOMPRESS)*/
+        query_plan_text varbinary(max) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_procedure_stats
         PRIMARY KEY CLUSTERED
@@ -441,6 +471,32 @@ BEGIN
     );
 
     PRINT 'Created collect.procedure_stats table';
+END;
+
+/*
+9b. Procedure Stats Dedup Tracking
+One row per natural key, updated on each collection cycle
+*/
+IF OBJECT_ID(N'collect.procedure_stats_latest_hash', N'U') IS NULL
+BEGIN
+    CREATE TABLE
+        collect.procedure_stats_latest_hash
+    (
+        database_name sysname NOT NULL,
+        object_id integer NOT NULL,
+        plan_handle varbinary(64) NOT NULL,
+        row_hash binary(32) NOT NULL,
+        last_seen datetime2(7) NOT NULL
+            DEFAULT SYSDATETIME(),
+        CONSTRAINT
+            PK_procedure_stats_latest_hash
+        PRIMARY KEY CLUSTERED
+            (database_name, object_id, plan_handle)
+        WITH
+            (DATA_COMPRESSION = PAGE)
+    );
+
+    PRINT 'Created collect.procedure_stats_latest_hash table';
 END;
 
 /*
@@ -473,7 +529,7 @@ BEGIN
         server_first_execution_time datetime2(7) NOT NULL,
         server_last_execution_time datetime2(7) NOT NULL,
         module_name nvarchar(261) NULL,
-        query_sql_text nvarchar(max) NULL,
+        query_sql_text varbinary(max) NULL,
         query_hash binary(8) NULL,
         /*Execution count*/
         count_executions bigint NOT NULL,
@@ -531,9 +587,11 @@ BEGIN
         last_force_failure_reason_desc nvarchar(128) NULL,
         plan_forcing_type nvarchar(60) NULL,
         compatibility_level smallint NULL,
-        query_plan_text nvarchar(max) NULL,
-        compilation_metrics xml NULL,
+        query_plan_text varbinary(max) NULL,
+        compilation_metrics varbinary(max) NULL,
         query_plan_hash binary(8) NULL,
+        /*Deduplication hash for skipping unchanged rows*/
+        row_hash binary(32) NULL,
         CONSTRAINT
             PK_query_store_data
         PRIMARY KEY CLUSTERED
@@ -543,6 +601,32 @@ BEGIN
     );
 
     PRINT 'Created collect.query_store_data table';
+END;
+
+/*
+11b. Query Store Data Dedup Tracking
+One row per natural key, updated on each collection cycle
+*/
+IF OBJECT_ID(N'collect.query_store_data_latest_hash', N'U') IS NULL
+BEGIN
+    CREATE TABLE
+        collect.query_store_data_latest_hash
+    (
+        database_name sysname NOT NULL,
+        query_id bigint NOT NULL,
+        plan_id bigint NOT NULL,
+        row_hash binary(32) NOT NULL,
+        last_seen datetime2(7) NOT NULL
+            DEFAULT SYSDATETIME(),
+        CONSTRAINT
+            PK_query_store_data_latest_hash
+        PRIMARY KEY CLUSTERED
+            (database_name, query_id, plan_id)
+        WITH
+            (DATA_COMPRESSION = PAGE)
+    );
+
+    PRINT 'Created collect.query_store_data_latest_hash table';
 END;
 
 /*

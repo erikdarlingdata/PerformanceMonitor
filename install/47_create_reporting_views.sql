@@ -1862,7 +1862,7 @@ RETURN
         SELECT
             database_name = qsd.database_name,
             query_id = qsd.query_id,
-            query_text_sample = MAX(qsd.query_sql_text),
+            query_text_sample = CAST(DECOMPRESS(MAX(qsd.query_sql_text)) AS nvarchar(max)),
             avg_duration_ms = AVG(qsd.avg_duration / 1000.0),
             avg_cpu_time_ms = AVG(qsd.avg_cpu_time / 1000.0),
             avg_logical_io_reads = AVG(qsd.avg_logical_io_reads),
@@ -2522,7 +2522,7 @@ WITH
         max_worker_time_ms = MAX(qs.max_worker_time) / 1000.0,
         min_elapsed_time_ms = MIN(qs.min_elapsed_time) / 1000.0,
         max_elapsed_time_ms = MAX(qs.max_elapsed_time) / 1000.0,
-        sample_query_text = MAX(qs.query_text),
+        sample_query_text = CAST(DECOMPRESS(MAX(qs.query_text)) AS nvarchar(max)),
         last_execution_time = MAX(qs.last_execution_time)
     FROM collect.query_stats AS qs
     WHERE qs.collection_time >= DATEADD(DAY, -7, SYSDATETIME())

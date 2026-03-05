@@ -274,6 +274,10 @@ BEGIN
             DEFAULT 5,
         retention_days integer NOT NULL
             DEFAULT 30,
+        collect_query bit NOT NULL
+            DEFAULT CONVERT(bit, 'true'),
+        collect_plan bit NOT NULL
+            DEFAULT CONVERT(bit, 'true'),
         [description] nvarchar(500) NULL,
         created_date datetime2(7) NOT NULL
             DEFAULT SYSDATETIME(),
