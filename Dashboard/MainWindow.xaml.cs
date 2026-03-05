@@ -26,6 +26,7 @@ using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Services;
 using System.ComponentModel;
 using System.Windows.Data;
+using System.Xml.Linq;
 
 namespace PerformanceMonitorDashboard
 {
@@ -1459,9 +1460,7 @@ namespace PerformanceMonitorDashboard
                 if (excludedDatabases != null && excludedDatabases.Count > 0)
                 {
                     deadlocks = deadlocks
-                        .Where(d => string.IsNullOrEmpty(d.DatabaseName) ||
-                            !excludedDatabases.Any(e =>
-                                string.Equals(e, d.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                        .Where(d => !IsDeadlockExcluded(d, excludedDatabases))
                         .ToList();
                 }
 
@@ -1516,6 +1515,29 @@ namespace PerformanceMonitorDashboard
                 Logger.Error($"Failed to fetch deadlock detail for email: {ex.Message}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Returns true if a deadlock should be excluded based on the deadlock graph XML.
+        /// A deadlock is only excluded when ALL process nodes have a currentdbname in the excluded list.
+        /// Cross-database deadlocks involving any non-excluded database will still be reported.
+        /// </summary>
+        private static bool IsDeadlockExcluded(DeadlockItem deadlock, List<string> excludedDatabases)
+        {
+            if (string.IsNullOrEmpty(deadlock.DeadlockGraph)) return false;
+            try
+            {
+                var doc = XElement.Parse(deadlock.DeadlockGraph);
+                var dbNames = doc.Descendants("process")
+                    .Select(p => p.Attribute("currentdbname")?.Value)
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .Cast<string>()
+                    .ToList();
+                if (dbNames.Count == 0) return false;
+                return dbNames.All(db => excludedDatabases.Any(e =>
+                    string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
+            }
+            catch { return false; }
         }
 
         private static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
