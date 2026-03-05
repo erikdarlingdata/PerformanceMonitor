@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Linq;
+using System.Xml.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -1001,8 +1002,26 @@ public partial class MainWindow : Window
         }
 
         /* Blocking alerts */
+        var effectiveBlockingCount = summary.BlockingCount;
+        if (App.AlertBlockingEnabled && App.AlertExcludedDatabases.Count > 0
+            && summary.BlockingCount >= App.AlertBlockingThreshold && _dataService != null)
+        {
+            try
+            {
+                var blockingRows = await _dataService.GetRecentBlockedProcessReportsAsync(summary.ServerId, hoursBack: 1);
+                effectiveBlockingCount = blockingRows
+                    .Count(r => string.IsNullOrEmpty(r.DatabaseName) ||
+                        !App.AlertExcludedDatabases.Any(e =>
+                            string.Equals(e, r.DatabaseName, StringComparison.OrdinalIgnoreCase)));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Alerts", $"Failed to filter blocking count for {summary.DisplayName}: {ex.Message}");
+            }
+        }
+
         bool blockingExceeded = App.AlertBlockingEnabled
-            && summary.BlockingCount >= App.AlertBlockingThreshold;
+            && effectiveBlockingCount >= App.AlertBlockingThreshold;
 
         if (blockingExceeded)
         {
@@ -1011,7 +1030,7 @@ public partial class MainWindow : Window
             {
                 _trayService.ShowNotification(
                     "Blocking Detected",
-                    $"{summary.DisplayName}: {summary.BlockingCount} blocking session(s)",
+                    $"{summary.DisplayName}: {effectiveBlockingCount} blocking session(s)",
                     Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
                 _lastBlockingAlert[key] = now;
 
@@ -1020,7 +1039,7 @@ public partial class MainWindow : Window
                 await _emailAlertService.TrySendAlertEmailAsync(
                     "Blocking Detected",
                     summary.DisplayName,
-                    summary.BlockingCount.ToString(),
+                    effectiveBlockingCount.ToString(),
                     App.AlertBlockingThreshold.ToString(),
                     summary.ServerId,
                     blockingContext);
@@ -1036,8 +1055,24 @@ public partial class MainWindow : Window
         }
 
         /* Deadlock alerts */
+        var effectiveDeadlockCount = summary.DeadlockCount;
+        if (App.AlertDeadlockEnabled && App.AlertExcludedDatabases.Count > 0
+            && summary.DeadlockCount >= App.AlertDeadlockThreshold && _dataService != null)
+        {
+            try
+            {
+                var deadlockRows = await _dataService.GetRecentDeadlocksAsync(summary.ServerId, hoursBack: 1);
+                effectiveDeadlockCount = deadlockRows
+                    .Count(r => !IsDeadlockExcluded(r, App.AlertExcludedDatabases));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Alerts", $"Failed to filter deadlock count for {summary.DisplayName}: {ex.Message}");
+            }
+        }
+
         bool deadlocksExceeded = App.AlertDeadlockEnabled
-            && summary.DeadlockCount >= App.AlertDeadlockThreshold;
+            && effectiveDeadlockCount >= App.AlertDeadlockThreshold;
 
         if (deadlocksExceeded)
         {
@@ -1046,7 +1081,7 @@ public partial class MainWindow : Window
             {
                 _trayService.ShowNotification(
                     "Deadlocks Detected",
-                    $"{summary.DisplayName}: {summary.DeadlockCount} deadlock(s) in the last hour",
+                    $"{summary.DisplayName}: {effectiveDeadlockCount} deadlock(s) in the last hour",
                     Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
                 _lastDeadlockAlert[key] = now;
 
@@ -1055,7 +1090,7 @@ public partial class MainWindow : Window
                 await _emailAlertService.TrySendAlertEmailAsync(
                     "Deadlocks Detected",
                     summary.DisplayName,
-                    summary.DeadlockCount.ToString(),
+                    effectiveDeadlockCount.ToString(),
                     App.AlertDeadlockThreshold.ToString(),
                     summary.ServerId,
                     deadlockContext);
@@ -1284,6 +1319,16 @@ public partial class MainWindow : Window
                 var events = await _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack: 1);
                 if (events == null || events.Count == 0) return null;
 
+                if (App.AlertExcludedDatabases.Count > 0)
+                {
+                    events = events
+                        .Where(e => string.IsNullOrEmpty(e.DatabaseName) ||
+                            !App.AlertExcludedDatabases.Any(ex =>
+                                string.Equals(ex, e.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                        .ToList();
+                    if (events.Count == 0) return null;
+                }
+
                 var context = new AlertContext();
                 var firstXml = (string?)null;
 
@@ -1334,6 +1379,14 @@ public partial class MainWindow : Window
                 var deadlocks = await _dataService.GetRecentDeadlocksAsync(serverId, hoursBack: 1);
                 if (deadlocks == null || deadlocks.Count == 0) return null;
 
+                if (App.AlertExcludedDatabases.Count > 0)
+                {
+                    deadlocks = deadlocks
+                        .Where(d => !IsDeadlockExcluded(d, App.AlertExcludedDatabases))
+                        .ToList();
+                    if (deadlocks.Count == 0) return null;
+                }
+
                 var context = new AlertContext();
                 var firstGraph = (string?)null;
 
@@ -1368,6 +1421,24 @@ public partial class MainWindow : Window
                 AppLogger.Error("EmailAlert", $"Failed to fetch deadlock detail for email: {ex.Message}");
                 return null;
             }
+        }
+
+        private static bool IsDeadlockExcluded(DeadlockRow row, List<string> excludedDatabases)
+        {
+            if (string.IsNullOrEmpty(row.DeadlockGraphXml)) return false;
+            try
+            {
+                var doc = XElement.Parse(row.DeadlockGraphXml);
+                var dbNames = doc.Descendants("process")
+                    .Select(p => p.Attribute("currentdbname")?.Value)
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .Cast<string>()
+                    .ToList();
+                if (dbNames.Count == 0) return false;
+                return dbNames.All(db => excludedDatabases.Any(e =>
+                    string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
+            }
+            catch { return false; }
         }
 
         private static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
