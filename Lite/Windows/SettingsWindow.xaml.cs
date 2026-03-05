@@ -551,6 +551,7 @@ public partial class SettingsWindow : Window
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLongRunningJobMultiplierBox.Text = "3";
+        AlertExcludedDatabasesBox.Text = "";
         UpdateAlertPreviewText();
     }
 

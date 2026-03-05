@@ -313,6 +313,7 @@ namespace PerformanceMonitorDashboard
             LongRunningQueryThresholdTextBox.Text = "30";
             TempDbSpaceThresholdTextBox.Text = "80";
             LongRunningJobMultiplierTextBox.Text = "3";
+            AlertExcludedDatabasesTextBox.Text = "";
             UpdateAlertPreviewText();
         }
 
