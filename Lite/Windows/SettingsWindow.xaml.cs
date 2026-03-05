@@ -484,8 +484,20 @@ public partial class SettingsWindow : Window
             App.AlertLongRunningJobMultiplier = jobMult;
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
             App.AlertCooldownMinutes = alertCooldown;
+        else
+        {
+            MessageBox.Show("Tray notification cooldown must be between 1 and 120 minutes.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown >= 1 && emailCooldown <= 120)
             App.EmailCooldownMinutes = emailCooldown;
+        else
+        {
+            MessageBox.Show("Email alert cooldown must be between 1 and 120 minutes.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try

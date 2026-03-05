@@ -27,6 +27,7 @@ namespace PerformanceMonitorDashboard.Services
             string serverName,
             string currentValue,
             string thresholdValue,
+            int emailCooldownMinutes,
             AlertContext? context = null)
         {
             var utcNow = DateTime.UtcNow;
@@ -34,7 +35,7 @@ namespace PerformanceMonitorDashboard.Services
             var (accentColor, badgeText) = GetSeverity(metricName);
 
             var html = BuildHtmlBody(metricName, serverName, currentValue,
-                thresholdValue, utcNow, localNow, accentColor, badgeText, context: context);
+                thresholdValue, utcNow, localNow, accentColor, badgeText, context: context, emailCooldownMinutes: emailCooldownMinutes);
 
             var plain = BuildPlainTextBody(metricName, serverName, currentValue,
                 thresholdValue, utcNow, localNow, context);
@@ -87,7 +88,8 @@ namespace PerformanceMonitorDashboard.Services
             string accentColor,
             string badgeText,
             bool isTest = false,
-            AlertContext? context = null)
+            AlertContext? context = null,
+            int emailCooldownMinutes = 15)
         {
             var sb = new StringBuilder(2048);
 
@@ -167,7 +169,7 @@ namespace PerformanceMonitorDashboard.Services
             sb.Append($"Sent by {WebUtility.HtmlEncode(EditionName)}");
             if (!isTest)
             {
-                sb.Append(" &middot; 15-minute cooldown between repeat alerts");
+                sb.Append($" &middot; {emailCooldownMinutes}-minute cooldown between repeat alerts");
             }
             sb.Append("</span>");
             sb.Append("</td></tr>");

@@ -96,7 +96,7 @@ namespace PerformanceMonitorDashboard.Services
 
                 var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                    metricName, serverName, currentValue, thresholdValue, context);
+                    metricName, serverName, currentValue, thresholdValue, prefs.EmailCooldownMinutes, context);
 
                 string? sendError = null;
                 bool sent = false;
