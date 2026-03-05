@@ -452,7 +452,7 @@ namespace PerformanceMonitorDashboard.Services
         /// This is the filtered equivalent of GetDeadlockCountAsync, which reads from
         /// sys.dm_os_performance_counters and cannot be filtered by database.
         /// </summary>
-        private async Task<long> GetFilteredDeadlockCountAsync(SqlConnection connection, IReadOnlyList<string> excludedDatabases)
+        private async Task<long?> GetFilteredDeadlockCountAsync(SqlConnection connection, IReadOnlyList<string> excludedDatabases)
         {
             var dbFilter = string.Join(", ", excludedDatabases.Select(db => $"N'{db.Replace("'", "''")}'"));
             var query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -476,7 +476,7 @@ namespace PerformanceMonitorDashboard.Services
             catch (Exception ex)
             {
                 Logger.Warning($"Failed to get filtered deadlock count: {ex.Message}");
-                return 0;
+                return null; // Fall back to raw delta
             }
         }
 
