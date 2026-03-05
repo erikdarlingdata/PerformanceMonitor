@@ -460,9 +460,12 @@ namespace PerformanceMonitorDashboard.Services
         /// </summary>
         private async Task<long?> GetFilteredDeadlockCountAsync(SqlConnection connection, IReadOnlyList<string> excludedDatabases)
         {
+            var dbFilter = "";
             var dbParams = new List<string>();
             for (int i = 0; i < excludedDatabases.Count; i++)
                 dbParams.Add($"@exdb{i}");
+            if (dbParams.Count > 0)
+                dbFilter = $"AND bds.database_name NOT IN ({string.Join(", ", dbParams)})";
 
             var query = $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -471,8 +474,8 @@ namespace PerformanceMonitorDashboard.Services
                         COALESCE(SUM(bds.deadlock_count_delta), 0)
                 FROM collect.blocking_deadlock_stats AS bds
                 WHERE bds.collection_time >= DATEADD(MINUTE, -5, SYSUTCDATETIME())
-                AND   bds.database_name NOT IN ({string.Join(", ", dbParams)})
                 AND   bds.deadlock_count_delta IS NOT NULL
+                {dbFilter}
                 OPTION(MAXDOP 1, RECOMPILE);";
 
             try
