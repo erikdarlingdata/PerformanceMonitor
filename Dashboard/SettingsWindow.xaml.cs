@@ -8,6 +8,7 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -640,7 +641,7 @@ namespace PerformanceMonitorDashboard
 
             // Save MCP server settings
             prefs.McpEnabled = McpEnabledCheckBox.IsChecked == true;
-            if (int.TryParse(McpPortTextBox.Text, out int mcpPort) && mcpPort > 0 && mcpPort <= 65535)
+            if (int.TryParse(McpPortTextBox.Text, out int mcpPort) && mcpPort >= 1024 && mcpPort <= IPEndPoint.MaxPort)
             {
                 if (prefs.McpEnabled && mcpPort != prefs.McpPort)
                 {
@@ -654,6 +655,13 @@ namespace PerformanceMonitorDashboard
                     }
                 }
                 prefs.McpPort = mcpPort;
+            }
+            else
+            {
+                MessageBox.Show(
+                    $"MCP port must be between 1024 and {IPEndPoint.MaxPort}.\nPorts 0–1023 are well-known privileged ports reserved by the operating system.",
+                    "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
             }
 
             _preferencesService.SavePreferences(prefs);

@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -153,6 +154,14 @@ public partial class SettingsWindow : Window
 
             if (newEnabled && newPort != oldPort)
             {
+                if (newPort < 1024 || newPort > IPEndPoint.MaxPort)
+                {
+                    MessageBox.Show(
+                        $"MCP port must be between 1024 and {IPEndPoint.MaxPort}.\nPorts 0–1023 are well-known privileged ports reserved by the operating system.",
+                        "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
+
                 bool inUse = Task.Run(() => PortUtilityService.IsTcpPortListeningAsync(newPort)).GetAwaiter().GetResult();
                 if (inUse)
                 {
@@ -165,7 +174,7 @@ public partial class SettingsWindow : Window
 
             root["mcp_enabled"] = newEnabled;
 
-            if (newPort > 0 && newPort < 65536)
+            if (newPort >= 1024 && newPort <= IPEndPoint.MaxPort)
             {
                 root["mcp_port"] = newPort;
             }
