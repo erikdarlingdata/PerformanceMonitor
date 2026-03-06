@@ -162,7 +162,7 @@ public partial class SettingsWindow : Window
                     return false;
                 }
 
-                bool inUse = Task.Run(() => PortUtilityService.IsTcpPortListeningAsync(newPort)).GetAwaiter().GetResult();
+                bool inUse = Task.Run(() => PortUtilityService.IsTcpPortListeningAsync(newPort, IPAddress.Loopback)).GetAwaiter().GetResult();
                 if (inUse)
                 {
                     MessageBox.Show(
@@ -250,6 +250,20 @@ public partial class SettingsWindow : Window
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
         Clipboard.SetDataObject(command, false);
         McpStatusText.Text = "Copied to clipboard!";
+    }
+
+    private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            int port = await PortUtilityService.GetFreeTcpPortAsync();
+            McpPortTextBox.Text = port.ToString();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not find an available port: {ex.Message}",
+                "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void LoadConnectionTimeout()

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -129,7 +130,7 @@ public partial class MainWindow : Window
             var mcpSettings = McpSettings.Load(App.ConfigDirectory);
             if (mcpSettings.Enabled)
             {
-                bool portInUse = await PortUtilityService.IsTcpPortListeningAsync(mcpSettings.Port);
+                bool portInUse = await PortUtilityService.IsTcpPortListeningAsync(mcpSettings.Port, IPAddress.Loopback);
                 if (portInUse)
                 {
                     AppLogger.Error("MCP", $"Port {mcpSettings.Port} is already in use — MCP server not started");

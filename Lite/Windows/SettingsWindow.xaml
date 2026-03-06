@@ -68,6 +68,10 @@
                     <TextBlock Text="Port:" VerticalAlignment="Center" Margin="20,0,6,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="McpPortTextBox" Width="70" Text="5151" VerticalAlignment="Center"/>
+                    <Button Content="Auto" ToolTip="Find an available port"
+                            Margin="6,0,0,0" Padding="8,2"
+                            VerticalAlignment="Center"
+                            Click="AutoPortButton_Click"/>
                 </StackPanel>
                 <TextBlock x:Name="McpStatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">

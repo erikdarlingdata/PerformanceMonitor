@@ -470,6 +470,20 @@ namespace PerformanceMonitorDashboard
             McpPortTextBox.IsEnabled = McpEnabledCheckBox.IsChecked == true;
         }
 
+        private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                int port = await PortUtilityService.GetFreeTcpPortAsync();
+                McpPortTextBox.Text = port.ToString();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Could not find an available port: {ex.Message}",
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
         private void UpdateMcpStatus(Models.UserPreferences prefs)
         {
             if (prefs.McpEnabled)
@@ -645,7 +659,7 @@ namespace PerformanceMonitorDashboard
             {
                 if (prefs.McpEnabled && mcpPort != prefs.McpPort)
                 {
-                    bool inUse = Task.Run(() => PortUtilityService.IsTcpPortListeningAsync(mcpPort)).GetAwaiter().GetResult();
+                    bool inUse = Task.Run(() => PortUtilityService.IsTcpPortListeningAsync(mcpPort, IPAddress.Loopback)).GetAwaiter().GetResult();
                     if (inUse)
                     {
                         MessageBox.Show(

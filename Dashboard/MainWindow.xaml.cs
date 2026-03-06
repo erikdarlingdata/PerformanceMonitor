@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -198,7 +199,7 @@ namespace PerformanceMonitorDashboard
 
             try
             {
-                bool portInUse = await PortUtilityService.IsTcpPortListeningAsync(prefs.McpPort);
+                bool portInUse = await PortUtilityService.IsTcpPortListeningAsync(prefs.McpPort, IPAddress.Loopback);
                 if (portInUse)
                 {
                     Logger.Error($"[MCP] Port {prefs.McpPort} is already in use — MCP server not started");
