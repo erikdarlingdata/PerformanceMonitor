@@ -163,8 +163,7 @@ BEGIN
         LEFT JOIN sys.dm_exec_requests AS der
           ON der.session_id = wt.session_id
         LEFT JOIN sys.databases AS d
-          ON  d.database_id = der.database_id
-          AND d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
+          ON d.database_id = der.database_id
         OUTER APPLY sys.dm_exec_sql_text(der.sql_handle) AS dest
         OUTER APPLY sys.dm_exec_text_query_plan
         (

@@ -45,10 +45,7 @@ public class SystemTrayService : IDisposable
 
         bool HasLightBackground = Helpers.ThemeManager.HasLightBackground;
 
-        /* Custom tooltip styled to match current theme.
-           Note: Hardcodet TrayToolTip can rarely trigger a race condition in Popup.CreateWindow
-           that throws "The root Visual of a VisualTarget cannot have a parent." (issue #422).
-           The DispatcherUnhandledException handler silently swallows this specific crash. */
+        /* Custom tooltip styled to match current theme */
         _tooltipText = new TextBlock
         {
             Text = "Performance Monitor Lite",

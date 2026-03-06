@@ -59,7 +59,7 @@ namespace PerformanceMonitorDashboard
             _toDate = toDate;
 
             // Collapse newlines/tabs to spaces and truncate for a clean single-line header
-            var displayPattern = MultipleSpacesRegExp().Replace(queryPattern, " ").Trim();
+            var displayPattern = System.Text.RegularExpressions.Regex.Replace(queryPattern, @"\s+", " ").Trim();
             if (displayPattern.Length > 120)
                 displayPattern = displayPattern.Substring(0, 120) + "...";
             QueryIdentifierText.Text = $"Trace Pattern History: [{databaseName}] — {displayPattern}";
@@ -405,9 +405,6 @@ namespace PerformanceMonitorDashboard
                 }
             }
         }
-
-        [System.Text.RegularExpressions.GeneratedRegex(@"\s+")]
-        private static partial System.Text.RegularExpressions.Regex MultipleSpacesRegExp();
 
         #endregion
     }

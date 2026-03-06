@@ -258,15 +258,6 @@
                     Margin="0,0,10,0"
                     Click="ViewReport_Click"
                     IsEnabled="False"/>
-            <Button x:Name="UninstallButton"
-                    Content="Uninstall"
-                    Width="100" Height="32"
-                    Margin="0,0,10,0"
-                    Click="Uninstall_Click"
-                    IsEnabled="False"
-                    Foreground="White"
-                    Background="#C62828"
-                    ToolTip="Remove database, Agent jobs, and XE sessions"/>
             <Button x:Name="CloseButton"
                     Content="Close"
                     Width="100" Height="32"

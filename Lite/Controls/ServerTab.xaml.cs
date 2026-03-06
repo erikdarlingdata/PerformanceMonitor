@@ -209,8 +209,7 @@ public partial class ServerTab : UserControl
         _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
 
         /* Chart context menus (right-click save/export) */
-        var waitStatsMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(WaitStatsChart, "Wait_Stats");
-        AddWaitDrillDownMenuItem(WaitStatsChart, waitStatsMenu);
+        Helpers.ContextMenuHelper.SetupChartContextMenu(WaitStatsChart, "Wait_Stats");
         Helpers.ContextMenuHelper.SetupChartContextMenu(QueryDurationTrendChart, "Query_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends");
@@ -1734,48 +1733,6 @@ public partial class ServerTab : UserControl
         if (_isUpdatingWaitTypeSelection) return;
         RefreshWaitTypeListOrder();
         _ = UpdateWaitStatsChartFromPickerAsync();
-    }
-
-    private void AddWaitDrillDownMenuItem(ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu)
-    {
-        contextMenu.Items.Insert(0, new Separator());
-        var drillDownItem = new MenuItem { Header = "Show Queries With This Wait" };
-        drillDownItem.Click += ShowQueriesForWaitType_Click;
-        contextMenu.Items.Insert(0, drillDownItem);
-
-        contextMenu.Opened += (s, _) =>
-        {
-            if (s is not ContextMenu cm) return;
-            var pos = System.Windows.Input.Mouse.GetPosition(chart);
-            var nearest = _waitStatsHover?.GetNearestSeries(pos);
-            if (nearest.HasValue)
-            {
-                drillDownItem.Tag = (nearest.Value.Label, nearest.Value.Time);
-                drillDownItem.Header = $"Show Queries With {nearest.Value.Label.Replace("_", "__")}";
-                drillDownItem.IsEnabled = true;
-            }
-            else
-            {
-                drillDownItem.Tag = null;
-                drillDownItem.Header = "Show Queries With This Wait";
-                drillDownItem.IsEnabled = false;
-            }
-        };
-    }
-
-    private void ShowQueriesForWaitType_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not MenuItem menuItem) return;
-        if (menuItem.Tag is not (string waitType, DateTime time)) return;
-
-        // ±15 minute window around the clicked point (already in server local time from chart)
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
-
-        var window = new Windows.WaitDrillDownWindow(
-            _dataService, _serverId, waitType, 1, fromDate, toDate);
-        window.Owner = Window.GetWindow(this);
-        window.ShowDialog();
     }
 
     private async System.Threading.Tasks.Task UpdateWaitStatsChartFromPickerAsync()

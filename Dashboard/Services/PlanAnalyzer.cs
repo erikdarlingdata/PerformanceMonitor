@@ -10,16 +10,24 @@ namespace PerformanceMonitorDashboard.Services;
 /// Post-parse analysis pass that walks a parsed plan tree and adds warnings
 /// for common performance anti-patterns. Called after ShowPlanParser.Parse().
 /// </summary>
-public static partial class PlanAnalyzer
+public static class PlanAnalyzer
 {
-    private static readonly Regex FunctionInPredicateRegex = FunctionInPredicateRegExp();
+    private static readonly Regex FunctionInPredicateRegex = new(
+        @"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private static readonly Regex LeadingWildcardLikeRegex = LeadingWildcardLikeRegExp();
+    private static readonly Regex LeadingWildcardLikeRegex = new(
+        @"\blike\b[^'""]*?N?'%",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private static readonly Regex CaseInPredicateRegex = CaseInPredicateRegExp();
+    private static readonly Regex CaseInPredicateRegex = new(
+        @"\bCASE\s+(WHEN\b|$)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // Matches CTE definitions: WITH name AS ( or , name AS (
-    private static readonly Regex CteDefinitionRegex = CteDefinitionRegExp();
+    private static readonly Regex CteDefinitionRegex = new(
+        @"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static void Analyze(ParsedPlan plan)
     {
@@ -178,7 +186,7 @@ public static partial class PlanAnalyzer
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
         if (!string.IsNullOrEmpty(stmt.StatementText) &&
-            OptimizeForUnknownRegExp().IsMatch(stmt.StatementText))
+            Regex.IsMatch(stmt.StatementText, @"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase))
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -459,7 +467,7 @@ public static partial class PlanAnalyzer
 
         // Rule 10: Key Lookup / RID Lookup with residual predicate
         // Check RID Lookup first — it's more specific (PhysicalOp) and also has Lookup=true
-        if (node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
+        if (node.PhysicalOp == "RID Lookup")
         {
             var message = "RID Lookup — this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
             if (!string.IsNullOrEmpty(node.Predicate))
@@ -678,7 +686,7 @@ public static partial class PlanAnalyzer
 
         // Rule 22: Table variables (Object name starts with @)
         if (!string.IsNullOrEmpty(node.ObjectName) &&
-            node.ObjectName.StartsWith('@'))
+            node.ObjectName.StartsWith("@"))
         {
             node.Warnings.Add(new PlanWarning
             {
@@ -785,7 +793,7 @@ public static partial class PlanAnalyzer
     {
         // Check statement text for NOT IN
         if (string.IsNullOrEmpty(stmt.StatementText) ||
-            !NotInRegExp().IsMatch(stmt.StatementText))
+            !Regex.IsMatch(stmt.StatementText, @"\bNOT\s+IN\b", RegexOptions.IgnoreCase))
             return false;
 
         // Walk up the tree checking ancestors and their children
@@ -882,7 +890,7 @@ public static partial class PlanAnalyzer
             return "Implicit conversion (CONVERT_IMPLICIT)";
 
         // ISNULL / COALESCE wrapping column
-        if (IsNullCoalesceRegExp().IsMatch(predicate))
+        if (Regex.IsMatch(predicate, @"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase))
             return "ISNULL/COALESCE wrapping column";
 
         // Common function calls on columns
@@ -922,7 +930,7 @@ public static partial class PlanAnalyzer
             var refPattern = new Regex(
                 $@"\b(FROM|JOIN)\s+{Regex.Escape(cteName)}\b",
                 RegexOptions.IgnoreCase);
-            var refCount = refPattern.Count(text);
+            var refCount = refPattern.Matches(text).Count;
 
             if (refCount > 1)
             {
@@ -1235,19 +1243,4 @@ public static partial class PlanAnalyzer
     {
         return value.Length <= maxLength ? value : value[..maxLength] + "...";
     }
-
-    [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase)]
-    private static partial Regex FunctionInPredicateRegExp();
-    [GeneratedRegex(@"\blike\b[^'""]*?N?'%", RegexOptions.IgnoreCase)]
-    private static partial Regex LeadingWildcardLikeRegExp();
-    [GeneratedRegex(@"\bCASE\s+(WHEN\b|$)", RegexOptions.IgnoreCase)]
-    private static partial Regex CaseInPredicateRegExp();
-    [GeneratedRegex(@"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(", RegexOptions.IgnoreCase)]
-    private static partial Regex CteDefinitionRegExp();
-    [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase)]
-    private static partial Regex IsNullCoalesceRegExp();
-    [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase)]
-    private static partial Regex OptimizeForUnknownRegExp();
-    [GeneratedRegex(@"\bNOT\s+IN\b", RegexOptions.IgnoreCase)]
-    private static partial Regex NotInRegExp();
 }

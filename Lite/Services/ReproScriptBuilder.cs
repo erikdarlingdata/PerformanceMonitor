@@ -19,7 +19,7 @@ namespace PerformanceMonitorLite.Services;
 /// Builds paste-ready T-SQL reproduction scripts from query text and plan XML.
 /// Extracts parameters from plan XML ParameterList (same approach as sp_QueryReproBuilder).
 /// </summary>
-public static partial class ReproScriptBuilder
+public static class ReproScriptBuilder
 {
     /// <summary>
     /// Builds a complete reproduction script from available query data.
@@ -397,7 +397,7 @@ public static partial class ReproScriptBuilder
         var extractedNames = new HashSet<string>(parameters.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
 
         /* Find all @variable references in the query text */
-        var matches = AtVariableRegExp().Matches(queryText);
+        var matches = Regex.Matches(queryText, @"@\w+", RegexOptions.IgnoreCase);
         var seenVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (Match match in matches)
@@ -427,9 +427,6 @@ public static partial class ReproScriptBuilder
 
         return unresolved;
     }
-
-    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase)]
-    private static partial Regex AtVariableRegExp();
 }
 
 /// <summary>

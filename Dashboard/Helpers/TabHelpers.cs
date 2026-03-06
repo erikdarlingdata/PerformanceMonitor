@@ -603,7 +603,7 @@ namespace PerformanceMonitorDashboard.Helpers
         /// <param name="chart">The WpfPlot chart control</param>
         /// <param name="chartName">A descriptive name for the chart (used in filenames)</param>
         /// <param name="dataSource">Optional SQL view/table name that populates this chart</param>
-        public static ContextMenu SetupChartContextMenu(WpfPlot chart, string chartName, string? dataSource = null)
+        public static void SetupChartContextMenu(WpfPlot chart, string chartName, string? dataSource = null)
         {
             var contextMenu = new ContextMenu();
 
@@ -786,8 +786,6 @@ namespace PerformanceMonitorDashboard.Helpers
                 chart.Plot.Axes.AutoScale();
                 chart.Refresh();
             };
-
-            return contextMenu;
         }
 
         /// <summary>

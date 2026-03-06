@@ -788,8 +788,4 @@ public class QuerySnapshotRow
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
     public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);
-
-    // Chain mode — set by WaitDrillDownWindow when showing head blockers
-    public int ChainBlockedCount { get; set; }
-    public string ChainBlockingPath { get; set; } = "";
 }

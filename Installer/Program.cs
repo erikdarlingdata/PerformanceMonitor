@@ -19,75 +19,14 @@ using Microsoft.Data.SqlClient;
 
 namespace PerformanceMonitorInstaller
 {
-    partial class Program
+    class Program
     {
-        /// <summary>
-        /// Complete uninstall SQL: stops traces, deletes all 3 Agent jobs,
-        /// drops both XE sessions, and drops the database.
-        /// </summary>
-        private const string UninstallSql = @"
-/*
-Remove SQL Agent jobs
-*/
-USE msdb;
-
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Collection')
-BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Collection', @delete_unused_schedule = 1;
-    PRINT 'Deleted job: PerformanceMonitor - Collection';
-END;
-
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Data Retention')
-BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Data Retention', @delete_unused_schedule = 1;
-    PRINT 'Deleted job: PerformanceMonitor - Data Retention';
-END;
-
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Hung Job Monitor')
-BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Hung Job Monitor', @delete_unused_schedule = 1;
-    PRINT 'Deleted job: PerformanceMonitor - Hung Job Monitor';
-END;
-
-/*
-Drop Extended Events sessions
-*/
-USE master;
-
-IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'PerformanceMonitor_BlockedProcess')
-BEGIN
-    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'PerformanceMonitor_BlockedProcess')
-        ALTER EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER STATE = STOP;
-    DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;
-    PRINT 'Dropped XE session: PerformanceMonitor_BlockedProcess';
-END;
-
-IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'PerformanceMonitor_Deadlock')
-BEGIN
-    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'PerformanceMonitor_Deadlock')
-        ALTER EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER STATE = STOP;
-    DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;
-    PRINT 'Dropped XE session: PerformanceMonitor_Deadlock';
-END;
-
-/*
-Drop the database
-*/
-IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'PerformanceMonitor')
-BEGIN
-    ALTER DATABASE PerformanceMonitor SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-    DROP DATABASE PerformanceMonitor;
-    PRINT 'PerformanceMonitor database dropped';
-END
-ELSE
-BEGIN
-    PRINT 'PerformanceMonitor database does not exist';
-END;";
-
         /*
         Pre-compiled regex patterns for performance
         */
-        private static readonly Regex GoBatchPattern = GoBatchRegExp();
+        private static readonly Regex GoBatchPattern = new Regex(
+            @"^\s*GO\s*(?:--[^\r\n]*)?\s*$",
+            RegexOptions.Compiled | RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
         private static readonly Regex SqlFileNamePattern = new Regex(
             @"^\d{2}[a-z]?_.*\.sql$",
@@ -116,7 +55,6 @@ END;";
             public const int PartialInstallation = 4;
             public const int VersionCheckFailed = 5;
             public const int SqlFilesNotFound = 6;
-            public const int UninstallFailed = 7;
         }
 
         static async Task<int> Main(string[] args)
@@ -156,7 +94,6 @@ END;";
                 Console.WriteLine("Options:");
                 Console.WriteLine("  -h, --help           Show this help message");
                 Console.WriteLine("  --reinstall          Drop existing database and perform clean install");
-                Console.WriteLine("  --uninstall          Remove database, Agent jobs, and XE sessions");
                 Console.WriteLine("  --reset-schedule     Reset collection schedule to recommended defaults");
                 Console.WriteLine("  --encrypt=<level>    Connection encryption: mandatory (default), optional, strict");
                 Console.WriteLine("  --trust-cert         Trust server certificate without validation");
@@ -172,13 +109,11 @@ END;";
                 Console.WriteLine("  4  Partial installation (non-critical failures)");
                 Console.WriteLine("  5  Version check failed");
                 Console.WriteLine("  6  SQL files not found");
-                Console.WriteLine("  7  Uninstall failed");
                 return 0;
             }
 
             bool automatedMode = args.Length > 0;
             bool reinstallMode = args.Any(a => a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase));
-            bool uninstallMode = args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase));
             bool resetSchedule = args.Any(a => a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase));
             bool trustCert = args.Any(a => a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase));
 
@@ -199,7 +134,6 @@ END;";
             /*Filter out option flags to get positional arguments*/
             var filteredArgs = args
                 .Where(a => !a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase))
-                .Where(a => !a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase))
                 .Where(a => !a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase))
@@ -377,14 +311,6 @@ END;";
             }
 
             /*
-            Handle --uninstall mode (no SQL files needed)
-            */
-            if (uninstallMode)
-            {
-                return await PerformUninstallAsync(builder.ConnectionString, automatedMode);
-            }
-
-            /*
             Find SQL files to execute (do this once before the installation loop)
             Search current directory and up to 5 parent directories
             Prefer install/ subfolder if it exists (new structure)
@@ -542,7 +468,41 @@ END;";
                             /*Database or procedure doesn't exist - no traces to clean*/
                         }
 
-                        using (var command = new SqlCommand(UninstallSql, connection))
+                        string cleanupSql = @"
+/*
+Remove any existing Agent jobs
+*/
+USE msdb;
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Collection')
+BEGIN
+    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Collection';
+    PRINT 'Dropped PerformanceMonitor - Collection job';
+END;
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Data Retention')
+BEGIN
+    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Data Retention';
+    PRINT 'Dropped PerformanceMonitor - Data Retention job';
+END;
+
+/*
+Drop the database
+*/
+USE master;
+
+IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'PerformanceMonitor')
+BEGIN
+    ALTER DATABASE PerformanceMonitor SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE PerformanceMonitor;
+    PRINT 'PerformanceMonitor database dropped successfully';
+END
+ELSE
+BEGIN
+    PRINT 'PerformanceMonitor database does not exist';
+END";
+
+                        using (var command = new SqlCommand(cleanupSql, connection))
                         {
                             command.CommandTimeout = ShortTimeoutSeconds;
                             await command.ExecuteNonQueryAsync().ConfigureAwait(false);
@@ -1127,86 +1087,6 @@ END;";
         Log installation history to database
         Tracks version, duration, success/failure, and upgrade detection
         */
-
-        /// <summary>
-        /// Performs a complete uninstall: stops traces, removes jobs, XE sessions, and database.
-        /// </summary>
-        private static async Task<int> PerformUninstallAsync(string connectionString, bool automatedMode)
-        {
-            Console.WriteLine();
-            Console.WriteLine("================================================================================");
-            Console.WriteLine("UNINSTALL MODE");
-            Console.WriteLine("================================================================================");
-            Console.WriteLine();
-
-            if (!automatedMode)
-            {
-                Console.WriteLine("This will remove:");
-                Console.WriteLine("  - SQL Agent jobs (Collection, Data Retention, Hung Job Monitor)");
-                Console.WriteLine("  - Extended Events sessions (BlockedProcess, Deadlock)");
-                Console.WriteLine("  - Server-side traces");
-                Console.WriteLine("  - PerformanceMonitor database and ALL collected data");
-                Console.WriteLine();
-                Console.Write("Are you sure you want to continue? (Y/N, default N): ");
-                string? confirm = Console.ReadLine();
-                if (!confirm?.Trim().Equals("Y", StringComparison.OrdinalIgnoreCase) ?? true)
-                {
-                    Console.WriteLine("Uninstall cancelled.");
-                    WaitForExit();
-                    return ExitCodes.Success;
-                }
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("Uninstalling Performance Monitor...");
-
-            try
-            {
-                using var connection = new SqlConnection(connectionString);
-                await connection.OpenAsync().ConfigureAwait(false);
-
-                /*Stop traces first (procedure lives in the database)*/
-                try
-                {
-                    using var traceCmd = new SqlCommand(
-                        "EXECUTE PerformanceMonitor.collect.trace_management_collector @action = 'STOP';",
-                        connection);
-                    traceCmd.CommandTimeout = ShortTimeoutSeconds;
-                    await traceCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
-                    Console.WriteLine("✓ Stopped server-side traces");
-                }
-                catch (SqlException)
-                {
-                    Console.WriteLine("  No traces to stop (database or procedure not found)");
-                }
-
-                /*Remove jobs, XE sessions, and database*/
-                using var command = new SqlCommand(UninstallSql, connection);
-                command.CommandTimeout = ShortTimeoutSeconds;
-                await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-
-                Console.WriteLine();
-                Console.WriteLine("✓ Uninstall completed successfully");
-                Console.WriteLine();
-                Console.WriteLine("Note: blocked process threshold (s) was NOT reset.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine();
-                Console.WriteLine($"Uninstall failed: {ex.Message}");
-                if (!automatedMode)
-                {
-                    WaitForExit();
-                }
-                return ExitCodes.UninstallFailed;
-            }
-
-            if (!automatedMode)
-            {
-                WaitForExit();
-            }
-            return ExitCodes.Success;
-        }
 
         /*
         Get currently installed version from database
@@ -1920,8 +1800,5 @@ END;";
 
             return reportPath;
         }
-
-        [GeneratedRegex(@"^\s*GO\s*(?:--[^\r\n]*)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline)]
-        private static partial Regex GoBatchRegExp();
     }
 }

@@ -162,11 +162,6 @@ namespace PerformanceMonitorDashboard
             PoisonWaitThresholdTextBox.Text = prefs.PoisonWaitThresholdMs.ToString(CultureInfo.InvariantCulture);
             NotifyOnLongRunningQueriesCheckBox.IsChecked = prefs.NotifyOnLongRunningQueries;
             LongRunningQueryThresholdTextBox.Text = prefs.LongRunningQueryThresholdMinutes.ToString(CultureInfo.InvariantCulture);
-            LongRunningQueryMaxResultsTextBox.Text = prefs.LongRunningQueryMaxResults.ToString(CultureInfo.InvariantCulture);
-            LrqExcludeSpServerDiagnosticsCheckBox.IsChecked = prefs.LongRunningQueryExcludeSpServerDiagnostics;
-            LrqExcludeWaitForCheckBox.IsChecked = prefs.LongRunningQueryExcludeWaitFor;
-            LrqExcludeBackupsCheckBox.IsChecked = prefs.LongRunningQueryExcludeBackups;
-            LrqExcludeMiscWaitsCheckBox.IsChecked = prefs.LongRunningQueryExcludeMiscWaits;
             NotifyOnTempDbSpaceCheckBox.IsChecked = prefs.NotifyOnTempDbSpace;
             TempDbSpaceThresholdTextBox.Text = prefs.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
             NotifyOnLongRunningJobsCheckBox.IsChecked = prefs.NotifyOnLongRunningJobs;
@@ -585,20 +580,6 @@ namespace PerformanceMonitorDashboard
                 prefs.LongRunningQueryThresholdMinutes = lrqThreshold;
             else if (prefs.NotifyOnLongRunningQueries)
                 validationErrors.Add("Long-running query threshold must be a positive number");
-
-            if (int.TryParse(LongRunningQueryMaxResultsTextBox.Text, out int lrqMaxResults) && lrqMaxResults >= 1 && lrqMaxResults <= int.MaxValue)
-            {
-                prefs.LongRunningQueryMaxResults = lrqMaxResults;
-            }
-            else
-            {
-                validationErrors.Add($"Long-running query max results must be between 1 and {int.MaxValue}");
-            }
-
-            prefs.LongRunningQueryExcludeSpServerDiagnostics = LrqExcludeSpServerDiagnosticsCheckBox.IsChecked == true;
-            prefs.LongRunningQueryExcludeWaitFor = LrqExcludeWaitForCheckBox.IsChecked == true;
-            prefs.LongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true;
-            prefs.LongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
 
             prefs.NotifyOnTempDbSpace = NotifyOnTempDbSpaceCheckBox.IsChecked == true;
             if (int.TryParse(TempDbSpaceThresholdTextBox.Text, out int tempDbThreshold) && tempDbThreshold > 0 && tempDbThreshold <= 100)

@@ -631,19 +631,6 @@ public static class ShowPlanParser
             StatsCollectionId = ParseLong(relOpEl.Attribute("StatsCollectionId")?.Value)
         };
 
-        // Spool operators: prepend Eager/Lazy from LogicalOp to PhysicalOp
-        // XML has PhysicalOp="Index Spool" but LogicalOp="Eager Spool" — show "Eager Index Spool"
-        if (node.PhysicalOp.EndsWith("Spool", StringComparison.OrdinalIgnoreCase)
-            && node.LogicalOp.StartsWith("Eager", StringComparison.OrdinalIgnoreCase))
-        {
-            node.PhysicalOp = "Eager " + node.PhysicalOp;
-        }
-        else if (node.PhysicalOp.EndsWith("Spool", StringComparison.OrdinalIgnoreCase)
-            && node.LogicalOp.StartsWith("Lazy", StringComparison.OrdinalIgnoreCase))
-        {
-            node.PhysicalOp = "Lazy " + node.PhysicalOp;
-        }
-
         // Map to icon
         node.IconName = PlanIconMapper.GetIconName(node.PhysicalOp);
 
@@ -844,19 +831,6 @@ public static class ShowPlanParser
             node.NoExpandHint = physicalOpEl.Attribute("NoExpandHint")?.Value is "true" or "1";
             node.Lookup = physicalOpEl.Attribute("Lookup")?.Value is "true" or "1";
             node.DynamicSeek = physicalOpEl.Attribute("DynamicSeek")?.Value is "true" or "1";
-
-            // Override PhysicalOp, LogicalOp, and icon when Lookup=true.
-            // SQL Server's XML emits PhysicalOp="Clustered Index Seek" with <IndexScan Lookup="1">
-            // rather than "Key Lookup (Clustered)" — correct the label here so all display
-            // paths (node card, tooltip, properties panel) show the right operator name.
-            if (node.Lookup)
-            {
-                var isHeap = node.IndexKind?.Equals("Heap", StringComparison.OrdinalIgnoreCase) == true
-                             || node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase);
-                node.PhysicalOp = isHeap ? "RID Lookup (Heap)" : "Key Lookup (Clustered)";
-                node.LogicalOp  = isHeap ? "RID Lookup" : "Key Lookup";
-                node.IconName   = isHeap ? "rid_lookup" : "bookmark_lookup";
-            }
 
             // Table cardinality and rows to be read (on <RelOp> per XSD)
             node.TableCardinality = ParseDouble(relOpEl.Attribute("TableCardinality")?.Value);
@@ -1442,32 +1416,10 @@ public static class ShowPlanParser
 
         if (warningsEl.Attribute("UnmatchedIndexes")?.Value is "true" or "1")
         {
-            var unmatchedMsg = "Indexes could not be matched due to parameterization";
-            var unmatchedEl = warningsEl.Element(Ns + "UnmatchedIndexes");
-            if (unmatchedEl != null)
-            {
-                var unmatchedDetails = new List<string>();
-                foreach (var paramEl in unmatchedEl.Elements(Ns + "Parameterization"))
-                {
-                    var db = paramEl.Attribute("Database")?.Value?.Replace("[", "").Replace("]", "");
-                    var schema = paramEl.Attribute("Schema")?.Value?.Replace("[", "").Replace("]", "");
-                    var table = paramEl.Attribute("Table")?.Value?.Replace("[", "").Replace("]", "");
-                    var index = paramEl.Attribute("Index")?.Value?.Replace("[", "").Replace("]", "");
-                    var parts = new List<string>();
-                    if (!string.IsNullOrEmpty(db)) parts.Add(db);
-                    if (!string.IsNullOrEmpty(schema)) parts.Add(schema);
-                    if (!string.IsNullOrEmpty(table)) parts.Add(table);
-                    if (!string.IsNullOrEmpty(index)) parts.Add(index);
-                    if (parts.Count > 0)
-                        unmatchedDetails.Add(string.Join(".", parts));
-                }
-                if (unmatchedDetails.Count > 0)
-                    unmatchedMsg += ": " + string.Join(", ", unmatchedDetails);
-            }
             result.Add(new PlanWarning
             {
                 WarningType = "Unmatched Indexes",
-                Message = unmatchedMsg,
+                Message = "Indexes could not be matched due to parameterization",
                 Severity = PlanWarningSeverity.Warning
             });
         }

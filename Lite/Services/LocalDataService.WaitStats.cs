@@ -170,7 +170,6 @@ FROM v_wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
 AND delta_waiting_tasks > 0
-AND collection_time >= NOW() - INTERVAL '10 minutes'
 ORDER BY collection_time DESC
 LIMIT 3";
 
@@ -193,214 +192,27 @@ LIMIT 3";
     }
 
     /// <summary>
-    /// Gets query snapshots filtered by wait type, for the wait drill-down feature.
-    /// Returns sessions that were experiencing the specified wait type during the time range.
-    /// </summary>
-    public async Task<List<QuerySnapshotRow>> GetQuerySnapshotsByWaitTypeAsync(
-        int serverId, string waitType, int hoursBack = 24,
-        DateTime? fromDate = null, DateTime? toDate = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
-
-        command.CommandText = @"
-SELECT
-    session_id,
-    database_name,
-    elapsed_time_formatted,
-    query_text,
-    status,
-    blocking_session_id,
-    wait_type,
-    wait_time_ms,
-    wait_resource,
-    cpu_time_ms,
-    total_elapsed_time_ms,
-    reads,
-    writes,
-    logical_reads,
-    granted_query_memory_gb,
-    transaction_isolation_level,
-    dop,
-    parallel_worker_count,
-    query_plan,
-    live_query_plan,
-    collection_time,
-    login_name,
-    host_name,
-    program_name,
-    open_transaction_count,
-    percent_complete
-FROM v_query_snapshots
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   wait_type = $4
-ORDER BY wait_time_ms DESC
-LIMIT 500";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
-        command.Parameters.Add(new DuckDBParameter { Value = waitType });
-
-        var items = new List<QuerySnapshotRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            items.Add(new QuerySnapshotRow
-            {
-                SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                WaitType = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                WaitResource = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                CpuTimeMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                TotalElapsedTimeMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                Reads = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                Writes = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                LogicalReads = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                GrantedQueryMemoryGb = reader.IsDBNull(14) ? 0 : ToDouble(reader.GetValue(14)),
-                TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
-                Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
-                ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
-                CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
-                LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
-                HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
-                ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
-                OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
-                PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25))
-            });
-        }
-
-        return items;
-    }
-
-    /// <summary>
-    /// Gets ALL query snapshots in a time range (for chain walking).
-    /// Used when a chain wait type (LCK_M_*, LATCH_EX/UP) needs blocking chain traversal.
-    /// </summary>
-    public async Task<List<QuerySnapshotRow>> GetAllQuerySnapshotsInRangeAsync(
-        int serverId, int hoursBack = 24,
-        DateTime? fromDate = null, DateTime? toDate = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
-
-        command.CommandText = @"
-SELECT
-    session_id,
-    database_name,
-    elapsed_time_formatted,
-    query_text,
-    status,
-    blocking_session_id,
-    wait_type,
-    wait_time_ms,
-    wait_resource,
-    cpu_time_ms,
-    total_elapsed_time_ms,
-    reads,
-    writes,
-    logical_reads,
-    granted_query_memory_gb,
-    transaction_isolation_level,
-    dop,
-    parallel_worker_count,
-    query_plan,
-    live_query_plan,
-    collection_time,
-    login_name,
-    host_name,
-    program_name,
-    open_transaction_count,
-    percent_complete
-FROM v_query_snapshots
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-ORDER BY collection_time DESC
-LIMIT 2000";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
-
-        var items = new List<QuerySnapshotRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            items.Add(new QuerySnapshotRow
-            {
-                SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                WaitType = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                WaitResource = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                CpuTimeMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                TotalElapsedTimeMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                Reads = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                Writes = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                LogicalReads = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                GrantedQueryMemoryGb = reader.IsDBNull(14) ? 0 : ToDouble(reader.GetValue(14)),
-                TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
-                Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
-                ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
-                CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
-                LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
-                HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
-                ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
-                OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
-                PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25))
-            });
-        }
-
-        return items;
-    }
-
-    /// <summary>
     /// Gets long-running queries from the latest collection snapshot.
     /// Returns sessions whose total elapsed time exceeds the given threshold.
     /// </summary>
-    public async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
-        int serverId,
-        int thresholdMinutes,
-        int maxResults = 5,
-        bool excludeSpServerDiagnostics = true,
-        bool excludeWaitFor = true,
-        bool excludeBackups = true,
-        bool excludeMiscWaits = true)
+    public async Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(int serverId, int thresholdMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var thresholdMs = (long)thresholdMinutes * 60 * 1000;
 
-        string spServerDiagnosticsFilter = excludeSpServerDiagnostics
-            ? "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'" : "";
-        string waitForFilter = excludeWaitFor
-            ? "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')" : "";
-        string backupsFilter = excludeBackups
-            ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
-        string miscWaitsFilter = excludeMiscWaits
-            ? "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')" : "";
-        maxResults = Math.Clamp(maxResults, 1, 1000);
+        // Exclude internal SP_SERVER_DIAGNOSTICS queries by default, as they often run long and aren't actionable.
+        string spServerDiagnosticsFilter = "AND r.wait_type NOT LIKE N'%SP_SERVER_DIAGNOSTICS%'";
+
+        // Exclude WAITFOR queries by default, as they can run indefinitely and may not indicate a problem.
+        string waitForFilter = "AND r.wait_type NOT IN (N'WAITFOR', N'BROKER_RECEIVE_WAITFOR')";
+
+        // Exclude backup waits if specified, as they can run long and aren't typically actionable in this context.
+        string backupsFilter = "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')";
+
+        // Exclude miscellaneous wait type that aren't typically actionable
+        string miscWaitsFilter = "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')";
 
         command.CommandText = @$"
                 SELECT
@@ -423,11 +235,10 @@ LIMIT 2000";
                     {miscWaitsFilter}
                     AND r.total_elapsed_time_ms >= $2
                 ORDER BY r.total_elapsed_time_ms DESC
-                LIMIT $3;";
+                LIMIT 5;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = thresholdMs });
-        command.Parameters.Add(new DuckDBParameter { Value = maxResults });
 
         var items = new List<LongRunningQueryInfo>();
         using var reader = await command.ExecuteReaderAsync();
