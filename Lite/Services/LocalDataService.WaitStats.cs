@@ -170,6 +170,7 @@ FROM v_wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
 AND delta_waiting_tasks > 0
+AND collection_time >= NOW() - INTERVAL '10 minutes'
 ORDER BY collection_time DESC
 LIMIT 3";
 

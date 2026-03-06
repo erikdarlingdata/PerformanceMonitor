@@ -1099,7 +1099,9 @@ public partial class MainWindow : Window
                             allWaitNames,
                             $"{App.AlertPoisonWaitThresholdMs}ms avg",
                             summary.ServerId,
-                            poisonContext);
+                            poisonContext,
+                            numericCurrentValue: worst.AvgMsPerWait,
+                            numericThresholdValue: App.AlertPoisonWaitThresholdMs);
                     }
                 }
                 else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait)
@@ -1147,7 +1149,9 @@ public partial class MainWindow : Window
                             $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
                             $"{App.AlertLongRunningQueryThresholdMinutes}m",
                             summary.ServerId,
-                            lrqContext);
+                            lrqContext,
+                            numericCurrentValue: elapsedMinutes,
+                            numericThresholdValue: App.AlertLongRunningQueryThresholdMinutes);
                     }
                 }
                 else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning)
@@ -1191,7 +1195,9 @@ public partial class MainWindow : Window
                             $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
                             $"{App.AlertTempDbSpaceThresholdPercent}%",
                             summary.ServerId,
-                            tempDbContext);
+                            tempDbContext,
+                            numericCurrentValue: tempDb.UsedPercent,
+                            numericThresholdValue: App.AlertTempDbSpaceThresholdPercent);
                     }
                 }
                 else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb)
@@ -1240,7 +1246,9 @@ public partial class MainWindow : Window
                             $"{anomalousJobs.Count} job(s) exceeding {App.AlertLongRunningJobMultiplier}x average",
                             $"{App.AlertLongRunningJobMultiplier}x historical avg",
                             summary.ServerId,
-                            jobContext);
+                            jobContext,
+                            numericCurrentValue: (double)worst.PercentOfAverage,
+                            numericThresholdValue: App.AlertLongRunningJobMultiplier * 100);
                     }
                 }
                 else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob)
