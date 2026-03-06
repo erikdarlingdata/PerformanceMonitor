@@ -8,8 +8,10 @@
 
 using System;
 using System.IO;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorLite.Mcp;
@@ -121,11 +123,9 @@ public partial class SettingsWindow : Window
         SaveSmtpSettings();
 
         _saved = true;
+        if (mcpChanged) McpSettingsChanged = true;
 
-        var message = mcpChanged
-            ? "Settings saved. MCP changes take effect after restarting the application."
-            : "Settings saved.";
-        MessageBox.Show(message, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+        MessageBox.Show("Settings saved.", "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private bool SaveMcpSettings()
@@ -150,9 +150,29 @@ public partial class SettingsWindow : Window
             var newEnabled = McpEnabledCheckBox.IsChecked == true;
             int.TryParse(McpPortTextBox.Text, out var newPort);
 
+            if (newEnabled && newPort != oldPort)
+            {
+                if (newPort < 1024 || newPort > IPEndPoint.MaxPort)
+                {
+                    MessageBox.Show(
+                        $"MCP port must be between 1024 and {IPEndPoint.MaxPort}.\nPorts 0–1023 are well-known privileged ports reserved by the operating system.",
+                        "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
+
+                bool inUse = Task.Run(() => PortUtilityService.IsTcpPortListeningAsync(newPort, IPAddress.Loopback)).GetAwaiter().GetResult();
+                if (inUse)
+                {
+                    MessageBox.Show(
+                        $"Port {newPort} is already in use. Choose a different port for the MCP server.",
+                        "Port Conflict", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
+            }
+
             root["mcp_enabled"] = newEnabled;
 
-            if (newPort > 0 && newPort < 65536)
+            if (newPort >= 1024 && newPort <= IPEndPoint.MaxPort)
             {
                 root["mcp_port"] = newPort;
             }
@@ -228,6 +248,20 @@ public partial class SettingsWindow : Window
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
         Clipboard.SetDataObject(command, false);
         McpStatusText.Text = "Copied to clipboard!";
+    }
+
+    private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            int port = await PortUtilityService.GetFreeTcpPortAsync();
+            McpPortTextBox.Text = port.ToString();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not find an available port: {ex.Message}",
+                "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void LoadConnectionTimeout()
@@ -316,6 +350,7 @@ public partial class SettingsWindow : Window
     private bool _isLoadingTheme;
     private readonly string _originalTheme = Helpers.ThemeManager.CurrentTheme;
     private bool _saved;
+    public bool McpSettingsChanged { get; private set; }
 
     private void ColorThemeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {

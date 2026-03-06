@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -126,12 +127,7 @@ public partial class MainWindow : Window
             AlertsHistoryContent.Initialize(_dataService);
 
             // Start MCP server if enabled
-            var mcpSettings = McpSettings.Load(App.ConfigDirectory);
-            if (mcpSettings.Enabled)
-            {
-                _mcpService = new McpHostService(_dataService, _serverManager, mcpSettings.Port);
-                _ = _mcpService.StartAsync(_backgroundCts!.Token);
-            }
+            await StartMcpServerAsync();
 
             // Load servers
             RefreshServerList();
@@ -195,18 +191,7 @@ public partial class MainWindow : Window
         // Stop background collection with timeout
         _backgroundCts?.Cancel();
 
-        if (_mcpService != null)
-        {
-            try
-            {
-                using var mcpShutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                await _mcpService.StopAsync(mcpShutdownCts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                /* MCP shutdown timed out */
-            }
-        }
+        await StopMcpServerAsync();
 
         if (_backgroundService != null)
         {
@@ -248,6 +233,46 @@ public partial class MainWindow : Window
         }
 
         UpdateCollectorHealth();
+    }
+
+    private async Task StartMcpServerAsync()
+    {
+        var mcpSettings = McpSettings.Load(App.ConfigDirectory);
+        if (!mcpSettings.Enabled) return;
+
+        try
+        {
+            bool portInUse = await PortUtilityService.IsTcpPortListeningAsync(mcpSettings.Port, IPAddress.Loopback);
+            if (portInUse)
+            {
+                AppLogger.Error("MCP", $"Port {mcpSettings.Port} is already in use — MCP server not started");
+                return;
+            }
+
+            _mcpService = new McpHostService(_dataService!, _serverManager, mcpSettings.Port);
+            _ = _mcpService.StartAsync(_backgroundCts!.Token);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("MCP", $"Failed to start MCP server: {ex.Message}");
+        }
+    }
+
+    private async Task StopMcpServerAsync()
+    {
+        if (_mcpService != null)
+        {
+            try
+            {
+                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                await _mcpService.StopAsync(shutdownCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                /* MCP shutdown timed out */
+            }
+            _mcpService = null;
+        }
     }
 
     private void RefreshServerList()
@@ -771,11 +796,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SettingsButton_Click(object sender, RoutedEventArgs e)
+    private async void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var window = new SettingsWindow(_scheduleManager, _backgroundService, _mcpService) { Owner = this };
         window.ShowDialog();
         UpdateStatusBar();
+
+        if (window.McpSettingsChanged)
+        {
+            await StopMcpServerAsync();
+            await StartMcpServerAsync();
+        }
     }
 
     private void AboutButton_Click(object sender, RoutedEventArgs e)

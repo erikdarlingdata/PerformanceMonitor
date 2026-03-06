@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -188,7 +189,7 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void StartMcpServerIfEnabled()
+        private async void StartMcpServerIfEnabled()
         {
             var prefs = _preferencesService.GetPreferences();
             if (!prefs.McpEnabled)
@@ -198,6 +199,13 @@ namespace PerformanceMonitorDashboard
 
             try
             {
+                bool portInUse = await PortUtilityService.IsTcpPortListeningAsync(prefs.McpPort, IPAddress.Loopback);
+                if (portInUse)
+                {
+                    Logger.Error($"[MCP] Port {prefs.McpPort} is already in use — MCP server not started");
+                    return;
+                }
+
                 _mcpHostService = new McpHostService(_serverManager, _credentialService, prefs.McpPort);
                 _mcpCts = new CancellationTokenSource();
                 _ = _mcpHostService.StartAsync(_mcpCts.Token);
@@ -206,6 +214,36 @@ namespace PerformanceMonitorDashboard
             {
                 Logger.Error($"[MCP] Failed to start MCP server: {ex.Message}", ex);
             }
+        }
+
+        private async Task StopMcpServerAsync()
+        {
+            if (_mcpHostService != null)
+            {
+                try
+                {
+                    _mcpCts?.Cancel();
+                    using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    await _mcpHostService.StopAsync(shutdownCts.Token);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[MCP] Error stopping MCP server: {ex.Message}", ex);
+                }
+                _mcpHostService = null;
+                _mcpCts?.Dispose();
+                _mcpCts = null;
+            }
+        }
+
+        private async void RestartMcpServerIfNeeded(bool wasEnabled, int oldPort)
+        {
+            var prefs = _preferencesService.GetPreferences();
+            bool changed = prefs.McpEnabled != wasEnabled || prefs.McpPort != oldPort;
+            if (!changed) return;
+
+            await StopMcpServerAsync();
+            StartMcpServerIfEnabled();
         }
 
         private void InitializeNotificationService()
@@ -251,6 +289,9 @@ namespace PerformanceMonitorDashboard
                 {
                     Logger.Error($"[MCP] Error stopping MCP server: {ex.Message}", ex);
                 }
+                _mcpHostService = null;
+                _mcpCts?.Dispose();
+                _mcpCts = null;
             }
 
             // Save alert history to disk
@@ -889,6 +930,10 @@ namespace PerformanceMonitorDashboard
 
         private void Settings_Click(object sender, RoutedEventArgs e)
         {
+            var oldPrefs = _preferencesService.GetPreferences();
+            bool wasEnabled = oldPrefs.McpEnabled;
+            int oldPort = oldPrefs.McpPort;
+
             var dialog = new SettingsWindow(_preferencesService);
             dialog.Owner = this;
             if (dialog.ShowDialog() == true)
@@ -904,6 +949,8 @@ namespace PerformanceMonitorDashboard
                         serverTab.RefreshAutoRefreshSettings();
                     }
                 }
+
+                RestartMcpServerIfNeeded(wasEnabled, oldPort);
             }
         }
 

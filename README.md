@@ -374,6 +374,9 @@ Both editions include an embedded [Model Context Protocol](https://modelcontextp
 ### Setup
 
 1. Enable the MCP server in Settings (checkbox + port, default `5151`)
+   - The port must be between **1024** and **65535**. Ports 0–1023 are well-known privileged ports reserved by the operating system.
+   - On save, the app checks whether the chosen port is already in use and warns you if there is a conflict.
+   - On startup, the app verifies the port is available before starting the MCP server.
 2. Register with Claude Code:
 
 ```

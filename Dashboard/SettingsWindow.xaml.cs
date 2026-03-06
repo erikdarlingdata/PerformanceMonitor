@@ -8,6 +8,8 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorDashboard.Helpers;
@@ -468,6 +470,20 @@ namespace PerformanceMonitorDashboard
             McpPortTextBox.IsEnabled = McpEnabledCheckBox.IsChecked == true;
         }
 
+        private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                int port = await PortUtilityService.GetFreeTcpPortAsync();
+                McpPortTextBox.Text = port.ToString();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Could not find an available port: {ex.Message}",
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
         private void UpdateMcpStatus(Models.UserPreferences prefs)
         {
             if (prefs.McpEnabled)
@@ -639,9 +655,27 @@ namespace PerformanceMonitorDashboard
 
             // Save MCP server settings
             prefs.McpEnabled = McpEnabledCheckBox.IsChecked == true;
-            if (int.TryParse(McpPortTextBox.Text, out int mcpPort) && mcpPort > 0 && mcpPort <= 65535)
+            if (int.TryParse(McpPortTextBox.Text, out int mcpPort) && mcpPort >= 1024 && mcpPort <= IPEndPoint.MaxPort)
             {
+                if (prefs.McpEnabled && mcpPort != prefs.McpPort)
+                {
+                    bool inUse = Task.Run(() => PortUtilityService.IsTcpPortListeningAsync(mcpPort, IPAddress.Loopback)).GetAwaiter().GetResult();
+                    if (inUse)
+                    {
+                        MessageBox.Show(
+                            $"Port {mcpPort} is already in use. Choose a different port for the MCP server.",
+                            "Port Conflict", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                }
                 prefs.McpPort = mcpPort;
+            }
+            else
+            {
+                MessageBox.Show(
+                    $"MCP port must be between 1024 and {IPEndPoint.MaxPort}.\nPorts 0–1023 are well-known privileged ports reserved by the operating system.",
+                    "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
             }
 
             _preferencesService.SavePreferences(prefs);

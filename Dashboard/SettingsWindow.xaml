@@ -316,6 +316,10 @@
                                          Width="70"
                                          VerticalAlignment="Center"
                                          TextAlignment="Center"/>
+                                <Button Content="Auto" ToolTip="Find an available port"
+                                        Margin="6,0,0,0" Padding="8,2"
+                                        VerticalAlignment="Center"
+                                        Click="AutoPortButton_Click"/>
                             </StackPanel>
                             <TextBlock x:Name="McpStatusText"
                                        FontStyle="Italic" Foreground="Gray" Margin="20,8,0,0" FontSize="11"/>
