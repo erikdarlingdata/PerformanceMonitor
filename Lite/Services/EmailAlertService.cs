@@ -48,7 +48,9 @@ public class EmailAlertService
         string currentValue,
         string thresholdValue,
         int serverId = 0,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        double? numericCurrentValue = null,
+        double? numericThresholdValue = null)
     {
         try
         {
@@ -108,10 +110,12 @@ public class EmailAlertService
             }
 
             /* Always log the alert to DuckDB, regardless of email status */
+            var logCurrent = numericCurrentValue
+                ?? (double.TryParse(currentValue.TrimEnd('%'), out var cv) ? cv : 0);
+            var logThreshold = numericThresholdValue
+                ?? (double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0);
             await LogAlertAsync(serverId, serverName, metricName,
-                double.TryParse(currentValue.TrimEnd('%'), out var cv) ? cv : 0,
-                double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0,
-                sent, notificationType, sendError);
+                logCurrent, logThreshold, sent, notificationType, sendError);
         }
         catch (Exception ex)
         {
