@@ -85,11 +85,6 @@ namespace PerformanceMonitorDashboard.Models
         public int PoisonWaitThresholdMs { get; set; } = 500; // Alert when avg ms per wait > X
         public bool NotifyOnLongRunningQueries { get; set; } = true;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30; // Alert when query runs > X minutes
-        public int LongRunningQueryMaxResults { get; set; } = 5; // Max number of long-running queries returned per check
-        public bool LongRunningQueryExcludeSpServerDiagnostics { get; set; } = true;
-        public bool LongRunningQueryExcludeWaitFor { get; set; } = true;
-        public bool LongRunningQueryExcludeBackups { get; set; } = true;
-        public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
         public bool NotifyOnTempDbSpace { get; set; } = true;
         public int TempDbSpaceThresholdPercent { get; set; } = 80; // Alert when TempDB used > X%
         public bool NotifyOnLongRunningJobs { get; set; } = true;

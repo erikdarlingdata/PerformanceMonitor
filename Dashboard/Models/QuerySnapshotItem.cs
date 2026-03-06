@@ -45,8 +45,5 @@ namespace PerformanceMonitorDashboard.Models
 
         // Property alias for XAML binding compatibility
         public string? QueryText => SqlText;
-
-        // Chain mode — set by WaitDrillDownWindow when showing head blockers
-        public string ChainBlockingPath { get; set; } = "";
     }
 }

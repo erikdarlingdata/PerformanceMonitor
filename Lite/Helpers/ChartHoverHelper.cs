@@ -61,45 +61,6 @@ internal sealed class ChartHoverHelper
     public void Add(ScottPlot.Plottables.Scatter scatter, string label) =>
         _scatters.Add((scatter, label));
 
-    /// <summary>
-    /// Returns the nearest series label and data-point time for the given mouse position,
-    /// or null if no series is close enough.
-    /// </summary>
-    public (string Label, DateTime Time)? GetNearestSeries(Point mousePos)
-    {
-        if (_scatters.Count == 0) return null;
-        var dpi = VisualTreeHelper.GetDpi(_chart);
-        var pixel = new ScottPlot.Pixel(
-            (float)(mousePos.X * dpi.DpiScaleX),
-            (float)(mousePos.Y * dpi.DpiScaleY));
-        var mouseCoords = _chart.Plot.GetCoordinates(pixel);
-
-        double bestDistance = double.MaxValue;
-        ScottPlot.DataPoint bestPoint = default;
-        string bestLabel = "";
-
-        foreach (var (scatter, label) in _scatters)
-        {
-            var nearest = scatter.Data.GetNearest(mouseCoords, _chart.Plot.LastRender);
-            if (!nearest.IsReal) continue;
-            var nearestPixel = _chart.Plot.GetPixel(
-                new ScottPlot.Coordinates(nearest.X, nearest.Y));
-            double dx = nearestPixel.X - pixel.X;
-            double dy = nearestPixel.Y - pixel.Y;
-            double dist = dx * dx + dy * dy;
-            if (dist < bestDistance)
-            {
-                bestDistance = dist;
-                bestPoint = nearest;
-                bestLabel = label;
-            }
-        }
-
-        if (bestPoint.IsReal && bestDistance < 2500) // ~50px radius
-            return (bestLabel, DateTime.FromOADate(bestPoint.X));
-        return null;
-    }
-
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
         if (_scatters.Count == 0) return;
@@ -108,10 +69,9 @@ internal sealed class ChartHoverHelper
         _lastUpdate = now;
 
         var pos = e.GetPosition(_chart);
-        var dpi = VisualTreeHelper.GetDpi(_chart);
         var pixel = new ScottPlot.Pixel(
-            (float)(pos.X * dpi.DpiScaleX),
-            (float)(pos.Y * dpi.DpiScaleY));
+            (float)(pos.X * _chart.DisplayScale),
+            (float)(pos.Y * _chart.DisplayScale));
         var mouseCoords = _chart.Plot.GetCoordinates(pixel);
 
         double bestDistance = double.MaxValue;

@@ -1099,9 +1099,7 @@ public partial class MainWindow : Window
                             allWaitNames,
                             $"{App.AlertPoisonWaitThresholdMs}ms avg",
                             summary.ServerId,
-                            poisonContext,
-                            numericCurrentValue: worst.AvgMsPerWait,
-                            numericThresholdValue: App.AlertPoisonWaitThresholdMs);
+                            poisonContext);
                     }
                 }
                 else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait)
@@ -1124,7 +1122,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                var longRunning = await _dataService.GetLongRunningQueriesAsync(summary.ServerId, App.AlertLongRunningQueryThresholdMinutes, App.AlertLongRunningQueryMaxResults, App.AlertLongRunningQueryExcludeSpServerDiagnostics, App.AlertLongRunningQueryExcludeWaitFor, App.AlertLongRunningQueryExcludeBackups, App.AlertLongRunningQueryExcludeMiscWaits);
+                var longRunning = await _dataService.GetLongRunningQueriesAsync(summary.ServerId, App.AlertLongRunningQueryThresholdMinutes);
 
                 if (longRunning.Count > 0)
                 {
@@ -1149,9 +1147,7 @@ public partial class MainWindow : Window
                             $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
                             $"{App.AlertLongRunningQueryThresholdMinutes}m",
                             summary.ServerId,
-                            lrqContext,
-                            numericCurrentValue: elapsedMinutes,
-                            numericThresholdValue: App.AlertLongRunningQueryThresholdMinutes);
+                            lrqContext);
                     }
                 }
                 else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning)
@@ -1195,9 +1191,7 @@ public partial class MainWindow : Window
                             $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
                             $"{App.AlertTempDbSpaceThresholdPercent}%",
                             summary.ServerId,
-                            tempDbContext,
-                            numericCurrentValue: tempDb.UsedPercent,
-                            numericThresholdValue: App.AlertTempDbSpaceThresholdPercent);
+                            tempDbContext);
                     }
                 }
                 else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb)
@@ -1246,9 +1240,7 @@ public partial class MainWindow : Window
                             $"{anomalousJobs.Count} job(s) exceeding {App.AlertLongRunningJobMultiplier}x average",
                             $"{App.AlertLongRunningJobMultiplier}x historical avg",
                             summary.ServerId,
-                            jobContext,
-                            numericCurrentValue: (double)worst.PercentOfAverage,
-                            numericThresholdValue: App.AlertLongRunningJobMultiplier * 100);
+                            jobContext);
                     }
                 }
                 else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob)

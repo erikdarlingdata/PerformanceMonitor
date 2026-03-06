@@ -19,7 +19,7 @@
 |---|---|---|
 | **What it does** | Installs a `PerformanceMonitor` database with 30 T-SQL collectors running via SQL Agent. Separate dashboard app connects to view everything. | Single desktop app that monitors remotely. Stores data locally in DuckDB + Parquet. Nothing touches your server. |
 | **Best for** | Production 24/7 monitoring, long-term baselining | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting |
-| **Requires** | SQL Agent running ([see permissions](#permissions)) | `VIEW SERVER STATE` ([see permissions](#permissions)) |
+| **Requires** | sysadmin + SQL Agent running | `VIEW SERVER STATE` (that's it) |
 | **Get started** | Run the installer, open the dashboard | Download, run, add a server, done |
 
 Both editions include real-time alerts (system tray + email), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude.
@@ -203,7 +203,7 @@ ORDER BY collection_time DESC;
 
 ### Data Retention
 
-Default: 30 days (configurable per collector via the `retention_days` column in `config.collection_schedule`).
+Default: 30 days (configurable per table in `config.retention_settings`).
 
 Storage estimates: 5–10 GB per week, 20–40 GB per month.
 
@@ -461,76 +461,7 @@ Common issues:
 1. **No data after connecting** — Wait for the first collection cycle (1–5 minutes). Check logs for connection errors.
 2. **Query Store tab empty** — Query Store must be enabled on the target database (`ALTER DATABASE [YourDB] SET QUERY_STORE = ON`).
 3. **Blocked process reports empty** — Both editions attempt to auto-configure the blocked process threshold to 5 seconds via `sp_configure`. On **AWS RDS**, `sp_configure` is not available — you must set `blocked process threshold (s)` through an RDS Parameter Group (see "AWS RDS Parameter Group Configuration" above). On **Azure SQL Database**, the threshold is fixed at 20 seconds and cannot be changed. If you still see no data on other platforms, verify the login has `ALTER SETTINGS` permission.
-4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has the required [permissions](#permissions). For Azure SQL Database, use a contained database user with `VIEW DATABASE STATE`.
-
----
-
-## Permissions
-
-### Full Edition (On-Premises)
-
-The installer needs `sysadmin` to create the database, Agent jobs, and configure `sp_configure` settings. After installation, the collection jobs can run under a **least-privilege login** with these grants:
-
-```sql
-USE [master];
-CREATE LOGIN [SQLServerPerfMon] WITH PASSWORD = N'YourStrongPassword';
-GRANT VIEW SERVER STATE TO [SQLServerPerfMon];
-
-USE [PerformanceMonitor];
-CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
-ALTER ROLE [db_owner] ADD MEMBER [SQLServerPerfMon];
-
-USE [msdb];
-CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
-ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [SQLServerPerfMon];
-```
-
-| Grant | Why |
-|---|---|
-| `VIEW SERVER STATE` | All DMV access (wait stats, query stats, memory, CPU, file I/O, etc.) |
-| `db_owner` on PerformanceMonitor | Collectors insert data, create/alter tables, execute procedures. Scoped to just this database — not sysadmin. |
-| `SQLAgentReaderRole` on msdb | Read `sysjobs`, `sysjobactivity`, `sysjobhistory` for the running jobs collector |
-
-**Optional** (gracefully skipped if missing):
-- `ALTER SETTINGS` — installer sets `blocked process threshold` via `sp_configure`. Skipped with a warning if unavailable.
-- `ALTER TRACE` — default trace collector. Skipped if denied.
-- `DBCC TRACESTATUS` — server config collector skips trace flag detection if denied.
-
-Change the SQL Agent job owner to the new login after installation if you want to run under least privilege end-to-end.
-
-### Lite Edition (On-Premises)
-
-Nothing is installed on the target server. The login only needs:
-
-```sql
-USE [master];
-GRANT VIEW SERVER STATE TO [YourLogin];
-
--- Optional: for SQL Agent job monitoring
-USE [msdb];
-CREATE USER [YourLogin] FOR LOGIN [YourLogin];
-ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [YourLogin];
-```
-
-### Azure SQL Database (Lite Only)
-
-Azure SQL Database doesn't support server-level logins. Create a **contained database user** directly on the target database:
-
-```sql
--- Connect to your target database (not master)
-CREATE USER [SQLServerPerfMon] WITH PASSWORD = 'YourStrongPassword';
-GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
-```
-
-When connecting in Lite, specify the database name in the connection. SQL Agent and msdb are not available on Azure SQL Database — those collectors are skipped automatically.
-
-### Azure SQL Managed Instance
-
-Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Agent is available.
-
-### AWS RDS for SQL Server
-
-Use the RDS master user for installation. The master user has the necessary permissions. For ongoing collection, `VIEW SERVER STATE` and msdb access work the same as on-premises, but `sp_configure` is not available (use RDS Parameter Groups instead — see above).
+4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has `VIEW SERVER STATE`.
 
 ---
 
@@ -577,27 +508,14 @@ dotnet publish InstallerGui/InstallerGui.csproj -c Release -r win-x64 --self-con
 
 ## Support & Sponsorship
 
-**This project is free and open source under the MIT License.** The software is fully functional with no features withheld — every user gets the same tool, same collectors, same MCP integration.
-
-However, some organizations have procurement or compliance policies that require a formal vendor relationship, a support agreement, or an invoice on file before software can be deployed to production. If that sounds familiar, two commercial support tiers are available:
-
-| Tier | Annual Cost | What You Get |
-|------|-------------|--------------|
-| **Supported** | $500/year | Email support (2-business-day response), compatibility guarantees for new SQL Server versions, vendor agreement and invoices for compliance, unlimited instances |
-| **Priority** | $2,500/year | Next-business-day email response, quarterly live Q&A sessions, early access to new features, roadmap input, unlimited instances |
-
-Both tiers cover unlimited SQL Server instances. The software itself is identical — commercial support is about the relationship, not a feature gate.
-
-**[Read more about the free tool and commercial options](https://erikdarling.com/free-sql-server-performance-monitoring/)** | **[Purchase a support subscription](https://training.erikdarling.com/sql-monitoring)**
-
-If you find the project valuable, you can also support continued development:
+**This project is free and open source.** If you find it valuable, consider supporting continued development:
 
 | | |
 |---|---|
 | **Sponsor on GitHub** | [Become a sponsor](https://github.com/sponsors/erikdarlingdata) to fund new features, ongoing maintenance, and SQL Server version support. |
 | **Consulting Services** | [Hire me](https://training.erikdarling.com/sqlconsulting) for hands-on consulting if you need help analyzing the data this tool collects? Want expert assistance fixing the issues it uncovers?  |
 
-Neither sponsorship nor consulting is required — use the tool freely.
+Neither is required — use the tool freely. Sponsorship and consulting keep this project alive.
 
 ---
 

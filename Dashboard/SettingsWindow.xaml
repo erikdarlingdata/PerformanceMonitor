@@ -217,28 +217,8 @@
                                          Margin="8,0,8,0"
                                          VerticalAlignment="Center"
                                          TextAlignment="Center"/>
-                                <TextBlock Text="minutes," VerticalAlignment="Center"/>
-                                <TextBlock Text="return up to" VerticalAlignment="Center" Margin="8,0,8,0"/>
-                                <TextBox x:Name="LongRunningQueryMaxResultsTextBox"
-                                         Width="50"
-                                         VerticalAlignment="Center"
-                                         TextAlignment="Center"/>
-                                <TextBlock Text="results" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                <TextBlock Text="minutes" VerticalAlignment="Center"/>
                             </StackPanel>
-                            <!-- Long Running Query Filters -->
-                            <TextBlock Text="Long Running Query Filters" FontWeight="Bold" FontSize="12" Margin="0,12,0,6"/>
-                            <CheckBox x:Name="LrqExcludeSpServerDiagnosticsCheckBox"
-                                      Content="Exclude SP_SERVER_DIAGNOSTICS"
-                                      Margin="0,0,0,4"/>
-                            <CheckBox x:Name="LrqExcludeWaitForCheckBox"
-                                      Content="Exclude WAITFOR / BROKER_RECEIVE_WAITFOR"
-                                      Margin="0,0,0,4"/>
-                            <CheckBox x:Name="LrqExcludeBackupsCheckBox"
-                                      Content="Exclude backup waits (BACKUPTHREAD, BACKUPIO)"
-                                      Margin="0,0,0,4"/>
-                            <CheckBox x:Name="LrqExcludeMiscWaitsCheckBox"
-                                      Content="Exclude miscellaneous waits (XE_LIVE_TARGET_TVF)"
-                                      Margin="0,0,0,0"/>
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                 <CheckBox x:Name="NotifyOnTempDbSpaceCheckBox"
                                           Content="TempDB space usage over"

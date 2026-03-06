@@ -181,7 +181,7 @@ public static class ContextMenuHelper
     /// Sets up a context menu for a ScottPlot chart with standard options:
     /// Copy Image, Save Image As, Open in New Window, Revert, Export Data to CSV.
     /// </summary>
-    public static ContextMenu SetupChartContextMenu(WpfPlot chart, string chartName, string? dataSource = null)
+    public static void SetupChartContextMenu(WpfPlot chart, string chartName, string? dataSource = null)
     {
         var contextMenu = new ContextMenu();
 
@@ -369,7 +369,5 @@ public static class ContextMenuHelper
             chart.Plot.Axes.AutoScale();
             chart.Refresh();
         };
-
-        return contextMenu;
     }
 }
