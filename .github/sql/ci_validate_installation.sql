@@ -30,7 +30,7 @@ IF SCHEMA_ID(N'report')  IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: sche
 PRINT '';
 
 /*
-Procedures in collect schema (36)
+Procedures in collect schema (38)
 */
 PRINT 'Checking collect procedures...';
 
@@ -70,11 +70,13 @@ IF OBJECT_ID(N'collect.database_configuration_collector', N'P') IS NULL BEGIN SE
 IF OBJECT_ID(N'collect.configuration_issues_analyzer', N'P')    IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.configuration_issues_analyzer'; END;    SET @checked += 1;
 IF OBJECT_ID(N'collect.scheduled_master_collector', N'P')       IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.scheduled_master_collector'; END;       SET @checked += 1;
 IF OBJECT_ID(N'collect.running_jobs_collector', N'P')           IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.running_jobs_collector'; END;           SET @checked += 1;
+IF OBJECT_ID(N'collect.database_size_stats_collector', N'P')   IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.database_size_stats_collector'; END;   SET @checked += 1;
+IF OBJECT_ID(N'collect.server_properties_collector', N'P')     IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: collect.server_properties_collector'; END;     SET @checked += 1;
 
 PRINT '';
 
 /*
-Procedures in config schema (10)
+Procedures in config schema (8)
 */
 PRINT 'Checking config procedures...';
 
@@ -82,9 +84,7 @@ IF OBJECT_ID(N'config.ensure_config_tables', N'P')       IS NULL BEGIN SET @miss
 IF OBJECT_ID(N'config.ensure_collection_table', N'P')    IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.ensure_collection_table'; END;    SET @checked += 1;
 IF OBJECT_ID(N'config.update_collector_frequency', N'P') IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.update_collector_frequency'; END; SET @checked += 1;
 IF OBJECT_ID(N'config.set_collector_enabled', N'P')      IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.set_collector_enabled'; END;      SET @checked += 1;
-IF OBJECT_ID(N'config.enable_realtime_monitoring', N'P') IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.enable_realtime_monitoring'; END; SET @checked += 1;
-IF OBJECT_ID(N'config.enable_consulting_analysis', N'P') IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.enable_consulting_analysis'; END; SET @checked += 1;
-IF OBJECT_ID(N'config.enable_baseline_monitoring', N'P') IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.enable_baseline_monitoring'; END; SET @checked += 1;
+IF OBJECT_ID(N'config.apply_collection_preset', N'P')    IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.apply_collection_preset'; END;    SET @checked += 1;
 IF OBJECT_ID(N'config.show_collection_schedule', N'P')   IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.show_collection_schedule'; END;   SET @checked += 1;
 IF OBJECT_ID(N'config.data_retention', N'P')             IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.data_retention'; END;             SET @checked += 1;
 IF OBJECT_ID(N'config.check_hung_collector_job', N'P')   IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: config.check_hung_collector_job'; END;   SET @checked += 1;
@@ -102,7 +102,7 @@ IF OBJECT_ID(N'config.server_info', N'V')     IS NULL BEGIN SET @missing += 1; P
 PRINT '';
 
 /*
-Views in report schema (37)
+Views in report schema (41)
 Note: report.query_snapshots and report.query_snapshots_blocking are created
 dynamically by collect.query_snapshots_create_views, so they are not checked here.
 */
@@ -144,6 +144,10 @@ IF OBJECT_ID(N'report.scheduler_cpu_analysis', N'V')              IS NULL BEGIN 
 IF OBJECT_ID(N'report.critical_issues', N'V')                     IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.critical_issues'; END;                     SET @checked += 1;
 IF OBJECT_ID(N'report.memory_usage_trends', N'V')                 IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.memory_usage_trends'; END;                 SET @checked += 1;
 IF OBJECT_ID(N'report.running_jobs', N'V')                        IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.running_jobs'; END;                        SET @checked += 1;
+IF OBJECT_ID(N'report.finops_database_resource_usage', N'V')     IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.finops_database_resource_usage'; END;     SET @checked += 1;
+IF OBJECT_ID(N'report.finops_utilization_efficiency', N'V')      IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.finops_utilization_efficiency'; END;      SET @checked += 1;
+IF OBJECT_ID(N'report.finops_peak_utilization', N'V')            IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.finops_peak_utilization'; END;            SET @checked += 1;
+IF OBJECT_ID(N'report.finops_application_resource_usage', N'V')  IS NULL BEGIN SET @missing += 1; PRINT '  MISSING: report.finops_application_resource_usage'; END;  SET @checked += 1;
 
 PRINT '';
 
@@ -180,7 +184,7 @@ WHERE OBJECT_SCHEMA_NAME(t.object_id) = N'config';
 PRINT '  collect schema tables: ' + CONVERT(varchar(10), @collect_tables);
 PRINT '  config schema tables: ' + CONVERT(varchar(10), @config_tables);
 
-IF @collect_tables < 19 BEGIN SET @missing += 1; PRINT '  MISSING: expected >= 20 collect tables, found ' + CONVERT(varchar(10), @collect_tables); END; SET @checked += 1;
+IF @collect_tables < 21 BEGIN SET @missing += 1; PRINT '  MISSING: expected >= 21 collect tables, found ' + CONVERT(varchar(10), @collect_tables); END; SET @checked += 1;
 IF @config_tables < 5  BEGIN SET @missing += 1; PRINT '  MISSING: expected >= 5 config tables, found ' + CONVERT(varchar(10), @config_tables); END;  SET @checked += 1;
 
 PRINT '';
