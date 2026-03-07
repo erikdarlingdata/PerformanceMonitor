@@ -1291,7 +1291,7 @@ public partial class MainWindow : Window
                             $"{App.AlertLongRunningJobMultiplier}x historical avg",
                             summary.ServerId,
                             jobContext,
-                            numericCurrentValue: (double)worst.PercentOfAverage,
+                            numericCurrentValue: (double)(worst.PercentOfAverage ?? 0),
                             numericThresholdValue: App.AlertLongRunningJobMultiplier * 100);
                     }
                 }
