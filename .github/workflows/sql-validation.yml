@@ -3,10 +3,10 @@ name: SQL Validation
 on:
   push:
     branches: [dev]
-    paths: ['install/**']
+    paths: ['install/**', '.github/sql/**', '.github/workflows/sql-validation.yml']
   pull_request:
     branches: [dev]
-    paths: ['install/**']
+    paths: ['install/**', '.github/sql/**', '.github/workflows/sql-validation.yml']
 
 jobs:
   validate-sql:
