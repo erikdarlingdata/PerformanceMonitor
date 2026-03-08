@@ -23,11 +23,6 @@ using PerformanceMonitorDashboard.Services;
 
 namespace PerformanceMonitorDashboard.Controls
 {
-    /// <summary>
-    /// UserControl for the FinOps tab content.
-    /// Displays utilization efficiency, database resource usage,
-    /// database sizes, and application connection metrics.
-    /// </summary>
     public partial class FinOpsContent : UserControl
     {
         private DatabaseService? _databaseService;
@@ -38,22 +33,6 @@ namespace PerformanceMonitorDashboard.Controls
         {
             InitializeComponent();
             Loaded += OnLoaded;
-            Unloaded += OnUnloaded;
-            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
-
-            // Apply dark theme immediately so charts don't flash white
-            TabHelpers.ApplyThemeToChart(PeakUtilizationChart);
-        }
-
-        private void OnUnloaded(object sender, RoutedEventArgs e)
-        {
-            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
-        }
-
-        private void OnThemeChanged(string _)
-        {
-            TabHelpers.ApplyThemeToChart(PeakUtilizationChart);
-            PeakUtilizationChart.Refresh();
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -61,10 +40,16 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.AutoSizeColumnMinWidths(DatabaseResourcesDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(DatabaseSizesDataGrid);
             TabHelpers.AutoSizeColumnMinWidths(ApplicationConnectionsDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(ServerInventoryDataGrid);
+            TabHelpers.AutoSizeColumnMinWidths(TopTotalGrid);
+            TabHelpers.AutoSizeColumnMinWidths(TopAvgGrid);
 
             TabHelpers.FreezeColumns(DatabaseResourcesDataGrid, 1);
             TabHelpers.FreezeColumns(DatabaseSizesDataGrid, 1);
             TabHelpers.FreezeColumns(ApplicationConnectionsDataGrid, 1);
+            TabHelpers.FreezeColumns(ServerInventoryDataGrid, 1);
+            TabHelpers.FreezeColumns(TopTotalGrid, 1);
+            TabHelpers.FreezeColumns(TopAvgGrid, 1);
         }
 
         /// <summary>
@@ -102,7 +87,8 @@ namespace PerformanceMonitorDashboard.Controls
                     LoadUtilizationAsync(),
                     LoadDatabaseResourcesAsync(),
                     LoadDatabaseSizesAsync(),
-                    LoadApplicationConnectionsAsync()
+                    LoadApplicationConnectionsAsync(),
+                    LoadServerInventoryAsync()
                 );
             }
             catch (Exception ex)
@@ -121,26 +107,26 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
-                UtilizationLoading.IsLoading = true;
-
-                var efficiencyTask = _databaseService.GetFinOpsUtilizationEfficiencyAsync();
-                var peakTask = _databaseService.GetFinOpsPeakUtilizationAsync();
-
-                await Task.WhenAll(efficiencyTask, peakTask);
-
-                var efficiency = await efficiencyTask;
-                var peakData = await peakTask;
-
+                var efficiency = await _databaseService.GetFinOpsUtilizationEfficiencyAsync();
                 UpdateUtilizationSummary(efficiency);
-                RenderPeakUtilizationChart(peakData);
+                NoUtilizationMessage.Visibility = efficiency == null ? Visibility.Visible : Visibility.Collapsed;
+                SummaryContent.Visibility = efficiency == null ? Visibility.Collapsed : Visibility.Visible;
+
+                if (efficiency != null)
+                {
+                    var topTotal = await _databaseService.GetFinOpsTopResourceConsumersByTotalAsync();
+                    TopTotalGrid.ItemsSource = topTotal;
+
+                    var topAvg = await _databaseService.GetFinOpsTopResourceConsumersByAvgAsync();
+                    TopAvgGrid.ItemsSource = topAvg;
+
+                    var sizes = await _databaseService.GetFinOpsDatabaseSizeSummaryAsync();
+                    DbSizeChart.ItemsSource = sizes;
+                }
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading utilization data: {ex.Message}", ex);
-            }
-            finally
-            {
-                UtilizationLoading.IsLoading = false;
             }
         }
 
@@ -150,8 +136,20 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 ProvisioningStatusText.Text = "No Data";
                 ProvisioningStatusBorder.Background = new SolidColorBrush(Colors.Gray);
+                AvgCpuText.Text = P95CpuText.Text = MaxCpuText.Text = CpuSamplesText.Text = "-";
+                AvgCpuBar.Width = P95CpuBar.Width = MaxCpuBar.Width = 0;
+                MemoryUtilBar.Width = MemoryRatioBar.Width = 0;
+                MemoryUtilText.Text = MemoryRatioText.Text = "-";
+                PhysicalMemoryText.Text = TargetMemoryText.Text = TotalMemoryText.Text = BufferPoolText.Text = "-";
+                WorkerThreadsText.Text = "-";
+                CpuCountText.Text = "-";
+                CpuSamplesText.Text = "-";
+                ClassificationExplanation.Text = "";
+                UtilizationContent.Visibility = Visibility.Collapsed;
                 return;
             }
+
+            UtilizationContent.Visibility = Visibility.Visible;
 
             // Provisioning status with color coding
             ProvisioningStatusText.Text = efficiency.ProvisioningStatus.Replace("_", " ");
@@ -176,80 +174,91 @@ namespace PerformanceMonitorDashboard.Controls
                     break;
             }
 
-            // CPU metrics
-            CpuCountText.Text = efficiency.CpuCount.ToString("N0");
+            /* CPU text + bars */
             AvgCpuText.Text = $"{efficiency.AvgCpuPct:N2}%";
             P95CpuText.Text = $"{efficiency.P95CpuPct:N2}%";
             MaxCpuText.Text = $"{efficiency.MaxCpuPct}%";
             CpuSamplesText.Text = efficiency.CpuSamples.ToString("N0");
+            CpuCountText.Text = efficiency.CpuCount.ToString("N0");
 
-            // Memory metrics
+            SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)efficiency.AvgCpuPct);
+            SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, (double)efficiency.P95CpuPct);
+            SetBar(MaxCpuBar, MaxCpuFilled, MaxCpuEmpty, efficiency.MaxCpuPct);
+
+            /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory
+               Uses perfmon counter value (TotalServerMemoryMb) for parity with Lite */
+            var tsm = efficiency.TotalServerMemoryMb > 0 ? efficiency.TotalServerMemoryMb : efficiency.TotalMemoryMb;
+            var stolenPct = tsm > 0
+                ? (double)(tsm - efficiency.BufferPoolMb) / tsm * 100.0
+                : 0;
+            MemoryUtilText.Text = $"{stolenPct:N0}%";
+            SetBar(MemoryUtilBar, MemUtilFilled, MemUtilEmpty, stolenPct);
+
+            /* Buffer Pool % = Buffer Pool / Physical Memory */
+            var bpPct = efficiency.PhysicalMemoryMb > 0
+                ? (double)efficiency.BufferPoolMb / efficiency.PhysicalMemoryMb * 100.0
+                : 0;
+            MemoryRatioText.Text = $"{bpPct:N0}%";
+            SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
+
             PhysicalMemoryText.Text = $"{efficiency.PhysicalMemoryMb:N0} MB";
             TargetMemoryText.Text = $"{efficiency.TargetMemoryMb:N0} MB";
-            TotalMemoryText.Text = $"{efficiency.TotalMemoryMb:N0} MB";
-            MemoryUtilText.Text = $"{efficiency.MemoryUtilizationPct}%";
-
-            // Thread metrics
+            TotalMemoryText.Text = $"{tsm:N0} MB";
+            BufferPoolText.Text = $"{efficiency.BufferPoolMb:N0} MB";
             WorkerThreadsText.Text = $"{efficiency.WorkerThreadsCurrent:N0} / {efficiency.WorkerThreadsMax:N0}";
-            ThreadRatioText.Text = $"{efficiency.WorkerThreadRatio:N2}";
+
+            /* Contextual explanation — one sentence describing WHY this classification */
+            ClassificationExplanation.Text = efficiency.ProvisioningStatus switch
+            {
+                "RIGHT_SIZED" => $"CPU is moderately loaded (avg {efficiency.AvgCpuPct:N1}%, p95 {efficiency.P95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bpPct:N0}% of physical RAM). No action needed.",
+                "OVER_PROVISIONED" => $"CPU is lightly loaded (avg {efficiency.AvgCpuPct:N1}%, max {efficiency.MaxCpuPct}%) and buffer pool uses only {bpPct:N0}% of physical RAM. This server may have more resources than it needs.",
+                "UNDER_PROVISIONED" => efficiency.P95CpuPct > 85
+                    ? $"CPU p95 is {efficiency.P95CpuPct:N1}% (threshold: 85%). This server may need more CPU capacity."
+                    : $"Buffer pool uses {bpPct:N0}% of physical RAM and memory ratio is {efficiency.MemoryRatio:N2} (threshold: 0.95). Memory pressure is high.",
+                _ => ""
+            };
         }
 
-        private void RenderPeakUtilizationChart(List<FinOpsPeakUtilization> data)
+        private static void SetBar(Border bar, ColumnDefinition filled, ColumnDefinition empty, double pct)
         {
-            PeakUtilizationChart.Plot.Clear();
+            var clamped = Math.Max(0, Math.Min(100, pct));
 
-            if (data.Count == 0)
+            /* Color thresholds: green < 60, orange 60-85, red > 85 */
+            var color = clamped switch
             {
-                var noDataText = PeakUtilizationChart.Plot.Add.Text("No peak utilization data available", 12, 50);
-                noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Color.FromHex("#888888");
-                PeakUtilizationChart.Refresh();
-                return;
-            }
+                > 85 => "#E74C3C",
+                > 60 => "#F39C12",
+                _ => "#27AE60"
+            };
+            bar.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
 
-            // Build bars for avg CPU by hour, colored by classification
-            var bars = new List<ScottPlot.Bar>();
-
-            foreach (var item in data)
-            {
-                var color = item.HourClassification switch
-                {
-                    "PEAK" => ScottPlot.Color.FromHex("#E74C3C"),   // Red
-                    "IDLE" => ScottPlot.Color.FromHex("#27AE60"),   // Green
-                    "NORMAL" => ScottPlot.Color.FromHex("#3498DB"), // Blue
-                    _ => ScottPlot.Color.FromHex("#95A5A6")         // Gray
-                };
-
-                bars.Add(new ScottPlot.Bar
-                {
-                    Position = item.HourOfDay,
-                    Value = (double)item.AvgCpuPct,
-                    FillColor = color,
-                    Size = 0.8
-                });
-            }
-
-            var barPlot = PeakUtilizationChart.Plot.Add.Bars(bars.ToArray());
-            barPlot.Horizontal = false;
-
-            PeakUtilizationChart.Plot.Axes.Bottom.Label.Text = "Hour of Day";
-            PeakUtilizationChart.Plot.Axes.Left.Label.Text = "Avg CPU %";
-
-            // Set x-axis ticks to show each hour
-            var ticks = data.Select(d => new ScottPlot.Tick(d.HourOfDay, $"{d.HourOfDay:D2}:00")).ToArray();
-            PeakUtilizationChart.Plot.Axes.Bottom.TickGenerator = new ScottPlot.TickGenerators.NumericManual(ticks);
-            PeakUtilizationChart.Plot.Axes.Bottom.TickLabelStyle.Rotation = 45;
-
-            // Add a legend for classifications
-            PeakUtilizationChart.Plot.Legend.IsVisible = true;
-            PeakUtilizationChart.Plot.Legend.Alignment = ScottPlot.Alignment.UpperRight;
-
-            PeakUtilizationChart.Refresh();
+            /* Use star-width proportions — the layout engine handles sizing natively */
+            filled.Width = new GridLength(Math.Max(clamped, 0.1), GridUnitType.Star);
+            empty.Width = new GridLength(Math.Max(100 - clamped, 0.1), GridUnitType.Star);
         }
 
         // ============================================
         // Database Resources Tab
         // ============================================
+
+        private int GetResourceUsageHoursBack()
+        {
+            return ResourceUsageTimeRangeCombo.SelectedIndex switch
+            {
+                0 => 1,
+                1 => 4,
+                2 => 12,
+                3 => 24,
+                4 => 168,
+                _ => 24
+            };
+        }
+
+        private async void ResourceUsageTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (!IsLoaded || _databaseService == null) return;
+            await LoadDatabaseResourcesAsync();
+        }
 
         private async Task LoadDatabaseResourcesAsync()
         {
@@ -257,23 +266,15 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
-                if (DatabaseResourcesDataGrid.ItemsSource == null)
-                {
-                    DatabaseResourcesLoading.IsLoading = true;
-                    DatabaseResourcesNoDataMessage.Visibility = Visibility.Collapsed;
-                }
-
-                var data = await _databaseService.GetFinOpsDatabaseResourceUsageAsync();
+                var hoursBack = GetResourceUsageHoursBack();
+                var data = await _databaseService.GetFinOpsDatabaseResourceUsageAsync(hoursBack);
                 DatabaseResourcesDataGrid.ItemsSource = data;
                 DatabaseResourcesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                DbResourcesCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading database resources: {ex.Message}", ex);
-            }
-            finally
-            {
-                DatabaseResourcesLoading.IsLoading = false;
             }
         }
 
@@ -287,23 +288,14 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
-                if (DatabaseSizesDataGrid.ItemsSource == null)
-                {
-                    DatabaseSizesLoading.IsLoading = true;
-                    DatabaseSizesNoDataMessage.Visibility = Visibility.Collapsed;
-                }
-
                 var data = await _databaseService.GetFinOpsDatabaseSizeStatsAsync();
                 DatabaseSizesDataGrid.ItemsSource = data;
                 DatabaseSizesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                DbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s)" : "";
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading database sizes: {ex.Message}", ex);
-            }
-            finally
-            {
-                DatabaseSizesLoading.IsLoading = false;
             }
         }
 
@@ -317,23 +309,35 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
-                if (ApplicationConnectionsDataGrid.ItemsSource == null)
-                {
-                    ApplicationConnectionsLoading.IsLoading = true;
-                    ApplicationConnectionsNoDataMessage.Visibility = Visibility.Collapsed;
-                }
-
                 var data = await _databaseService.GetFinOpsApplicationResourceUsageAsync();
                 ApplicationConnectionsDataGrid.ItemsSource = data;
                 ApplicationConnectionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                AppConnectionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} application(s)" : "";
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading application connections: {ex.Message}", ex);
             }
-            finally
+        }
+
+        // ============================================
+        // Server Inventory Tab
+        // ============================================
+
+        private async Task LoadServerInventoryAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
             {
-                ApplicationConnectionsLoading.IsLoading = false;
+                var data = await _databaseService.GetFinOpsServerInventoryAsync();
+                ServerInventoryDataGrid.ItemsSource = data;
+                ServerInventoryNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                ServerInventoryCountIndicator.Text = data.Count > 0 ? $"{data.Count} server(s)" : "";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading server inventory: {ex.Message}", ex);
             }
         }
 
@@ -359,6 +363,11 @@ namespace PerformanceMonitorDashboard.Controls
         private async void ApplicationConnectionsRefresh_Click(object sender, RoutedEventArgs e)
         {
             await LoadApplicationConnectionsAsync();
+        }
+
+        private async void ServerInventoryRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            await LoadServerInventoryAsync();
         }
 
         // ============================================

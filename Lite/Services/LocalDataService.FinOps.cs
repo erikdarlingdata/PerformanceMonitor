@@ -34,10 +34,10 @@ SELECT
     volume_total_mb,
     volume_free_mb,
     recovery_model_desc
-FROM database_size_stats
+FROM v_database_size_stats
 WHERE (server_id, collection_time) IN (
     SELECT server_id, MAX(collection_time)
-    FROM database_size_stats
+    FROM v_database_size_stats
     GROUP BY server_id
 )
 ORDER BY server_name, database_name, file_type_desc, file_name";
@@ -85,10 +85,10 @@ SELECT
     cores_per_socket,
     is_hadr_enabled,
     is_clustered
-FROM server_properties
+FROM v_server_properties
 WHERE (server_id, collection_time) IN (
     SELECT server_id, MAX(collection_time)
-    FROM server_properties
+    FROM v_server_properties
     GROUP BY server_id
 )
 ORDER BY server_name";
@@ -132,7 +132,7 @@ SELECT
     collection_time,
     database_name,
     SUM(total_size_mb) AS total_size_mb
-FROM database_size_stats
+FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 GROUP BY collection_time, database_name
@@ -172,7 +172,7 @@ WITH cpu_stats AS (
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
         COUNT(*) AS cpu_samples
-    FROM cpu_utilization_stats
+    FROM v_cpu_utilization_stats
     WHERE server_id = $1
     AND   collection_time >= $2
 ),
@@ -182,8 +182,10 @@ mem_latest AS (
         target_server_memory_mb,
         total_physical_memory_mb,
         buffer_pool_mb,
+        max_workers_count,
+        current_workers_count,
         CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0) AS memory_ratio
-    FROM memory_stats
+    FROM v_memory_stats
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1
@@ -197,7 +199,9 @@ SELECT
     m.target_server_memory_mb,
     m.total_physical_memory_mb,
     m.buffer_pool_mb,
-    m.memory_ratio
+    m.memory_ratio,
+    m.max_workers_count,
+    m.current_workers_count
 FROM cpu_stats c
 CROSS JOIN mem_latest m";
 
@@ -229,19 +233,21 @@ CROSS JOIN mem_latest m";
             PhysicalMemoryMb = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
             BufferPoolMb = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
             MemoryRatio = memRatio,
-            ProvisioningStatus = status
+            ProvisioningStatus = status,
+            MaxWorkersCount = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
+            CurrentWorkersCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10))
         };
     }
 
     /// <summary>
-    /// Computes per-database resource usage from query_stats + file_io_stats deltas (last 24 hours).
+    /// Computes per-database resource usage from query_stats + file_io_stats deltas.
     /// </summary>
-    public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId)
+    public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-24);
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         command.CommandText = @"
 WITH workload AS (
@@ -252,7 +258,7 @@ WITH workload AS (
         SUM(delta_physical_reads) AS physical_reads,
         SUM(delta_logical_writes) AS logical_writes,
         SUM(delta_execution_count) AS execution_count
-    FROM query_stats
+    FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
@@ -264,7 +270,7 @@ io AS (
         SUM(delta_read_bytes) / 1048576.0 AS io_read_mb,
         SUM(delta_write_bytes) / 1048576.0 AS io_write_mb,
         SUM(delta_stall_read_ms + delta_stall_write_ms) AS io_stall_ms
-    FROM file_io_stats
+    FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_read_bytes IS NOT NULL
@@ -347,10 +353,12 @@ ORDER BY c.cpu_time_ms DESC";
         command.CommandText = @"
 SELECT
     program_name,
+    CAST(AVG(connection_count) AS INTEGER) AS avg_connections,
     MAX(connection_count) AS max_connections,
+    COUNT(*) AS sample_count,
     MIN(collection_time) AS first_seen,
     MAX(collection_time) AS last_seen
-FROM session_stats
+FROM v_session_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 GROUP BY program_name
@@ -366,14 +374,230 @@ ORDER BY max_connections DESC";
             items.Add(new ApplicationConnectionRow
             {
                 ApplicationName = reader.GetString(0),
-                SampleCount = ToInt64(reader.GetValue(1)),
-                FirstSeen = reader.GetDateTime(2),
-                LastSeen = reader.GetDateTime(3)
+                AvgConnections = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+                MaxConnections = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2)),
+                SampleCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                FirstSeen = reader.GetDateTime(4),
+                LastSeen = reader.GetDateTime(5)
             });
         }
 
         return items;
     }
+
+    /// <summary>
+    /// Gets top N databases by total CPU for the utilization summary.
+    /// </summary>
+    public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByTotalAsync(int serverId, int hoursBack = 24, int topN = 5)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        command.CommandText = @"
+WITH workload AS (
+    SELECT
+        database_name,
+        SUM(delta_worker_time) / 1000 AS cpu_time_ms,
+        SUM(delta_execution_count) AS execution_count
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_worker_time IS NOT NULL
+    GROUP BY database_name
+),
+io AS (
+    SELECT
+        database_name,
+        SUM(delta_read_bytes + delta_write_bytes) / 1048576.0 AS io_total_mb
+    FROM v_file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_read_bytes IS NOT NULL
+    GROUP BY database_name
+),
+combined AS (
+    SELECT
+        COALESCE(w.database_name, i.database_name) AS database_name,
+        COALESCE(w.cpu_time_ms, 0) AS cpu_time_ms,
+        COALESCE(w.execution_count, 0) AS execution_count,
+        COALESCE(i.io_total_mb, 0) AS io_total_mb
+    FROM workload w
+    FULL JOIN io i ON i.database_name = w.database_name
+),
+totals AS (
+    SELECT
+        NULLIF(SUM(cpu_time_ms), 0) AS total_cpu,
+        NULLIF(SUM(io_total_mb), 0) AS total_io
+    FROM combined
+)
+SELECT
+    c.database_name,
+    c.cpu_time_ms,
+    c.execution_count,
+    CAST(c.io_total_mb AS DECIMAL(19,2)),
+    CAST(c.cpu_time_ms * 100.0 / t.total_cpu AS DECIMAL(5,2)),
+    CAST(c.io_total_mb * 100.0 / t.total_io AS DECIMAL(5,2))
+FROM combined c
+CROSS JOIN totals t
+WHERE c.database_name IS NOT NULL
+ORDER BY c.cpu_time_ms DESC
+LIMIT $3";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = topN });
+
+        var items = new List<TopResourceConsumerRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new TopResourceConsumerRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                CpuTimeMs = reader.IsDBNull(1) ? 0 : ToInt64(reader.GetValue(1)),
+                ExecutionCount = reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
+                IoTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                PctCpu = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                PctIo = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Gets top N databases by average CPU per execution for the utilization summary.
+    /// </summary>
+    public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByAvgAsync(int serverId, int hoursBack = 24, int topN = 5)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        command.CommandText = @"
+WITH workload AS (
+    SELECT
+        database_name,
+        SUM(delta_worker_time) / 1000 AS cpu_time_ms,
+        SUM(delta_execution_count) AS execution_count
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_worker_time IS NOT NULL
+    GROUP BY database_name
+    HAVING SUM(delta_execution_count) > 0
+),
+io AS (
+    SELECT
+        database_name,
+        SUM(delta_read_bytes + delta_write_bytes) / 1048576.0 AS io_total_mb
+    FROM v_file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_read_bytes IS NOT NULL
+    GROUP BY database_name
+)
+SELECT
+    w.database_name,
+    CAST(w.cpu_time_ms * 1.0 / w.execution_count AS DECIMAL(19,2)) AS avg_cpu_ms,
+    w.execution_count,
+    CAST(COALESCE(i.io_total_mb, 0) AS DECIMAL(19,2)),
+    w.cpu_time_ms,
+    CAST(COALESCE(i.io_total_mb, 0) * 1.0 / w.execution_count AS DECIMAL(19,4)) AS avg_io_mb
+FROM workload w
+LEFT JOIN io i ON i.database_name = w.database_name
+ORDER BY avg_cpu_ms DESC
+LIMIT $3";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = topN });
+
+        var items = new List<TopResourceConsumerRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new TopResourceConsumerRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                CpuTimeMs = reader.IsDBNull(1) ? 0 : ToInt64(reader.GetValue(1)),
+                ExecutionCount = reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
+                IoTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                TotalCpuTimeMs = reader.IsDBNull(4) ? 0 : ToInt64(reader.GetValue(4)),
+                AvgIoMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Gets per-database total allocated and used space for the utilization size chart.
+    /// Aggregates across all files per database for the selected server.
+    /// </summary>
+    public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT
+    database_name,
+    SUM(total_size_mb) AS total_mb,
+    SUM(used_size_mb) AS used_mb
+FROM v_database_size_stats
+WHERE server_id = $1
+AND   collection_time = (
+    SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1
+)
+GROUP BY database_name
+ORDER BY total_mb DESC
+LIMIT $2";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = topN });
+
+        var items = new List<DatabaseSizeSummaryRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new DatabaseSizeSummaryRow
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                TotalMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                UsedMb = reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2))
+            });
+        }
+        return items;
+    }
+}
+
+public class TopResourceConsumerRow
+{
+    public string DatabaseName { get; set; } = "";
+    public long CpuTimeMs { get; set; }
+    public long ExecutionCount { get; set; }
+    public decimal IoTotalMb { get; set; }
+    public decimal PctCpu { get; set; }
+    public decimal PctIo { get; set; }
+    public long TotalCpuTimeMs { get; set; }
+    public decimal AvgIoMb { get; set; }
+}
+
+public class DatabaseSizeSummaryRow
+{
+    public string DatabaseName { get; set; } = "";
+    public decimal TotalMb { get; set; }
+    public decimal? UsedMb { get; set; }
+    public decimal FreeMb => UsedMb.HasValue ? TotalMb - UsedMb.Value : TotalMb;
+    public decimal UsedPct => TotalMb > 0 && UsedMb.HasValue ? Math.Round(UsedMb.Value * 100m / TotalMb, 1) : 0;
+
+    /* Star-width GridLength for XAML binding — drives the stacked bar proportions */
+    public System.Windows.GridLength UsedStarWidth =>
+        new(Math.Max((double)(UsedMb ?? 0m), 0.1), System.Windows.GridUnitType.Star);
+    public System.Windows.GridLength FreeStarWidth =>
+        new(Math.Max((double)FreeMb, 0.1), System.Windows.GridUnitType.Star);
 }
 
 public class UtilizationEfficiencyRow
@@ -387,6 +611,8 @@ public class UtilizationEfficiencyRow
     public int PhysicalMemoryMb { get; set; }
     public int BufferPoolMb { get; set; }
     public decimal MemoryRatio { get; set; }
+    public int MaxWorkersCount { get; set; }
+    public int CurrentWorkersCount { get; set; }
     public string ProvisioningStatus { get; set; } = "";
 }
 
@@ -408,6 +634,8 @@ public class DatabaseResourceUsageRow
 public class ApplicationConnectionRow
 {
     public string ApplicationName { get; set; } = "";
+    public int AvgConnections { get; set; }
+    public int MaxConnections { get; set; }
     public long SampleCount { get; set; }
     public DateTime FirstSeen { get; set; }
     public DateTime LastSeen { get; set; }

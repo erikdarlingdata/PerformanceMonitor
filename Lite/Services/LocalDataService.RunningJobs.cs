@@ -36,11 +36,11 @@ SELECT
     successful_run_count,
     is_running_long,
     percent_of_average
-FROM running_jobs
+FROM v_running_jobs
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
-    FROM running_jobs
+    FROM v_running_jobs
     WHERE server_id = $1
 )
 ORDER BY current_duration_seconds DESC";
@@ -90,9 +90,9 @@ SELECT
     p95_duration_seconds,
     percent_of_average,
     start_time
-FROM running_jobs
+FROM v_running_jobs
 WHERE server_id = $1
-AND collection_time = (SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1)
+AND collection_time = (SELECT MAX(collection_time) FROM v_running_jobs WHERE server_id = $1)
 AND avg_duration_seconds >= 60
 AND percent_of_average >= $2
 ORDER BY percent_of_average DESC

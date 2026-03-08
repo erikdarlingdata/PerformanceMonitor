@@ -31,7 +31,7 @@ SELECT
     blocking_session_id,
     resource_description,
     database_name
-FROM waiting_tasks
+FROM v_waiting_tasks
 WHERE server_id = $1
 AND   collection_time >= $2
 ORDER BY collection_time DESC, wait_duration_ms DESC";
@@ -73,7 +73,7 @@ SELECT
     collection_time,
     wait_type,
     SUM(wait_duration_ms) AS total_wait_ms
-FROM waiting_tasks
+FROM v_waiting_tasks
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -118,7 +118,7 @@ SELECT
     collection_time,
     database_name,
     COUNT(*) AS blocked_count
-FROM waiting_tasks
+FROM v_waiting_tasks
 WHERE server_id = $1
 AND   blocking_session_id > 0
 AND   collection_time >= $2

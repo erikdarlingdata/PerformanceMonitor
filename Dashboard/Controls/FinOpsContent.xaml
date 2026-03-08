@@ -3,8 +3,6 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-             xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
-             xmlns:controls="clr-namespace:PerformanceMonitorDashboard.Controls"
              mc:Ignorable="d"
              d:DesignHeight="600" d:DesignWidth="1200">
     <UserControl.Resources>
@@ -42,345 +40,706 @@
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,6,10,0">
             <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,6,0"
                        FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
-            <ComboBox x:Name="ServerSelector" Width="300" DisplayMemberPath="DisplayName"
+            <ComboBox x:Name="ServerSelector" Width="260" DisplayMemberPath="DisplayName"
                       SelectionChanged="ServerSelector_SelectionChanged"/>
         </StackPanel>
 
-    <TabControl Grid.Row="1" TabStripPlacement="Top" Margin="0,5,0,0">
+        <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
 
         <!-- Utilization Sub-Tab -->
         <TabItem Header="Utilization">
-            <Grid Margin="10,5,10,10">
+            <Grid>
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <!-- Refresh Button -->
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
-                    <Button Content="Refresh" Click="UtilizationRefresh_Click" Padding="10,4" MinWidth="70" Style="{DynamicResource SuccessButton}"/>
-                    <controls:LoadingOverlay x:Name="UtilizationLoading" Width="24" Height="24" Margin="10,0,0,0"/>
+                <!-- Header Controls -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Utilization Efficiency" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button Content="Refresh" Click="UtilizationRefresh_Click"
+                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <Border x:Name="ProvisioningStatusBorder" CornerRadius="4" Padding="8,2" Margin="12,0,0,0"
+                            VerticalAlignment="Center" Background="Gray">
+                        <TextBlock x:Name="ProvisioningStatusText" Text="No Data"
+                                   FontWeight="Bold" Foreground="White"/>
+                    </Border>
                 </StackPanel>
 
-                <!-- Provisioning Status Summary Panel -->
-                <Border Grid.Row="1" Background="{DynamicResource BackgroundLightBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="12,10" Margin="0,0,0,8">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
+                <!-- Utilization Summary — compact, top-aligned -->
+                <Grid Grid.Row="1" Margin="10,0,10,0" x:Name="UtilizationContent">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- CPU Metrics -->
+                    <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0" VerticalAlignment="Top"
+                              Foreground="{DynamicResource ForegroundBrush}">
+                        <StackPanel Margin="10">
+                            <!-- Avg CPU -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Avg CPU" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="AvgCpuFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="AvgCpuEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="AvgCpuBar" Background="#27AE60"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="AvgCpuText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- P95 CPU -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="P95 CPU" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="P95CpuFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="P95CpuEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="P95CpuBar" Background="#27AE60"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="P95CpuText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Max CPU -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Max CPU" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="MaxCpuFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="MaxCpuEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="MaxCpuBar" Background="#27AE60"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="MaxCpuText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- CPU Details -->
+                            <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
+                                <Run x:Name="CpuCountText" Text="-"/>
+                                <Run Text=" CPUs,"/>
+                                <Run x:Name="WorkerThreadsText" Text="-"/>
+                                <Run Text=" workers,"/>
+                                <Run x:Name="CpuSamplesText" Text="-"/>
+                                <Run Text=" samples (24h)"/>
+                            </TextBlock>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <!-- Memory Metrics -->
+                    <GroupBox Grid.Column="1" Header="Memory" Margin="5,0,0,0" VerticalAlignment="Top"
+                              Foreground="{DynamicResource ForegroundBrush}">
+                        <StackPanel Margin="10">
+                            <!-- Committed vs Target -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="120"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Stolen Mem %" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
+                                           ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory — memory used by plan cache, locks, grants, CLR, etc."/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="MemUtilFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="MemUtilEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="MemoryUtilBar" Background="#3498DB"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="MemoryUtilText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Buffer Pool vs Physical -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="120"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
+                                           ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="MemRatioFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="MemRatioEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="MemoryRatioBar" Background="#3498DB"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="MemoryRatioText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Memory Details -->
+                            <Grid Margin="0,4,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5">
+                                        <Run Text="Physical: " FontWeight="SemiBold"/>
+                                        <Run x:Name="PhysicalMemoryText" Text="-"/>
+                                    </TextBlock>
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
+                                        <Run Text="Target: " FontWeight="SemiBold"/>
+                                        <Run x:Name="TargetMemoryText" Text="-"/>
+                                    </TextBlock>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5">
+                                        <Run Text="Total: " FontWeight="SemiBold"/>
+                                        <Run x:Name="TotalMemoryText" Text="-"/>
+                                    </TextBlock>
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
+                                        <Run Text="Buffer Pool: " FontWeight="SemiBold"/>
+                                        <Run x:Name="BufferPoolText" Text="-"/>
+                                    </TextBlock>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </GroupBox>
+                </Grid>
+
+                <!-- Classification Explanation -->
+                <TextBlock x:Name="ClassificationExplanation" Grid.Row="2" Margin="12,8,10,4"
+                           VerticalAlignment="Top" TextWrapping="Wrap" FontSize="12"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+                <!-- Resource Summaries -->
+                <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" Margin="0,0,0,0">
+                    <Grid x:Name="SummaryContent">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <!-- Row 1: Provisioning Status + CPU Metrics -->
-                        <StackPanel Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,6">
-                            <TextBlock Text="Provisioning:" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                            <Border x:Name="ProvisioningStatusBorder" CornerRadius="3" Padding="8,2" Margin="0,0,20,0">
-                                <TextBlock x:Name="ProvisioningStatusText" Text="--" FontWeight="Bold" VerticalAlignment="Center"/>
-                            </Border>
+                        <!-- Top Resource Consumers — Total + Avg side by side -->
+                        <Grid Grid.Row="0" Margin="10,4,10,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
 
-                            <TextBlock Text="CPU Count:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="CpuCountText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                            <!-- Top 5 by Total CPU -->
+                            <GroupBox Grid.Column="0" Header="Top Databases by Total CPU" Margin="0,0,5,0"
+                                      Foreground="{DynamicResource ForegroundBrush}">
+                                <DataGrid x:Name="TopTotalGrid"
+                                          AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserSortColumns="True" HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal" SelectionMode="Single"
+                                          MinHeight="40" MaxHeight="200"
+                                          RowStyle="{StaticResource DefaultRowStyle}">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                        <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat='{}{0:N1}'}" Width="60">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="IO %" Binding="{Binding PctIo, StringFormat='{}{0:N1}'}" Width="55">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" Width="80">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </GroupBox>
 
-                            <TextBlock Text="Avg CPU:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="AvgCpuText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                            <!-- Top 5 by Avg CPU per Execution -->
+                            <GroupBox Grid.Column="1" Header="Top Databases by Avg CPU / Execution" Margin="5,0,0,0"
+                                      Foreground="{DynamicResource ForegroundBrush}">
+                                <DataGrid x:Name="TopAvgGrid"
+                                          AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserSortColumns="True" HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal" SelectionMode="Single"
+                                          MinHeight="40" MaxHeight="200"
+                                          RowStyle="{StaticResource DefaultRowStyle}">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                        <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N2}'}" Width="95">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat='{}{0:N2}'}" Width="90">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </GroupBox>
+                        </Grid>
 
-                            <TextBlock Text="P95 CPU:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="P95CpuText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-
-                            <TextBlock Text="Max CPU:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="MaxCpuText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-
-                            <TextBlock Text="Samples:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="CpuSamplesText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                        </StackPanel>
-
-                        <!-- Row 2: Memory + Thread Metrics -->
-                        <StackPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal">
-                            <TextBlock Text="Physical Memory:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="PhysicalMemoryText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-
-                            <TextBlock Text="Target Memory:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="TargetMemoryText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-
-                            <TextBlock Text="Total Memory:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="TotalMemoryText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-
-                            <TextBlock Text="Memory Util:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="MemoryUtilText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-
-                            <TextBlock Text="Worker Threads:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="WorkerThreadsText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-
-                            <TextBlock Text="Thread Ratio:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <TextBlock x:Name="ThreadRatioText" Text="--" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                        </StackPanel>
+                        <!-- Database Size Chart -->
+                        <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10"
+                                  Foreground="{DynamicResource ForegroundBrush}">
+                            <ItemsControl x:Name="DbSizeChart" Margin="8,4,8,4">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,2" Height="22">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="160"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="90"/>
+                                            </Grid.ColumnDefinitions>
+                                            <!-- Database name -->
+                                            <TextBlock Grid.Column="0" Text="{Binding DatabaseName}"
+                                                       VerticalAlignment="Center" FontSize="11.5"
+                                                       Foreground="{DynamicResource ForegroundBrush}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <!-- Stacked bar: used (accent) + free (dim) -->
+                                            <Grid Grid.Column="1" Margin="4,2">
+                                                <Border CornerRadius="3" Background="#1AFFFFFF"/>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="{Binding UsedStarWidth}"/>
+                                                        <ColumnDefinition Width="{Binding FreeStarWidth}"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Grid.Column="0" CornerRadius="3" Background="#3498DB"/>
+                                                </Grid>
+                                            </Grid>
+                                            <!-- Size label -->
+                                            <TextBlock Grid.Column="2" VerticalAlignment="Center"
+                                                       HorizontalAlignment="Right" FontSize="11.5"
+                                                       Foreground="{DynamicResource ForegroundBrush}">
+                                                <TextBlock.Text>
+                                                    <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB">
+                                                        <Binding Path="UsedMb"/>
+                                                        <Binding Path="TotalMb"/>
+                                                    </MultiBinding>
+                                                </TextBlock.Text>
+                                            </TextBlock>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </GroupBox>
                     </Grid>
-                </Border>
+                </ScrollViewer>
 
-                <!-- Peak Utilization Chart -->
-                <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Text="Peak Utilization by Hour" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="PeakUtilizationChart" Margin="5"/>
-                    </Grid>
-                </Border>
+                <!-- Empty State -->
+                <TextBlock x:Name="NoUtilizationMessage"
+                           Grid.Row="1" Grid.RowSpan="3"
+                           Text="No utilization data collected yet. Select a server above."
+                           FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="Collapsed"/>
             </Grid>
         </TabItem>
 
         <!-- Database Resources Sub-Tab -->
         <TabItem Header="Database Resources">
-            <Grid Margin="10,5,10,10">
+            <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <!-- Refresh Button -->
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
-                    <Button Content="Refresh" Click="DatabaseResourcesRefresh_Click" Padding="10,4" MinWidth="70" Style="{DynamicResource SuccessButton}"/>
+                <!-- Header Controls -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Database Resource Usage" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="ResourceUsageTimeRangeCombo" SelectedIndex="3" Width="120" Margin="0,0,8,0"
+                              SelectionChanged="ResourceUsageTimeRange_Changed">
+                        <ComboBoxItem Content="Last 1 hour"/>
+                        <ComboBoxItem Content="Last 4 hours"/>
+                        <ComboBoxItem Content="Last 12 hours"/>
+                        <ComboBoxItem Content="Last 24 hours"/>
+                        <ComboBoxItem Content="Last 7 days"/>
+                    </ComboBox>
+                    <Button Content="Refresh" Click="DatabaseResourcesRefresh_Click"
+                            Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <TextBlock x:Name="DbResourcesCountIndicator" Text="" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontStyle="Italic"
+                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                 </StackPanel>
 
                 <!-- DataGrid -->
-                <Grid Grid.Row="1">
+                <Grid Grid.Row="1" Margin="10,0,10,10">
                     <DataGrid x:Name="DatabaseResourcesDataGrid"
-                              AutoGenerateColumns="False" IsReadOnly="True"
-                              CanUserSortColumns="True" CanUserResizeColumns="True"
-                              GridLinesVisibility="All"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
                               RowStyle="{StaticResource DefaultRowStyle}">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Database" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
+                            <DataGridTextColumn Header="CPU Time (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding PctCpuShare, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="CPU %" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpuShare, StringFormat='{}{0:N1}'}" Width="70">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding PctIoShare, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="I/O %" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Logical Reads" Binding="{Binding LogicalReads, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="CPU Time (ms)" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Physical Reads" Binding="{Binding PhysicalReads, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Executions" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Logical Writes" Binding="{Binding LogicalWrites, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LogicalReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Logical Reads" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Executions" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding PhysicalReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Physical Reads" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="IO Read MB" Binding="{Binding IoReadMb, StringFormat='{}{0:N2}'}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LogicalWrites, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Logical Writes" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="IO Write MB" Binding="{Binding IoWriteMb, StringFormat='{}{0:N2}'}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IoReadMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="I/O Read MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="IO %" Binding="{Binding PctIoShare, StringFormat='{}{0:N1}'}" Width="70">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IoWriteMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="I/O Write MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IoStallMs, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="I/O Stall (ms)" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="IO Stall (ms)" Binding="{Binding IoStallMs, StringFormat='{}{0:N0}'}" Width="110">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
-                    <TextBlock x:Name="DatabaseResourcesNoDataMessage" Style="{DynamicResource NoDataMessage}"
-                               Text="No database resource usage data available."/>
-                    <controls:LoadingOverlay x:Name="DatabaseResourcesLoading"/>
-                </Grid>
-            </Grid>
-        </TabItem>
 
-        <!-- Database Sizes Sub-Tab -->
-        <TabItem Header="Database Sizes">
-            <Grid Margin="10,5,10,10">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-
-                <!-- Refresh Button -->
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
-                    <Button Content="Refresh" Click="DatabaseSizesRefresh_Click" Padding="10,4" MinWidth="70" Style="{DynamicResource SuccessButton}"/>
-                </StackPanel>
-
-                <!-- DataGrid -->
-                <Grid Grid.Row="1">
-                    <DataGrid x:Name="DatabaseSizesDataGrid"
-                              AutoGenerateColumns="False" IsReadOnly="True"
-                              CanUserSortColumns="True" CanUserResizeColumns="True"
-                              GridLinesVisibility="All"
-                              RowStyle="{StaticResource DefaultRowStyle}">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding DatabaseName}" Width="160">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Database" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding FileTypeDesc}" Width="80">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="File Type" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding FileName}" Width="160">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="File Name" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Total MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding UsedSizeMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Used MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding FreeSpaceMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Free MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding UsedPct, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Used %" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding AutoGrowthMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Auto Growth" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding MaxSizeMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Max Size MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding RecoveryModelDesc}" Width="100">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Recovery" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding StateDesc}" Width="80">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="State" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeMountPoint}" Width="80">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Volume" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeTotalMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Vol Total MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VolumeFreeMb, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Vol Free MB" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding PhysicalName}" Width="400">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Physical Path" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                        </DataGrid.Columns>
-                    </DataGrid>
-                    <TextBlock x:Name="DatabaseSizesNoDataMessage" Style="{DynamicResource NoDataMessage}"
-                               Text="No database size data available."/>
-                    <controls:LoadingOverlay x:Name="DatabaseSizesLoading"/>
+                    <!-- Empty State -->
+                    <TextBlock x:Name="DatabaseResourcesNoDataMessage"
+                               Text="No database resource data collected yet. Select a server above."
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
                 </Grid>
             </Grid>
         </TabItem>
 
         <!-- Application Connections Sub-Tab -->
         <TabItem Header="Application Connections">
-            <Grid Margin="10,5,10,10">
+            <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <!-- Refresh Button -->
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
-                    <Button Content="Refresh" Click="ApplicationConnectionsRefresh_Click" Padding="10,4" MinWidth="70" Style="{DynamicResource SuccessButton}"/>
+                <!-- Header Controls -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Application Connections (24h)" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button Content="Refresh" Click="ApplicationConnectionsRefresh_Click"
+                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <TextBlock x:Name="AppConnectionsCountIndicator" Text="" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontStyle="Italic"
+                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                 </StackPanel>
 
                 <!-- DataGrid -->
-                <Grid Grid.Row="1">
+                <Grid Grid.Row="1" Margin="10,0,10,10">
                     <DataGrid x:Name="ApplicationConnectionsDataGrid"
-                              AutoGenerateColumns="False" IsReadOnly="True"
-                              CanUserSortColumns="True" CanUserResizeColumns="True"
-                              GridLinesVisibility="All"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
                               RowStyle="{StaticResource DefaultRowStyle}">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding ApplicationName}" Width="300">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Application" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="300"/>
+                            <DataGridTextColumn Header="Avg Connections" Binding="{Binding AvgConnections, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding AvgConnections, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Avg Connections" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Max Connections" Binding="{Binding MaxConnections, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding MaxConnections, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Max Connections" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
+                            <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Sample Count" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding FirstSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="160">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="First Seen" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LastSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="160">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="Last Seen" FontWeight="Bold"/>
-                                </DataGridTextColumn.Header>
-                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
+                            <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
                         </DataGrid.Columns>
                     </DataGrid>
-                    <TextBlock x:Name="ApplicationConnectionsNoDataMessage" Style="{DynamicResource NoDataMessage}"
-                               Text="No application connection data available."/>
-                    <controls:LoadingOverlay x:Name="ApplicationConnectionsLoading"/>
+
+                    <!-- Empty State -->
+                    <TextBlock x:Name="ApplicationConnectionsNoDataMessage"
+                               Text="No application connection data collected yet. Select a server above."
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
+                </Grid>
+            </Grid>
+        </TabItem>
+
+        <!-- Database Sizes Sub-Tab -->
+        <TabItem Header="Database Sizes">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header Controls -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Database Sizes" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button Content="Refresh" Click="DatabaseSizesRefresh_Click"
+                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <TextBlock x:Name="DbSizeCountIndicator" Text="" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontStyle="Italic"
+                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                </StackPanel>
+
+                <!-- DataGrid -->
+                <Grid Grid.Row="1" Margin="10,0,10,10">
+                    <DataGrid x:Name="DatabaseSizesDataGrid"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
+                              RowStyle="{StaticResource DefaultRowStyle}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="160"/>
+                            <DataGridTextColumn Header="File Type" Binding="{Binding FileTypeDesc}" Width="80"/>
+                            <DataGridTextColumn Header="File Name" Binding="{Binding FileName}" Width="160"/>
+                            <DataGridTextColumn Header="Total Size MB" Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}'}" Width="110">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Used Size MB" Binding="{Binding UsedSizeMb, StringFormat='{}{0:N2}'}" Width="110">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Free Space MB" Binding="{Binding FreeSpaceMb, StringFormat='{}{0:N2}'}" Width="110">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Used %" Binding="{Binding UsedPct, StringFormat='{}{0:N1}'}" Width="70">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Volume" Binding="{Binding VolumeMountPoint}" Width="80"/>
+                            <DataGridTextColumn Header="Volume Total MB" Binding="{Binding VolumeTotalMb, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Volume Free MB" Binding="{Binding VolumeFreeMb, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Recovery Model" Binding="{Binding RecoveryModelDesc}" Width="120"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Empty State -->
+                    <TextBlock x:Name="DatabaseSizesNoDataMessage"
+                               Text="No database size data collected yet"
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
+                </Grid>
+            </Grid>
+        </TabItem>
+
+        <!-- Server Inventory Sub-Tab -->
+        <TabItem Header="Server Inventory">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header Controls -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                    <TextBlock Text="Server Inventory" VerticalAlignment="Center" Margin="0,0,10,0"
+                               FontWeight="Bold" FontSize="14"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <Button Content="Refresh" Click="ServerInventoryRefresh_Click"
+                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                    <TextBlock x:Name="ServerInventoryCountIndicator" Text="" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontStyle="Italic"
+                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                </StackPanel>
+
+                <!-- DataGrid -->
+                <Grid Grid.Row="1" Margin="10,0,10,10">
+                    <DataGrid x:Name="ServerInventoryDataGrid"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserSortColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              CanUserResizeColumns="True"
+                              HeadersVisibility="Column"
+                              SelectionMode="Extended"
+                              RowStyle="{StaticResource DefaultRowStyle}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
+                            <DataGridTextColumn Header="Edition" Binding="{Binding Edition}" Width="200"/>
+                            <DataGridTextColumn Header="Version" Binding="{Binding SqlVersion}" Width="140"/>
+                            <DataGridTextColumn Header="Environment" Binding="{Binding EnvironmentType}" Width="100"/>
+                            <DataGridTextColumn Header="CPUs" Binding="{Binding CpuCount, StringFormat='{}{0:N0}'}" Width="70">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Memory MB" Binding="{Binding PhysicalMemoryMb, StringFormat='{}{0:N0}'}" Width="100">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Uptime" Binding="{Binding UptimeDisplay}" Width="90"/>
+                            <DataGridTextColumn Header="Start Time" Binding="{Binding SqlServerStartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
+                            <DataGridTextColumn Header="Last Updated" Binding="{Binding LastUpdated, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- Empty State -->
+                    <TextBlock x:Name="ServerInventoryNoDataMessage"
+                               Text="No server inventory data collected yet"
+                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
                 </Grid>
             </Grid>
         </TabItem>

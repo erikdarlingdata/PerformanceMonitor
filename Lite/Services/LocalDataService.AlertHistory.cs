@@ -38,7 +38,7 @@ SELECT
     alert_sent,
     notification_type,
     send_error
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   server_id = $2
 AND   dismissed = FALSE
@@ -61,7 +61,7 @@ SELECT
     alert_sent,
     notification_type,
     send_error
-FROM config_alert_log
+FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   dismissed = FALSE
 ORDER BY alert_time DESC

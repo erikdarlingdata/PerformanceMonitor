@@ -24,9 +24,9 @@ public partial class LocalDataService
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced
-FROM server_config
+FROM v_server_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM server_config WHERE server_id = $1)
+AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
 ORDER BY configuration_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -64,9 +64,9 @@ SELECT database_name, state_desc, compatibility_level, collation_name, recovery_
        is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on,
        log_reuse_wait_desc, page_verify_option, target_recovery_time_seconds, delayed_durability,
        is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on
-FROM database_config
+FROM v_database_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
 ORDER BY database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -121,9 +121,9 @@ ORDER BY database_name";
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT database_name, configuration_name, value, value_for_secondary
-FROM database_scoped_config
+FROM v_database_scoped_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM database_scoped_config WHERE server_id = $1)
+AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)
 ORDER BY database_name, configuration_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -153,9 +153,9 @@ ORDER BY database_name, configuration_name";
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT trace_flag, status, is_global, is_session
-FROM trace_flags
+FROM v_trace_flags
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM trace_flags WHERE server_id = $1)
+AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
 ORDER BY trace_flag";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

@@ -50,6 +50,8 @@
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -67,89 +69,320 @@
                     </Border>
                 </StackPanel>
 
-                <!-- Utilization Summary -->
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="10,0,10,10">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
+                <!-- Utilization Summary — compact, top-aligned -->
+                <Grid Grid.Row="1" Margin="10,0,10,0" x:Name="UtilizationContent">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
 
-                        <!-- CPU Metrics -->
-                        <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0"
-                                  Foreground="{DynamicResource ForegroundBrush}">
-                            <StackPanel Margin="8">
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}">
-                                    <Run Text="Avg CPU: " FontWeight="SemiBold"/>
-                                    <Run x:Name="AvgCpuText" Text="-"/>
-                                </TextBlock>
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,0">
-                                    <Run Text="P95 CPU: " FontWeight="SemiBold"/>
-                                    <Run x:Name="P95CpuText" Text="-"/>
-                                </TextBlock>
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,0">
-                                    <Run Text="Max CPU: " FontWeight="SemiBold"/>
-                                    <Run x:Name="MaxCpuText" Text="-"/>
-                                </TextBlock>
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,0">
-                                    <Run Text="Samples: " FontWeight="SemiBold"/>
-                                    <Run x:Name="CpuSamplesText" Text="-"/>
-                                </TextBlock>
-                            </StackPanel>
-                        </GroupBox>
+                    <!-- CPU Metrics -->
+                    <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0" VerticalAlignment="Top"
+                              Foreground="{DynamicResource ForegroundBrush}">
+                        <StackPanel Margin="10">
+                            <!-- Avg CPU -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Avg CPU" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="AvgCpuFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="AvgCpuEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="AvgCpuBar" Background="#27AE60"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="AvgCpuText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- P95 CPU -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="P95 CPU" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="P95CpuFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="P95CpuEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="P95CpuBar" Background="#27AE60"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="P95CpuText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Max CPU -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Max CPU" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="MaxCpuFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="MaxCpuEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="MaxCpuBar" Background="#27AE60"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="MaxCpuText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- CPU Details -->
+                            <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
+                                <Run x:Name="WorkerThreadsText" Text="-"/>
+                                <Run Text=" workers,"/>
+                                <Run x:Name="CpuSamplesText" Text="-"/>
+                                <Run Text=" samples (24h)"/>
+                            </TextBlock>
+                        </StackPanel>
+                    </GroupBox>
 
-                        <!-- Memory Metrics -->
-                        <GroupBox Grid.Column="1" Header="Memory" Margin="5,0"
-                                  Foreground="{DynamicResource ForegroundBrush}">
-                            <StackPanel Margin="8">
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}">
-                                    <Run Text="Physical: " FontWeight="SemiBold"/>
-                                    <Run x:Name="PhysicalMemoryText" Text="-"/>
-                                </TextBlock>
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,0">
-                                    <Run Text="Target: " FontWeight="SemiBold"/>
-                                    <Run x:Name="TargetMemoryText" Text="-"/>
-                                </TextBlock>
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,0">
-                                    <Run Text="Total: " FontWeight="SemiBold"/>
-                                    <Run x:Name="TotalMemoryText" Text="-"/>
-                                </TextBlock>
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,0">
-                                    <Run Text="Buffer Pool: " FontWeight="SemiBold"/>
-                                    <Run x:Name="BufferPoolText" Text="-"/>
-                                </TextBlock>
-                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,0,0">
-                                    <Run Text="Memory Ratio: " FontWeight="SemiBold"/>
-                                    <Run x:Name="MemoryRatioText" Text="-"/>
-                                </TextBlock>
-                            </StackPanel>
-                        </GroupBox>
+                    <!-- Memory Metrics -->
+                    <GroupBox Grid.Column="1" Header="Memory" Margin="5,0,0,0" VerticalAlignment="Top"
+                              Foreground="{DynamicResource ForegroundBrush}">
+                        <StackPanel Margin="10">
+                            <!-- Committed vs Target -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="120"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Stolen Mem %" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
+                                           ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory — memory used by plan cache, locks, grants, CLR, etc."/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="MemUtilFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="MemUtilEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="MemoryUtilBar" Background="#3498DB"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="MemoryUtilText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Buffer Pool vs Physical -->
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="120"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="60"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
+                                           ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool"/>
+                                <Grid Grid.Column="1" Margin="0,0,8,0">
+                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="MemRatioFilled" Width="0*"/>
+                                            <ColumnDefinition x:Name="MemRatioEmpty" Width="100*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Height="16" CornerRadius="3"
+                                                x:Name="MemoryRatioBar" Background="#3498DB"/>
+                                    </Grid>
+                                </Grid>
+                                <TextBlock x:Name="MemoryRatioText" Grid.Column="2" Text="-"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <!-- Memory Details -->
+                            <Grid Margin="0,4,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5">
+                                        <Run Text="Physical: " FontWeight="SemiBold"/>
+                                        <Run x:Name="PhysicalMemoryText" Text="-"/>
+                                    </TextBlock>
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
+                                        <Run Text="Target: " FontWeight="SemiBold"/>
+                                        <Run x:Name="TargetMemoryText" Text="-"/>
+                                    </TextBlock>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5">
+                                        <Run Text="Total: " FontWeight="SemiBold"/>
+                                        <Run x:Name="TotalMemoryText" Text="-"/>
+                                    </TextBlock>
+                                    <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
+                                        <Run Text="Buffer Pool: " FontWeight="SemiBold"/>
+                                        <Run x:Name="BufferPoolText" Text="-"/>
+                                    </TextBlock>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </GroupBox>
+                </Grid>
 
-                        <!-- Classification Info -->
-                        <GroupBox Grid.Column="2" Header="Classification" Margin="5,0,0,0"
+                <!-- Classification Explanation -->
+                <TextBlock x:Name="ClassificationExplanation" Grid.Row="2" Margin="12,8,10,4"
+                           VerticalAlignment="Top" TextWrapping="Wrap" FontSize="12"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+                <!-- Resource Summaries -->
+                <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" Margin="0,0,0,0">
+                    <Grid x:Name="SummaryContent">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <!-- Top Resource Consumers — Total + Avg side by side -->
+                        <Grid Grid.Row="0" Margin="10,4,10,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Top 5 by Total CPU -->
+                            <GroupBox Grid.Column="0" Header="Top Databases by Total CPU" Margin="0,0,5,0"
+                                      Foreground="{DynamicResource ForegroundBrush}">
+                                <DataGrid x:Name="TopTotalGrid"
+                                          AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserSortColumns="True" HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal" SelectionMode="Single"
+                                          MinHeight="40" MaxHeight="200"
+                                          RowStyle="{StaticResource DefaultRowStyle}">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                        <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat='{}{0:N1}'}" Width="60">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="IO %" Binding="{Binding PctIo, StringFormat='{}{0:N1}'}" Width="55">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" Width="80">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </GroupBox>
+
+                            <!-- Top 5 by Avg CPU per Execution -->
+                            <GroupBox Grid.Column="1" Header="Top Databases by Avg CPU / Execution" Margin="5,0,0,0"
+                                      Foreground="{DynamicResource ForegroundBrush}">
+                                <DataGrid x:Name="TopAvgGrid"
+                                          AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserSortColumns="True" HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal" SelectionMode="Single"
+                                          MinHeight="40" MaxHeight="200"
+                                          RowStyle="{StaticResource DefaultRowStyle}">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                        <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N2}'}" Width="95">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat='{}{0:N2}'}" Width="90">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </GroupBox>
+                        </Grid>
+
+                        <!-- Database Size Chart -->
+                        <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10"
                                   Foreground="{DynamicResource ForegroundBrush}">
-                            <StackPanel Margin="8">
-                                <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}" FontSize="12">
-                                    <Run FontWeight="SemiBold" Foreground="#27AE60">RIGHT SIZED</Run>
-                                    <Run Text=" — balanced resource usage"/>
-                                </TextBlock>
-                                <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}" FontSize="12" Margin="0,6,0,0">
-                                    <Run FontWeight="SemiBold" Foreground="#F39C12">OVER PROVISIONED</Run>
-                                    <Run Text=" — avg CPU &lt;15%, max &lt;40%, memory ratio &lt;0.5"/>
-                                </TextBlock>
-                                <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}" FontSize="12" Margin="0,6,0,0">
-                                    <Run FontWeight="SemiBold" Foreground="#E74C3C">UNDER PROVISIONED</Run>
-                                    <Run Text=" — p95 CPU >85% or memory ratio >0.95"/>
-                                </TextBlock>
-                            </StackPanel>
+                            <ItemsControl x:Name="DbSizeChart" Margin="8,4,8,4">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,2" Height="22">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="160"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="90"/>
+                                            </Grid.ColumnDefinitions>
+                                            <!-- Database name -->
+                                            <TextBlock Grid.Column="0" Text="{Binding DatabaseName}"
+                                                       VerticalAlignment="Center" FontSize="11.5"
+                                                       Foreground="{DynamicResource ForegroundBrush}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <!-- Stacked bar: used (accent) + free (dim) -->
+                                            <Grid Grid.Column="1" Margin="4,2">
+                                                <Border CornerRadius="3" Background="#1AFFFFFF"/>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="{Binding UsedStarWidth}"/>
+                                                        <ColumnDefinition Width="{Binding FreeStarWidth}"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Grid.Column="0" CornerRadius="3" Background="#3498DB"/>
+                                                </Grid>
+                                            </Grid>
+                                            <!-- Size label -->
+                                            <TextBlock Grid.Column="2" VerticalAlignment="Center"
+                                                       HorizontalAlignment="Right" FontSize="11.5"
+                                                       Foreground="{DynamicResource ForegroundBrush}">
+                                                <TextBlock.Text>
+                                                    <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB">
+                                                        <Binding Path="UsedMb"/>
+                                                        <Binding Path="TotalMb"/>
+                                                    </MultiBinding>
+                                                </TextBlock.Text>
+                                            </TextBlock>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
                         </GroupBox>
                     </Grid>
                 </ScrollViewer>
 
                 <!-- Empty State -->
                 <TextBlock x:Name="NoUtilizationMessage"
-                           Grid.Row="1"
+                           Grid.Row="1" Grid.RowSpan="3"
                            Text="No utilization data collected yet. Select a server above."
                            FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -167,11 +400,19 @@
 
                 <!-- Header Controls -->
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
-                    <TextBlock Text="Database Resource Usage (24h)" VerticalAlignment="Center" Margin="0,0,10,0"
+                    <TextBlock Text="Database Resource Usage" VerticalAlignment="Center" Margin="0,0,10,0"
                                FontWeight="Bold" FontSize="14"
                                Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="ResourceUsageTimeRangeCombo" SelectedIndex="3" Width="120" Margin="0,0,8,0"
+                              SelectionChanged="ResourceUsageTimeRange_Changed">
+                        <ComboBoxItem Content="Last 1 hour"/>
+                        <ComboBoxItem Content="Last 4 hours"/>
+                        <ComboBoxItem Content="Last 12 hours"/>
+                        <ComboBoxItem Content="Last 24 hours"/>
+                        <ComboBoxItem Content="Last 7 days"/>
+                    </ComboBox>
                     <Button Content="Refresh" Click="RefreshDatabaseResources_Click"
-                            Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                            Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="DbResourcesCountIndicator" Text="" Margin="12,0,0,0"
                                VerticalAlignment="Center" FontStyle="Italic"
                                Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
@@ -306,7 +547,21 @@
                               RowStyle="{StaticResource DefaultRowStyle}">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="300"/>
-                            <DataGridTextColumn Header="Max Connections" Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" Width="120">
+                            <DataGridTextColumn Header="Avg Connections" Binding="{Binding AvgConnections, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Max Connections" Binding="{Binding MaxConnections, StringFormat='{}{0:N0}'}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" Width="100">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="HorizontalAlignment" Value="Right"/>

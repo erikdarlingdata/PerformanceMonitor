@@ -175,7 +175,9 @@ CREATE TABLE IF NOT EXISTS memory_stats (
     target_server_memory_mb DECIMAL(18,2),
     total_server_memory_mb DECIMAL(18,2),
     buffer_pool_mb DECIMAL(18,2),
-    plan_cache_mb DECIMAL(18,2)
+    plan_cache_mb DECIMAL(18,2),
+    max_workers_count INTEGER,
+    current_workers_count INTEGER
 )";
 
     public const string CreateMemoryClerksTable = @"

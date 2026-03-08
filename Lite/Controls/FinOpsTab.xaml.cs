@@ -91,6 +91,19 @@ public partial class FinOpsTab : UserControl
             var data = await _dataService.GetUtilizationEfficiencyAsync(serverId);
             UpdateUtilizationSummary(data);
             NoUtilizationMessage.Visibility = data == null ? Visibility.Visible : Visibility.Collapsed;
+            SummaryContent.Visibility = data == null ? Visibility.Collapsed : Visibility.Visible;
+
+            if (data != null)
+            {
+                var topTotal = await _dataService.GetTopResourceConsumersByTotalAsync(serverId);
+                TopTotalGrid.ItemsSource = topTotal;
+
+                var topAvg = await _dataService.GetTopResourceConsumersByAvgAsync(serverId);
+                TopAvgGrid.ItemsSource = topAvg;
+
+                var sizes = await _dataService.GetDatabaseSizeSummaryAsync(serverId);
+                DbSizeChart.ItemsSource = sizes;
+            }
         }
         catch (Exception ex)
         {
@@ -105,9 +118,17 @@ public partial class FinOpsTab : UserControl
             ProvisioningStatusText.Text = "No Data";
             ProvisioningStatusBorder.Background = new SolidColorBrush(Colors.Gray);
             AvgCpuText.Text = P95CpuText.Text = MaxCpuText.Text = CpuSamplesText.Text = "-";
-            PhysicalMemoryText.Text = TargetMemoryText.Text = TotalMemoryText.Text = BufferPoolText.Text = MemoryRatioText.Text = "-";
+            WorkerThreadsText.Text = "-";
+            AvgCpuBar.Width = P95CpuBar.Width = MaxCpuBar.Width = 0;
+            MemoryUtilBar.Width = MemoryRatioBar.Width = 0;
+            MemoryUtilText.Text = MemoryRatioText.Text = "-";
+            PhysicalMemoryText.Text = TargetMemoryText.Text = TotalMemoryText.Text = BufferPoolText.Text = "-";
+            ClassificationExplanation.Text = "";
+            UtilizationContent.Visibility = Visibility.Collapsed;
             return;
         }
+
+        UtilizationContent.Visibility = Visibility.Visible;
 
         ProvisioningStatusText.Text = data.ProvisioningStatus.Replace("_", " ");
         switch (data.ProvisioningStatus)
@@ -130,16 +151,85 @@ public partial class FinOpsTab : UserControl
                 break;
         }
 
+        /* CPU text + bars */
         AvgCpuText.Text = $"{data.AvgCpuPct:N2}%";
         P95CpuText.Text = $"{data.P95CpuPct:N2}%";
         MaxCpuText.Text = $"{data.MaxCpuPct}%";
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
+        WorkerThreadsText.Text = $"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}";
+
+        SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)data.AvgCpuPct);
+        SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, (double)data.P95CpuPct);
+        SetBar(MaxCpuBar, MaxCpuFilled, MaxCpuEmpty, data.MaxCpuPct);
+
+        /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
+        var stolenPct = data.TotalMemoryMb > 0
+            ? (double)(data.TotalMemoryMb - data.BufferPoolMb) / data.TotalMemoryMb * 100.0
+            : 0;
+        MemoryUtilText.Text = $"{stolenPct:N0}%";
+        SetBar(MemoryUtilBar, MemUtilFilled, MemUtilEmpty, stolenPct);
+
+        /* Buffer Pool % = Buffer Pool / Physical Memory */
+        var bpPct = data.PhysicalMemoryMb > 0
+            ? (double)data.BufferPoolMb / data.PhysicalMemoryMb * 100.0
+            : 0;
+        MemoryRatioText.Text = $"{bpPct:N0}%";
+        SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
 
         PhysicalMemoryText.Text = $"{data.PhysicalMemoryMb:N0} MB";
         TargetMemoryText.Text = $"{data.TargetMemoryMb:N0} MB";
         TotalMemoryText.Text = $"{data.TotalMemoryMb:N0} MB";
         BufferPoolText.Text = $"{data.BufferPoolMb:N0} MB";
-        MemoryRatioText.Text = $"{data.MemoryRatio:N2}";
+
+        /* Contextual explanation — one sentence describing WHY this classification */
+        ClassificationExplanation.Text = data.ProvisioningStatus switch
+        {
+            "RIGHT_SIZED" => $"CPU is moderately loaded (avg {data.AvgCpuPct:N1}%, p95 {data.P95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bpPct:N0}% of physical RAM). No action needed.",
+            "OVER_PROVISIONED" => $"CPU is lightly loaded (avg {data.AvgCpuPct:N1}%, max {data.MaxCpuPct}%) and buffer pool uses only {bpPct:N0}% of physical RAM. This server may have more resources than it needs.",
+            "UNDER_PROVISIONED" => data.P95CpuPct > 85
+                ? $"CPU p95 is {data.P95CpuPct:N1}% (threshold: 85%). This server may need more CPU capacity."
+                : $"Buffer pool uses {bpPct:N0}% of physical RAM and memory ratio is {data.MemoryRatio:N2} (threshold: 0.95). Memory pressure is high.",
+            _ => ""
+        };
+    }
+
+    private static void SetBar(Border bar, ColumnDefinition filled, ColumnDefinition empty, double pct)
+    {
+        var clamped = Math.Max(0, Math.Min(100, pct));
+
+        /* Color thresholds: green < 60, orange 60-85, red > 85 */
+        var color = clamped switch
+        {
+            > 85 => "#E74C3C",
+            > 60 => "#F39C12",
+            _ => "#27AE60"
+        };
+        bar.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+
+        /* Use star-width proportions — the layout engine handles sizing natively */
+        filled.Width = new GridLength(Math.Max(clamped, 0.1), GridUnitType.Star);
+        empty.Width = new GridLength(Math.Max(100 - clamped, 0.1), GridUnitType.Star);
+    }
+
+    private int GetResourceUsageHoursBack()
+    {
+        return ResourceUsageTimeRangeCombo.SelectedIndex switch
+        {
+            0 => 1,
+            1 => 4,
+            2 => 12,
+            3 => 24,
+            4 => 168,
+            _ => 24
+        };
+    }
+
+    private async void ResourceUsageTimeRange_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _dataService == null) return;
+        var serverId = GetSelectedServerId();
+        if (serverId == 0) return;
+        await LoadDatabaseResourcesAsync(serverId);
     }
 
     private async System.Threading.Tasks.Task LoadDatabaseResourcesAsync(int serverId)
@@ -148,7 +238,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetDatabaseResourceUsageAsync(serverId);
+            var hoursBack = GetResourceUsageHoursBack();
+            var data = await _dataService.GetDatabaseResourceUsageAsync(serverId, hoursBack);
             DatabaseResourcesDataGrid.ItemsSource = data;
             NoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             DbResourcesCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";

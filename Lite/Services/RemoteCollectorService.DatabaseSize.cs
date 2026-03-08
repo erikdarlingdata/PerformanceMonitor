@@ -32,6 +32,35 @@ public partial class RemoteCollectorService
 
         const string onPremQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET NOCOUNT ON;
+
+CREATE TABLE #file_space
+(
+    database_id int NOT NULL,
+    file_id int NOT NULL,
+    used_size_mb decimal(19,2) NULL
+);
+
+DECLARE
+    @sql nvarchar(MAX) = N'';
+
+SELECT
+    @sql += N'
+USE ' + QUOTENAME(d.name) + N';
+INSERT #file_space (database_id, file_id, used_size_mb)
+SELECT
+    DB_ID(),
+    df.file_id,
+    CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''SpaceUsed'') * 8.0 / 1024.0)
+FROM sys.database_files AS df;
+'
+FROM sys.databases AS d
+WHERE d.state_desc = N'ONLINE'
+AND   d.database_id > 0
+ORDER BY
+    d.name;
+
+EXEC sys.sp_executesql @sql;
 
 SELECT
     database_name = d.name,
@@ -43,7 +72,7 @@ SELECT
     total_size_mb =
         CONVERT(decimal(19,2), mf.size * 8.0 / 1024.0),
     used_size_mb =
-        CONVERT(decimal(19,2), NULL),
+        fs.used_size_mb,
     auto_growth_mb =
         CASE
             WHEN mf.is_percent_growth = 1
@@ -74,6 +103,9 @@ FROM sys.master_files AS mf
 JOIN sys.databases AS d
   ON d.database_id = mf.database_id
 CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) AS vs
+LEFT JOIN #file_space AS fs
+  ON  fs.database_id = mf.database_id
+  AND fs.file_id = mf.file_id
 WHERE d.state_desc = N'ONLINE'
 ORDER BY
     d.name,

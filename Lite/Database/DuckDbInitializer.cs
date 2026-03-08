@@ -86,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 18;
+    internal const int CurrentSchemaVersion = 19;
 
     private readonly string _archivePath;
 
@@ -539,6 +539,20 @@ public class DuckDbInitializer
             /* v18: Added session_stats table for per-application connection tracking
                     from sys.dm_exec_sessions. New table only — created by GetAllTableStatements(). */
             _logger?.LogInformation("Running migration to v18: adding session_stats table for application connections");
+        }
+
+        if (fromVersion < 19)
+        {
+            _logger?.LogInformation("Running migration to v19: adding worker thread columns to memory_stats");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE memory_stats ADD COLUMN IF NOT EXISTS max_workers_count INTEGER");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE memory_stats ADD COLUMN IF NOT EXISTS current_workers_count INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v19 encountered an error (non-fatal): {Error}", ex.Message);
+            }
         }
     }
 

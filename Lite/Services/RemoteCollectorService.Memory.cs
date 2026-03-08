@@ -44,7 +44,9 @@ SELECT
     target_server_memory_mb = CONVERT(decimal(18,2), pc_target.cntr_value / 1024.0),
     total_server_memory_mb = CONVERT(decimal(18,2), pc_total.cntr_value / 1024.0),
     buffer_pool_mb = CONVERT(decimal(18,2), pc_buffer.cntr_value / 1024.0),
-    plan_cache_mb = CONVERT(decimal(18,2), pc_plan.cntr_value * 8.0 / 1024.0)
+    plan_cache_mb = CONVERT(decimal(18,2), pc_plan.cntr_value * 8.0 / 1024.0),
+    max_workers_count = osi.max_workers_count,
+    current_workers_count = w.current_workers
 FROM sys.dm_os_sys_info AS osi
 CROSS JOIN
 (
@@ -71,6 +73,12 @@ CROSS JOIN
     WHERE counter_name = N'Cache Pages'
       AND object_name LIKE N'%:Plan Cache%'
 ) AS pc_plan
+CROSS JOIN
+(
+    SELECT current_workers = SUM(active_workers_count)
+    FROM sys.dm_os_schedulers
+    WHERE status = N'VISIBLE ONLINE'
+) AS w
 OPTION(RECOMPILE);"
             : @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -85,7 +93,9 @@ SELECT
     target_server_memory_mb = CONVERT(decimal(18,2), pc_target.cntr_value / 1024.0),
     total_server_memory_mb = CONVERT(decimal(18,2), pc_total.cntr_value / 1024.0),
     buffer_pool_mb = CONVERT(decimal(18,2), pc_buffer.cntr_value / 1024.0),
-    plan_cache_mb = CONVERT(decimal(18,2), pc_plan.cntr_value * 8.0 / 1024.0)
+    plan_cache_mb = CONVERT(decimal(18,2), pc_plan.cntr_value * 8.0 / 1024.0),
+    max_workers_count = osi.max_workers_count,
+    current_workers_count = w.current_workers
 FROM sys.dm_os_sys_memory AS osm
 CROSS JOIN sys.dm_os_sys_info AS osi
 CROSS JOIN
@@ -113,6 +123,12 @@ CROSS JOIN
     WHERE counter_name = N'Cache Pages'
       AND object_name LIKE N'%:Plan Cache%'
 ) AS pc_plan
+CROSS JOIN
+(
+    SELECT current_workers = SUM(active_workers_count)
+    FROM sys.dm_os_schedulers
+    WHERE status = N'VISIBLE ONLINE'
+) AS w
 OPTION(RECOMPILE);";
 
         var serverId = GetServerId(server);
@@ -142,6 +158,8 @@ OPTION(RECOMPILE);";
         var totalServerMemoryMb = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7);
         var bufferPoolMb = reader.IsDBNull(8) ? 0m : reader.GetDecimal(8);
         var planCacheMb = reader.IsDBNull(9) ? 0m : reader.GetDecimal(9);
+        var maxWorkersCount = reader.IsDBNull(10) ? 0 : reader.GetInt32(10);
+        var currentWorkersCount = reader.IsDBNull(11) ? 0 : reader.GetInt32(11);
         sqlSw.Stop();
 
         /* Insert into DuckDB using Appender */
@@ -168,6 +186,8 @@ OPTION(RECOMPILE);";
                    .AppendValue(totalServerMemoryMb)
                    .AppendValue(bufferPoolMb)
                    .AppendValue(planCacheMb)
+                   .AppendValue(maxWorkersCount)
+                   .AppendValue(currentWorkersCount)
                    .EndRow();
             }
         }

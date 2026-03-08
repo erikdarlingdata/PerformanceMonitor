@@ -32,7 +32,7 @@ SELECT
     0 AS target_server_memory_mb,
     0 AS buffer_pool_mb,
     SUM(granted_memory_mb) AS total_granted_mb
-FROM memory_grant_stats
+FROM v_memory_grant_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -78,7 +78,7 @@ SELECT
     SUM(waiter_count) AS waiter_count,
     SUM(timeout_error_count_delta) AS timeout_error_count_delta,
     SUM(forced_grant_count_delta) AS forced_grant_count_delta
-FROM memory_grant_stats
+FROM v_memory_grant_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3

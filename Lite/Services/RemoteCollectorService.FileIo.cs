@@ -138,7 +138,7 @@ OPTION(RECOMPILE);";
             {
                 foreach (var stat in fileStats)
                 {
-                    var deltaKey = $"{stat.DatabaseId}_{stat.FileId}";
+                    var deltaKey = $"{stat.DatabaseName}|{stat.FileName}";
                     var deltaReads = _deltaCalculator.CalculateDelta(serverId, "file_io_reads", deltaKey, stat.NumOfReads);
                     var deltaWrites = _deltaCalculator.CalculateDelta(serverId, "file_io_writes", deltaKey, stat.NumOfWrites);
                     var deltaReadBytes = _deltaCalculator.CalculateDelta(serverId, "file_io_read_bytes", deltaKey, stat.ReadBytes);
