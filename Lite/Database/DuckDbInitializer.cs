@@ -86,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 17;
+    internal const int CurrentSchemaVersion = 18;
 
     private readonly string _archivePath;
 
@@ -97,13 +97,18 @@ public class DuckDbInitializer
         _archivePath = Path.Combine(Path.GetDirectoryName(databasePath) ?? ".", "archive");
     }
 
-    /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files */
+    /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files.
+       IMPORTANT: Must match ArchiveService.ArchivableTables — every archived table needs an archive view. */
     private static readonly string[] ArchivableTables =
     [
         "wait_stats", "query_stats", "procedure_stats", "query_store_stats",
         "query_snapshots", "cpu_utilization_stats", "file_io_stats", "memory_stats",
         "memory_clerks", "tempdb_stats", "perfmon_stats", "deadlocks",
-        "blocked_process_reports", "collection_log"
+        "blocked_process_reports", "memory_grant_stats", "waiting_tasks",
+        "running_jobs", "database_size_stats", "server_properties",
+        "session_stats", "server_config", "database_config",
+        "database_scoped_config", "trace_flags", "config_alert_log",
+        "collection_log"
     ];
 
     /// <summary>
@@ -317,6 +322,12 @@ public class DuckDbInitializer
     /// <summary>
     /// Runs schema migrations from the given version up to CurrentSchemaVersion.
     /// Each migration drops and recreates affected tables.
+    ///
+    /// IMPORTANT: When adding a new data collection table, you must also register it in:
+    ///   1. Schema.cs — GetAllTableStatements() and GetAllIndexStatements()
+    ///   2. DuckDbInitializer.cs — ArchivableTables (archive view creation)
+    ///   3. ArchiveService.cs — ArchivableTables (parquet export + purge)
+    /// Forgetting any of these causes unbounded growth and 512 MB reset loops.
     /// </summary>
     private async Task RunMigrationsAsync(DuckDBConnection connection, int fromVersion)
     {
@@ -521,6 +532,13 @@ public class DuckDbInitializer
             {
                 /* Table doesn't exist yet — will be created with correct schema below */
             }
+        }
+
+        if (fromVersion < 18)
+        {
+            /* v18: Added session_stats table for per-application connection tracking
+                    from sys.dm_exec_sessions. New table only — created by GetAllTableStatements(). */
+            _logger?.LogInformation("Running migration to v18: adding session_stats table for application connections");
         }
     }
 

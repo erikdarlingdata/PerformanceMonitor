@@ -125,6 +125,9 @@ public partial class MainWindow : Window
             // Initialize alerts history tab
             AlertsHistoryContent.Initialize(_dataService);
 
+            // Initialize FinOps tab
+            FinOpsContent.Initialize(_dataService, _serverManager);
+
             // Start MCP server if enabled
             var mcpSettings = McpSettings.Load(App.ConfigDirectory);
             if (mcpSettings.Enabled)

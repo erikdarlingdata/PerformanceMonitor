@@ -193,6 +193,12 @@
                             <TextBlock Text="Open Plan Viewer" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Button>
+                    <Button x:Name="FinOpsButton"
+                            Content="FinOps"
+                            Click="FinOps_Click"
+                            Style="{StaticResource AccentButton}"
+                            Height="32"
+                            Margin="0,0,0,8"/>
                     <Separator Margin="0,0,0,8"/>
                     <Button x:Name="RefreshAllButton"
                             Content="&#x21BB; Refresh All Status"

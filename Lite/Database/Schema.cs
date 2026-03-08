@@ -643,6 +643,26 @@ CREATE TABLE IF NOT EXISTS server_properties (
     public const string CreateServerPropertiesIndex = @"
 CREATE INDEX IF NOT EXISTS idx_server_properties_time ON server_properties(server_id, collection_time)";
 
+    public const string CreateSessionStatsTable = @"
+CREATE TABLE IF NOT EXISTS session_stats (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    program_name VARCHAR NOT NULL,
+    connection_count INTEGER NOT NULL,
+    running_count INTEGER NOT NULL,
+    sleeping_count INTEGER NOT NULL,
+    dormant_count INTEGER NOT NULL,
+    total_cpu_time_ms BIGINT,
+    total_reads BIGINT,
+    total_writes BIGINT,
+    total_logical_reads BIGINT
+)";
+
+    public const string CreateSessionStatsIndex = @"
+CREATE INDEX IF NOT EXISTS idx_session_stats_time ON session_stats(server_id, collection_time)";
+
     public const string CreateAlertLogTable = @"
 CREATE TABLE IF NOT EXISTS config_alert_log (
     alert_time TIMESTAMP NOT NULL,
@@ -687,6 +707,7 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
         yield return CreateRunningJobsTable;
         yield return CreateDatabaseSizeStatsTable;
         yield return CreateServerPropertiesTable;
+        yield return CreateSessionStatsTable;
         yield return CreateAlertLogTable;
     }
 
@@ -716,5 +737,6 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
         yield return CreateRunningJobsIndex;
         yield return CreateDatabaseSizeStatsIndex;
         yield return CreateServerPropertiesIndex;
+        yield return CreateSessionStatsIndex;
     }
 }

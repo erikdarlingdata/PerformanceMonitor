@@ -279,6 +279,9 @@
                     <TabItem Header="Alert History" x:Name="AlertsTab">
                         <controls:AlertsHistoryTab x:Name="AlertsHistoryContent"/>
                     </TabItem>
+                    <TabItem Header="FinOps" x:Name="FinOpsTab">
+                        <controls:FinOpsTab x:Name="FinOpsContent"/>
+                    </TabItem>
                     <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
                         <TabItem.Header>
                             <StackPanel Orientation="Horizontal">

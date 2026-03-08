@@ -49,6 +49,8 @@ namespace PerformanceMonitorDashboard
         private LandingPage? _landingPage;
         private TabItem? _alertsTab;
         private TabItem? _planViewerTab;
+        private TabItem? _finOpsTab;
+        private Controls.FinOpsContent? _finOpsContent;
         private AlertsHistoryContent? _alertsHistoryContent;
 
         private McpHostService? _mcpHostService;
@@ -79,6 +81,7 @@ namespace PerformanceMonitorDashboard
         private const string NocTabId = "__NOC_OVERVIEW__";
         private const string AlertsTabId = "__ALERTS_HISTORY__";
         private const string PlanViewerTabId = "__PLAN_VIEWER__";
+        private const string FinOpsTabId = "__FINOPS__";
 
         public MainWindow()
         {
@@ -627,6 +630,11 @@ namespace PerformanceMonitorDashboard
             OpenAlertsTab();
         }
 
+        private void FinOps_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFinOpsTab();
+        }
+
         private void OpenAlertsTab()
         {
             if (_alertsTab != null && ServerTabControl.Items.Contains(_alertsTab))
@@ -670,6 +678,61 @@ namespace PerformanceMonitorDashboard
             _alertsHistoryContent.RefreshAlerts();
         }
 
+        private void OpenFinOpsTab()
+        {
+            if (_finOpsTab != null && ServerTabControl.Items.Contains(_finOpsTab))
+            {
+                ServerTabControl.SelectedItem = _finOpsTab;
+                _ = _finOpsContent?.RefreshDataAsync();
+                return;
+            }
+
+            // Ensure at least one server is configured
+            var servers = _serverManager.GetAllServers();
+            if (servers.Count == 0)
+            {
+                MessageBox.Show("Add at least one server before opening FinOps.", "No Servers",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            _finOpsContent = new Controls.FinOpsContent();
+            _finOpsContent.Initialize(_serverManager, _credentialService);
+
+            var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
+            var headerText = new TextBlock
+            {
+                Text = "FinOps",
+                VerticalAlignment = VerticalAlignment.Center,
+                FontWeight = FontWeights.SemiBold
+            };
+            var closeButton = new Button
+            {
+                Style = (Style)FindResource("TabCloseButton"),
+                Tag = FinOpsTabId
+            };
+            closeButton.Click += CloseTab_Click;
+            headerPanel.Children.Add(headerText);
+            headerPanel.Children.Add(closeButton);
+
+            _finOpsTab = new TabItem
+            {
+                Header = headerPanel,
+                Content = _finOpsContent,
+                Tag = FinOpsTabId
+            };
+
+            /* Insert after Alerts tab if present, else after NOC, else at 0 */
+            var insertIndex = 0;
+            if (_alertsTab != null && ServerTabControl.Items.Contains(_alertsTab))
+                insertIndex = ServerTabControl.Items.IndexOf(_alertsTab) + 1;
+            else if (_nocTab != null && ServerTabControl.Items.Contains(_nocTab))
+                insertIndex = ServerTabControl.Items.IndexOf(_nocTab) + 1;
+
+            ServerTabControl.Items.Insert(insertIndex, _finOpsTab);
+            ServerTabControl.SelectedItem = _finOpsTab;
+        }
+
         private void CloseTab_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.Tag is string tabId)
@@ -691,6 +754,15 @@ namespace PerformanceMonitorDashboard
                         ServerTabControl.Items.Remove(_alertsTab);
                         _alertsTab = null;
                         _alertsHistoryContent = null;
+                    }
+                }
+                else if (tabId == FinOpsTabId)
+                {
+                    if (_finOpsTab != null)
+                    {
+                        ServerTabControl.Items.Remove(_finOpsTab);
+                        _finOpsTab = null;
+                        _finOpsContent = null;
                     }
                 }
                 else if (tabId == PlanViewerTabId)

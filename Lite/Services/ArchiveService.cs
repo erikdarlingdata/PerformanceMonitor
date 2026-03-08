@@ -26,7 +26,9 @@ public class ArchiveService
     private readonly ILogger<ArchiveService>? _logger;
     private static readonly SemaphoreSlim s_archiveLock = new(1, 1);
 
-    /* Tables eligible for archival with their time column */
+    /* Tables eligible for archival with their time column.
+       IMPORTANT: Every table with time-series data must be listed here,
+       or it will grow unbounded and push the DB past the 512 MB reset threshold. */
     private static readonly (string Table, string TimeColumn)[] ArchivableTables =
     [
         ("wait_stats", "collection_time"),
@@ -42,6 +44,17 @@ public class ArchiveService
         ("perfmon_stats", "collection_time"),
         ("deadlocks", "collection_time"),
         ("blocked_process_reports", "collection_time"),
+        ("memory_grant_stats", "collection_time"),
+        ("waiting_tasks", "collection_time"),
+        ("running_jobs", "collection_time"),
+        ("database_size_stats", "collection_time"),
+        ("server_properties", "collection_time"),
+        ("session_stats", "collection_time"),
+        ("server_config", "capture_time"),
+        ("database_config", "capture_time"),
+        ("database_scoped_config", "capture_time"),
+        ("trace_flags", "capture_time"),
+        ("config_alert_log", "alert_time"),
         ("collection_log", "collection_time")
     ];
 
