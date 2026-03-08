@@ -112,7 +112,10 @@ BEGIN
                 max_size_mb,
                 recovery_model_desc,
                 compatibility_level,
-                state_desc
+                state_desc,
+                volume_mount_point,
+                volume_total_mb,
+                volume_free_mb
             )
             SELECT
                 collection_time = @start_time,
@@ -147,7 +150,10 @@ BEGIN
                 recovery_model_desc =
                     CONVERT(nvarchar(12), DATABASEPROPERTYEX(DB_NAME(), N'Recovery')),
                 compatibility_level = NULL,
-                state_desc = N'ONLINE'
+                state_desc = N'ONLINE',
+                volume_mount_point = NULL,
+                volume_total_mb = NULL,
+                volume_free_mb = NULL
             FROM sys.database_files AS df
             OPTION(RECOMPILE);
 
@@ -200,7 +206,10 @@ BEGIN
                         max_size_mb,
                         recovery_model_desc,
                         compatibility_level,
-                        state_desc
+                        state_desc,
+                        volume_mount_point,
+                        volume_total_mb,
+                        volume_free_mb
                     )
                     SELECT
                         collection_time = @start_time,
@@ -234,9 +243,16 @@ BEGIN
                             END,
                         recovery_model_desc = d.recovery_model_desc,
                         compatibility_level = d.compatibility_level,
-                        state_desc = d.state_desc
+                        state_desc = d.state_desc,
+                        volume_mount_point =
+                            RTRIM(vs.volume_mount_point),
+                        volume_total_mb =
+                            CONVERT(decimal(19,2), vs.total_bytes / 1048576.0),
+                        volume_free_mb =
+                            CONVERT(decimal(19,2), vs.available_bytes / 1048576.0)
                     FROM sys.database_files AS df
                     CROSS JOIN sys.databases AS d
+                    CROSS APPLY sys.dm_os_volume_stats(DB_ID(), df.file_id) AS vs
                     WHERE d.database_id = DB_ID();';
 
                     EXECUTE sys.sp_executesql
@@ -277,7 +293,10 @@ BEGIN
                 dss.total_size_mb,
                 dss.used_size_mb,
                 dss.free_space_mb,
-                dss.used_pct
+                dss.used_pct,
+                dss.volume_mount_point,
+                dss.volume_total_mb,
+                dss.volume_free_mb
             FROM collect.database_size_stats AS dss
             WHERE dss.collection_time = @start_time
             ORDER BY

@@ -86,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 16;
+    internal const int CurrentSchemaVersion = 17;
 
     private readonly string _archivePath;
 
@@ -504,6 +504,23 @@ public class DuckDbInitializer
                     New tables only — no existing table changes needed. Tables created by
                     GetAllTableStatements() during initialization. */
             _logger?.LogInformation("Running migration to v16: adding FinOps tables (database_size_stats, server_properties)");
+        }
+
+        if (fromVersion < 17)
+        {
+            /* v17: Added volume-level drive space columns to database_size_stats.
+                    Columns appended at end — safe for DuckDB appender positional writes. */
+            _logger?.LogInformation("Running migration to v17: adding volume stats columns to database_size_stats");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ADD COLUMN IF NOT EXISTS volume_mount_point VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ADD COLUMN IF NOT EXISTS volume_total_mb DECIMAL(19,2)");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE database_size_stats ADD COLUMN IF NOT EXISTS volume_free_mb DECIMAL(19,2)");
+            }
+            catch
+            {
+                /* Table doesn't exist yet — will be created with correct schema below */
+            }
         }
     }
 

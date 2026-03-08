@@ -1110,6 +1110,9 @@ BEGIN
                 recovery_model_desc nvarchar(12) NULL,
                 compatibility_level integer NULL,
                 state_desc nvarchar(60) NULL,
+                volume_mount_point nvarchar(256) NULL,
+                volume_total_mb decimal(19,2) NULL,
+                volume_free_mb decimal(19,2) NULL,
                 free_space_mb AS
                 (
                     total_size_mb - used_size_mb

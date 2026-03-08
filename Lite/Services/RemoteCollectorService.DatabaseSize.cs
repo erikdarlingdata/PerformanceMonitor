@@ -22,8 +22,8 @@ public partial class RemoteCollectorService
 {
     /// <summary>
     /// Collects per-file database sizes for growth trending and capacity planning.
-    /// On-prem: queries sys.master_files + sys.databases for all online databases.
-    /// Azure SQL DB: queries sys.database_files for the single database.
+    /// On-prem: queries sys.master_files + sys.databases + dm_os_volume_stats for file and drive context.
+    /// Azure SQL DB: queries sys.database_files for the single database (no volume stats available).
     /// </summary>
     private async Task<int> CollectDatabaseSizeStatsAsync(ServerConnection server, CancellationToken cancellationToken)
     {
@@ -63,10 +63,17 @@ SELECT
     compatibility_level =
         CONVERT(int, d.compatibility_level),
     state_desc =
-        d.state_desc
+        d.state_desc,
+    volume_mount_point =
+        RTRIM(vs.volume_mount_point),
+    volume_total_mb =
+        CONVERT(decimal(19,2), vs.total_bytes / 1048576.0),
+    volume_free_mb =
+        CONVERT(decimal(19,2), vs.available_bytes / 1048576.0)
 FROM sys.master_files AS mf
 JOIN sys.databases AS d
   ON d.database_id = mf.database_id
+CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) AS vs
 WHERE d.state_desc = N'ONLINE'
 ORDER BY
     d.name,
@@ -106,7 +113,13 @@ SELECT
     compatibility_level =
         CONVERT(int, NULL),
     state_desc =
-        N'ONLINE'
+        N'ONLINE',
+    volume_mount_point =
+        CONVERT(nvarchar(256), NULL),
+    volume_total_mb =
+        CONVERT(decimal(19,2), NULL),
+    volume_free_mb =
+        CONVERT(decimal(19,2), NULL)
 FROM sys.database_files AS df
 ORDER BY
     df.file_id
@@ -123,7 +136,8 @@ OPTION(RECOMPILE);";
         var rows = new List<(string DatabaseName, int DatabaseId, int FileId, string FileTypeDesc,
             string FileName, string PhysicalName, decimal TotalSizeMb, decimal? UsedSizeMb,
             decimal? AutoGrowthMb, decimal? MaxSizeMb, string? RecoveryModel,
-            int? CompatibilityLevel, string? StateDesc)>();
+            int? CompatibilityLevel, string? StateDesc, string? VolumeMountPoint,
+            decimal? VolumeTotalMb, decimal? VolumeFreeMb)>();
 
         var sqlSw = Stopwatch.StartNew();
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
@@ -146,7 +160,10 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(9) ? null : reader.GetDecimal(9),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
                 reader.IsDBNull(11) ? null : reader.GetInt32(11),
-                reader.IsDBNull(12) ? null : reader.GetString(12)));
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.IsDBNull(13) ? null : reader.GetString(13),
+                reader.IsDBNull(14) ? null : reader.GetDecimal(14),
+                reader.IsDBNull(15) ? null : reader.GetDecimal(15)));
         }
         sqlSw.Stop();
 
@@ -178,6 +195,9 @@ OPTION(RECOMPILE);";
                        .AppendValue(r.RecoveryModel)
                        .AppendValue(r.CompatibilityLevel)
                        .AppendValue(r.StateDesc)
+                       .AppendValue(r.VolumeMountPoint)
+                       .AppendValue(r.VolumeTotalMb)
+                       .AppendValue(r.VolumeFreeMb)
                        .EndRow();
                     rowsCollected++;
                 }

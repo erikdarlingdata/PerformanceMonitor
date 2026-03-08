@@ -609,7 +609,10 @@ CREATE TABLE IF NOT EXISTS database_size_stats (
     max_size_mb DECIMAL(19,2),
     recovery_model_desc VARCHAR,
     compatibility_level INTEGER,
-    state_desc VARCHAR
+    state_desc VARCHAR,
+    volume_mount_point VARCHAR,
+    volume_total_mb DECIMAL(19,2),
+    volume_free_mb DECIMAL(19,2)
 )";
 
     public const string CreateDatabaseSizeStatsIndex = @"
