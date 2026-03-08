@@ -61,7 +61,7 @@ SELECT
     recovery_model_desc =
         d.recovery_model_desc,
     compatibility_level =
-        d.compatibility_level,
+        CONVERT(int, d.compatibility_level),
     state_desc =
         d.state_desc
 FROM sys.master_files AS mf
