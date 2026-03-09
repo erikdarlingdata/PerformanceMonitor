@@ -459,19 +459,85 @@ public partial class PlanViewerControl : UserControl
         figure.Segments.Add(new LineSegment(new Point(childLeft, childCenterY), true));
         geometry.Figures.Add(figure);
 
-        var rowText = child.HasActualStats
-            ? $"Actual Rows: {child.ActualRows:N0}"
-            : $"Estimated Rows: {child.EstimateRows:N0}";
-
         return new WpfPath
         {
             Data = geometry,
             Stroke = EdgeBrush,
             StrokeThickness = thickness,
             StrokeLineJoin = PenLineJoin.Round,
-            ToolTip = rowText,
+            ToolTip = BuildEdgeTooltipContent(child),
             SnapsToDevicePixels = true
         };
+    }
+
+    private object BuildEdgeTooltipContent(PlanNode child)
+    {
+        var grid = new Grid { MinWidth = 240 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        int row = 0;
+
+        void AddRow(string label, string value)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var lbl = new TextBlock
+            {
+                Text = label,
+                Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+                FontSize = 12,
+                Margin = new Thickness(0, 1, 12, 1)
+            };
+            var val = new TextBlock
+            {
+                Text = value,
+                Foreground = new SolidColorBrush(Colors.White),
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 1, 0, 1)
+            };
+            Grid.SetRow(lbl, row);
+            Grid.SetColumn(lbl, 0);
+            Grid.SetRow(val, row);
+            Grid.SetColumn(val, 1);
+            grid.Children.Add(lbl);
+            grid.Children.Add(val);
+            row++;
+        }
+
+        if (child.HasActualStats)
+            AddRow("Actual Number of Rows for All Executions", $"{child.ActualRows:N0}");
+
+        AddRow("Estimated Number of Rows Per Execution", $"{child.EstimateRows:N0}");
+
+        var executions = 1.0 + child.EstimateRebinds + child.EstimateRewinds;
+        var estimatedRowsAllExec = child.EstimateRows * executions;
+        AddRow("Estimated Number of Rows for All Executions", $"{estimatedRowsAllExec:N0}");
+
+        if (child.EstimatedRowSize > 0)
+        {
+            AddRow("Estimated Row Size", FormatBytes(child.EstimatedRowSize));
+            var dataSize = estimatedRowsAllExec * child.EstimatedRowSize;
+            AddRow("Estimated Data Size", FormatBytes(dataSize));
+        }
+
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x2E)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x5A)),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(10, 6, 10, 6),
+            CornerRadius = new CornerRadius(4),
+            Child = grid
+        };
+    }
+
+    private static string FormatBytes(double bytes)
+    {
+        if (bytes < 1024) return $"{bytes:N0} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024:N0} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024 * 1024):N0} MB";
+        return $"{bytes / (1024L * 1024 * 1024):N1} GB";
     }
 
     #endregion
@@ -639,7 +705,7 @@ public partial class PlanViewerControl : UserControl
             || !string.IsNullOrEmpty(node.InnerSideJoinColumns)
             || !string.IsNullOrEmpty(node.OuterSideJoinColumns)
             || !string.IsNullOrEmpty(node.ActionColumn)
-            || node.ManyToMany || node.BitmapCreator
+            || node.ManyToMany || node.PhysicalOp == "Merge Join" || node.BitmapCreator
             || node.SortDistinct || node.StartupExpression
             || node.NLOptimized || node.WithOrderedPrefetch || node.WithUnorderedPrefetch
             || node.WithTies || node.Remoting || node.LocalParallelism
@@ -704,8 +770,10 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Inner Join Cols", node.InnerSideJoinColumns, isCode: true);
             if (!string.IsNullOrEmpty(node.OuterSideJoinColumns))
                 AddPropertyRow("Outer Join Cols", node.OuterSideJoinColumns, isCode: true);
-            if (node.ManyToMany)
-                AddPropertyRow("Many to Many", "True");
+            if (node.PhysicalOp == "Merge Join")
+                AddPropertyRow("Many to Many", node.ManyToMany ? "Yes" : "No");
+            else if (node.ManyToMany)
+                AddPropertyRow("Many to Many", "Yes");
             if (!string.IsNullOrEmpty(node.ConstantScanValues))
                 AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
             if (!string.IsNullOrEmpty(node.UdxUsedColumns))
