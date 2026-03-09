@@ -1444,8 +1444,8 @@ public static class ShowPlanParser
             result.Add(new PlanWarning
             {
                 WarningType = "No Join Predicate",
-                Message = "This join has no join predicate (possible cross join)",
-                Severity = PlanWarningSeverity.Critical
+                Message = "This join triggered a no join predicate warning, which is worth checking on, but is often misleading. The optimizer may have removed a redundant predicate after simplification.",
+                Severity = PlanWarningSeverity.Warning
             });
         }
 
