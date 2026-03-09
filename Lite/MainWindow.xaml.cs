@@ -1091,6 +1091,7 @@ public partial class MainWindow : Window
                 }
 
                 var blockingContext = await BuildBlockingContextAsync(summary.ServerId);
+                var detailText = ContextToDetailText(blockingContext);
 
                 await _emailAlertService.TrySendAlertEmailAsync(
                     "Blocking Detected",
@@ -1099,7 +1100,8 @@ public partial class MainWindow : Window
                     App.AlertBlockingThreshold.ToString(),
                     summary.ServerId,
                     blockingContext,
-                    muted: isMuted);
+                    muted: isMuted,
+                    detailText: detailText);
             }
         }
         else if (_activeBlockingAlert.TryGetValue(key, out var wasBlocking) && wasBlocking)
@@ -1149,6 +1151,7 @@ public partial class MainWindow : Window
                 }
 
                 var deadlockContext = await BuildDeadlockContextAsync(summary.ServerId);
+                var detailText = ContextToDetailText(deadlockContext);
 
                 await _emailAlertService.TrySendAlertEmailAsync(
                     "Deadlocks Detected",
@@ -1157,7 +1160,8 @@ public partial class MainWindow : Window
                     App.AlertDeadlockThreshold.ToString(),
                     summary.ServerId,
                     deadlockContext,
-                    muted: isMuted);
+                    muted: isMuted,
+                    detailText: detailText);
             }
         }
         else if (_activeDeadlockAlert.TryGetValue(key, out var wasDeadlock) && wasDeadlock)
@@ -1198,6 +1202,7 @@ public partial class MainWindow : Window
                         }
 
                         var poisonContext = BuildPoisonWaitContext(triggered);
+                        var detailText = ContextToDetailText(poisonContext);
 
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "Poison Wait",
@@ -1208,7 +1213,8 @@ public partial class MainWindow : Window
                             poisonContext,
                             numericCurrentValue: worst.AvgMsPerWait,
                             numericThresholdValue: App.AlertPoisonWaitThresholdMs,
-                            muted: isMuted);
+                            muted: isMuted,
+                            detailText: detailText);
                     }
                 }
                 else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait)
@@ -1271,6 +1277,7 @@ public partial class MainWindow : Window
                         }
 
                         var lrqContext = BuildLongRunningQueryContext(longRunning);
+                        var detailText = ContextToDetailText(lrqContext);
 
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "Long-Running Query",
@@ -1281,7 +1288,8 @@ public partial class MainWindow : Window
                             lrqContext,
                             numericCurrentValue: elapsedMinutes,
                             numericThresholdValue: App.AlertLongRunningQueryThresholdMinutes,
-                            muted: isMuted);
+                            muted: isMuted,
+                            detailText: detailText);
                     }
                 }
                 else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning)
@@ -1324,6 +1332,7 @@ public partial class MainWindow : Window
                         }
 
                         var tempDbContext = BuildTempDbSpaceContext(tempDb);
+                        var detailText = ContextToDetailText(tempDbContext);
 
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "TempDB Space",
@@ -1334,7 +1343,8 @@ public partial class MainWindow : Window
                             tempDbContext,
                             numericCurrentValue: tempDb.UsedPercent,
                             numericThresholdValue: App.AlertTempDbSpaceThresholdPercent,
-                            muted: isMuted);
+                            muted: isMuted,
+                            detailText: detailText);
                     }
                 }
                 else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb)
@@ -1383,6 +1393,7 @@ public partial class MainWindow : Window
                         }
 
                         var jobContext = BuildAnomalousJobContext(anomalousJobs);
+                        var detailText = ContextToDetailText(jobContext);
 
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "Long-Running Job",
@@ -1393,7 +1404,8 @@ public partial class MainWindow : Window
                             jobContext,
                             numericCurrentValue: (double)(worst.PercentOfAverage ?? 0),
                             numericThresholdValue: App.AlertLongRunningJobMultiplier * 100,
-                            muted: isMuted);
+                            muted: isMuted,
+                            detailText: detailText);
                     }
                 }
                 else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob)
@@ -1417,6 +1429,20 @@ public partial class MainWindow : Window
             if (string.IsNullOrEmpty(text)) return "";
             text = text.Trim();
             return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
+        }
+
+        private static string? ContextToDetailText(AlertContext? context)
+        {
+            if (context == null || context.Details.Count == 0) return null;
+            var sb = new System.Text.StringBuilder();
+            foreach (var detail in context.Details)
+            {
+                if (sb.Length > 0) sb.AppendLine();
+                sb.AppendLine(detail.Heading);
+                foreach (var (label, value) in detail.Fields)
+                    sb.AppendLine($"  {label}: {value}");
+            }
+            return sb.ToString().TrimEnd();
         }
 
         private async Task<AlertContext?> BuildBlockingContextAsync(int serverId)

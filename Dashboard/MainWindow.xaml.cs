@@ -1227,6 +1227,7 @@ namespace PerformanceMonitorDashboard
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Detected" };
                     bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastBlockingAlert[serverId] = now;
+                    var detailText = $"Blocked Sessions: {(int)health.TotalBlocked}\nLongest Wait: {(int)health.LongestBlockedSeconds}s";
 
                     if (!isMuted)
                     {
@@ -1238,7 +1239,7 @@ namespace PerformanceMonitorDashboard
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Blocking Detected",
                         $"{(int)health.TotalBlocked} session(s), longest {(int)health.LongestBlockedSeconds}s",
-                        $"{prefs.BlockingThresholdSeconds}s", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
+                        $"{prefs.BlockingThresholdSeconds}s", !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
                     {
@@ -1287,6 +1288,7 @@ namespace PerformanceMonitorDashboard
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Deadlocks Detected" };
                     bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastDeadlockAlert[serverId] = now;
+                    var detailText = $"New Deadlocks: {effectiveDeadlockDelta}";
 
                     if (!isMuted)
                     {
@@ -1297,7 +1299,7 @@ namespace PerformanceMonitorDashboard
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Deadlocks Detected",
                         effectiveDeadlockDelta.ToString(),
-                        prefs.DeadlockThreshold.ToString(), !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
+                        prefs.DeadlockThreshold.ToString(), !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
                     {
@@ -1383,6 +1385,8 @@ namespace PerformanceMonitorDashboard
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[serverId] = now;
+                    var poisonContext = BuildPoisonWaitContext(triggeredWaits);
+                    var detailText = ContextToDetailText(poisonContext);
 
                     if (!isMuted)
                     {
@@ -1391,12 +1395,10 @@ namespace PerformanceMonitorDashboard
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Poison Wait",
                         allWaitNames,
-                        $"{prefs.PoisonWaitThresholdMs}ms avg", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
+                        $"{prefs.PoisonWaitThresholdMs}ms avg", !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
                     {
-                        var poisonContext = BuildPoisonWaitContext(triggeredWaits);
-
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "Poison Wait",
                             serverName,
@@ -1445,6 +1447,8 @@ namespace PerformanceMonitorDashboard
                     };
                     bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastLongRunningQueryAlert[serverId] = now;
+                    var lrqContext = BuildLongRunningQueryContext(lrqList);
+                    var detailText = ContextToDetailText(lrqContext);
 
                     if (!isMuted)
                     {
@@ -1454,12 +1458,10 @@ namespace PerformanceMonitorDashboard
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Long-Running Query",
                         $"Session #{worst.SessionId} running {elapsedMinutes}m",
-                        $"{prefs.LongRunningQueryThresholdMinutes}m", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
+                        $"{prefs.LongRunningQueryThresholdMinutes}m", !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
                     {
-                        var lrqContext = BuildLongRunningQueryContext(lrqList);
-
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "Long-Running Query",
                             serverName,
@@ -1492,6 +1494,8 @@ namespace PerformanceMonitorDashboard
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "TempDB Space" };
                     bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastTempDbSpaceAlert[serverId] = now;
+                    var tempDbContext = BuildTempDbSpaceContext(tempDb);
+                    var detailText = ContextToDetailText(tempDbContext);
 
                     if (!isMuted)
                     {
@@ -1500,12 +1504,10 @@ namespace PerformanceMonitorDashboard
 
                     _emailAlertService.RecordAlert(serverId, serverName, "TempDB Space",
                         $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
-                        $"{prefs.TempDbSpaceThresholdPercent}%", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
+                        $"{prefs.TempDbSpaceThresholdPercent}%", !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
                     {
-                        var tempDbContext = BuildTempDbSpaceContext(tempDb);
-
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "TempDB Space",
                             serverName,
@@ -1542,6 +1544,8 @@ namespace PerformanceMonitorDashboard
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Long-Running Job", JobName = worst.JobName };
                     bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastLongRunningJobAlert[jobKey] = now;
+                    var jobContext = BuildAnomalousJobContext(health.AnomalousJobs);
+                    var detailText = ContextToDetailText(jobContext);
 
                     if (!isMuted)
                     {
@@ -1551,12 +1555,10 @@ namespace PerformanceMonitorDashboard
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Long-Running Job",
                         $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)",
-                        $"{prefs.LongRunningJobMultiplier}x avg", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
+                        $"{prefs.LongRunningJobMultiplier}x avg", !isMuted, isMuted ? "muted" : "tray", muted: isMuted, detailText: detailText);
 
                     if (!isMuted)
                     {
-                        var jobContext = BuildAnomalousJobContext(health.AnomalousJobs);
-
                         await _emailAlertService.TrySendAlertEmailAsync(
                             "Long-Running Job",
                             serverName,
@@ -1581,6 +1583,20 @@ namespace PerformanceMonitorDashboard
             if (string.IsNullOrEmpty(text)) return "";
             text = text.Trim();
             return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
+        }
+
+        private static string? ContextToDetailText(AlertContext? context)
+        {
+            if (context == null || context.Details.Count == 0) return null;
+            var sb = new System.Text.StringBuilder();
+            foreach (var detail in context.Details)
+            {
+                if (sb.Length > 0) sb.AppendLine();
+                sb.AppendLine(detail.Heading);
+                foreach (var (label, value) in detail.Fields)
+                    sb.AppendLine($"  {label}: {value}");
+            }
+            return sb.ToString().TrimEnd();
         }
 
         private static async Task<AlertContext?> BuildBlockingContextAsync(DatabaseService databaseService, List<string>? excludedDatabases = null)

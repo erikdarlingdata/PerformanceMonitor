@@ -27,5 +27,11 @@ public partial class AlertDetailWindow : Window
 
         if (item.Muted)
             MutedBanner.Visibility = Visibility.Visible;
+
+        if (!string.IsNullOrWhiteSpace(item.DetailText))
+        {
+            DetailTextBox.Text = item.DetailText;
+            DetailPanel.Visibility = Visibility.Visible;
+        }
     }
 }

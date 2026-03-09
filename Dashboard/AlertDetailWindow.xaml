@@ -11,6 +11,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Header -->
@@ -74,6 +75,21 @@
                 Background="#33D97706" CornerRadius="4" Padding="8" Margin="0,12,0,0">
             <TextBlock Text="🔇 This alert was muted by a mute rule"
                        Foreground="{DynamicResource ForegroundBrush}" FontStyle="Italic"/>
+        </Border>
+
+        <!-- Context-specific details -->
+        <Border Grid.Row="3" x:Name="DetailPanel" Visibility="Collapsed"
+                Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,12,0,0">
+            <StackPanel>
+                <TextBlock Text="Details" FontWeight="SemiBold" FontSize="13"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>
+                <TextBox x:Name="DetailTextBox" IsReadOnly="True" TextWrapping="Wrap"
+                         Background="Transparent" BorderThickness="0"
+                         Foreground="{DynamicResource ForegroundBrush}" FontFamily="Consolas"
+                         FontSize="12" MaxHeight="300"
+                         VerticalScrollBarVisibility="Auto"/>
+            </StackPanel>
         </Border>
     </Grid>
 </Window>

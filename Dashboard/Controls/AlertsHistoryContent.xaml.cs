@@ -74,7 +74,8 @@ namespace PerformanceMonitorDashboard.Controls
                 IsCritical = e.MetricName.Contains("Deadlock") || e.MetricName.Contains("Poison"),
                 IsWarning = !e.MetricName.Contains("Cleared") && !e.MetricName.Contains("Resolved")
                             && !e.MetricName.Contains("Deadlock") && !e.MetricName.Contains("Poison"),
-                Muted = e.Muted
+                Muted = e.Muted,
+                DetailText = e.DetailText
             }).ToList();
 
             ApplyFilters();
@@ -509,5 +510,6 @@ namespace PerformanceMonitorDashboard.Controls
         public bool IsCritical { get; set; }
         public bool IsWarning { get; set; }
         public bool Muted { get; set; }
+        public string? DetailText { get; set; }
     }
 }

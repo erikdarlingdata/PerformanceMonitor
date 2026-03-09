@@ -86,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 20;
+    internal const int CurrentSchemaVersion = 21;
 
     private readonly string _archivePath;
 
@@ -565,6 +565,19 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v20 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 21)
+        {
+            _logger?.LogInformation("Running migration to v21: adding detail_text column to alert log");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS detail_text VARCHAR");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v21 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

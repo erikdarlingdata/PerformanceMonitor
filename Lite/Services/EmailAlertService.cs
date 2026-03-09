@@ -50,7 +50,8 @@ public class EmailAlertService
         AlertContext? context = null,
         double? numericCurrentValue = null,
         double? numericThresholdValue = null,
-        bool muted = false)
+        bool muted = false,
+        string? detailText = null)
     {
         try
         {
@@ -115,7 +116,7 @@ public class EmailAlertService
             var logThreshold = numericThresholdValue
                 ?? (double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0);
             await LogAlertAsync(serverId, serverName, metricName,
-                logCurrent, logThreshold, sent, notificationType, sendError, muted);
+                logCurrent, logThreshold, sent, notificationType, sendError, muted, detailText);
         }
         catch (Exception ex)
         {
@@ -201,7 +202,7 @@ public class EmailAlertService
     /// Reuses the injected DuckDbInitializer instead of creating a new one each time.
     /// </summary>
     private async Task LogAlertAsync(int serverId, string serverName, string metricName,
-        double currentValue, double thresholdValue, bool alertSent, string notificationType, string? sendError, bool muted = false)
+        double currentValue, double thresholdValue, bool alertSent, string notificationType, string? sendError, bool muted = false, string? detailText = null)
     {
         try
         {
@@ -219,8 +220,8 @@ public class EmailAlertService
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
@@ -232,6 +233,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = notificationType });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sendError ?? (object)DBNull.Value });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = muted });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = detailText ?? (object)DBNull.Value });
 
             await command.ExecuteNonQueryAsync();
 

@@ -677,7 +677,8 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
     notification_type VARCHAR NOT NULL DEFAULT 'tray',
     send_error VARCHAR,
     dismissed BOOLEAN NOT NULL DEFAULT false,
-    muted BOOLEAN NOT NULL DEFAULT false
+    muted BOOLEAN NOT NULL DEFAULT false,
+    detail_text VARCHAR
 )";
 
     public const string CreateMuteRulesTable = @"
