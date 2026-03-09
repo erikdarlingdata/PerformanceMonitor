@@ -1256,15 +1256,39 @@ OPTION(MAXDOP 1, RECOMPILE);";
             {
                 while (await reader.ReadAsync())
                 {
-                    var fieldCount = reader.FieldCount;
+                    var fc = reader.FieldCount;
+                    string Col(int i) => fc > i && !reader.IsDBNull(i) ? reader.GetValue(i).ToString() ?? "" : "";
                     summaries.Add(new IndexCleanupSummary
                     {
-                        DatabaseName = fieldCount > 1 && !reader.IsDBNull(1) ? reader.GetValue(1).ToString() ?? "" : "",
-                        TotalIndexes = fieldCount > 4 && !reader.IsDBNull(4) ? reader.GetValue(4).ToString() ?? "" : "",
-                        UnusedIndexes = fieldCount > 5 && !reader.IsDBNull(5) ? reader.GetValue(5).ToString() ?? "" : "",
-                        DuplicateIndexes = fieldCount > 6 && !reader.IsDBNull(6) ? reader.GetValue(6).ToString() ?? "" : "",
-                        CompressibleIndexes = fieldCount > 7 && !reader.IsDBNull(7) ? reader.GetValue(7).ToString() ?? "" : "",
-                        TotalSizeGb = fieldCount > 8 && !reader.IsDBNull(8) ? reader.GetValue(8).ToString() ?? "" : ""
+                        Level = Col(0),
+                        DatabaseInfo = Col(1),
+                        SchemaName = Col(2),
+                        TableName = Col(3),
+                        TablesAnalyzed = Col(4),
+                        TotalIndexes = Col(5),
+                        RemovableIndexes = Col(6),
+                        MergeableIndexes = Col(7),
+                        CompressableIndexes = Col(8),
+                        PercentRemovable = Col(9),
+                        CurrentSizeGb = Col(10),
+                        SizeAfterCleanupGb = Col(11),
+                        SpaceSavedGb = Col(12),
+                        SpaceReductionPercent = Col(13),
+                        CompressionSavingsPotential = Col(14),
+                        CompressionSavingsPotentialTotal = Col(15),
+                        ComputedColumnsWithUdfs = Col(16),
+                        CheckConstraintsWithUdfs = Col(17),
+                        FilteredIndexesNeedingIncludes = Col(18),
+                        TotalRows = Col(19),
+                        ReadsBreakdown = Col(20),
+                        Writes = Col(21),
+                        DailyWriteOpsSaved = Col(22),
+                        LockWaitCount = Col(23),
+                        DailyLockWaitsSaved = Col(24),
+                        AvgLockWaitMs = Col(25),
+                        LatchWaitCount = Col(26),
+                        DailyLatchWaitsSaved = Col(27),
+                        AvgLatchWaitMs = Col(28)
                     });
                 }
             }
@@ -1457,11 +1481,34 @@ OPTION(MAXDOP 1, RECOMPILE);";
 
     public class IndexCleanupSummary
     {
-        public string DatabaseName { get; set; } = "";
+        public string Level { get; set; } = "";
+        public string DatabaseInfo { get; set; } = "";
+        public string SchemaName { get; set; } = "";
+        public string TableName { get; set; } = "";
+        public string TablesAnalyzed { get; set; } = "";
         public string TotalIndexes { get; set; } = "";
-        public string UnusedIndexes { get; set; } = "";
-        public string DuplicateIndexes { get; set; } = "";
-        public string CompressibleIndexes { get; set; } = "";
-        public string TotalSizeGb { get; set; } = "";
+        public string RemovableIndexes { get; set; } = "";
+        public string MergeableIndexes { get; set; } = "";
+        public string CompressableIndexes { get; set; } = "";
+        public string PercentRemovable { get; set; } = "";
+        public string CurrentSizeGb { get; set; } = "";
+        public string SizeAfterCleanupGb { get; set; } = "";
+        public string SpaceSavedGb { get; set; } = "";
+        public string SpaceReductionPercent { get; set; } = "";
+        public string CompressionSavingsPotential { get; set; } = "";
+        public string CompressionSavingsPotentialTotal { get; set; } = "";
+        public string ComputedColumnsWithUdfs { get; set; } = "";
+        public string CheckConstraintsWithUdfs { get; set; } = "";
+        public string FilteredIndexesNeedingIncludes { get; set; } = "";
+        public string TotalRows { get; set; } = "";
+        public string ReadsBreakdown { get; set; } = "";
+        public string Writes { get; set; } = "";
+        public string DailyWriteOpsSaved { get; set; } = "";
+        public string LockWaitCount { get; set; } = "";
+        public string DailyLockWaitsSaved { get; set; } = "";
+        public string AvgLockWaitMs { get; set; } = "";
+        public string LatchWaitCount { get; set; } = "";
+        public string DailyLatchWaitsSaved { get; set; } = "";
+        public string AvgLatchWaitMs { get; set; } = "";
     }
 }

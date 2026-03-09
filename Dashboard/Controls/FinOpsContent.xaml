@@ -740,44 +740,80 @@
                               CanUserResizeColumns="True"
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
-                              MaxHeight="200"
                               RowStyle="{StaticResource DefaultRowStyle}">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
-                            <DataGridTextColumn Header="Total Indexes" Binding="{Binding TotalIndexes, StringFormat='{}{0:N0}'}" Width="110">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
+                            <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="80"/>
+                            <DataGridTextColumn Header="Database" Binding="{Binding DatabaseInfo}" Width="200"/>
+                            <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="100"/>
+                            <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                            <DataGridTextColumn Header="Tables" Binding="{Binding TablesAnalyzed}" Width="70">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Unused" Binding="{Binding UnusedIndexes, StringFormat='{}{0:N0}'}" Width="80">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
+                            <DataGridTextColumn Header="Total Indexes" Binding="{Binding TotalIndexes}" Width="100">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Duplicate" Binding="{Binding DuplicateIndexes, StringFormat='{}{0:N0}'}" Width="90">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
+                            <DataGridTextColumn Header="Removable" Binding="{Binding RemovableIndexes}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Compressible" Binding="{Binding CompressibleIndexes, StringFormat='{}{0:N0}'}" Width="110">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
+                            <DataGridTextColumn Header="Mergeable" Binding="{Binding MergeableIndexes}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Total Size (GB)" Binding="{Binding TotalSizeGb}" Width="120">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
+                            <DataGridTextColumn Header="Compressable" Binding="{Binding CompressableIndexes}" Width="100">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="% Removable" Binding="{Binding PercentRemovable}" Width="95">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Current Size GB" Binding="{Binding CurrentSizeGb}" Width="115">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="After Cleanup GB" Binding="{Binding SizeAfterCleanupGb}" Width="125">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Space Saved GB" Binding="{Binding SpaceSavedGb}" Width="110">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="% Reduction" Binding="{Binding SpaceReductionPercent}" Width="95">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Compression Savings" Binding="{Binding CompressionSavingsPotential}" Width="220"/>
+                            <DataGridTextColumn Header="Compression Total" Binding="{Binding CompressionSavingsPotentialTotal}" Width="240"/>
+                            <DataGridTextColumn Header="UDF Computed Cols" Binding="{Binding ComputedColumnsWithUdfs}" Width="130">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="UDF Check Constraints" Binding="{Binding CheckConstraintsWithUdfs}" Width="150">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Filtered Idx Missing Incl" Binding="{Binding FilteredIndexesNeedingIncludes}" Width="170">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Total Rows" Binding="{Binding TotalRows}" Width="100">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Reads" Binding="{Binding ReadsBreakdown}" Width="220"/>
+                            <DataGridTextColumn Header="Writes" Binding="{Binding Writes}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Daily Writes Saved" Binding="{Binding DailyWriteOpsSaved}" Width="130">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Lock Waits" Binding="{Binding LockWaitCount}" Width="95">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Daily Lock Waits Saved" Binding="{Binding DailyLockWaitsSaved}" Width="150">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Avg Lock Wait ms" Binding="{Binding AvgLockWaitMs}" Width="120">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Latch Waits" Binding="{Binding LatchWaitCount}" Width="95">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Daily Latch Waits Saved" Binding="{Binding DailyLatchWaitsSaved}" Width="155">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Avg Latch Wait ms" Binding="{Binding AvgLatchWaitMs}" Width="130">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
@@ -794,30 +830,37 @@
                               RowStyle="{StaticResource DefaultRowStyle}">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Action" Binding="{Binding ScriptType}" Width="100"/>
+                            <DataGridTextColumn Header="Info" Binding="{Binding AdditionalInfo}" Width="160"/>
                             <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
                             <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="80"/>
                             <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
                             <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="200"/>
                             <DataGridTextColumn Header="Rule" Binding="{Binding ConsolidationRule}" Width="160"/>
                             <DataGridTextColumn Header="Target Index" Binding="{Binding TargetIndexName}" Width="160"/>
-                            <DataGridTextColumn Header="Size (GB)" Binding="{Binding IndexSizeGb}" Width="90">
+                            <DataGridTextColumn Header="Superseded By" Binding="{Binding SupersededInfo}" Width="160"/>
+                            <DataGridTextColumn Header="Size GB" Binding="{Binding IndexSizeGb}" Width="80">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Rows" Binding="{Binding IndexRows}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Reads" Binding="{Binding IndexReads}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Writes" Binding="{Binding IndexWrites}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Definition" Binding="{Binding OriginalIndexDefinition}" Width="300">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                        <Setter Property="ToolTip" Value="{Binding OriginalIndexDefinition}"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Reads" Binding="{Binding IndexReads}" Width="100">
+                            <DataGridTextColumn Header="Script" Binding="{Binding Script}" Width="300">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Header="Writes" Binding="{Binding IndexWrites}" Width="100">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                        <Setter Property="ToolTip" Value="{Binding Script}"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
