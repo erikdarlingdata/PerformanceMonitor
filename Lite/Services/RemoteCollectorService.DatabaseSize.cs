@@ -181,8 +181,8 @@ OPTION(RECOMPILE);";
         {
             rows.Add((
                 reader.GetString(0),
-                reader.GetInt32(1),
-                reader.GetInt32(2),
+                Convert.ToInt32(reader.GetValue(1)),
+                Convert.ToInt32(reader.GetValue(2)),
                 reader.GetString(3),
                 reader.GetString(4),
                 reader.GetString(5),
@@ -191,7 +191,7 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(8) ? null : reader.GetDecimal(8),
                 reader.IsDBNull(9) ? null : reader.GetDecimal(9),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
-                reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
                 reader.IsDBNull(12) ? null : reader.GetString(12),
                 reader.IsDBNull(13) ? null : reader.GetString(13),
                 reader.IsDBNull(14) ? null : reader.GetDecimal(14),
