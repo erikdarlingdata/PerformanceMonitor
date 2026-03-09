@@ -310,6 +310,9 @@ public partial class MainWindow : Window
 
         ServerCountText.Text = $"Servers: {servers.Count}";
 
+        // Refresh FinOps server dropdown when server list changes
+        FinOpsContent.RefreshServerList();
+
         // Refresh overview when server list changes
         _ = RefreshOverviewAsync();
     }

@@ -326,7 +326,10 @@ OPTION(RECOMPILE);";
     /// </summary>
     private async Task<int> CollectDatabaseScopedConfigAsync(ServerConnection server, CancellationToken cancellationToken)
     {
-        const string dbQuery = @"
+        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+        bool isAzureSqlDb = serverStatus?.SqlEngineEdition == 5;
+
+        const string onPremDbQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
@@ -346,6 +349,21 @@ AND
 )
 ORDER BY d.name
 OPTION(RECOMPILE);";
+
+        const string azureDbQuery = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    d.name
+FROM sys.databases AS d
+WHERE (d.database_id > 4 OR d.database_id = 2)
+AND   d.database_id < 32761
+AND   d.name <> N'PerformanceMonitor'
+AND   d.state_desc = N'ONLINE'
+ORDER BY d.name
+OPTION(RECOMPILE);";
+
+        string dbQuery = isAzureSqlDb ? azureDbQuery : onPremDbQuery;
 
         var serverId = GetServerId(server);
         var captureTime = DateTime.UtcNow;
