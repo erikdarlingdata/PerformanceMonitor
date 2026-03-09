@@ -45,6 +45,32 @@ public partial class FinOpsTab : UserControl
         RefreshData();
     }
 
+    /// <summary>
+    /// Refreshes the server dropdown from the current server list.
+    /// Called when servers are added or removed.
+    /// </summary>
+    public void RefreshServerList()
+    {
+        if (_serverManager == null) return;
+
+        var previousSelection = ServerSelector.SelectedItem as ServerConnection;
+        var servers = _serverManager.GetAllServers();
+        ServerSelector.ItemsSource = servers;
+
+        if (previousSelection != null)
+        {
+            var match = servers.FirstOrDefault(s => s.Id == previousSelection.Id);
+            if (match != null)
+            {
+                ServerSelector.SelectedItem = match;
+                return;
+            }
+        }
+
+        if (servers.Count > 0)
+            ServerSelector.SelectedIndex = 0;
+    }
+
     private void PopulateServerSelector()
     {
         if (_serverManager == null) return;
