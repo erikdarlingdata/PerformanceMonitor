@@ -92,9 +92,11 @@ public partial class ManageMuteRulesWindow : Window
     {
         if (e.EditAction == DataGridEditAction.Commit && e.Row.Item is MuteRule rule)
         {
+            // The checkbox binding hasn't committed yet, so toggle the opposite of the current service state
+            var currentState = _muteRuleService.GetRules().FirstOrDefault(r => r.Id == rule.Id)?.Enabled ?? true;
             Dispatcher.BeginInvoke(async () =>
             {
-                await _muteRuleService.SetRuleEnabledAsync(rule.Id, rule.Enabled);
+                await _muteRuleService.SetRuleEnabledAsync(rule.Id, !currentState);
             });
         }
     }
