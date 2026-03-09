@@ -324,8 +324,7 @@ BEGIN
         WHILE @@FETCH_STATUS = 0
         BEGIN
             BEGIN TRY
-                SET @qs_check_sql =
-                    N'USE ' + QUOTENAME(@database_name) + N';
+                SET @qs_check_sql = N'
                     SELECT ' + QUOTENAME(@database_name, '''') + N'
                     WHERE EXISTS
                     (
@@ -335,8 +334,10 @@ BEGIN
                         WHERE actual_state > 0
                     );';
 
+                DECLARE @qs_exec_sp nvarchar(256) = QUOTENAME(@database_name) + N'.sys.sp_executesql';
+
                 INSERT @qs_databases (name)
-                EXEC(@qs_check_sql);
+                EXECUTE @qs_exec_sp @qs_check_sql;
             END TRY
             BEGIN CATCH
             END CATCH;

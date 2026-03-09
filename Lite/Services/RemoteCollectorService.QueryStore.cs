@@ -41,7 +41,8 @@ DECLARE
 
 DECLARE
     @db sysname,
-    @sql NVARCHAR(500);
+    @sql NVARCHAR(500),
+    @exec_sp nvarchar(256);
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     SELECT /* PerformanceMonitorLite */
@@ -70,8 +71,7 @@ INTO @db;
 WHILE @@FETCH_STATUS = 0
 BEGIN
     BEGIN TRY
-        SET @sql =
-            N'USE ' + QUOTENAME(@db) + N';
+        SET @sql = N'
             SELECT ' + QUOTENAME(@db, '''') + N'
             WHERE EXISTS
             (
@@ -81,8 +81,10 @@ BEGIN
                 WHERE actual_state > 0
             );';
 
+        SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
+
         INSERT @result (name)
-        EXEC(@sql);
+        EXECUTE @exec_sp @sql;
     END TRY
     BEGIN CATCH
     END CATCH;
@@ -110,7 +112,8 @@ DECLARE
 
 DECLARE
     @db sysname,
-    @sql NVARCHAR(500);
+    @sql NVARCHAR(500),
+    @exec_sp nvarchar(256);
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     SELECT /* PerformanceMonitorLite */
@@ -131,8 +134,7 @@ INTO @db;
 WHILE @@FETCH_STATUS = 0
 BEGIN
     BEGIN TRY
-        SET @sql =
-            N'USE ' + QUOTENAME(@db) + N';
+        SET @sql = N'
             SELECT ' + QUOTENAME(@db, '''') + N'
             WHERE EXISTS
             (
@@ -142,8 +144,10 @@ BEGIN
                 WHERE actual_state > 0
             );';
 
+        SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
+
         INSERT @result (name)
-        EXEC(@sql);
+        EXECUTE @exec_sp @sql;
     END TRY
     BEGIN CATCH
     END CATCH;

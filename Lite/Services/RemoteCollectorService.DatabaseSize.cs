@@ -42,25 +42,43 @@ CREATE TABLE #file_space
 );
 
 DECLARE
-    @sql nvarchar(MAX) = N'';
+    @db_name sysname,
+    @sql nvarchar(MAX);
 
-SELECT
-    @sql += N'
-USE ' + QUOTENAME(d.name) + N';
+DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT
+        d.name
+    FROM sys.databases AS d
+    WHERE d.state_desc = N'ONLINE'
+    AND   d.database_id > 0
+    AND   HAS_DBACCESS(d.name) = 1
+    ORDER BY
+        d.name;
+
+OPEN db_cursor;
+FETCH NEXT FROM db_cursor INTO @db_name;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    BEGIN TRY
+        SET @sql = N'EXECUTE ' + QUOTENAME(@db_name) + N'.sys.sp_executesql N''
 INSERT #file_space (database_id, file_id, used_size_mb)
 SELECT
     DB_ID(),
     df.file_id,
-    CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''SpaceUsed'') * 8.0 / 1024.0)
-FROM sys.database_files AS df;
-'
-FROM sys.databases AS d
-WHERE d.state_desc = N'ONLINE'
-AND   d.database_id > 0
-ORDER BY
-    d.name;
+    CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''''SpaceUsed'''') * 8.0 / 1024.0)
+FROM sys.database_files AS df;'';';
 
-EXEC sys.sp_executesql @sql;
+        EXECUTE sys.sp_executesql @sql;
+    END TRY
+    BEGIN CATCH
+    END CATCH;
+
+    FETCH NEXT FROM db_cursor INTO @db_name;
+END;
+
+CLOSE db_cursor;
+DEALLOCATE db_cursor;
 
 SELECT
     database_name = d.name,

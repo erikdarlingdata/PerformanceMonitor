@@ -3,4 +3,3 @@
 03_compress_procedure_stats.sql
 04_create_tracking_tables.sql
 05_add_finops_collectors.sql
-06_add_volume_stats_columns.sql
