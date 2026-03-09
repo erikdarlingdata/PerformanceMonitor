@@ -199,11 +199,23 @@ public partial class PlanViewerControl : UserControl
             BorderThickness = new Thickness(isExpensive ? 2 : 1),
             CornerRadius = new CornerRadius(4),
             Padding = new Thickness(6, 4, 6, 4),
-            ToolTip = BuildNodeTooltip(node),
             Cursor = Cursors.Hand,
             SnapsToDevicePixels = true,
             Tag = node
         };
+
+        // Tooltip — root node includes statement-level PlanWarnings
+        if (totalWarningCount > 0 && _currentStatement != null)
+        {
+            var allWarnings = new List<PlanWarning>();
+            allWarnings.AddRange(_currentStatement.PlanWarnings);
+            CollectWarnings(node, allWarnings);
+            border.ToolTip = BuildNodeTooltip(node, allWarnings);
+        }
+        else
+        {
+            border.ToolTip = BuildNodeTooltip(node);
+        }
 
         // Click to select + show properties
         border.MouseLeftButtonUp += Node_Click;
@@ -1478,7 +1490,7 @@ public partial class PlanViewerControl : UserControl
 
     #region Tooltips
 
-    private ToolTip BuildNodeTooltip(PlanNode node)
+    private ToolTip BuildNodeTooltip(PlanNode node, List<PlanWarning>? allWarnings = null)
     {
         var tip = new ToolTip
         {
@@ -1618,22 +1630,51 @@ public partial class PlanViewerControl : UserControl
             AddTooltipRow(stack, "Columns", node.OutputColumns, isCode: true);
         }
 
-        // Warnings
-        if (node.HasWarnings)
+        // Warnings — use allWarnings (includes statement-level) for root, node.Warnings for others
+        var warnings = allWarnings ?? (node.HasWarnings ? node.Warnings : null);
+        if (warnings != null && warnings.Count > 0)
         {
             stack.Children.Add(new Separator { Margin = new Thickness(0, 6, 0, 6) });
-            foreach (var w in node.Warnings)
+
+            if (allWarnings != null)
             {
-                var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
-                    : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
-                stack.Children.Add(new TextBlock
+                // Root node: show distinct warning type names only
+                var distinct = warnings
+                    .GroupBy(w => w.WarningType)
+                    .Select(g => (Type: g.Key, MaxSeverity: g.Max(w => w.Severity), Count: g.Count()))
+                    .OrderByDescending(g => g.MaxSeverity)
+                    .ThenBy(g => g.Type);
+
+                foreach (var (type, severity, count) in distinct)
                 {
-                    Text = $"\u26A0 {w.WarningType}: {w.Message}",
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
-                    FontSize = 11,
-                    TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, 2, 0, 0)
-                });
+                    var warnColor = severity == PlanWarningSeverity.Critical ? "#E57373"
+                        : severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var label = count > 1 ? $"\u26A0 {type} ({count})" : $"\u26A0 {type}";
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = label,
+                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        FontSize = 11,
+                        Margin = new Thickness(0, 2, 0, 0)
+                    });
+                }
+            }
+            else
+            {
+                // Individual node: show full warning messages
+                foreach (var w in warnings)
+                {
+                    var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
+                        : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = $"\u26A0 {w.WarningType}: {w.Message}",
+                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        FontSize = 11,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(0, 2, 0, 0)
+                    });
+                }
             }
         }
 

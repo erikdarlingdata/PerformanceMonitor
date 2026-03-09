@@ -651,6 +651,10 @@ public static class ShowPlanParser
         var physicalOpEl = GetOperatorElement(relOpEl);
         if (physicalOpEl != null)
         {
+            // Top N Sort — XML element is <TopSort> but PhysicalOp is "Sort"
+            if (physicalOpEl.Name.LocalName == "TopSort")
+                node.LogicalOp = "Top N Sort";
+
             // Object reference (table/index name) — scoped to stop at child RelOps
             var objEl = ScopedDescendants(physicalOpEl, Ns + "Object").FirstOrDefault();
             if (objEl != null)
