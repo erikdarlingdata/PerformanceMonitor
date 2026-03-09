@@ -8,6 +8,7 @@
 
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -84,6 +85,17 @@ public partial class ManageMuteRulesWindow : Window
         {
             MessageBox.Show("No expired rules to remove.", "Purge Complete",
                 MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    private void RulesGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
+    {
+        if (e.EditAction == DataGridEditAction.Commit && e.Row.Item is MuteRule rule)
+        {
+            Dispatcher.BeginInvoke(async () =>
+            {
+                await _muteRuleService.SetRuleEnabledAsync(rule.Id, rule.Enabled);
+            });
         }
     }
 

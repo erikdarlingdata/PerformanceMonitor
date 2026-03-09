@@ -8,6 +8,7 @@
 
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
@@ -84,6 +85,17 @@ namespace PerformanceMonitorDashboard
             {
                 MessageBox.Show("No expired rules to remove.", "Purge Complete",
                     MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+
+        private void RulesGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
+        {
+            if (e.EditAction == DataGridEditAction.Commit && e.Row.Item is MuteRule rule)
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    _muteRuleService.SetRuleEnabled(rule.Id, rule.Enabled);
+                });
             }
         }
 
