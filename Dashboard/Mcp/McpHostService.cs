@@ -21,14 +21,16 @@ public sealed class McpHostService : BackgroundService
 {
     private readonly ServerManager _serverManager;
     private readonly ICredentialService _credentialService;
+    private readonly MuteRuleService _muteRuleService;
     private readonly int _port;
     private WebApplication? _app;
     private DatabaseServiceRegistry? _registry;
 
-    public McpHostService(ServerManager serverManager, ICredentialService credentialService, int port)
+    public McpHostService(ServerManager serverManager, ICredentialService credentialService, MuteRuleService muteRuleService, int port)
     {
         _serverManager = serverManager;
         _credentialService = credentialService;
+        _muteRuleService = muteRuleService;
         _port = port;
     }
 
@@ -51,6 +53,7 @@ public sealed class McpHostService : BackgroundService
             _registry = new DatabaseServiceRegistry(_serverManager, _credentialService);
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_registry);
+            builder.Services.AddSingleton(_muteRuleService);
 
             /* Register MCP server with all tool classes */
             builder.Services

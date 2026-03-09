@@ -41,6 +41,7 @@ namespace PerformanceMonitorDashboard
         private readonly DispatcherTimer _connectionStatusTimer;
         private NotificationService? _notificationService;
         private readonly AlertStateService _alertStateService;
+        private readonly MuteRuleService _muteRuleService;
         private readonly Dictionary<string, bool> _previousConnectionStates;
         private readonly Dictionary<string, Border> _tabBadges;
         private readonly Dictionary<string, ServerHealthStatus> _latestHealthStatus;
@@ -92,6 +93,7 @@ namespace PerformanceMonitorDashboard
             _openTabs = new Dictionary<string, TabItem>();
             _preferencesService = new UserPreferencesService();
             _alertStateService = new AlertStateService();
+            _muteRuleService = new MuteRuleService();
             _serverListItems = new ObservableCollection<ServerListItem>();
             _previousConnectionStates = new Dictionary<string, bool>();
             _tabBadges = new Dictionary<string, Border>();
@@ -209,7 +211,7 @@ namespace PerformanceMonitorDashboard
                     return;
                 }
 
-                _mcpHostService = new McpHostService(_serverManager, _credentialService, prefs.McpPort);
+                _mcpHostService = new McpHostService(_serverManager, _credentialService, _muteRuleService, prefs.McpPort);
                 _mcpCts = new CancellationTokenSource();
                 _ = _mcpHostService.StartAsync(_mcpCts.Token);
             }
@@ -673,6 +675,7 @@ namespace PerformanceMonitorDashboard
             }
 
             _alertsHistoryContent = new AlertsHistoryContent();
+            _alertsHistoryContent.MuteRuleService = _muteRuleService;
             _alertsHistoryContent.AlertsDismissed += (_, _) => UpdateAlertBadge();
 
             var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
@@ -993,7 +996,7 @@ namespace PerformanceMonitorDashboard
             bool wasEnabled = oldPrefs.McpEnabled;
             int oldPort = oldPrefs.McpPort;
 
-            var dialog = new SettingsWindow(_preferencesService);
+            var dialog = new SettingsWindow(_preferencesService, _muteRuleService);
             dialog.Owner = this;
             if (dialog.ShowDialog() == true)
             {
@@ -1221,25 +1224,34 @@ namespace PerformanceMonitorDashboard
                 _activeBlockingAlert[serverId] = true;
                 if (!_lastBlockingAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
-                    _notificationService?.ShowBlockingNotification(
-                        serverName,
-                        (int)health.TotalBlocked,
-                        (int)health.LongestBlockedSeconds);
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Detected" };
+                    bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastBlockingAlert[serverId] = now;
+
+                    if (!isMuted)
+                    {
+                        _notificationService?.ShowBlockingNotification(
+                            serverName,
+                            (int)health.TotalBlocked,
+                            (int)health.LongestBlockedSeconds);
+                    }
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Blocking Detected",
                         $"{(int)health.TotalBlocked} session(s), longest {(int)health.LongestBlockedSeconds}s",
-                        $"{prefs.BlockingThresholdSeconds}s", true, "tray");
+                        $"{prefs.BlockingThresholdSeconds}s", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
 
-                    var blockingContext = await BuildBlockingContextAsync(databaseService, prefs.AlertExcludedDatabases);
+                    if (!isMuted)
+                    {
+                        var blockingContext = await BuildBlockingContextAsync(databaseService, prefs.AlertExcludedDatabases);
 
-                    await _emailAlertService.TrySendAlertEmailAsync(
-                        "Blocking Detected",
-                        serverName,
-                        $"{(int)health.TotalBlocked} session(s), longest {(int)health.LongestBlockedSeconds}s",
-                        $"{prefs.BlockingThresholdSeconds}s",
-                        serverId,
-                        blockingContext);
+                        await _emailAlertService.TrySendAlertEmailAsync(
+                            "Blocking Detected",
+                            serverName,
+                            $"{(int)health.TotalBlocked} session(s), longest {(int)health.LongestBlockedSeconds}s",
+                            $"{prefs.BlockingThresholdSeconds}s",
+                            serverId,
+                            blockingContext);
+                    }
                 }
             }
             else if (_activeBlockingAlert.TryRemove(serverId, out var wasBlocking) && wasBlocking)
@@ -1272,24 +1284,33 @@ namespace PerformanceMonitorDashboard
                 _activeDeadlockAlert[serverId] = true;
                 if (!_lastDeadlockAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
-                    _notificationService?.ShowDeadlockNotification(
-                        serverName,
-                        (int)effectiveDeadlockDelta);
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Deadlocks Detected" };
+                    bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastDeadlockAlert[serverId] = now;
+
+                    if (!isMuted)
+                    {
+                        _notificationService?.ShowDeadlockNotification(
+                            serverName,
+                            (int)effectiveDeadlockDelta);
+                    }
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Deadlocks Detected",
                         effectiveDeadlockDelta.ToString(),
-                        prefs.DeadlockThreshold.ToString(), true, "tray");
+                        prefs.DeadlockThreshold.ToString(), !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
 
-                    var deadlockContext = await BuildDeadlockContextAsync(databaseService, prefs.AlertExcludedDatabases);
+                    if (!isMuted)
+                    {
+                        var deadlockContext = await BuildDeadlockContextAsync(databaseService, prefs.AlertExcludedDatabases);
 
-                    await _emailAlertService.TrySendAlertEmailAsync(
-                        "Deadlocks Detected",
-                        serverName,
-                        effectiveDeadlockDelta.ToString(),
-                        prefs.DeadlockThreshold.ToString(),
-                        serverId,
-                        deadlockContext);
+                        await _emailAlertService.TrySendAlertEmailAsync(
+                            "Deadlocks Detected",
+                            serverName,
+                            effectiveDeadlockDelta.ToString(),
+                            prefs.DeadlockThreshold.ToString(),
+                            serverId,
+                            deadlockContext);
+                    }
                 }
             }
             else if (_activeDeadlockAlert.TryRemove(serverId, out var wasDeadlock) && wasDeadlock)
@@ -1311,21 +1332,30 @@ namespace PerformanceMonitorDashboard
                 _activeHighCpuAlert[serverId] = true;
                 if (!_lastHighCpuAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
-                    _notificationService?.ShowHighCpuNotification(
-                        serverName,
-                        totalCpu);
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "High CPU" };
+                    bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastHighCpuAlert[serverId] = now;
+
+                    if (!isMuted)
+                    {
+                        _notificationService?.ShowHighCpuNotification(
+                            serverName,
+                            totalCpu);
+                    }
 
                     _emailAlertService.RecordAlert(serverId, serverName, "High CPU",
                         $"{totalCpu:F0}%",
-                        $"{prefs.CpuThresholdPercent}%", true, "tray");
+                        $"{prefs.CpuThresholdPercent}%", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
 
-                    await _emailAlertService.TrySendAlertEmailAsync(
-                        "High CPU",
-                        serverName,
-                        $"{totalCpu:F0}%",
-                        $"{prefs.CpuThresholdPercent}%",
-                        serverId);
+                    if (!isMuted)
+                    {
+                        await _emailAlertService.TrySendAlertEmailAsync(
+                            "High CPU",
+                            serverName,
+                            $"{totalCpu:F0}%",
+                            $"{prefs.CpuThresholdPercent}%",
+                            serverId);
+                    }
                 }
             }
             else if (_activeHighCpuAlert.TryRemove(serverId, out var wasCpu) && wasCpu)
@@ -1348,23 +1378,33 @@ namespace PerformanceMonitorDashboard
                 if (!_lastPoisonWaitAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     var worst = triggeredWaits[0];
-                    _notificationService?.ShowPoisonWaitNotification(serverName, worst.WaitType, worst.AvgMsPerWait);
+                    var allWaitNames = string.Join(", ", triggeredWaits.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)"));
+
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
+                    bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[serverId] = now;
 
-                    var allWaitNames = string.Join(", ", triggeredWaits.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)"));
+                    if (!isMuted)
+                    {
+                        _notificationService?.ShowPoisonWaitNotification(serverName, worst.WaitType, worst.AvgMsPerWait);
+                    }
+
                     _emailAlertService.RecordAlert(serverId, serverName, "Poison Wait",
                         allWaitNames,
-                        $"{prefs.PoisonWaitThresholdMs}ms avg", true, "tray");
+                        $"{prefs.PoisonWaitThresholdMs}ms avg", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
 
-                    var poisonContext = BuildPoisonWaitContext(triggeredWaits);
+                    if (!isMuted)
+                    {
+                        var poisonContext = BuildPoisonWaitContext(triggeredWaits);
 
-                    await _emailAlertService.TrySendAlertEmailAsync(
-                        "Poison Wait",
-                        serverName,
-                        allWaitNames,
-                        $"{prefs.PoisonWaitThresholdMs}ms avg",
-                        serverId,
-                        poisonContext);
+                        await _emailAlertService.TrySendAlertEmailAsync(
+                            "Poison Wait",
+                            serverName,
+                            allWaitNames,
+                            $"{prefs.PoisonWaitThresholdMs}ms avg",
+                            serverId,
+                            poisonContext);
+                    }
                 }
             }
             else if (_activePoisonWaitAlert.TryRemove(serverId, out var wasPoisonWait) && wasPoisonWait)
@@ -1395,23 +1435,39 @@ namespace PerformanceMonitorDashboard
                     var worst = lrqList[0];
                     var elapsedMinutes = worst.ElapsedSeconds / 60;
                     var preview = Truncate(worst.QueryText, 80);
-                    _notificationService?.ShowLongRunningQueryNotification(
-                        serverName, worst.SessionId, elapsedMinutes, preview);
+
+                    var muteCtx = new AlertMuteContext
+                    {
+                        ServerName = serverName,
+                        MetricName = "Long-Running Query",
+                        DatabaseName = worst.DatabaseName,
+                        QueryText = worst.QueryText
+                    };
+                    bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastLongRunningQueryAlert[serverId] = now;
+
+                    if (!isMuted)
+                    {
+                        _notificationService?.ShowLongRunningQueryNotification(
+                            serverName, worst.SessionId, elapsedMinutes, preview);
+                    }
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Long-Running Query",
                         $"Session #{worst.SessionId} running {elapsedMinutes}m",
-                        $"{prefs.LongRunningQueryThresholdMinutes}m", true, "tray");
+                        $"{prefs.LongRunningQueryThresholdMinutes}m", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
 
-                    var lrqContext = BuildLongRunningQueryContext(lrqList);
+                    if (!isMuted)
+                    {
+                        var lrqContext = BuildLongRunningQueryContext(lrqList);
 
-                    await _emailAlertService.TrySendAlertEmailAsync(
-                        "Long-Running Query",
-                        serverName,
-                        $"{lrqList.Count} query(s), longest {elapsedMinutes}m",
-                        $"{prefs.LongRunningQueryThresholdMinutes}m",
-                        serverId,
-                        lrqContext);
+                        await _emailAlertService.TrySendAlertEmailAsync(
+                            "Long-Running Query",
+                            serverName,
+                            $"{lrqList.Count} query(s), longest {elapsedMinutes}m",
+                            $"{prefs.LongRunningQueryThresholdMinutes}m",
+                            serverId,
+                            lrqContext);
+                    }
                 }
             }
             else if (_activeLongRunningQueryAlert.TryRemove(serverId, out var wasLongRunning) && wasLongRunning)
@@ -1433,22 +1489,31 @@ namespace PerformanceMonitorDashboard
                 _activeTempDbSpaceAlert[serverId] = true;
                 if (!_lastTempDbSpaceAlert.TryGetValue(serverId, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
-                    _notificationService?.ShowTempDbSpaceNotification(serverName, tempDb.UsedPercent);
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "TempDB Space" };
+                    bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastTempDbSpaceAlert[serverId] = now;
+
+                    if (!isMuted)
+                    {
+                        _notificationService?.ShowTempDbSpaceNotification(serverName, tempDb.UsedPercent);
+                    }
 
                     _emailAlertService.RecordAlert(serverId, serverName, "TempDB Space",
                         $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
-                        $"{prefs.TempDbSpaceThresholdPercent}%", true, "tray");
+                        $"{prefs.TempDbSpaceThresholdPercent}%", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
 
-                    var tempDbContext = BuildTempDbSpaceContext(tempDb);
+                    if (!isMuted)
+                    {
+                        var tempDbContext = BuildTempDbSpaceContext(tempDb);
 
-                    await _emailAlertService.TrySendAlertEmailAsync(
-                        "TempDB Space",
-                        serverName,
-                        $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
-                        $"{prefs.TempDbSpaceThresholdPercent}%",
-                        serverId,
-                        tempDbContext);
+                        await _emailAlertService.TrySendAlertEmailAsync(
+                            "TempDB Space",
+                            serverName,
+                            $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
+                            $"{prefs.TempDbSpaceThresholdPercent}%",
+                            serverId,
+                            tempDbContext);
+                    }
                 }
             }
             else if (_activeTempDbSpaceAlert.TryRemove(serverId, out var wasTempDb) && wasTempDb)
@@ -1473,23 +1538,33 @@ namespace PerformanceMonitorDashboard
                 if (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastAlert) || (now - lastAlert) >= alertCooldown)
                 {
                     var currentMinutes = worst.CurrentDurationSeconds / 60;
-                    _notificationService?.ShowLongRunningJobNotification(
-                        serverName, worst.JobName, currentMinutes, worst.PercentOfAverage ?? 0);
+
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Long-Running Job", JobName = worst.JobName };
+                    bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                     _lastLongRunningJobAlert[jobKey] = now;
+
+                    if (!isMuted)
+                    {
+                        _notificationService?.ShowLongRunningJobNotification(
+                            serverName, worst.JobName, currentMinutes, worst.PercentOfAverage ?? 0);
+                    }
 
                     _emailAlertService.RecordAlert(serverId, serverName, "Long-Running Job",
                         $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)",
-                        $"{prefs.LongRunningJobMultiplier}x avg", true, "tray");
+                        $"{prefs.LongRunningJobMultiplier}x avg", !isMuted, isMuted ? "muted" : "tray", muted: isMuted);
 
-                    var jobContext = BuildAnomalousJobContext(health.AnomalousJobs);
+                    if (!isMuted)
+                    {
+                        var jobContext = BuildAnomalousJobContext(health.AnomalousJobs);
 
-                    await _emailAlertService.TrySendAlertEmailAsync(
-                        "Long-Running Job",
-                        serverName,
-                        $"{health.AnomalousJobs.Count} job(s) exceeding {prefs.LongRunningJobMultiplier}x average",
-                        $"{prefs.LongRunningJobMultiplier}x historical avg",
-                        serverId,
-                        jobContext);
+                        await _emailAlertService.TrySendAlertEmailAsync(
+                            "Long-Running Job",
+                            serverName,
+                            $"{health.AnomalousJobs.Count} job(s) exceeding {prefs.LongRunningJobMultiplier}x average",
+                            $"{prefs.LongRunningJobMultiplier}x historical avg",
+                            serverId,
+                            jobContext);
+                    }
                 }
             }
             else if (_activeLongRunningJobAlert.TryRemove(serverId, out var wasJob) && wasJob)

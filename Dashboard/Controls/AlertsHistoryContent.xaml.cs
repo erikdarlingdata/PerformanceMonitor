@@ -25,6 +25,8 @@ namespace PerformanceMonitorDashboard.Controls
     {
         public event EventHandler? AlertsDismissed;
 
+        public MuteRuleService? MuteRuleService { get; set; }
+
         private List<AlertHistoryDisplayItem> _allAlerts = new();
 
         /* Column filter state */
@@ -71,7 +73,8 @@ namespace PerformanceMonitorDashboard.Controls
                 IsResolved = e.MetricName.Contains("Cleared") || e.MetricName.Contains("Resolved"),
                 IsCritical = e.MetricName.Contains("Deadlock") || e.MetricName.Contains("Poison"),
                 IsWarning = !e.MetricName.Contains("Cleared") && !e.MetricName.Contains("Resolved")
-                            && !e.MetricName.Contains("Deadlock") && !e.MetricName.Contains("Poison")
+                            && !e.MetricName.Contains("Deadlock") && !e.MetricName.Contains("Poison"),
+                Muted = e.Muted
             }).ToList();
 
             ApplyFilters();
@@ -432,6 +435,53 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         #endregion
+
+        #region Mute Handlers
+
+        private void MuteThisAlert_Click(object sender, RoutedEventArgs e)
+        {
+            if (MuteRuleService == null) return;
+            if (sender is not MenuItem menuItem) return;
+            var contextMenu = menuItem.Parent as ContextMenu;
+            var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu!);
+            if (dataGrid?.SelectedItem is not AlertHistoryDisplayItem item) return;
+
+            var rule = new MuteRule
+            {
+                ServerName = item.ServerName,
+                MetricName = item.MetricName
+            };
+
+            var dialog = new MuteRuleDialog(rule) { Owner = Window.GetWindow(this) };
+            if (dialog.ShowDialog() == true)
+            {
+                MuteRuleService.AddRule(dialog.Rule);
+                LoadAlerts();
+            }
+        }
+
+        private void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
+        {
+            if (MuteRuleService == null) return;
+            if (sender is not MenuItem menuItem) return;
+            var contextMenu = menuItem.Parent as ContextMenu;
+            var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu!);
+            if (dataGrid?.SelectedItem is not AlertHistoryDisplayItem item) return;
+
+            var rule = new MuteRule
+            {
+                MetricName = item.MetricName
+            };
+
+            var dialog = new MuteRuleDialog(rule) { Owner = Window.GetWindow(this) };
+            if (dialog.ShowDialog() == true)
+            {
+                MuteRuleService.AddRule(dialog.Rule);
+                LoadAlerts();
+            }
+        }
+
+        #endregion
     }
 
     public class AlertHistoryDisplayItem
@@ -447,5 +497,6 @@ namespace PerformanceMonitorDashboard.Controls
         public bool IsResolved { get; set; }
         public bool IsCritical { get; set; }
         public bool IsWarning { get; set; }
+        public bool Muted { get; set; }
     }
 }

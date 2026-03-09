@@ -68,7 +68,8 @@ public class DuckDbSchemaTests : IDisposable
             "database_scoped_config",
             "trace_flags",
             "running_jobs",
-            "config_alert_log"
+            "config_alert_log",
+            "config_mute_rules"
         };
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
@@ -136,8 +137,8 @@ public class DuckDbSchemaTests : IDisposable
         foreach (var _ in Schema.GetAllTableStatements())
             tableCount++;
 
-        /* 27 tables from Schema (schema_version is created separately by DuckDbInitializer) */
-        Assert.Equal(27, tableCount);
+        /* 28 tables from Schema (schema_version is created separately by DuckDbInitializer) */
+        Assert.Equal(28, tableCount);
     }
 
     [Fact]

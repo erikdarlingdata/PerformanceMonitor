@@ -29,6 +29,8 @@ public partial class AlertsHistoryTab : UserControl
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
+    public MuteRuleService? MuteRuleService { get; set; }
+
     public AlertsHistoryTab()
     {
         InitializeComponent();
@@ -393,6 +395,51 @@ public partial class AlertsHistoryTab : UserControl
         if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         return value;
+    }
+
+    #endregion
+
+    #region Mute Handlers
+
+    private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)
+    {
+        if (MuteRuleService == null) return;
+        if (sender is not MenuItem menuItem) return;
+        var dataGrid = FindParentDataGrid(menuItem);
+        if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
+
+        var rule = new MuteRule
+        {
+            ServerName = item.ServerName,
+            MetricName = item.MetricName
+        };
+
+        var dialog = new Windows.MuteRuleDialog(rule) { Owner = Window.GetWindow(this) };
+        if (dialog.ShowDialog() == true)
+        {
+            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            await LoadAlertsAsync();
+        }
+    }
+
+    private async void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
+    {
+        if (MuteRuleService == null) return;
+        if (sender is not MenuItem menuItem) return;
+        var dataGrid = FindParentDataGrid(menuItem);
+        if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
+
+        var rule = new MuteRule
+        {
+            MetricName = item.MetricName
+        };
+
+        var dialog = new Windows.MuteRuleDialog(rule) { Owner = Window.GetWindow(this) };
+        if (dialog.ShowDialog() == true)
+        {
+            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            await LoadAlertsAsync();
+        }
     }
 
     #endregion

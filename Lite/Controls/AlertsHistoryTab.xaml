@@ -21,6 +21,13 @@
                 <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
+                <Separator/>
+                <MenuItem Header="Mute This Alert..." Click="MuteThisAlert_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F515;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Mute Similar Alerts..." Click="MuteSimilarAlerts_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F507;"/></MenuItem.Icon>
+                </MenuItem>
             </ContextMenu>
 
             <Style x:Key="DefaultRowStyle" TargetType="DataGridRow">
@@ -37,6 +44,10 @@
                     </DataTrigger>
                     <DataTrigger Binding="{Binding IsResolved}" Value="True">
                         <Setter Property="Background" Value="#3322C55E"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding Muted}" Value="True">
+                        <Setter Property="Opacity" Value="0.5"/>
+                        <Setter Property="FontStyle" Value="Italic"/>
                     </DataTrigger>
                 </Style.Triggers>
             </Style>

@@ -86,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 19;
+    internal const int CurrentSchemaVersion = 20;
 
     private readonly string _archivePath;
 
@@ -552,6 +552,19 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v19 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 20)
+        {
+            _logger?.LogInformation("Running migration to v20: adding mute rules table and muted column to alert log");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS muted BOOLEAN NOT NULL DEFAULT false");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v20 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

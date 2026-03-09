@@ -37,7 +37,8 @@ SELECT
     threshold_value,
     alert_sent,
     notification_type,
-    send_error
+    send_error,
+    muted
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   server_id = $2
@@ -60,7 +61,8 @@ SELECT
     threshold_value,
     alert_sent,
     notification_type,
-    send_error
+    send_error,
+    muted
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   dismissed = FALSE
@@ -84,7 +86,8 @@ LIMIT $2";
                 ThresholdValue = Convert.ToDouble(reader.GetValue(5)),
                 AlertSent = reader.GetBoolean(6),
                 NotificationType = reader.GetString(7),
-                SendError = reader.IsDBNull(8) ? null : reader.GetString(8)
+                SendError = reader.IsDBNull(8) ? null : reader.GetString(8),
+                Muted = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
         }
 
@@ -163,6 +166,7 @@ public class AlertHistoryRow
     public bool AlertSent { get; set; }
     public string NotificationType { get; set; } = "";
     public string? SendError { get; set; }
+    public bool Muted { get; set; }
 
     public string TimeLocal => AlertTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
     public string CurrentValueDisplay => FormatValue(MetricName, CurrentValue);

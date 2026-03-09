@@ -49,6 +49,7 @@ public partial class MainWindow : Window
     private LocalDataService? _dataService;
     private McpHostService? _mcpService;
     private readonly AlertStateService _alertStateService = new();
+    private readonly MuteRuleService _muteRuleService;
     private EmailAlertService _emailAlertService;
 
     /* Track active alert states for resolved notifications */
@@ -67,6 +68,7 @@ public partial class MainWindow : Window
         // Initialize services (with loggers wired to AppLogger)
         _databaseInitializer = new DuckDbInitializer(App.DatabasePath, new AppLoggerAdapter<DuckDbInitializer>());
         _emailAlertService = new EmailAlertService(_databaseInitializer);
+        _muteRuleService = new MuteRuleService(_databaseInitializer);
         _serverManager = new ServerManager(App.ConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
         _scheduleManager = new ScheduleManager(App.ConfigDirectory);
 
@@ -123,8 +125,12 @@ public partial class MainWindow : Window
             // Initialize data service for overview
             _dataService = new LocalDataService(_databaseInitializer);
 
+            // Load mute rules from database
+            await _muteRuleService.LoadAsync();
+
             // Initialize alerts history tab
             AlertsHistoryContent.Initialize(_dataService);
+            AlertsHistoryContent.MuteRuleService = _muteRuleService;
 
             // Initialize FinOps tab
             FinOpsContent.Initialize(_dataService, _serverManager);
@@ -252,7 +258,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, mcpSettings.Port);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, mcpSettings.Port);
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
         catch (Exception ex)
@@ -801,7 +807,7 @@ public partial class MainWindow : Window
 
     private async void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
-        var window = new SettingsWindow(_scheduleManager, _backgroundService, _mcpService) { Owner = this };
+        var window = new SettingsWindow(_scheduleManager, _backgroundService, _mcpService, _muteRuleService) { Owner = this };
         window.ShowDialog();
         UpdateStatusBar();
 
@@ -1012,18 +1018,25 @@ public partial class MainWindow : Window
             _activeCpuAlert[key] = true;
             if (!suppressPopups && (!_lastCpuAlert.TryGetValue(key, out var lastCpu) || now - lastCpu >= alertCooldown))
             {
-                _trayService.ShowNotification(
-                    "High CPU",
-                    $"{summary.DisplayName}: CPU at {summary.CpuPercent:F0}% (threshold: {App.AlertCpuThreshold}%)",
-                    Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "High CPU" };
+                bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                 _lastCpuAlert[key] = now;
+
+                if (!isMuted)
+                {
+                    _trayService.ShowNotification(
+                        "High CPU",
+                        $"{summary.DisplayName}: CPU at {summary.CpuPercent:F0}% (threshold: {App.AlertCpuThreshold}%)",
+                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                }
 
                 await _emailAlertService.TrySendAlertEmailAsync(
                     "High CPU",
                     summary.DisplayName,
                     $"{summary.CpuPercent:F0}%",
                     $"{App.AlertCpuThreshold}%",
-                    summary.ServerId);
+                    summary.ServerId,
+                    muted: isMuted);
             }
         }
         else if (_activeCpuAlert.TryGetValue(key, out var wasCpu) && wasCpu)
@@ -1062,11 +1075,17 @@ public partial class MainWindow : Window
             _activeBlockingAlert[key] = true;
             if (!suppressPopups && (!_lastBlockingAlert.TryGetValue(key, out var lastBlocking) || now - lastBlocking >= alertCooldown))
             {
-                _trayService.ShowNotification(
-                    "Blocking Detected",
-                    $"{summary.DisplayName}: {effectiveBlockingCount} blocking session(s)",
-                    Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Blocking Detected" };
+                bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                 _lastBlockingAlert[key] = now;
+
+                if (!isMuted)
+                {
+                    _trayService.ShowNotification(
+                        "Blocking Detected",
+                        $"{summary.DisplayName}: {effectiveBlockingCount} blocking session(s)",
+                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                }
 
                 var blockingContext = await BuildBlockingContextAsync(summary.ServerId);
 
@@ -1076,7 +1095,8 @@ public partial class MainWindow : Window
                     effectiveBlockingCount.ToString(),
                     App.AlertBlockingThreshold.ToString(),
                     summary.ServerId,
-                    blockingContext);
+                    blockingContext,
+                    muted: isMuted);
             }
         }
         else if (_activeBlockingAlert.TryGetValue(key, out var wasBlocking) && wasBlocking)
@@ -1113,11 +1133,17 @@ public partial class MainWindow : Window
             _activeDeadlockAlert[key] = true;
             if (!suppressPopups && (!_lastDeadlockAlert.TryGetValue(key, out var lastDeadlock) || now - lastDeadlock >= alertCooldown))
             {
-                _trayService.ShowNotification(
-                    "Deadlocks Detected",
-                    $"{summary.DisplayName}: {effectiveDeadlockCount} deadlock(s) in the last hour",
-                    Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
+                var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Deadlocks Detected" };
+                bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                 _lastDeadlockAlert[key] = now;
+
+                if (!isMuted)
+                {
+                    _trayService.ShowNotification(
+                        "Deadlocks Detected",
+                        $"{summary.DisplayName}: {effectiveDeadlockCount} deadlock(s) in the last hour",
+                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
+                }
 
                 var deadlockContext = await BuildDeadlockContextAsync(summary.ServerId);
 
@@ -1127,7 +1153,8 @@ public partial class MainWindow : Window
                     effectiveDeadlockCount.ToString(),
                     App.AlertDeadlockThreshold.ToString(),
                     summary.ServerId,
-                    deadlockContext);
+                    deadlockContext,
+                    muted: isMuted);
             }
         }
         else if (_activeDeadlockAlert.TryGetValue(key, out var wasDeadlock) && wasDeadlock)
@@ -1154,11 +1181,18 @@ public partial class MainWindow : Window
                     {
                         var worst = triggered[0];
                         var allWaitNames = string.Join(", ", triggered.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)"));
-                        _trayService.ShowNotification(
-                            "Poison Wait",
-                            $"{summary.DisplayName}: {worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait",
-                            Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
+
+                        var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Poison Wait", WaitType = worst.WaitType };
+                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                         _lastPoisonWaitAlert[key] = now;
+
+                        if (!isMuted)
+                        {
+                            _trayService.ShowNotification(
+                                "Poison Wait",
+                                $"{summary.DisplayName}: {worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait",
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
+                        }
 
                         var poisonContext = BuildPoisonWaitContext(triggered);
 
@@ -1170,7 +1204,8 @@ public partial class MainWindow : Window
                             summary.ServerId,
                             poisonContext,
                             numericCurrentValue: worst.AvgMsPerWait,
-                            numericThresholdValue: App.AlertPoisonWaitThresholdMs);
+                            numericThresholdValue: App.AlertPoisonWaitThresholdMs,
+                            muted: isMuted);
                     }
                 }
                 else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait)
@@ -1213,11 +1248,24 @@ public partial class MainWindow : Window
                         var elapsedMinutes = worst.ElapsedSeconds / 60;
                         var preview = TruncateText(worst.QueryText, 80);
                         var previewSuffix = string.IsNullOrEmpty(preview) ? "" : $" — {preview}";
-                        _trayService.ShowNotification(
-                            "Long-Running Query",
-                            $"{summary.DisplayName}: Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}",
-                            Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+
+                        var muteCtx = new AlertMuteContext
+                        {
+                            ServerName = summary.DisplayName,
+                            MetricName = "Long-Running Query",
+                            DatabaseName = worst.DatabaseName,
+                            QueryText = worst.QueryText
+                        };
+                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                         _lastLongRunningQueryAlert[key] = now;
+
+                        if (!isMuted)
+                        {
+                            _trayService.ShowNotification(
+                                "Long-Running Query",
+                                $"{summary.DisplayName}: Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}",
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                        }
 
                         var lrqContext = BuildLongRunningQueryContext(longRunning);
 
@@ -1229,7 +1277,8 @@ public partial class MainWindow : Window
                             summary.ServerId,
                             lrqContext,
                             numericCurrentValue: elapsedMinutes,
-                            numericThresholdValue: App.AlertLongRunningQueryThresholdMinutes);
+                            numericThresholdValue: App.AlertLongRunningQueryThresholdMinutes,
+                            muted: isMuted);
                     }
                 }
                 else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning)
@@ -1259,11 +1308,17 @@ public partial class MainWindow : Window
                     _activeTempDbSpaceAlert[key] = true;
                     if (!suppressPopups && (!_lastTempDbSpaceAlert.TryGetValue(key, out var lastTempDb) || now - lastTempDb >= alertCooldown))
                     {
-                        _trayService.ShowNotification(
-                            "TempDB Space",
-                            $"{summary.DisplayName}: TempDB {tempDb.UsedPercent:F0}% used",
-                            Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                        var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "TempDB Space" };
+                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                         _lastTempDbSpaceAlert[key] = now;
+
+                        if (!isMuted)
+                        {
+                            _trayService.ShowNotification(
+                                "TempDB Space",
+                                $"{summary.DisplayName}: TempDB {tempDb.UsedPercent:F0}% used",
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                        }
 
                         var tempDbContext = BuildTempDbSpaceContext(tempDb);
 
@@ -1275,7 +1330,8 @@ public partial class MainWindow : Window
                             summary.ServerId,
                             tempDbContext,
                             numericCurrentValue: tempDb.UsedPercent,
-                            numericThresholdValue: App.AlertTempDbSpaceThresholdPercent);
+                            numericThresholdValue: App.AlertTempDbSpaceThresholdPercent,
+                            muted: isMuted);
                     }
                 }
                 else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb)
@@ -1310,11 +1366,18 @@ public partial class MainWindow : Window
                     if (!suppressPopups && (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastJob) || now - lastJob >= alertCooldown))
                     {
                         var currentMinutes = worst.CurrentDurationSeconds / 60;
-                        _trayService.ShowNotification(
-                            "Long-Running Job",
-                            $"{summary.DisplayName}: {worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)",
-                            Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+
+                        var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Long-Running Job", JobName = worst.JobName };
+                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
                         _lastLongRunningJobAlert[jobKey] = now;
+
+                        if (!isMuted)
+                        {
+                            _trayService.ShowNotification(
+                                "Long-Running Job",
+                                $"{summary.DisplayName}: {worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)",
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                        }
 
                         var jobContext = BuildAnomalousJobContext(anomalousJobs);
 
@@ -1326,7 +1389,8 @@ public partial class MainWindow : Window
                             summary.ServerId,
                             jobContext,
                             numericCurrentValue: (double)(worst.PercentOfAverage ?? 0),
-                            numericThresholdValue: App.AlertLongRunningJobMultiplier * 100);
+                            numericThresholdValue: App.AlertLongRunningJobMultiplier * 100,
+                            muted: isMuted);
                     }
                 }
                 else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob)

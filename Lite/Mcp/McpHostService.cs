@@ -16,13 +16,15 @@ public sealed class McpHostService : BackgroundService
 {
     private readonly LocalDataService _dataService;
     private readonly ServerManager _serverManager;
+    private readonly MuteRuleService _muteRuleService;
     private readonly int _port;
     private WebApplication? _app;
 
-    public McpHostService(LocalDataService dataService, ServerManager serverManager, int port)
+    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, int port)
     {
         _dataService = dataService;
         _serverManager = serverManager;
+        _muteRuleService = muteRuleService;
         _port = port;
     }
 
@@ -44,6 +46,7 @@ public sealed class McpHostService : BackgroundService
             /* Register services that MCP tools need via dependency injection */
             builder.Services.AddSingleton(_dataService);
             builder.Services.AddSingleton(_serverManager);
+            builder.Services.AddSingleton(_muteRuleService);
 
             /* Register MCP server with all tool classes */
             builder.Services

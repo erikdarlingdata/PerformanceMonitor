@@ -676,7 +676,23 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
     alert_sent BOOLEAN NOT NULL DEFAULT false,
     notification_type VARCHAR NOT NULL DEFAULT 'tray',
     send_error VARCHAR,
-    dismissed BOOLEAN NOT NULL DEFAULT false
+    dismissed BOOLEAN NOT NULL DEFAULT false,
+    muted BOOLEAN NOT NULL DEFAULT false
+)";
+
+    public const string CreateMuteRulesTable = @"
+CREATE TABLE IF NOT EXISTS config_mute_rules (
+    id VARCHAR NOT NULL PRIMARY KEY,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at_utc TIMESTAMP NOT NULL,
+    expires_at_utc TIMESTAMP,
+    reason VARCHAR,
+    server_name VARCHAR,
+    metric_name VARCHAR,
+    database_pattern VARCHAR,
+    query_text_pattern VARCHAR,
+    wait_type_pattern VARCHAR,
+    job_name_pattern VARCHAR
 )";
 
     /// <summary>
@@ -711,6 +727,7 @@ CREATE TABLE IF NOT EXISTS config_alert_log (
         yield return CreateServerPropertiesTable;
         yield return CreateSessionStatsTable;
         yield return CreateAlertLogTable;
+        yield return CreateMuteRulesTable;
     }
 
     /// <summary>

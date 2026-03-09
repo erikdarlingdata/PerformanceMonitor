@@ -25,16 +25,19 @@ public partial class SettingsWindow : Window
     private readonly ScheduleManager _scheduleManager;
     private readonly CollectionBackgroundService? _backgroundService;
     private readonly McpHostService? _mcpService;
+    private readonly MuteRuleService? _muteRuleService;
 
     public SettingsWindow(
         ScheduleManager scheduleManager,
         CollectionBackgroundService? backgroundService = null,
-        McpHostService? mcpService = null)
+        McpHostService? mcpService = null,
+        MuteRuleService? muteRuleService = null)
     {
         InitializeComponent();
         _scheduleManager = scheduleManager;
         _backgroundService = backgroundService;
         _mcpService = mcpService;
+        _muteRuleService = muteRuleService;
 
         LoadSchedules();
         UpdateCollectionStatus();
@@ -686,6 +689,13 @@ public partial class SettingsWindow : Window
         EmailCooldownBox.Text = "15";
         AlertExcludedDatabasesBox.Text = "";
         UpdateAlertPreviewText();
+    }
+
+    private void ManageMuteRulesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_muteRuleService == null) return;
+        var window = new ManageMuteRulesWindow(_muteRuleService) { Owner = this };
+        window.ShowDialog();
     }
 
     private void UpdateAlertPreviewText()

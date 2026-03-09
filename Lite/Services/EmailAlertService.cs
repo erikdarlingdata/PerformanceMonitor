@@ -49,16 +49,17 @@ public class EmailAlertService
         int serverId = 0,
         AlertContext? context = null,
         double? numericCurrentValue = null,
-        double? numericThresholdValue = null)
+        double? numericThresholdValue = null,
+        bool muted = false)
     {
         try
         {
             string? sendError = null;
             bool sent = false;
-            var notificationType = "tray";
+            var notificationType = muted ? "muted" : "tray";
 
-            /* Attempt email delivery if SMTP is fully configured */
-            if (App.SmtpEnabled &&
+            /* Attempt email delivery if SMTP is fully configured and alert is not muted */
+            if (!muted && App.SmtpEnabled &&
                 !string.IsNullOrWhiteSpace(App.SmtpServer) &&
                 !string.IsNullOrWhiteSpace(App.SmtpFromAddress) &&
                 !string.IsNullOrWhiteSpace(App.SmtpRecipients))
@@ -114,7 +115,7 @@ public class EmailAlertService
             var logThreshold = numericThresholdValue
                 ?? (double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0);
             await LogAlertAsync(serverId, serverName, metricName,
-                logCurrent, logThreshold, sent, notificationType, sendError);
+                logCurrent, logThreshold, sent, notificationType, sendError, muted);
         }
         catch (Exception ex)
         {
@@ -200,7 +201,7 @@ public class EmailAlertService
     /// Reuses the injected DuckDbInitializer instead of creating a new one each time.
     /// </summary>
     private async Task LogAlertAsync(int serverId, string serverName, string metricName,
-        double currentValue, double thresholdValue, bool alertSent, string notificationType, string? sendError)
+        double currentValue, double thresholdValue, bool alertSent, string notificationType, string? sendError, bool muted = false)
     {
         try
         {
@@ -218,8 +219,8 @@ public class EmailAlertService
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
+INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
 
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
@@ -230,6 +231,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = alertSent });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = notificationType });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sendError ?? (object)DBNull.Value });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = muted });
 
             await command.ExecuteNonQueryAsync();
 
