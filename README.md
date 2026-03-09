@@ -38,7 +38,7 @@ Both editions include real-time alerts (system tray + email), charts and graphs,
 
 ## What You Get
 
-🔍 **32 specialized T-SQL collectors** running on configurable schedules — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments.
+🔍 **32 specialized T-SQL collectors** running on configurable schedules with named presets (Aggressive, Balanced, Low-Impact) — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments.
 
 🚨 **Real-time alerts** for blocking, deadlocks, and high CPU — system tray notifications plus styled HTML emails with full XML attachments for offline analysis
 
@@ -81,7 +81,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-20 collectors run on independent, configurable schedules:
+23 collectors run on independent, configurable schedules:
 
 | Collector | Default | Source |
 |---|---|---|
@@ -98,9 +98,12 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | tempdb_stats | 1 min | `sys.dm_db_file_space_usage` |
 | perfmon_stats | 1 min | `sys.dm_os_performance_counters` (deltas) |
 | deadlocks | 1 min | `system_health` Extended Events session |
+| session_stats | 1 min | `sys.dm_exec_sessions` active session tracking |
 | memory_clerks | 5 min | `sys.dm_os_memory_clerks` |
 | query_store | 5 min | Query Store DMVs (per database) |
 | running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
+| database_size_stats | 15 min | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
+| server_properties | 15 min | `SERVERPROPERTY()` hardware and licensing metadata |
 | server_config | On connect | `sys.configurations` |
 | database_config | On connect | `sys.databases` |
 | database_scoped_config | On connect | Database-scoped configurations |
@@ -141,11 +144,24 @@ SQL Authentication:
 PerformanceMonitorInstaller.exe YourServerName sa YourPassword
 ```
 
+Entra ID (MFA) Authentication:
+
+```
+PerformanceMonitorInstaller.exe YourServerName --entra user@domain.com
+```
+
 Clean reinstall (drops existing database and all collected data):
 
 ```
 PerformanceMonitorInstaller.exe YourServerName --reinstall
 PerformanceMonitorInstaller.exe YourServerName sa YourPassword --reinstall
+```
+
+Uninstall (removes database, Agent jobs, and XE sessions):
+
+```
+PerformanceMonitorInstaller.exe YourServerName --uninstall
+PerformanceMonitorInstaller.exe YourServerName sa YourPassword --uninstall
 ```
 
 The installer automatically tests the connection, executes SQL scripts, downloads community dependencies, creates SQL Agent jobs, and runs initial data collection. A GUI installer (`InstallerGui/`) is also available with the same functionality.
@@ -156,7 +172,10 @@ The installer automatically tests the connection, executes SQL scripts, download
 |---|---|
 | `SERVER` | SQL Server instance name (positional, required) |
 | `USERNAME PASSWORD` | SQL Authentication credentials (positional, optional) |
+| `--entra EMAIL` | Microsoft Entra ID interactive authentication (MFA) |
 | `--reinstall` | Drop existing database and perform clean install |
+| `--uninstall` | Remove database, Agent jobs, and XE sessions |
+| `--reset-schedule` | Reset collection schedule to recommended defaults |
 | `--preserve-jobs` | Keep existing SQL Agent job schedules during upgrade |
 | `--encrypt=optional\|mandatory\|strict` | Connection encryption level (default: mandatory) |
 | `--trust-cert` | Trust server certificate without validation (default: require valid cert) |
@@ -175,6 +194,7 @@ The installer automatically tests the connection, executes SQL scripts, download
 | `4` | Partial installation (non-critical failures) |
 | `5` | Version check failed |
 | `6` | SQL files not found |
+| `7` | Uninstall failed |
 
 ### Post-Installation
 
@@ -264,7 +284,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | AWS RDS for SQL Server | Supported | Supported |
 | Azure SQL Database | Not supported | Supported |
 | Multi-server from one seat | Per-server install | Built-in |
-| Collectors | 32 | 20 |
+| Collectors | 32 | 23 |
 | Agent job monitoring | Duration vs historical avg/p95 | Duration vs historical avg/p95 |
 | Data storage | SQL Server (on target) | DuckDB + Parquet (local) |
 | Execution plans | Collected and stored (can be disabled per-collector) | Download on demand |
@@ -308,6 +328,7 @@ Plus a NOC-style landing page with server health cards (green/yellow/red severit
 | **Blocking** | Blocking/deadlock trends, blocked process reports, deadlock history |
 | **Perfmon** | Selectable SQL Server performance counters over time |
 | **Configuration** | Server configuration, database configuration, scoped configuration, trace flags |
+| **FinOps** | Database size tracking, storage growth analysis (7d/30d), server properties, capacity planning |
 
 Both editions feature auto-refresh, configurable time ranges, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC).
 
@@ -545,7 +566,7 @@ Use the RDS master user for installation. The master user has the necessary perm
 Monitor/
 │
 │   Full Edition (server-installed collectors + separate dashboard)
-├── install/          # 54 SQL installation scripts
+├── install/          # 58 SQL installation scripts
 ├── upgrades/         # Version-specific upgrade scripts
 ├── Installer/        # CLI installer for Full Edition database (C#)
 ├── InstallerGui/     # GUI installer for Full Edition database (WPF)

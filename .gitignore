@@ -54,4 +54,5 @@ nul
 
 # Lite runtime configuration (user-specific)
 Lite/config/servers.json
+Lite/servers.json
 Lite/collection_schedule.json

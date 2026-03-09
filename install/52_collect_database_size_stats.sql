@@ -178,6 +178,7 @@ BEGIN
                 FROM sys.databases AS d
                 WHERE d.state_desc = N'ONLINE'
                 AND   d.database_id > 0
+                AND   HAS_DBACCESS(d.name) = 1
                 ORDER BY
                     d.database_id;
 
@@ -188,8 +189,6 @@ BEGIN
             BEGIN
                 BEGIN TRY
                     SET @sql = N'
-                    USE ' + QUOTENAME(@db_name) + N';
-
                     INSERT INTO
                         PerformanceMonitor.collect.database_size_stats
                     (
@@ -255,7 +254,9 @@ BEGIN
                     CROSS APPLY sys.dm_os_volume_stats(DB_ID(), df.file_id) AS vs
                     WHERE d.database_id = DB_ID();';
 
-                    EXECUTE sys.sp_executesql
+                    DECLARE @exec_sql nvarchar(max) = QUOTENAME(@db_name) + N'.sys.sp_executesql';
+
+                    EXECUTE @exec_sql
                         @sql,
                         N'@start_time datetime2(7)',
                         @start_time = @start_time;
