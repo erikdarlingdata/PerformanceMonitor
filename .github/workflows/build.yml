@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  actions: read
 
 jobs:
   build:
@@ -77,6 +79,77 @@ jobs:
           if (Test-Path 'THIRD_PARTY_NOTICES.md') { Copy-Item 'THIRD_PARTY_NOTICES.md' $instDir }
 
           Compress-Archive -Path 'publish/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
+
+      - name: Upload Dashboard for signing
+        if: github.event_name == 'release'
+        id: upload-dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dashboard-unsigned
+          path: releases/PerformanceMonitorDashboard-${{ steps.version.outputs.VERSION }}.zip
+
+      - name: Upload Lite for signing
+        if: github.event_name == 'release'
+        id: upload-lite
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lite-unsigned
+          path: releases/PerformanceMonitorLite-${{ steps.version.outputs.VERSION }}.zip
+
+      - name: Upload Installer for signing
+        if: github.event_name == 'release'
+        id: upload-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Installer-unsigned
+          path: releases/PerformanceMonitorInstaller-${{ steps.version.outputs.VERSION }}.zip
+
+      - name: Sign Dashboard
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'test-signing'
+          artifact-configuration-slug: 'Dashboard'
+          github-artifact-id: '${{ steps.upload-dashboard.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Dashboard'
+
+      - name: Sign Lite
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'test-signing'
+          artifact-configuration-slug: 'Lite'
+          github-artifact-id: '${{ steps.upload-lite.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Lite'
+
+      - name: Sign Installer
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'test-signing'
+          artifact-configuration-slug: 'Installers'
+          github-artifact-id: '${{ steps.upload-installer.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Installer'
+
+      - name: Replace with signed artifacts
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          Copy-Item 'signed/Dashboard/*' 'releases/' -Force
+          Copy-Item 'signed/Lite/*' 'releases/' -Force
+          Copy-Item 'signed/Installer/*' 'releases/' -Force
 
       - name: Generate checksums
         if: github.event_name == 'release'
