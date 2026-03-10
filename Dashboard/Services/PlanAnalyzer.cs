@@ -509,15 +509,19 @@ public static partial class PlanAnalyzer
 
         // Rule 8: Parallel thread skew (actual plans with per-thread stats)
         // Only warn when there are enough rows to meaningfully distribute across threads
+        // Filter out thread 0 (coordinator) which typically does 0 rows in parallel operators
         if (node.PerThreadStats.Count > 1)
         {
-            var totalRows = node.PerThreadStats.Sum(t => t.ActualRows);
-            var minRowsForSkew = node.PerThreadStats.Count * 1000;
+            var workerThreads = node.PerThreadStats.Where(t => t.ThreadId > 0).ToList();
+            if (workerThreads.Count < 2) workerThreads = node.PerThreadStats; // fallback
+            var totalRows = workerThreads.Sum(t => t.ActualRows);
+            var minRowsForSkew = workerThreads.Count * 1000;
             if (totalRows >= minRowsForSkew)
             {
-                var maxThread = node.PerThreadStats.OrderByDescending(t => t.ActualRows).First();
+                var maxThread = workerThreads.OrderByDescending(t => t.ActualRows).First();
                 var skewRatio = (double)maxThread.ActualRows / totalRows;
-                var skewThreshold = node.PerThreadStats.Count == 2 ? 0.75 : 0.50;
+                // At DOP 2, a 60/40 split is normal — use higher threshold
+                var skewThreshold = workerThreads.Count <= 2 ? 0.80 : 0.50;
                 if (skewRatio >= skewThreshold)
                 {
                     node.Warnings.Add(new PlanWarning

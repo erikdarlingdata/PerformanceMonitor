@@ -2122,7 +2122,28 @@ public partial class PlanViewerControl : UserControl
 
     private void PlanViewerControl_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        // Don't steal focus from interactive controls (ComboBox, DataGrid, TextBox, etc.)
+        // ComboBox dropdown items live in a separate visual tree (Popup), so also check
+        // for ComboBoxItem to avoid stealing focus when selecting dropdown items.
+        if (e.OriginalSource is System.Windows.Controls.Primitives.TextBoxBase
+            || e.OriginalSource is ComboBox
+            || e.OriginalSource is ComboBoxItem
+            || FindVisualParent<ComboBox>(e.OriginalSource as DependencyObject) != null
+            || FindVisualParent<ComboBoxItem>(e.OriginalSource as DependencyObject) != null
+            || FindVisualParent<DataGrid>(e.OriginalSource as DependencyObject) != null)
+            return;
+
         Focus();
+    }
+
+    private static T? FindVisualParent<T>(DependencyObject? child) where T : DependencyObject
+    {
+        while (child != null)
+        {
+            if (child is T parent) return parent;
+            child = VisualTreeHelper.GetParent(child);
+        }
+        return null;
     }
 
     private void PlanViewerControl_PreviewKeyDown(object sender, KeyEventArgs e)
