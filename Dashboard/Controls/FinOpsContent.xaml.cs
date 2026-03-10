@@ -128,17 +128,10 @@ namespace PerformanceMonitorDashboard.Controls
 
                 if (efficiency != null)
                 {
-                    var topTotalTask = _databaseService.GetFinOpsTopResourceConsumersByTotalAsync();
-                    var topAvgTask = _databaseService.GetFinOpsTopResourceConsumersByAvgAsync();
-                    var sizesTask = _databaseService.GetFinOpsDatabaseSizeSummaryAsync();
-                    var trendTask = _databaseService.GetFinOpsProvisioningTrendAsync();
-
-                    await Task.WhenAll(topTotalTask, topAvgTask, sizesTask, trendTask);
-
-                    TopTotalGrid.ItemsSource = topTotalTask.Result;
-                    TopAvgGrid.ItemsSource = topAvgTask.Result;
-                    DbSizeChart.ItemsSource = sizesTask.Result;
-                    ProvisioningTrendGrid.ItemsSource = trendTask.Result;
+                    TopTotalGrid.ItemsSource = await _databaseService.GetFinOpsTopResourceConsumersByTotalAsync();
+                    TopAvgGrid.ItemsSource = await _databaseService.GetFinOpsTopResourceConsumersByAvgAsync();
+                    DbSizeChart.ItemsSource = await _databaseService.GetFinOpsDatabaseSizeSummaryAsync();
+                    ProvisioningTrendGrid.ItemsSource = await _databaseService.GetFinOpsProvisioningTrendAsync();
                 }
             }
             catch (Exception ex)

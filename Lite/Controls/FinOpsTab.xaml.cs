@@ -108,12 +108,10 @@ public partial class FinOpsTab : UserControl
         var serverId = GetSelectedServerId();
         if (serverId == 0 || _dataService == null) return;
 
-        await System.Threading.Tasks.Task.WhenAll(
-            LoadUtilizationAsync(serverId),
-            LoadDatabaseResourcesAsync(serverId),
-            LoadApplicationConnectionsAsync(serverId),
-            LoadDatabaseSizesAsync(serverId)
-        );
+        await LoadUtilizationAsync(serverId);
+        await LoadDatabaseResourcesAsync(serverId);
+        await LoadApplicationConnectionsAsync(serverId);
+        await LoadDatabaseSizesAsync(serverId);
     }
 
     private async System.Threading.Tasks.Task LoadUtilizationAsync(int serverId)
@@ -129,17 +127,10 @@ public partial class FinOpsTab : UserControl
 
             if (data != null)
             {
-                var topTotalTask = _dataService.GetTopResourceConsumersByTotalAsync(serverId);
-                var topAvgTask = _dataService.GetTopResourceConsumersByAvgAsync(serverId);
-                var sizesTask = _dataService.GetDatabaseSizeSummaryAsync(serverId);
-                var trendTask = _dataService.GetProvisioningTrendAsync(serverId);
-
-                await System.Threading.Tasks.Task.WhenAll(topTotalTask, topAvgTask, sizesTask, trendTask);
-
-                TopTotalGrid.ItemsSource = topTotalTask.Result;
-                TopAvgGrid.ItemsSource = topAvgTask.Result;
-                DbSizeChart.ItemsSource = sizesTask.Result;
-                ProvisioningTrendGrid.ItemsSource = trendTask.Result;
+                TopTotalGrid.ItemsSource = await _dataService.GetTopResourceConsumersByTotalAsync(serverId);
+                TopAvgGrid.ItemsSource = await _dataService.GetTopResourceConsumersByAvgAsync(serverId);
+                DbSizeChart.ItemsSource = await _dataService.GetDatabaseSizeSummaryAsync(serverId);
+                ProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(serverId);
             }
         }
         catch (Exception ex)
