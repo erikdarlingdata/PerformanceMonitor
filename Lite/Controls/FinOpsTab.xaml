@@ -52,6 +52,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -254,8 +255,53 @@
                            VerticalAlignment="Top" TextWrapping="Wrap" FontSize="12"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
+                <!-- Provisioning Trend (7-day) -->
+                <Expander Header="7-Day Provisioning Trend" IsExpanded="False" Grid.Row="3" Margin="10,4,10,0">
+                    <DataGrid x:Name="ProvisioningTrendGrid"
+                              AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserSortColumns="False" HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal" SelectionMode="Single"
+                              MaxHeight="200" RowStyle="{StaticResource DefaultRowStyle}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100"/>
+                            <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="130">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Status}" Value="RIGHT_SIZED">
+                                                <Setter Property="Foreground" Value="#27AE60"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Status}" Value="OVER_PROVISIONED">
+                                                <Setter Property="Foreground" Value="#F39C12"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Status}" Value="UNDER_PROVISIONED">
+                                                <Setter Property="Foreground" Value="#E74C3C"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Avg CPU %" Binding="{Binding AvgCpuPct, StringFormat='{}{0:N1}'}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="P95 CPU %" Binding="{Binding P95CpuPct, StringFormat='{}{0:N1}'}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Max CPU %" Binding="{Binding MaxCpuPct}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat='{}{0:N2}'}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Expander>
+
                 <!-- Resource Summaries -->
-                <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" Margin="0,0,0,0">
+                <ScrollViewer Grid.Row="4" VerticalScrollBarVisibility="Auto" Margin="0,0,0,0">
                     <Grid x:Name="SummaryContent">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -739,17 +785,26 @@
                               SelectionMode="Extended"
                               RowStyle="{StaticResource DefaultRowStyle}">
                         <DataGrid.Columns>
+                            <!-- Actionable columns first -->
                             <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="80"/>
                             <DataGridTextColumn Header="Database" Binding="{Binding DatabaseInfo}" Width="200"/>
-                            <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="100"/>
-                            <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
-                            <DataGridTextColumn Header="Tables" Binding="{Binding TablesAnalyzed}" Width="70">
+                            <DataGridTextColumn Header="Space Saved GB" Binding="{Binding SpaceSavedGb}" Width="110">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Total Indexes" Binding="{Binding TotalIndexes}" Width="100">
+                            <DataGridTextColumn Header="% Reduction" Binding="{Binding SpaceReductionPercent}" Width="95">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="Removable" Binding="{Binding RemovableIndexes}" Width="90">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Current Size GB" Binding="{Binding CurrentSizeGb}" Width="115">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="After Cleanup GB" Binding="{Binding SizeAfterCleanupGb}" Width="125">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <!-- Index counts -->
+                            <DataGridTextColumn Header="Total Indexes" Binding="{Binding TotalIndexes}" Width="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="Mergeable" Binding="{Binding MergeableIndexes}" Width="90">
@@ -761,20 +816,16 @@
                             <DataGridTextColumn Header="% Removable" Binding="{Binding PercentRemovable}" Width="95">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Current Size GB" Binding="{Binding CurrentSizeGb}" Width="115">
+                            <!-- Object context -->
+                            <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="100"/>
+                            <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                            <DataGridTextColumn Header="Tables" Binding="{Binding TablesAnalyzed}" Width="70">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="After Cleanup GB" Binding="{Binding SizeAfterCleanupGb}" Width="125">
-                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Header="Space Saved GB" Binding="{Binding SpaceSavedGb}" Width="110">
-                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Header="% Reduction" Binding="{Binding SpaceReductionPercent}" Width="95">
-                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
+                            <!-- Compression -->
                             <DataGridTextColumn Header="Compression Savings" Binding="{Binding CompressionSavingsPotential}" Width="220"/>
                             <DataGridTextColumn Header="Compression Total" Binding="{Binding CompressionSavingsPotentialTotal}" Width="240"/>
+                            <!-- Remaining detail -->
                             <DataGridTextColumn Header="UDF Computed Cols" Binding="{Binding ComputedColumnsWithUdfs}" Width="130">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
@@ -981,7 +1032,21 @@
                     </Expander>
 
                     <!-- Wait Stats Summary -->
-                    <Expander Header="Wait Stats Summary" IsExpanded="True" Margin="0,0,0,8">
+                    <Expander IsExpanded="True" Margin="0,0,0,8">
+                        <Expander.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Wait Stats Summary" VerticalAlignment="Center"/>
+                                <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
+                                <ComboBox x:Name="WaitStatsTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11"
+                                          SelectionChanged="WaitStatsTimeRange_Changed">
+                                    <ComboBoxItem Content="Last 1 hour"/>
+                                    <ComboBoxItem Content="Last 4 hours"/>
+                                    <ComboBoxItem Content="Last 12 hours"/>
+                                    <ComboBoxItem Content="Last 24 hours"/>
+                                    <ComboBoxItem Content="Last 7 days"/>
+                                </ComboBox>
+                            </StackPanel>
+                        </Expander.Header>
                         <StackPanel>
                             <DataGrid x:Name="WaitCategorySummaryDataGrid"
                                       AutoGenerateColumns="False"
@@ -1035,7 +1100,21 @@
                     </Expander>
 
                     <!-- Expensive Queries -->
-                    <Expander Header="Expensive Queries (Top 20 by CPU)" IsExpanded="True" Margin="0,0,0,8">
+                    <Expander IsExpanded="True" Margin="0,0,0,8">
+                        <Expander.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Expensive Queries (Top 20 by CPU)" VerticalAlignment="Center"/>
+                                <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
+                                <ComboBox x:Name="ExpensiveQueriesTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11"
+                                          SelectionChanged="ExpensiveQueriesTimeRange_Changed">
+                                    <ComboBoxItem Content="Last 1 hour"/>
+                                    <ComboBoxItem Content="Last 4 hours"/>
+                                    <ComboBoxItem Content="Last 12 hours"/>
+                                    <ComboBoxItem Content="Last 24 hours"/>
+                                    <ComboBoxItem Content="Last 7 days"/>
+                                </ComboBox>
+                            </StackPanel>
+                        </Expander.Header>
                         <StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
                                 <TextBlock x:Name="ExpensiveQueriesCountIndicator" Text=""
@@ -1099,6 +1178,58 @@
                             </DataGrid>
                             <TextBlock x:Name="ExpensiveQueriesNoDataMessage"
                                        Text="No expensive queries found"
+                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       HorizontalAlignment="Center" Margin="0,4,0,0"
+                                       Visibility="Collapsed"/>
+                        </StackPanel>
+                    </Expander>
+
+                    <!-- Memory Grant Efficiency -->
+                    <Expander Header="Memory Grant Efficiency" IsExpanded="True" Margin="0,0,0,8">
+                        <StackPanel>
+                            <DataGrid x:Name="MemoryGrantEfficiencyDataGrid"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      CanUserSortColumns="True"
+                                      GridLinesVisibility="Horizontal"
+                                      CanUserResizeColumns="True"
+                                      HeadersVisibility="Column"
+                                      SelectionMode="Extended"
+                                      MaxHeight="250"
+                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100"/>
+                                    <DataGridTextColumn Header="Avg Granted MB" Binding="{Binding AvgGrantedMb, StringFormat='{}{0:N1}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Avg Used MB" Binding="{Binding AvgUsedMb, StringFormat='{}{0:N1}'}" Width="110">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Efficiency %" Binding="{Binding EfficiencyPct, StringFormat='{}{0:N1}'}" Width="100">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Peak Grant MB" Binding="{Binding PeakGrantedMb, StringFormat='{}{0:N1}'}" Width="120">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Wasted MB" Binding="{Binding WastedMb, StringFormat='{}{0:N1}'}" Width="100">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Grantees" Binding="{Binding TotalGrantees, StringFormat='{}{0:N0}'}" Width="90">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Waiters" Binding="{Binding TotalWaiters, StringFormat='{}{0:N0}'}" Width="80">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Timeouts" Binding="{Binding TimeoutErrors, StringFormat='{}{0:N0}'}" Width="90">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Forced" Binding="{Binding ForcedGrants, StringFormat='{}{0:N0}'}" Width="80">
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="MemoryGrantEfficiencyNoDataMessage"
+                                       Text="No memory grant data available"
                                        FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
                                        HorizontalAlignment="Center" Margin="0,4,0,0"
                                        Visibility="Collapsed"/>
@@ -1212,15 +1343,7 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
                             <DataGridTextColumn Header="Edition" Binding="{Binding Edition}" Width="200"/>
-                            <DataGridTextColumn Header="Version" Binding="{Binding ProductVersion}" Width="110"/>
-                            <DataGridTextColumn Header="Update Level" Binding="{Binding ProductUpdateLevel}" Width="100"/>
-                            <DataGridTextColumn Header="Engine Edition" Binding="{Binding EngineEdition}" Width="110">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="HorizontalAlignment" Value="Right"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Version" Binding="{Binding ProductVersion}" Width="180"/>
                             <DataGridTextColumn Header="CPUs" Binding="{Binding CpuCount, StringFormat='{}{0:N0}'}" Width="70">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
@@ -1249,6 +1372,38 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
+                            <DataGridTextColumn Header="Status" Binding="{Binding ProvisioningDisplay}" Width="130">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding ProvisioningStatus}" Value="RIGHT_SIZED">
+                                                <Setter Property="Foreground" Value="#27AE60"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding ProvisioningStatus}" Value="OVER_PROVISIONED">
+                                                <Setter Property="Foreground" Value="#F39C12"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding ProvisioningStatus}" Value="UNDER_PROVISIONED">
+                                                <Setter Property="Foreground" Value="#E74C3C"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Avg CPU %" Binding="{Binding AvgCpuPct, StringFormat='{}{0:N1}'}" Width="80">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Storage GB" Binding="{Binding StorageTotalGb, StringFormat='{}{0:N1}'}" Width="95">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Idle DBs" Binding="{Binding IdleDbCount}" Width="70">
+                                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Uptime" Binding="{Binding UptimeDisplay}" Width="90"/>
+                            <DataGridTextColumn Header="Start Time" Binding="{Binding SqlServerStartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
+                            <DataGridTextColumn Header="Last Updated" Binding="{Binding LastUpdated, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150"/>
                             <DataGridTextColumn Header="HADR" Binding="{Binding HadrDisplay}" Width="60"/>
                             <DataGridTextColumn Header="Clustered" Binding="{Binding ClusteredDisplay}" Width="80"/>
                         </DataGrid.Columns>

@@ -131,6 +131,9 @@ public partial class FinOpsTab : UserControl
 
                 var sizes = await _dataService.GetDatabaseSizeSummaryAsync(serverId);
                 DbSizeChart.ItemsSource = sizes;
+
+                var trend = await _dataService.GetProvisioningTrendAsync(serverId);
+                ProvisioningTrendGrid.ItemsSource = trend;
             }
         }
         catch (Exception ex)
@@ -317,13 +320,50 @@ public partial class FinOpsTab : UserControl
 
     private async System.Threading.Tasks.Task LoadServerInventoryAsync()
     {
-        if (_dataService == null) return;
+        if (_dataService == null || _serverManager == null || _credentialService == null) return;
 
         try
         {
-            var data = await _dataService.GetServerPropertiesLatestAsync();
-            ServerInventoryDataGrid.ItemsSource = data;
+            var servers = _serverManager.GetAllServers();
 
+            var tasks = servers.Select(async server =>
+            {
+                try
+                {
+                    var connStr = server.GetConnectionString(_credentialService);
+
+                    // Step 1: Query live server properties
+                    var item = await LocalDataService.GetServerPropertiesLiveAsync(connStr);
+                    item.ServerName = server.DisplayName;
+
+                    // Step 2: Get collected metrics from DuckDB
+                    try
+                    {
+                        var serverId = RemoteCollectorService.GetDeterministicHashCode(server.ServerName);
+                        var (avgCpu, storageGb, idleDbs, status) = await _dataService!.GetServerMetricsAsync(serverId);
+                        item.AvgCpuPct = avgCpu;
+                        item.StorageTotalGb = storageGb;
+                        item.IdleDbCount = idleDbs;
+                        item.ProvisioningStatus = status;
+                    }
+                    catch
+                    {
+                        // DuckDB metrics may not exist yet — that's OK
+                    }
+
+                    return item;
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error("FinOps", $"Failed to query {server.DisplayName}: {ex.Message}");
+                    return (ServerPropertyRow?)null;
+                }
+            });
+
+            var results = await System.Threading.Tasks.Task.WhenAll(tasks);
+            var data = results.Where(r => r != null).Cast<ServerPropertyRow>().ToList();
+
+            ServerInventoryDataGrid.ItemsSource = data;
             NoServerInventoryMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             ServerInventoryCountIndicator.Text = data.Count > 0 ? $"{data.Count} server(s)" : "";
         }
@@ -383,13 +423,40 @@ public partial class FinOpsTab : UserControl
         }
     }
 
+    private int GetWaitStatsHoursBack()
+    {
+        return WaitStatsTimeRangeCombo.SelectedIndex switch
+        {
+            0 => 1,
+            1 => 4,
+            2 => 12,
+            3 => 24,
+            4 => 168,
+            _ => 24
+        };
+    }
+
+    private int GetExpensiveQueriesHoursBack()
+    {
+        return ExpensiveQueriesTimeRangeCombo.SelectedIndex switch
+        {
+            0 => 1,
+            1 => 4,
+            2 => 12,
+            3 => 24,
+            4 => 168,
+            _ => 24
+        };
+    }
+
     private async System.Threading.Tasks.Task LoadWaitCategorySummaryAsync(int serverId)
     {
         if (_dataService == null) return;
 
         try
         {
-            var data = await _dataService.GetWaitCategorySummaryAsync(serverId);
+            var hoursBack = GetWaitStatsHoursBack();
+            var data = await _dataService.GetWaitCategorySummaryAsync(serverId, hoursBack);
             WaitCategorySummaryDataGrid.ItemsSource = data;
             WaitCategorySummaryNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -405,7 +472,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetExpensiveQueriesAsync(serverId);
+            var hoursBack = GetExpensiveQueriesHoursBack();
+            var data = await _dataService.GetExpensiveQueriesAsync(serverId, hoursBack);
             ExpensiveQueriesDataGrid.ItemsSource = data;
             ExpensiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             ExpensiveQueriesCountIndicator.Text = data.Count > 0 ? $"{data.Count} query(s)" : "";
@@ -413,6 +481,22 @@ public partial class FinOpsTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to load expensive queries: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadMemoryGrantEfficiencyAsync(int serverId)
+    {
+        if (_dataService == null) return;
+
+        try
+        {
+            var data = await _dataService.GetMemoryGrantEfficiencyAsync(serverId);
+            MemoryGrantEfficiencyDataGrid.ItemsSource = data;
+            MemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load memory grant efficiency: {ex.Message}");
         }
     }
 
@@ -460,6 +544,22 @@ public partial class FinOpsTab : UserControl
         if (serverId != 0) await LoadStorageGrowthAsync(serverId);
     }
 
+    private async void WaitStatsTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _dataService == null) return;
+        var serverId = GetSelectedServerId();
+        if (serverId == 0) return;
+        await LoadWaitCategorySummaryAsync(serverId);
+    }
+
+    private async void ExpensiveQueriesTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _dataService == null) return;
+        var serverId = GetSelectedServerId();
+        if (serverId == 0) return;
+        await LoadExpensiveQueriesAsync(serverId);
+    }
+
     private async void OptimizationRefresh_Click(object sender, RoutedEventArgs e)
     {
         var serverId = GetSelectedServerId();
@@ -469,7 +569,8 @@ public partial class FinOpsTab : UserControl
             LoadIdleDatabasesAsync(serverId),
             LoadTempdbSummaryAsync(serverId),
             LoadWaitCategorySummaryAsync(serverId),
-            LoadExpensiveQueriesAsync(serverId)
+            LoadExpensiveQueriesAsync(serverId),
+            LoadMemoryGrantEfficiencyAsync(serverId)
         );
     }
 

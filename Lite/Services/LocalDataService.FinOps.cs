@@ -67,33 +67,290 @@ ORDER BY database_name, file_type_desc, file_name";
     }
 
     /// <summary>
-    /// Gets the latest server properties snapshot per server (cross-server).
+    /// Queries a SQL Server directly for its properties via SERVERPROPERTY + sys.dm_os_sys_info.
+    /// Works from any database context — no PerformanceMonitor DB required.
     /// </summary>
-    public async Task<List<ServerPropertyRow>> GetServerPropertiesLatestAsync()
+    public static async Task<ServerPropertyRow> GetServerPropertiesLiveAsync(string connectionString)
+    {
+        using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        const string query = @"
+SELECT
+    CONVERT(nvarchar(256), SERVERPROPERTY('Edition')),
+    CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
+    CONVERT(nvarchar(128), SERVERPROPERTY('ProductLevel')),
+    CONVERT(nvarchar(128), SERVERPROPERTY('ProductUpdateLevel')),
+    si.cpu_count,
+    si.physical_memory_kb / 1024,
+    si.sqlserver_start_time,
+    (SELECT SUM(CAST(size AS bigint)) * 8.0 / 1024.0 / 1024.0 FROM sys.master_files),
+    si.socket_count,
+    si.cores_per_socket,
+    CONVERT(int, SERVERPROPERTY('EngineEdition')),
+    CONVERT(int, SERVERPROPERTY('IsHadrEnabled')),
+    CONVERT(int, SERVERPROPERTY('IsClustered'))
+FROM sys.dm_os_sys_info AS si;";
+
+        using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
+        using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            var version = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            var level = reader.IsDBNull(2) ? "" : reader.GetString(2);
+            var updateLevel = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var versionDisplay = !string.IsNullOrEmpty(updateLevel)
+                ? $"{version} - {updateLevel}"
+                : $"{version} - {level}";
+
+            return new ServerPropertyRow
+            {
+                Edition = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                ProductVersion = versionDisplay,
+                CpuCount = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
+                PhysicalMemoryMb = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                SqlServerStartTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                StorageTotalGb = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
+                SocketCount = reader.IsDBNull(8) ? null : Convert.ToInt32(reader.GetValue(8)),
+                CoresPerSocket = reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
+                EngineEdition = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
+                IsHadrEnabled = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)) == 1,
+                IsClustered = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)) == 1,
+                LastUpdated = DateTime.Now
+            };
+        }
+
+        return new ServerPropertyRow();
+    }
+
+    /// <summary>
+    /// Gets collected metrics (CPU, storage, idle DBs) for a specific server from DuckDB.
+    /// </summary>
+    public async Task<(decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus)> GetServerMetricsAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+
+        var cpuCutoff = DateTime.UtcNow.AddHours(-24);
+        var idleCutoff = DateTime.UtcNow.AddDays(-7);
+
         command.CommandText = @"
+WITH cpu_24h AS (
+    SELECT
+        AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
+        MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct
+    FROM v_cpu_utilization_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+),
+mem_latest AS (
+    SELECT
+        CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0) AS memory_ratio
+    FROM v_memory_stats
+    WHERE server_id = $1
+    AND   (server_id, collection_time) IN (
+        SELECT server_id, MAX(collection_time)
+        FROM v_memory_stats
+        WHERE server_id = $1
+        GROUP BY server_id
+    )
+),
+storage_totals AS (
+    SELECT
+        SUM(total_size_mb) / 1024.0 AS total_storage_gb
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   (server_id, collection_time) IN (
+        SELECT server_id, MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+        GROUP BY server_id
+    )
+),
+idle_dbs AS (
+    SELECT
+        COUNT(DISTINCT database_name) AS idle_db_count
+    FROM (
+        SELECT database_name
+        FROM v_database_size_stats
+        WHERE server_id = $1
+        AND   (server_id, collection_time) IN (
+            SELECT server_id, MAX(collection_time)
+            FROM v_database_size_stats
+            WHERE server_id = $1
+            GROUP BY server_id
+        )
+        AND database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
+        EXCEPT
+        SELECT DISTINCT database_name
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $3
+        AND   delta_execution_count > 0
+    ) AS idle
+)
 SELECT
-    server_name,
-    edition,
-    product_version,
-    product_level,
-    product_update_level,
-    engine_edition,
-    cpu_count,
-    physical_memory_mb,
-    socket_count,
-    cores_per_socket,
-    is_hadr_enabled,
-    is_clustered
-FROM v_server_properties
-WHERE (server_id, collection_time) IN (
-    SELECT server_id, MAX(collection_time)
+    c.avg_cpu_pct,
+    st.total_storage_gb,
+    id.idle_db_count,
+    CASE
+        WHEN c.avg_cpu_pct < 15 AND c.max_cpu_pct < 40 AND COALESCE(m.memory_ratio, 0) < 0.5
+        THEN 'OVER_PROVISIONED'
+        WHEN c.p95_cpu_pct > 85 OR COALESCE(m.memory_ratio, 0) > 0.95
+        THEN 'UNDER_PROVISIONED'
+        ELSE 'RIGHT_SIZED'
+    END AS provisioning_status
+FROM (SELECT 1) AS anchor
+LEFT JOIN cpu_24h c ON true
+LEFT JOIN mem_latest m ON true
+LEFT JOIN storage_totals st ON true
+LEFT JOIN idle_dbs id ON true";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cpuCutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = idleCutoff });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            return (
+                reader.IsDBNull(0) ? null : Convert.ToDecimal(reader.GetValue(0)),
+                reader.IsDBNull(1) ? null : Convert.ToDecimal(reader.GetValue(1)),
+                reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : reader.GetString(3)
+            );
+        }
+
+        return (null, null, null, null);
+    }
+
+    /// <summary>
+    /// Gets the latest server properties snapshot per server (cross-server) from DuckDB.
+    /// Fallback for when live query is not available.
+    /// </summary>
+    public async Task<List<ServerPropertyRow>> GetServerPropertiesLatestAsync(IEnumerable<int>? activeServerIds = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cpuCutoff = DateTime.UtcNow.AddHours(-24);
+        var idleCutoff = DateTime.UtcNow.AddDays(-7);
+        var recentCutoff = DateTime.UtcNow.AddHours(-24);
+
+        // Build server ID filter — integers only, safe to inline
+        var serverFilter = "";
+        if (activeServerIds != null)
+        {
+            var idList = string.Join(",", activeServerIds);
+            if (!string.IsNullOrEmpty(idList))
+                serverFilter = $"AND server_id IN ({idList})";
+        }
+
+        command.CommandText = $@"
+WITH active_servers AS (
+    SELECT DISTINCT server_id, server_name
+    FROM v_cpu_utilization_stats
+    WHERE collection_time >= $3
+    {serverFilter}
+),
+latest_props AS (
+    SELECT *
     FROM v_server_properties
+    WHERE (server_id, collection_time) IN (
+        SELECT server_id, MAX(collection_time)
+        FROM v_server_properties
+        GROUP BY server_id
+    )
+),
+cpu_24h AS (
+    SELECT
+        server_id,
+        AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
+        MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct
+    FROM v_cpu_utilization_stats
+    WHERE collection_time >= $1
+    GROUP BY server_id
+),
+mem_latest AS (
+    SELECT
+        server_id,
+        CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0) AS memory_ratio
+    FROM v_memory_stats
+    WHERE (server_id, collection_time) IN (
+        SELECT server_id, MAX(collection_time)
+        FROM v_memory_stats
+        GROUP BY server_id
+    )
+),
+storage_totals AS (
+    SELECT
+        server_id,
+        SUM(total_size_mb) / 1024.0 AS total_storage_gb
+    FROM v_database_size_stats
+    WHERE (server_id, collection_time) IN (
+        SELECT server_id, MAX(collection_time)
+        FROM v_database_size_stats
+        GROUP BY server_id
+    )
+    GROUP BY server_id
+),
+idle_dbs AS (
+    SELECT
+        server_id,
+        COUNT(DISTINCT database_name) AS idle_db_count
+    FROM (
+        SELECT server_id, database_name
+        FROM v_database_size_stats
+        WHERE (server_id, collection_time) IN (
+            SELECT server_id, MAX(collection_time)
+            FROM v_database_size_stats
+            GROUP BY server_id
+        )
+        AND database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
+        EXCEPT
+        SELECT DISTINCT server_id, database_name
+        FROM v_query_stats
+        WHERE collection_time >= $2
+        AND   delta_execution_count > 0
+    ) AS idle
     GROUP BY server_id
 )
-ORDER BY server_name";
+SELECT
+    a.server_name,
+    sp.edition,
+    sp.product_version,
+    sp.product_level,
+    sp.product_update_level,
+    sp.engine_edition,
+    sp.cpu_count,
+    sp.physical_memory_mb,
+    sp.socket_count,
+    sp.cores_per_socket,
+    sp.is_hadr_enabled,
+    sp.is_clustered,
+    c.avg_cpu_pct,
+    st.total_storage_gb,
+    id.idle_db_count,
+    CASE
+        WHEN c.avg_cpu_pct < 15 AND c.max_cpu_pct < 40 AND COALESCE(m.memory_ratio, 0) < 0.5
+        THEN 'OVER_PROVISIONED'
+        WHEN c.p95_cpu_pct > 85 OR COALESCE(m.memory_ratio, 0) > 0.95
+        THEN 'UNDER_PROVISIONED'
+        ELSE 'RIGHT_SIZED'
+    END AS provisioning_status
+FROM active_servers a
+LEFT JOIN latest_props sp ON sp.server_id = a.server_id
+LEFT JOIN cpu_24h c ON c.server_id = a.server_id
+LEFT JOIN mem_latest m ON m.server_id = a.server_id
+LEFT JOIN storage_totals st ON st.server_id = a.server_id
+LEFT JOIN idle_dbs id ON id.server_id = a.server_id
+ORDER BY a.server_name";
+
+        command.Parameters.Add(new DuckDBParameter { Value = cpuCutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = idleCutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = recentCutoff });
 
         var items = new List<ServerPropertyRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -112,7 +369,11 @@ ORDER BY server_name";
                 SocketCount = reader.IsDBNull(8) ? null : Convert.ToInt32(reader.GetValue(8)),
                 CoresPerSocket = reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
                 IsHadrEnabled = reader.IsDBNull(10) ? null : reader.GetBoolean(10),
-                IsClustered = reader.IsDBNull(11) ? null : reader.GetBoolean(11)
+                IsClustered = reader.IsDBNull(11) ? null : reader.GetBoolean(11),
+                AvgCpuPct = reader.IsDBNull(12) ? null : Convert.ToDecimal(reader.GetValue(12)),
+                StorageTotalGb = reader.IsDBNull(13) ? null : Convert.ToDecimal(reader.GetValue(13)),
+                IdleDbCount = reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14)),
+                ProvisioningStatus = reader.IsDBNull(15) ? null : reader.GetString(15)
             });
         }
 
@@ -818,12 +1079,12 @@ FROM latest l CROSS JOIN peak p";
     /// <summary>
     /// Gets wait stats grouped by cost category over the last 24 hours.
     /// </summary>
-    public async Task<List<WaitCategorySummaryRow>> GetWaitCategorySummaryAsync(int serverId)
+    public async Task<List<WaitCategorySummaryRow>> GetWaitCategorySummaryAsync(int serverId, int hoursBack = 24)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-24);
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         command.CommandText = @"
 WITH categorized AS (
@@ -839,7 +1100,7 @@ WITH categorized AS (
         END AS category,
         wait_type,
         SUM(delta_wait_time_ms) AS wait_time_ms,
-        SUM(delta_waiting_tasks_count) AS waiting_tasks
+        SUM(delta_waiting_tasks) AS waiting_tasks
     FROM v_wait_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -1067,6 +1328,156 @@ LIMIT $3";
 
         return (details, summaries);
     }
+
+    /// <summary>
+    /// Gets 7-day daily provisioning classification trend.
+    /// </summary>
+    public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddDays(-7);
+
+        command.CommandText = @"
+WITH daily_cpu AS (
+    SELECT
+        CAST(collection_time AS DATE) AS day,
+        AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
+        MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct
+    FROM v_cpu_utilization_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    GROUP BY CAST(collection_time AS DATE)
+),
+daily_mem AS (
+    SELECT
+        CAST(collection_time AS DATE) AS day,
+        AVG(CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0)) AS avg_memory_ratio
+    FROM v_memory_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    GROUP BY CAST(collection_time AS DATE)
+)
+SELECT
+    c.day,
+    c.avg_cpu_pct,
+    c.max_cpu_pct,
+    c.p95_cpu_pct,
+    COALESCE(m.avg_memory_ratio, 0)
+FROM daily_cpu c
+LEFT JOIN daily_mem m ON m.day = c.day
+ORDER BY c.day";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+
+        var items = new List<ProvisioningTrendRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var avgCpu = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1));
+            var maxCpu = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
+            var p95Cpu = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
+            var memRatio = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4));
+
+            var status = "RIGHT_SIZED";
+            if (avgCpu < 15 && maxCpu < 40 && memRatio < 0.5m)
+                status = "OVER_PROVISIONED";
+            else if (p95Cpu > 85 || memRatio > 0.95m)
+                status = "UNDER_PROVISIONED";
+
+            items.Add(new ProvisioningTrendRow
+            {
+                Day = reader.GetDateTime(0),
+                AvgCpuPct = avgCpu,
+                MaxCpuPct = maxCpu,
+                P95CpuPct = p95Cpu,
+                MemoryRatio = memRatio,
+                Status = status
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Gets memory grant efficiency stats for the Optimization tab.
+    /// Shows pool-level grant vs used efficiency from resource semaphore snapshots.
+    /// </summary>
+    public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+
+        command.CommandText = @"
+SELECT
+    CAST(collection_time AS DATE) AS day,
+    AVG(granted_memory_mb) AS avg_granted_mb,
+    AVG(used_memory_mb) AS avg_used_mb,
+    CAST(AVG(used_memory_mb) * 100.0 / NULLIF(AVG(granted_memory_mb), 0) AS DECIMAL(5,1)) AS efficiency_pct,
+    MAX(granted_memory_mb) AS peak_granted_mb,
+    SUM(grantee_count) AS total_grantees,
+    SUM(waiter_count) AS total_waiters,
+    SUM(timeout_error_count_delta) AS timeout_errors,
+    SUM(forced_grant_count_delta) AS forced_grants
+FROM v_memory_grant_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+GROUP BY CAST(collection_time AS DATE)
+ORDER BY CAST(collection_time AS DATE)";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+
+        var items = new List<MemoryGrantEfficiencyRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new MemoryGrantEfficiencyRow
+            {
+                Day = reader.GetDateTime(0),
+                AvgGrantedMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                AvgUsedMb = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
+                EfficiencyPct = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                PeakGrantedMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                TotalGrantees = reader.IsDBNull(5) ? 0 : ToInt64(reader.GetValue(5)),
+                TotalWaiters = reader.IsDBNull(6) ? 0 : ToInt64(reader.GetValue(6)),
+                TimeoutErrors = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
+                ForcedGrants = reader.IsDBNull(8) ? 0 : ToInt64(reader.GetValue(8))
+            });
+        }
+        return items;
+    }
+}
+
+public class ProvisioningTrendRow
+{
+    public DateTime Day { get; set; }
+    public decimal AvgCpuPct { get; set; }
+    public int MaxCpuPct { get; set; }
+    public decimal P95CpuPct { get; set; }
+    public decimal MemoryRatio { get; set; }
+    public string Status { get; set; } = "";
+    public string DayDisplay => Day.ToString("ddd MM/dd");
+    public string StatusDisplay => Status.Replace("_", " ");
+}
+
+public class MemoryGrantEfficiencyRow
+{
+    public DateTime Day { get; set; }
+    public decimal AvgGrantedMb { get; set; }
+    public decimal AvgUsedMb { get; set; }
+    public decimal EfficiencyPct { get; set; }
+    public decimal PeakGrantedMb { get; set; }
+    public long TotalGrantees { get; set; }
+    public long TotalWaiters { get; set; }
+    public long TimeoutErrors { get; set; }
+    public long ForcedGrants { get; set; }
+    public string DayDisplay => Day.ToString("ddd MM/dd");
+    public decimal WastedMb => AvgGrantedMb - AvgUsedMb;
 }
 
 public class TopResourceConsumerRow
@@ -1167,11 +1578,28 @@ public class ServerPropertyRow
     public long PhysicalMemoryMb { get; set; }
     public int? SocketCount { get; set; }
     public int? CoresPerSocket { get; set; }
+    public DateTime? SqlServerStartTime { get; set; }
+    public DateTime? LastUpdated { get; set; }
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
 
+    public decimal? AvgCpuPct { get; set; }
+    public decimal? StorageTotalGb { get; set; }
+    public int? IdleDbCount { get; set; }
+    public string? ProvisioningStatus { get; set; }
+
+    public string UptimeDisplay
+    {
+        get
+        {
+            if (SqlServerStartTime == null) return "";
+            var uptime = DateTime.Now - SqlServerStartTime.Value;
+            return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
+        }
+    }
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
+    public string ProvisioningDisplay => ProvisioningStatus?.Replace("_", " ") ?? "";
 }
 
 public class DatabaseSizeTrendPoint

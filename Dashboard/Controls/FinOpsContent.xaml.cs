@@ -134,6 +134,9 @@ namespace PerformanceMonitorDashboard.Controls
 
                     var sizes = await _databaseService.GetFinOpsDatabaseSizeSummaryAsync();
                     DbSizeChart.ItemsSource = sizes;
+
+                    var trend = await _databaseService.GetFinOpsProvisioningTrendAsync();
+                    ProvisioningTrendGrid.ItemsSource = trend;
                 }
             }
             catch (Exception ex)
@@ -356,13 +359,40 @@ namespace PerformanceMonitorDashboard.Controls
         // Optimization Tab — Wait Stats Summary
         // ============================================
 
+        private int GetWaitStatsHoursBack()
+        {
+            return WaitStatsTimeRangeCombo.SelectedIndex switch
+            {
+                0 => 1,
+                1 => 4,
+                2 => 12,
+                3 => 24,
+                4 => 168,
+                _ => 24
+            };
+        }
+
+        private int GetExpensiveQueriesHoursBack()
+        {
+            return ExpensiveQueriesTimeRangeCombo.SelectedIndex switch
+            {
+                0 => 1,
+                1 => 4,
+                2 => 12,
+                3 => 24,
+                4 => 168,
+                _ => 24
+            };
+        }
+
         private async Task LoadWaitCategorySummaryAsync()
         {
             if (_databaseService == null) return;
 
             try
             {
-                var data = await _databaseService.GetFinOpsWaitCategorySummaryAsync();
+                var hoursBack = GetWaitStatsHoursBack();
+                var data = await _databaseService.GetFinOpsWaitCategorySummaryAsync(hoursBack);
                 WaitCategorySummaryDataGrid.ItemsSource = data;
                 WaitCategorySummaryNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             }
@@ -382,7 +412,8 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
-                var data = await _databaseService.GetFinOpsExpensiveQueriesAsync();
+                var hoursBack = GetExpensiveQueriesHoursBack();
+                var data = await _databaseService.GetFinOpsExpensiveQueriesAsync(hoursBack);
                 ExpensiveQueriesDataGrid.ItemsSource = data;
                 ExpensiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 ExpensiveQueriesCountIndicator.Text = data.Count > 0 ? $"{data.Count} query(s)" : "";
@@ -390,6 +421,22 @@ namespace PerformanceMonitorDashboard.Controls
             catch (Exception ex)
             {
                 Logger.Error($"Error loading expensive queries: {ex.Message}", ex);
+            }
+        }
+
+        private async Task LoadMemoryGrantEfficiencyAsync()
+        {
+            if (_databaseService == null) return;
+
+            try
+            {
+                var data = await _databaseService.GetFinOpsMemoryGrantEfficiencyAsync();
+                MemoryGrantEfficiencyDataGrid.ItemsSource = data;
+                MemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading memory grant efficiency: {ex.Message}", ex);
             }
         }
 
@@ -494,14 +541,52 @@ namespace PerformanceMonitorDashboard.Controls
 
         private async Task LoadServerInventoryAsync()
         {
-            if (_databaseService == null) return;
+            if (_serverManager == null || _credentialService == null) return;
 
             try
             {
-                var data = await _databaseService.GetFinOpsServerInventoryAsync();
-                ServerInventoryDataGrid.ItemsSource = data;
-                ServerInventoryNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                ServerInventoryCountIndicator.Text = data.Count > 0 ? $"{data.Count} server(s)" : "";
+                var servers = _serverManager.GetAllServers();
+
+                var tasks = servers.Select(async server =>
+                {
+                    try
+                    {
+                        var connStr = server.GetConnectionString(_credentialService);
+
+                        // Step 1: Query live server properties (works from any DB context)
+                        var item = await DatabaseService.GetServerPropertiesLiveAsync(connStr);
+                        item.ServerName = server.DisplayName;
+
+                        // Step 2: Try to augment with collected metrics from PerformanceMonitor DB
+                        try
+                        {
+                            var svc = new DatabaseService(connStr);
+                            var (avgCpu, storageGb, idleDbs, status) = await svc.GetServerMetricsAsync();
+                            if (avgCpu.HasValue) item.AvgCpuPct = avgCpu;
+                            if (storageGb.HasValue) item.StorageTotalGb = storageGb;
+                            if (idleDbs.HasValue) item.IdleDbCount = idleDbs;
+                            if (status != null) item.ProvisioningStatus = status;
+                        }
+                        catch
+                        {
+                            // PerformanceMonitor DB may not exist or have no data — that's OK
+                        }
+
+                        return item;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Error loading server inventory for {server.DisplayName}: {ex.Message}", ex);
+                        return (FinOpsServerInventory?)null;
+                    }
+                });
+
+                var results = await Task.WhenAll(tasks);
+                var allItems = results.Where(r => r != null).Cast<FinOpsServerInventory>().ToList();
+
+                ServerInventoryDataGrid.ItemsSource = allItems;
+                ServerInventoryNoDataMessage.Visibility = allItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                ServerInventoryCountIndicator.Text = allItems.Count > 0 ? $"{allItems.Count} server(s)" : "";
             }
             catch (Exception ex)
             {
@@ -528,13 +613,26 @@ namespace PerformanceMonitorDashboard.Controls
             await LoadStorageGrowthAsync();
         }
 
+        private async void WaitStatsTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (!IsLoaded || _databaseService == null) return;
+            await LoadWaitCategorySummaryAsync();
+        }
+
+        private async void ExpensiveQueriesTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (!IsLoaded || _databaseService == null) return;
+            await LoadExpensiveQueriesAsync();
+        }
+
         private async void OptimizationRefresh_Click(object sender, RoutedEventArgs e)
         {
             await Task.WhenAll(
                 LoadIdleDatabasesAsync(),
                 LoadTempdbSummaryAsync(),
                 LoadWaitCategorySummaryAsync(),
-                LoadExpensiveQueriesAsync()
+                LoadExpensiveQueriesAsync(),
+                LoadMemoryGrantEfficiencyAsync()
             );
         }
 

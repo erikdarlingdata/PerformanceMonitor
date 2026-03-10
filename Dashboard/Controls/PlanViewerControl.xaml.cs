@@ -623,7 +623,7 @@ public partial class PlanViewerControl : UserControl
             || !string.IsNullOrEmpty(node.InnerSideJoinColumns)
             || !string.IsNullOrEmpty(node.OuterSideJoinColumns)
             || !string.IsNullOrEmpty(node.ActionColumn)
-            || node.ManyToMany || node.BitmapCreator
+            || node.ManyToMany || node.PhysicalOp == "Merge Join" || node.BitmapCreator
             || node.SortDistinct || node.StartupExpression
             || node.NLOptimized || node.WithOrderedPrefetch || node.WithUnorderedPrefetch
             || node.WithTies || node.Remoting || node.LocalParallelism
@@ -688,8 +688,10 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Inner Join Cols", node.InnerSideJoinColumns, isCode: true);
             if (!string.IsNullOrEmpty(node.OuterSideJoinColumns))
                 AddPropertyRow("Outer Join Cols", node.OuterSideJoinColumns, isCode: true);
-            if (node.ManyToMany)
-                AddPropertyRow("Many to Many", "True");
+            if (node.PhysicalOp == "Merge Join")
+                AddPropertyRow("Many to Many", node.ManyToMany ? "Yes" : "No");
+            else if (node.ManyToMany)
+                AddPropertyRow("Many to Many", "Yes");
             if (!string.IsNullOrEmpty(node.ConstantScanValues))
                 AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
             if (!string.IsNullOrEmpty(node.UdxUsedColumns))

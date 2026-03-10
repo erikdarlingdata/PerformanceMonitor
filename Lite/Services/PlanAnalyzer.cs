@@ -188,48 +188,44 @@ public static partial class PlanAnalyzer
             });
         }
 
-        // Rule 25: Ineffective parallelism — parallel plan where CPU ≈ elapsed
+        // Rule 25: Ineffective parallelism — DOP-aware efficiency scoring
+        // Efficiency = (speedup - 1) / (DOP - 1) * 100
+        // where speedup = CPU / Elapsed. At DOP 1 speedup=1 (0%), at DOP=speedup (100%).
+        // Rule 31: Parallel wait bottleneck — elapsed >> CPU means threads waiting, not working.
         if (stmt.DegreeOfParallelism > 1 && stmt.QueryTimeStats != null)
         {
             var cpu = stmt.QueryTimeStats.CpuTimeMs;
             var elapsed = stmt.QueryTimeStats.ElapsedTimeMs;
+            var dop = stmt.DegreeOfParallelism;
 
             if (elapsed >= 1000 && cpu > 0)
             {
-                var ratio = (double)cpu / elapsed;
-                if (ratio >= 0.8 && ratio <= 1.3)
-                {
-                    stmt.PlanWarnings.Add(new PlanWarning
-                    {
-                        WarningType = "Ineffective Parallelism",
-                        Message = $"Parallel plan (DOP {stmt.DegreeOfParallelism}) but CPU time ({cpu:N0}ms) is nearly equal to elapsed time ({elapsed:N0}ms). " +
-                                  $"The work ran essentially serially despite the overhead of parallelism. " +
-                                  $"Look for parallel thread skew, blocking exchanges, or serial zones in the plan that prevent effective parallel execution.",
-                        Severity = PlanWarningSeverity.Warning
-                    });
-                }
-            }
-        }
+                var speedup = (double)cpu / elapsed;
+                var efficiency = Math.Max(0.0, Math.Min(100.0, (speedup - 1.0) / (dop - 1.0) * 100.0));
 
-        // Rule 31: Parallel wait bottleneck — elapsed time significantly exceeds CPU time
-        if (stmt.DegreeOfParallelism > 1 && stmt.QueryTimeStats != null)
-        {
-            var cpu = stmt.QueryTimeStats.CpuTimeMs;
-            var elapsed = stmt.QueryTimeStats.ElapsedTimeMs;
-
-            if (elapsed >= 1000 && cpu > 0)
-            {
-                var ratio = (double)cpu / elapsed;
-                if (ratio < 0.8)
+                if (speedup < 0.5)
                 {
-                    var waitPct = (1.0 - ratio) * 100;
+                    // CPU well below Elapsed: threads are waiting, not doing CPU work
+                    var waitPct = (1.0 - speedup) * 100;
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Parallel Wait Bottleneck",
-                        Message = $"Parallel plan (DOP {stmt.DegreeOfParallelism}) with elapsed time ({elapsed:N0}ms) significantly exceeding CPU time ({cpu:N0}ms). " +
+                        Message = $"Parallel plan (DOP {dop}, {efficiency:N0}% efficient) with elapsed time ({elapsed:N0}ms) exceeding CPU time ({cpu:N0}ms). " +
                                   $"Approximately {waitPct:N0}% of elapsed time was spent waiting rather than on CPU. " +
                                   $"Common causes include spills to tempdb, physical I/O reads, lock or latch contention, and memory grant waits.",
                         Severity = PlanWarningSeverity.Warning
+                    });
+                }
+                else if (efficiency < 40)
+                {
+                    // CPU >= Elapsed but well below DOP potential — parallelism is ineffective
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Ineffective Parallelism",
+                        Message = $"Parallel plan (DOP {dop}) is only {efficiency:N0}% efficient — CPU time ({cpu:N0}ms) vs elapsed time ({elapsed:N0}ms). " +
+                                  $"At DOP {dop}, ideal CPU time would be ~{elapsed * dop:N0}ms. " +
+                                  $"Look for parallel thread skew, blocking exchanges, or serial zones in the plan that prevent effective parallel execution.",
+                        Severity = efficiency < 20 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                     });
                 }
             }

@@ -374,56 +374,196 @@ OPTION(MAXDOP 1, RECOMPILE);";
         /// <summary>
         /// Fetches server inventory from config.server_info.
         /// </summary>
-        public async Task<List<FinOpsServerInventory>> GetFinOpsServerInventoryAsync()
+        /// <summary>
+        /// Queries a SQL Server directly for its properties via SERVERPROPERTY + sys.dm_os_sys_info.
+        /// Works from any database context — no PerformanceMonitor DB required.
+        /// </summary>
+        public static async Task<FinOpsServerInventory> GetServerPropertiesLiveAsync(string connectionString)
         {
-            var items = new List<FinOpsServerInventory>();
+            await using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
 
+            const string query = @"
+SELECT
+    edition =
+        CONVERT(nvarchar(256), SERVERPROPERTY('Edition')),
+    product_version =
+        CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
+    product_level =
+        CONVERT(nvarchar(128), SERVERPROPERTY('ProductLevel')),
+    product_update_level =
+        CONVERT(nvarchar(128), SERVERPROPERTY('ProductUpdateLevel')),
+    cpu_count =
+        si.cpu_count,
+    physical_memory_mb =
+        si.physical_memory_kb / 1024,
+    sqlserver_start_time =
+        si.sqlserver_start_time,
+    total_storage_gb =
+        (SELECT SUM(CAST(size AS bigint)) * 8.0 / 1024.0 / 1024.0 FROM sys.master_files),
+    socket_count =
+        si.socket_count,
+    cores_per_socket =
+        si.cores_per_socket,
+    engine_edition =
+        CONVERT(int, SERVERPROPERTY('EngineEdition')),
+    is_hadr_enabled =
+        CONVERT(int, SERVERPROPERTY('IsHadrEnabled')),
+    is_clustered =
+        CONVERT(int, SERVERPROPERTY('IsClustered'))
+FROM sys.dm_os_sys_info AS si;";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 30;
+
+            using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                var version = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                var level = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                var updateLevel = reader.IsDBNull(3) ? null : reader.GetString(3);
+                var versionDisplay = !string.IsNullOrEmpty(updateLevel)
+                    ? $"{version} - {updateLevel}"
+                    : $"{version} - {level}";
+
+                return new FinOpsServerInventory
+                {
+                    Edition = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    SqlVersion = versionDisplay,
+                    CpuCount = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
+                    PhysicalMemoryMb = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                    SqlServerStartTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                    StorageTotalGb = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
+                    SocketCount = reader.IsDBNull(8) ? null : Convert.ToInt32(reader.GetValue(8)),
+                    CoresPerSocket = reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
+                    EngineEdition = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10)),
+                    IsHadrEnabled = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)) == 1,
+                    IsClustered = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)) == 1,
+                    LastUpdated = DateTime.Now
+                };
+            }
+
+            return new FinOpsServerInventory();
+        }
+
+        /// <summary>
+        /// Gets collected metrics (CPU, storage, idle DBs) from the PerformanceMonitor database.
+        /// Returns null values if no data is collected yet.
+        /// </summary>
+        public async Task<(decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus)> GetServerMetricsAsync()
+        {
             await using var tc = await OpenThrottledConnectionAsync();
             var connection = tc.Connection;
 
-            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-                SELECT
-                    server_name,
-                    edition,
-                    sql_version,
-                    environment_type,
-                    cpu_count,
-                    physical_memory_mb,
-                    sqlserver_start_time,
-                    uptime_days,
-                    uptime_hours,
-                    last_updated
-                FROM config.server_info
-                ORDER BY
-                    server_name
-                OPTION(MAXDOP 1, RECOMPILE);";
+WITH
+    cpu_24h AS
+    (
+        SELECT DISTINCT
+            avg_cpu_pct =
+                AVG(CONVERT(decimal(5,2), cu.sqlserver_cpu_utilization)) OVER (),
+            max_cpu_pct =
+                MAX(cu.sqlserver_cpu_utilization) OVER (),
+            p95_cpu_pct =
+                CONVERT
+                (
+                    decimal(5,2),
+                    PERCENTILE_CONT(0.95)
+                    WITHIN GROUP (ORDER BY cu.sqlserver_cpu_utilization)
+                    OVER ()
+                )
+        FROM collect.cpu_utilization_stats AS cu
+        WHERE cu.collection_time >= DATEADD(HOUR, -24, SYSDATETIME())
+    ),
+    mem_latest AS
+    (
+        SELECT TOP (1)
+            memory_ratio =
+                CONVERT(decimal(10,4), ms.total_memory_mb) /
+                NULLIF(ms.committed_target_memory_mb, 0)
+        FROM collect.memory_stats AS ms
+        ORDER BY
+            ms.collection_time DESC
+    ),
+    storage_total AS
+    (
+        SELECT
+            total_storage_gb =
+                SUM(ds.total_size_mb) / 1024.0
+        FROM collect.database_size_stats AS ds
+        WHERE ds.collection_time =
+        (
+            SELECT MAX(ds2.collection_time)
+            FROM collect.database_size_stats AS ds2
+        )
+    ),
+    idle_dbs AS
+    (
+        SELECT
+            idle_db_count = COUNT(DISTINCT d.database_name)
+        FROM
+        (
+            SELECT DISTINCT ds.database_name
+            FROM collect.database_size_stats AS ds
+            WHERE ds.collection_time =
+            (
+                SELECT MAX(ds2.collection_time)
+                FROM collect.database_size_stats AS ds2
+            )
+            AND ds.database_name NOT IN (N'master', N'model', N'msdb', N'tempdb')
+            EXCEPT
+            SELECT DISTINCT qs.database_name
+            FROM collect.query_stats AS qs
+            WHERE qs.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+            AND   qs.execution_count_delta > 0
+        ) AS d
+    )
+SELECT
+    c.avg_cpu_pct,
+    st.total_storage_gb,
+    id.idle_db_count,
+    provisioning_status =
+        CASE
+            WHEN c.avg_cpu_pct < 15
+            AND  c.max_cpu_pct < 40
+            AND  ISNULL(m.memory_ratio, 0) < 0.5
+            THEN N'OVER_PROVISIONED'
+            WHEN c.p95_cpu_pct > 85
+            OR   ISNULL(m.memory_ratio, 0) > 0.95
+            THEN N'UNDER_PROVISIONED'
+            ELSE N'RIGHT_SIZED'
+        END
+FROM (SELECT 1 AS x) AS anchor
+LEFT JOIN cpu_24h AS c
+  ON 1 = 1
+LEFT JOIN mem_latest AS m
+  ON 1 = 1
+LEFT JOIN storage_total AS st
+  ON 1 = 1
+LEFT JOIN idle_dbs AS id
+  ON 1 = 1
+OPTION(MAXDOP 1, RECOMPILE);";
 
             using var command = new SqlCommand(query, connection);
             command.CommandTimeout = 120;
 
-            using (StartQueryTiming("FinOps_ServerInventory", query, connection))
+            using (StartQueryTiming("FinOps_ServerMetrics", query, connection))
             {
                 using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                if (await reader.ReadAsync())
                 {
-                    items.Add(new FinOpsServerInventory
-                    {
-                        ServerName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                        Edition = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                        SqlVersion = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                        EnvironmentType = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                        CpuCount = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
-                        PhysicalMemoryMb = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                        SqlServerStartTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                        UptimeDays = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
-                        UptimeHours = reader.IsDBNull(8) ? 0 : Convert.ToInt32(reader.GetValue(8)),
-                        LastUpdated = reader.IsDBNull(9) ? null : reader.GetDateTime(9)
-                    });
+                    return (
+                        reader.IsDBNull(0) ? null : Convert.ToDecimal(reader.GetValue(0)),
+                        reader.IsDBNull(1) ? null : Convert.ToDecimal(reader.GetValue(1)),
+                        reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2)),
+                        reader.IsDBNull(3) ? null : reader.GetString(3)
+                    );
                 }
             }
 
-            return items;
+            return (null, null, null, null);
         }
 
         /// <summary>
@@ -975,7 +1115,7 @@ OPTION(MAXDOP 1, RECOMPILE);";
         /// <summary>
         /// Gets wait stats grouped by cost category over the last 24 hours.
         /// </summary>
-        public async Task<List<FinOpsWaitCategorySummary>> GetFinOpsWaitCategorySummaryAsync()
+        public async Task<List<FinOpsWaitCategorySummary>> GetFinOpsWaitCategorySummaryAsync(int hoursBack = 24)
         {
             var items = new List<FinOpsWaitCategorySummary>();
 
@@ -1010,7 +1150,7 @@ WITH
             waiting_tasks =
                 SUM(waiting_tasks_count_delta)
         FROM collect.wait_stats
-        WHERE collection_time >= DATEADD(HOUR, -24, SYSDATETIME())
+        WHERE collection_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME())
         AND   wait_time_ms_delta IS NOT NULL
         AND   wait_time_ms_delta > 0
         GROUP BY
@@ -1081,6 +1221,7 @@ ORDER BY
 OPTION(MAXDOP 1, RECOMPILE);";
 
             using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@hoursBack", hoursBack);
             command.CommandTimeout = 120;
 
             using (StartQueryTiming("FinOps_WaitCategorySummary", query, connection))
@@ -1295,6 +1436,174 @@ OPTION(MAXDOP 1, RECOMPILE);";
 
             return (details, summaries);
         }
+
+        /// <summary>
+        /// Gets 7-day daily provisioning classification trend.
+        /// </summary>
+        public async Task<List<FinOpsProvisioningTrend>> GetFinOpsProvisioningTrendAsync()
+        {
+            var items = new List<FinOpsProvisioningTrend>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+WITH
+    daily_cpu AS
+    (
+        SELECT DISTINCT
+            day = CONVERT(date, cu.collection_time),
+            avg_cpu_pct =
+                AVG(CONVERT(decimal(5,2), cu.sqlserver_cpu_utilization))
+                OVER (PARTITION BY CONVERT(date, cu.collection_time)),
+            max_cpu_pct =
+                MAX(cu.sqlserver_cpu_utilization)
+                OVER (PARTITION BY CONVERT(date, cu.collection_time)),
+            p95_cpu_pct =
+                CONVERT
+                (
+                    decimal(5,2),
+                    PERCENTILE_CONT(0.95)
+                    WITHIN GROUP (ORDER BY cu.sqlserver_cpu_utilization)
+                    OVER (PARTITION BY CONVERT(date, cu.collection_time))
+                )
+        FROM collect.cpu_utilization_stats AS cu
+        WHERE cu.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+    ),
+    daily_mem AS
+    (
+        SELECT
+            day = CONVERT(date, ms.collection_time),
+            avg_memory_ratio =
+                AVG
+                (
+                    CONVERT(decimal(10,4), ms.total_memory_mb) /
+                    NULLIF(ms.committed_target_memory_mb, 0)
+                )
+        FROM collect.memory_stats AS ms
+        WHERE ms.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
+        GROUP BY
+            CONVERT(date, ms.collection_time)
+    )
+SELECT
+    c.day,
+    c.avg_cpu_pct,
+    c.max_cpu_pct,
+    c.p95_cpu_pct,
+    ISNULL(m.avg_memory_ratio, 0),
+    provisioning_status =
+        CASE
+            WHEN c.avg_cpu_pct < 15
+            AND  c.max_cpu_pct < 40
+            AND  ISNULL(m.avg_memory_ratio, 0) < 0.5
+            THEN N'OVER_PROVISIONED'
+            WHEN c.p95_cpu_pct > 85
+            OR   ISNULL(m.avg_memory_ratio, 0) > 0.95
+            THEN N'UNDER_PROVISIONED'
+            ELSE N'RIGHT_SIZED'
+        END
+FROM daily_cpu AS c
+LEFT JOIN daily_mem AS m
+  ON m.day = c.day
+ORDER BY
+    c.day
+OPTION(MAXDOP 1, RECOMPILE);";
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+
+            using (StartQueryTiming("FinOps_ProvisioningTrend", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new FinOpsProvisioningTrend
+                    {
+                        Day = reader.GetDateTime(0),
+                        AvgCpuPct = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                        MaxCpuPct = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2)),
+                        P95CpuPct = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                        MemoryRatio = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                        Status = reader.IsDBNull(5) ? "" : reader.GetString(5)
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        /// <summary>
+        /// Gets memory grant efficiency from resource semaphore data.
+        /// </summary>
+        public async Task<List<FinOpsMemoryGrantEfficiency>> GetFinOpsMemoryGrantEfficiencyAsync(int hoursBack = 24)
+        {
+            var items = new List<FinOpsMemoryGrantEfficiency>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    day = CONVERT(date, mg.collection_time),
+    avg_granted_mb =
+        AVG(mg.granted_memory_mb),
+    avg_used_mb =
+        AVG(mg.used_memory_mb),
+    efficiency_pct =
+        CONVERT
+        (
+            decimal(5,1),
+            AVG(mg.used_memory_mb) * 100.0 /
+            NULLIF(AVG(mg.granted_memory_mb), 0)
+        ),
+    peak_granted_mb =
+        MAX(mg.granted_memory_mb),
+    total_grantees =
+        SUM(mg.grantee_count),
+    total_waiters =
+        SUM(mg.waiter_count),
+    timeout_errors =
+        SUM(mg.timeout_error_count_delta),
+    forced_grants =
+        SUM(mg.forced_grant_count_delta)
+FROM collect.memory_grant_stats AS mg
+WHERE mg.collection_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME())
+GROUP BY
+    CONVERT(date, mg.collection_time)
+ORDER BY
+    CONVERT(date, mg.collection_time)
+OPTION(MAXDOP 1, RECOMPILE);";
+
+            using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@hoursBack", hoursBack);
+            command.CommandTimeout = 120;
+
+            using (StartQueryTiming("FinOps_MemoryGrantEfficiency", query, connection))
+            {
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    items.Add(new FinOpsMemoryGrantEfficiency
+                    {
+                        Day = reader.GetDateTime(0),
+                        AvgGrantedMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+                        AvgUsedMb = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
+                        EfficiencyPct = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                        PeakGrantedMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                        TotalGrantees = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
+                        TotalWaiters = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
+                        TimeoutErrors = reader.IsDBNull(7) ? 0 : Convert.ToInt64(reader.GetValue(7)),
+                        ForcedGrants = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8))
+                    });
+                }
+            }
+
+            return items;
+        }
     }
 
     // ============================================
@@ -1351,14 +1660,31 @@ OPTION(MAXDOP 1, RECOMPILE);";
         public string ServerName { get; set; } = "";
         public string Edition { get; set; } = "";
         public string SqlVersion { get; set; } = "";
-        public string EnvironmentType { get; set; } = "";
         public int CpuCount { get; set; }
         public long PhysicalMemoryMb { get; set; }
+        public int? SocketCount { get; set; }
+        public int? CoresPerSocket { get; set; }
+        public int? EngineEdition { get; set; }
         public DateTime? SqlServerStartTime { get; set; }
-        public int UptimeDays { get; set; }
-        public int UptimeHours { get; set; }
         public DateTime? LastUpdated { get; set; }
-        public string UptimeDisplay => $"{UptimeDays}d {UptimeHours}h";
+        public bool? IsHadrEnabled { get; set; }
+        public bool? IsClustered { get; set; }
+        public decimal? AvgCpuPct { get; set; }
+        public decimal? StorageTotalGb { get; set; }
+        public int? IdleDbCount { get; set; }
+        public string? ProvisioningStatus { get; set; }
+        public string UptimeDisplay
+        {
+            get
+            {
+                if (SqlServerStartTime == null) return "";
+                var uptime = DateTime.Now - SqlServerStartTime.Value;
+                return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
+            }
+        }
+        public string ProvisioningDisplay => ProvisioningStatus?.Replace("_", " ") ?? "";
+        public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
+        public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
     }
 
     public class FinOpsDatabaseSizeStats
@@ -1477,6 +1803,33 @@ OPTION(MAXDOP 1, RECOMPILE);";
         public string IndexWrites { get; set; } = "";
         public string OriginalIndexDefinition { get; set; } = "";
         public string Script { get; set; } = "";
+    }
+
+    public class FinOpsProvisioningTrend
+    {
+        public DateTime Day { get; set; }
+        public decimal AvgCpuPct { get; set; }
+        public int MaxCpuPct { get; set; }
+        public decimal P95CpuPct { get; set; }
+        public decimal MemoryRatio { get; set; }
+        public string Status { get; set; } = "";
+        public string DayDisplay => Day.ToString("ddd MM/dd");
+        public string StatusDisplay => Status.Replace("_", " ");
+    }
+
+    public class FinOpsMemoryGrantEfficiency
+    {
+        public DateTime Day { get; set; }
+        public decimal AvgGrantedMb { get; set; }
+        public decimal AvgUsedMb { get; set; }
+        public decimal EfficiencyPct { get; set; }
+        public decimal PeakGrantedMb { get; set; }
+        public long TotalGrantees { get; set; }
+        public long TotalWaiters { get; set; }
+        public long TimeoutErrors { get; set; }
+        public long ForcedGrants { get; set; }
+        public string DayDisplay => Day.ToString("ddd MM/dd");
+        public decimal WastedMb => AvgGrantedMb - AvgUsedMb;
     }
 
     public class IndexCleanupSummary
