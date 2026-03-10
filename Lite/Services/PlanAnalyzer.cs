@@ -300,7 +300,7 @@ public static partial class PlanAnalyzer
             var modifiesTableVar = false;
             CheckForTableVariables(stmt.RootNode, isModification, ref hasTableVar, ref modifiesTableVar);
 
-            if (hasTableVar)
+            if (hasTableVar && !modifiesTableVar)
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
@@ -758,11 +758,17 @@ public static partial class PlanAnalyzer
         if (!string.IsNullOrEmpty(node.ObjectName) &&
             node.ObjectName.StartsWith('@'))
         {
+            var isModificationOp = node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
+                || node.PhysicalOp.Contains("Update", StringComparison.OrdinalIgnoreCase)
+                || node.PhysicalOp.Contains("Delete", StringComparison.OrdinalIgnoreCase);
+
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Table Variable",
-                Message = "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
-                Severity = PlanWarningSeverity.Warning
+                Message = isModificationOp
+                    ? "Modifying a table variable forces the entire plan to run single-threaded. Replace with a #temp table to allow parallel execution."
+                    : "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
+                Severity = isModificationOp ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
             });
         }
 
