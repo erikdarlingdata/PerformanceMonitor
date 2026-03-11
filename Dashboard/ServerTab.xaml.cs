@@ -325,7 +325,7 @@ namespace PerformanceMonitorDashboard
 
                     try
                     {
-                        await LoadDataAsync();
+                        await LoadDataAsync(fullRefresh: false);
                     }
                     catch (Exception ex)
                     {
@@ -396,7 +396,7 @@ namespace PerformanceMonitorDashboard
 
                     try
                     {
-                        await LoadDataAsync();
+                        await LoadDataAsync(fullRefresh: false);
                     }
                     catch (Exception ex)
                     {
@@ -445,7 +445,7 @@ namespace PerformanceMonitorDashboard
 
                     try
                     {
-                        await LoadDataAsync();
+                        await LoadDataAsync(fullRefresh: false);
                     }
                     catch (Exception ex)
                     {
@@ -1081,7 +1081,12 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private async Task LoadDataAsync()
+        /// <summary>
+        /// Loads data for the Dashboard. When fullRefresh is true (first load, manual refresh,
+        /// Apply to All), all tabs are refreshed in parallel. When false (auto-refresh timer tick),
+        /// only the currently visible tab is refreshed to reduce SQL Server load.
+        /// </summary>
+        private async Task LoadDataAsync(bool fullRefresh = true)
         {
             using var _ = Helpers.MethodProfiler.StartTiming("ServerTab");
             try
@@ -1104,35 +1109,110 @@ namespace PerformanceMonitorDashboard
 
                 StatusText.Text = GetLoadingMessage();
 
-                // Fetch all data in parallel — overview queries + all tab refreshes
+                if (fullRefresh)
+                {
+                    // Full refresh: query all tabs in parallel (first load, manual refresh, Apply to All)
+                    await RefreshAllTabsAsync();
+                }
+                else
+                {
+                    // Timer tick: only refresh the currently visible tab
+                    await RefreshVisibleTabAsync();
+                }
+
+                StatusText.Text = "Ready";
+                FooterText.Text = $"Last refresh: {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Server: {_serverConnection.DisplayName}";
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = "Error loading data";
+                MessageBox.Show(
+                    $"Error loading data:\n\n{ex.Message}",
+                    "Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error
+                );
+            }
+            finally
+            {
+                RefreshButton.IsEnabled = true;
+            }
+        }
+
+        // ====================================================================
+        // Per-Tab Refresh Methods
+        // ====================================================================
+
+        /// <summary>
+        /// Refreshes all tabs in parallel — used on first load, manual refresh, and Apply to All.
+        /// </summary>
+        private async Task RefreshAllTabsAsync()
+        {
+            var overviewTask = RefreshOverviewTabAsync();
+            var queriesTask = RefreshQueriesTabAsync();
+            var resourceMetricsTask = RefreshResourceMetricsTabAsync();
+            var memoryTask = RefreshMemoryTabAsync();
+            var lockingTask = RefreshLockingTabAsync();
+            var systemEventsTask = RefreshSystemEventsTabAsync();
+
+            await Task.WhenAll(overviewTask, queriesTask, resourceMetricsTask, memoryTask, lockingTask, systemEventsTask);
+        }
+
+        /// <summary>
+        /// Refreshes only the currently visible tab — used on auto-refresh timer tick.
+        /// </summary>
+        private async Task RefreshVisibleTabAsync()
+        {
+            var selectedTab = DataTabControl.SelectedItem as TabItem;
+            if (selectedTab == null) return;
+
+            var tabHeader = GetTabHeaderText(selectedTab);
+
+            switch (tabHeader)
+            {
+                case "Overview":
+                    await RefreshOverviewTabAsync();
+                    break;
+                case "Queries":
+                    await RefreshQueriesTabAsync();
+                    break;
+                case "Resource Metrics":
+                    await RefreshResourceMetricsTabAsync();
+                    break;
+                case "Memory":
+                    await RefreshMemoryTabAsync();
+                    break;
+                case "Locking":
+                    await RefreshLockingTabAsync();
+                    break;
+                case "System Events":
+                    await RefreshSystemEventsTabAsync();
+                    break;
+                // Plan Viewer has no data to refresh
+            }
+        }
+
+        /// <summary>
+        /// Refreshes the Overview tab: Collection Health, Duration Trends, Daily Summary,
+        /// Critical Issues, Default Trace, Current Config, Config Changes, Resource Overview, Running Jobs.
+        /// </summary>
+        private async Task RefreshOverviewTabAsync()
+        {
+            try
+            {
                 var healthTask = _databaseService.GetCollectionHealthAsync();
                 var durationLogsTask = _databaseService.GetCollectionDurationLogsAsync();
-                var blockingEventsTask = _databaseService.GetBlockingEventsAsync();
-                var deadlocksTask = _databaseService.GetDeadlocksAsync();
-                var blockingStatsTask = _databaseService.GetBlockingDeadlockStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
-                var lockWaitStatsTask = _databaseService.GetLockWaitStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
-                var currentWaitsDurationTask = _databaseService.GetWaitingTaskTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
-                var currentWaitsBlockedTask = _databaseService.GetBlockedSessionTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
-
-                var performanceTask = PerformanceTab.RefreshAllDataAsync();
-                var memoryTask = MemoryTab.RefreshAllDataAsync();
                 var resourceOverviewTask = RefreshResourceOverviewAsync();
                 var runningJobsTask = RefreshRunningJobsAsync();
-                var resourceMetricsTask = ResourceMetricsContent.RefreshAllDataAsync();
                 var dailySummaryTask = DailySummaryTab.RefreshDataAsync();
                 var criticalIssuesTask = CriticalIssuesTab.RefreshDataAsync();
                 var defaultTraceTask = DefaultTraceTab.RefreshAllDataAsync();
                 var currentConfigTask = CurrentConfigTab.RefreshAllDataAsync();
                 var configChangesTask = ConfigChangesTab.RefreshAllDataAsync();
-                var systemEventsTask = SystemEventsContent.RefreshAllDataAsync();
 
-                // Wait for everything to complete before _isRefreshing resets
-                await Task.WhenAll(
-                    healthTask, durationLogsTask, blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask, currentWaitsDurationTask, currentWaitsBlockedTask,
-                    performanceTask, memoryTask, resourceOverviewTask, runningJobsTask,
-                    resourceMetricsTask, dailySummaryTask, criticalIssuesTask, defaultTraceTask, currentConfigTask, configChangesTask, systemEventsTask);
+                await Task.WhenAll(healthTask, durationLogsTask, resourceOverviewTask, runningJobsTask,
+                    dailySummaryTask, criticalIssuesTask, defaultTraceTask, currentConfigTask, configChangesTask);
 
-                // Populate grids with fetched data
                 var healthData = await healthTask;
                 HealthDataGrid.ItemsSource = healthData;
                 UpdateDataGridFilterButtonStyles(HealthDataGrid, _collectionHealthFilters);
@@ -1140,6 +1220,74 @@ namespace PerformanceMonitorDashboard
 
                 var durationLogs = await durationLogsTask;
                 UpdateCollectorDurationChart(durationLogs);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error refreshing Overview tab: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Refreshes the Queries tab (delegated to QueryPerformanceContent UserControl).
+        /// </summary>
+        private async Task RefreshQueriesTabAsync()
+        {
+            try
+            {
+                await PerformanceTab.RefreshAllDataAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error refreshing Queries tab: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Refreshes the Resource Metrics tab (delegated to ResourceMetricsContent UserControl).
+        /// </summary>
+        private async Task RefreshResourceMetricsTabAsync()
+        {
+            try
+            {
+                await ResourceMetricsContent.RefreshAllDataAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error refreshing Resource Metrics tab: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Refreshes the Memory tab (delegated to MemoryContent UserControl).
+        /// </summary>
+        private async Task RefreshMemoryTabAsync()
+        {
+            try
+            {
+                await MemoryTab.RefreshAllDataAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error refreshing Memory tab: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Refreshes the Locking tab: Blocking events, deadlocks, blocking/deadlock stats,
+        /// lock wait stats, current waits duration, and current waits blocked sessions.
+        /// </summary>
+        private async Task RefreshLockingTabAsync()
+        {
+            try
+            {
+                var blockingEventsTask = _databaseService.GetBlockingEventsAsync();
+                var deadlocksTask = _databaseService.GetDeadlocksAsync();
+                var blockingStatsTask = _databaseService.GetBlockingDeadlockStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                var lockWaitStatsTask = _databaseService.GetLockWaitStatsAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                var currentWaitsDurationTask = _databaseService.GetWaitingTaskTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+                var currentWaitsBlockedTask = _databaseService.GetBlockedSessionTrendAsync(_blockingStatsHoursBack, _blockingStatsFromDate, _blockingStatsToDate);
+
+                await Task.WhenAll(blockingEventsTask, deadlocksTask, blockingStatsTask, lockWaitStatsTask, currentWaitsDurationTask, currentWaitsBlockedTask);
 
                 try
                 {
@@ -1180,27 +1328,55 @@ namespace PerformanceMonitorDashboard
                 {
                     Logger.Warning($"Could not load blocking/deadlock stats: {blockingStatsEx.Message}");
                 }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error refreshing Locking tab: {ex.Message}", ex);
+            }
+        }
 
-                int failing = healthData.Count(h => h.HealthStatus == "FAILING");
-                int stale = healthData.Count(h => h.HealthStatus == "STALE");
-                int healthy = healthData.Count(h => h.HealthStatus == "HEALTHY");
+        /// <summary>
+        /// Refreshes the System Events tab (delegated to SystemEventsContent UserControl).
+        /// </summary>
+        private async Task RefreshSystemEventsTabAsync()
+        {
+            try
+            {
+                await SystemEventsContent.RefreshAllDataAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error refreshing System Events tab: {ex.Message}", ex);
+            }
+        }
 
+        /// <summary>
+        /// Handles the main TabControl's SelectionChanged event to refresh the newly
+        /// visible tab with current data. Guards against bubbling from nested TabControls.
+        /// </summary>
+        private async void DataTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            // Only handle events from the main DataTabControl, not from nested sub-tab controls
+            if (e.Source != DataTabControl) return;
+
+            // Don't refresh during initial load or if already refreshing
+            if (_isRefreshing || !IsLoaded) return;
+
+            _isRefreshing = true;
+            try
+            {
+                await RefreshVisibleTabAsync();
                 StatusText.Text = "Ready";
                 FooterText.Text = $"Last refresh: {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Server: {_serverConnection.DisplayName}";
             }
             catch (Exception ex)
             {
-                StatusText.Text = "Error loading data";
-                MessageBox.Show(
-                    $"Error loading data:\n\n{ex.Message}",
-                    "Error",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error
-                );
+                Logger.Error($"Error refreshing on tab switch: {ex.Message}", ex);
+                StatusText.Text = "Error refreshing data";
             }
             finally
             {
-                RefreshButton.IsEnabled = true;
+                _isRefreshing = false;
             }
         }
 

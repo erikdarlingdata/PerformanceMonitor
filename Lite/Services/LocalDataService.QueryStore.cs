@@ -50,7 +50,7 @@ SELECT
     MAX(query_plan_hash) AS query_plan_hash,
     MAX(CASE WHEN is_forced_plan THEN TRUE ELSE FALSE END) AS is_forced_plan,
     MAX(plan_forcing_type) AS plan_forcing_type,
-    MAX(query_plan_text) AS query_plan_text,
+    NULL AS query_plan_text,
     MAX(execution_type_desc) AS execution_type_desc,
     MIN(first_execution_time) AS first_execution_time,
     AVG(CAST(avg_clr_time_us AS DOUBLE)) / 1000.0 AS avg_clr_time_ms,

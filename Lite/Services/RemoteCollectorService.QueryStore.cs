@@ -315,7 +315,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
          force_failure_count = qsp.force_failure_count,
          last_force_failure_reason = qsp.last_force_failure_reason_desc,
          compatibility_level = qsp.compatibility_level,
-         query_plan_text = CONVERT(nvarchar(max), qsp.query_plan),
+         query_plan_text = CONVERT(nvarchar(1), NULL),
          query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1)
      FROM sys.query_store_runtime_stats AS qsrs
      JOIN sys.query_store_plan AS qsp
@@ -326,7 +326,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
        ON qst.query_text_id = qsq.query_text_id
      WHERE qsrs.last_execution_time > @cutoff_time
      AND   qst.query_sql_text NOT LIKE N''%PerformanceMonitorLite%''
-     OPTION(RECOMPILE);',
+     OPTION(RECOMPILE, LOOP JOIN);',
     N'@cutoff_time datetime2(7)',
     @cutoff_time;";
 

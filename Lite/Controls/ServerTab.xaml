@@ -119,7 +119,7 @@
 
         <!-- Main Tab Control -->
         <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{DynamicResource BackgroundBrush}"
-                    BorderThickness="0" Padding="0">
+                    BorderThickness="0" Padding="0" SelectionChanged="MainTabControl_SelectionChanged">
 
             <!-- Wait Stats Tab -->
             <TabItem Header="Wait Stats">
@@ -179,7 +179,7 @@
             <!-- Query Performance Tab -->
             <TabItem Header="Queries">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0">
                         <TabItem Header="Performance Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -697,7 +697,7 @@
 
             <!-- Memory Tab -->
             <TabItem Header="Memory">
-                <TabControl Background="Transparent" BorderThickness="0">
+                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
                         <Grid Margin="8">
@@ -890,7 +890,7 @@
             <!-- Blocking Tab -->
             <TabItem Header="Blocking">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="BlockingSubTabControl" Background="Transparent" BorderThickness="0">
                         <TabItem Header="Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
