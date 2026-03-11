@@ -86,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 19;
+    internal const int CurrentSchemaVersion = 21;
 
     private readonly string _archivePath;
 
@@ -552,6 +552,33 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v19 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 20)
+        {
+            _logger?.LogInformation("Running migration to v20: adding mute rules table and muted column to alert log");
+            try
+            {
+                /* DuckDB does not support ADD COLUMN with NOT NULL — use nullable with DEFAULT */
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS muted BOOLEAN DEFAULT false");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v20 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 21)
+        {
+            _logger?.LogInformation("Running migration to v21: adding detail_text column to alert log");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS detail_text VARCHAR");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v21 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

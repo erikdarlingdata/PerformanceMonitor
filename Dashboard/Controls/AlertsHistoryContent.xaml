@@ -9,6 +9,10 @@
         <ResourceDictionary>
             <!-- Context Menu for DataGrid Copy/Export -->
             <ContextMenu x:Key="DataGridContextMenu">
+                <MenuItem Header="View Details..." Click="ViewAlertDetails_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
+                </MenuItem>
+                <Separator/>
                 <MenuItem Header="Copy Cell" Click="CopyCell_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
                 </MenuItem>
@@ -21,6 +25,13 @@
                 <Separator/>
                 <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
+                </MenuItem>
+                <Separator/>
+                <MenuItem Header="Mute This Alert..." Click="MuteThisAlert_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F515;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Mute Similar Alerts..." Click="MuteSimilarAlerts_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F507;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>
 
@@ -38,6 +49,10 @@
                     </DataTrigger>
                     <DataTrigger Binding="{Binding IsResolved}" Value="True">
                         <Setter Property="Background" Value="#3322C55E"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding Muted}" Value="True">
+                        <Setter Property="Opacity" Value="0.5"/>
+                        <Setter Property="FontStyle" Value="Italic"/>
                     </DataTrigger>
                 </Style.Triggers>
             </Style>
@@ -89,6 +104,7 @@
                       CanUserResizeColumns="True"
                       SelectionMode="Extended"
                       SelectionChanged="AlertsDataGrid_SelectionChanged"
+                      MouseDoubleClick="AlertsDataGrid_MouseDoubleClick"
                       RowStyle="{StaticResource AlertRowStyle}">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding TimeLocal}" Width="150">

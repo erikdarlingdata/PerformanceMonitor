@@ -1,0 +1,112 @@
+<Window x:Class="PerformanceMonitorDashboard.MuteRuleDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Create Mute Rule"
+        SizeToContent="Height" Width="500"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="{DynamicResource BackgroundBrush}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Create Mute Rule" FontSize="18" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,5"/>
+        <TextBlock Grid.Row="1" Text="Alerts matching all specified fields will be suppressed from notifications."
+                   Foreground="{DynamicResource ForegroundDimBrush}" TextWrapping="Wrap" Margin="0,0,0,15"/>
+
+        <!-- Reason -->
+        <TextBlock Grid.Row="2" Text="Reason (optional)" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBox Grid.Row="3" x:Name="ReasonBox" Margin="0,0,0,12"/>
+
+        <!-- Expiration -->
+        <TextBlock Grid.Row="4" Text="Expires After" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <ComboBox Grid.Row="5" x:Name="ExpirationCombo" SelectedIndex="3" Margin="0,0,0,12">
+            <ComboBoxItem Content="1 hour"/>
+            <ComboBoxItem Content="24 hours"/>
+            <ComboBoxItem Content="7 days"/>
+            <ComboBoxItem Content="Never (permanent)"/>
+        </ComboBox>
+
+        <!-- Separator -->
+        <Border Grid.Row="6" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
+
+        <!-- Match Criteria -->
+        <TextBlock Grid.Row="7" Text="Match Criteria" FontSize="14" FontWeight="SemiBold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="8" Text="Leave fields blank to match any value. All filled fields must match (AND logic)."
+                   Foreground="{DynamicResource ForegroundDimBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+        <!-- Server Name -->
+        <TextBlock Grid.Row="9" Text="Server Name (exact match)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBox Grid.Row="10" x:Name="ServerNameBox" Margin="0,0,0,8"/>
+
+        <!-- Metric Name -->
+        <TextBlock Grid.Row="11" Text="Metric" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <ComboBox Grid.Row="12" x:Name="MetricCombo" SelectedIndex="0" Margin="0,0,0,8"
+                  SelectionChanged="MetricCombo_SelectionChanged">
+            <ComboBoxItem Content="(any)"/>
+            <ComboBoxItem Content="Blocking Detected"/>
+            <ComboBoxItem Content="Deadlocks Detected"/>
+            <ComboBoxItem Content="High CPU"/>
+            <ComboBoxItem Content="Poison Wait"/>
+            <ComboBoxItem Content="Long-Running Query"/>
+            <ComboBoxItem Content="TempDB Space"/>
+            <ComboBoxItem Content="Long-Running Job"/>
+        </ComboBox>
+
+        <!-- Pattern fields in a uniform grid -->
+        <Grid Grid.Row="13" x:Name="PatternFieldsGrid" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" x:Name="DatabaseLabel" Text="Database (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="1" Grid.Column="0" x:Name="DatabasePatternBox" Margin="0,0,0,8"/>
+
+            <TextBlock Grid.Row="0" Grid.Column="2" x:Name="WaitTypeLabel" Text="Wait Type (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="1" Grid.Column="2" x:Name="WaitTypePatternBox" Margin="0,0,0,8"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" x:Name="QueryTextLabel" Text="Query Text (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="3" Grid.Column="0" x:Name="QueryTextPatternBox" Margin="0,0,0,8"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
+        </Grid>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="16" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Save" Width="80" Height="28" Margin="0,0,8,0"
+                    Click="Save_Click" Style="{StaticResource AccentButton}"/>
+            <Button Content="Cancel" Width="80" Height="28" Click="Cancel_Click" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

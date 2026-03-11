@@ -48,7 +48,7 @@ All release binaries are digitally signed via [SignPath](https://signpath.io) �
 
 📋 **Graphical plan viewer** with native ShowPlan rendering, 30-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
 
-🤖 **Built-in MCP server** with 27-31 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
+🤖 **Built-in MCP server** with 28-32 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
 
 🧰 **Community tools installed automatically** — sp_WhoIsActive, sp_BlitzLock, sp_HealthParser, sp_HumanEventsBlockViewer
 
@@ -300,7 +300,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | Dashboard | Separate app | Built-in |
 | Themes | Dark and light | Dark and light |
 | Portability | Server-bound | Single executable |
-| MCP server (LLM integration) | Built into Dashboard (27 tools) | Built-in (31 tools) |
+| MCP server (LLM integration) | Built into Dashboard (28 tools) | Built-in (32 tools) |
 
 ---
 
@@ -349,10 +349,16 @@ Both editions include a real-time alert engine that monitors for performance iss
 |---|---|---|
 | **Blocking** | 30 seconds (Full), 5 seconds (Lite) | Fires when the longest blocked session exceeds the threshold |
 | **Deadlocks** | 1 | Fires when new deadlocks are detected since the last check |
+| **Poison waits** | 100 ms avg | Fires when any poison wait type exceeds the average-ms-per-wait threshold |
+| **Long-running queries** | 5 minutes | Fires when any query exceeds the elapsed-time threshold |
+| **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold |
+| **Long-running agent jobs** | 3× average | Fires when a job's current duration exceeds a multiple of its historical average |
 | **High CPU** | 90% (Full), 80% (Lite) | Fires when total CPU (SQL + other) exceeds the threshold |
 | **Connection changes** | N/A | Fires when a monitored server goes offline or comes back online |
 
 All thresholds are configurable in Settings.
+
+**Poison wait types** monitored: [`THREADPOOL`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#threadpool) (worker thread exhaustion), [`RESOURCE_SEMAPHORE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore) (memory grant pressure), and [`RESOURCE_SEMAPHORE_QUERY_COMPILE`](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-os-wait-stats-transact-sql#resource_semaphore_query_compile) (compilation memory pressure). These waits indicate severe resource starvation and should never occur under normal operation.
 
 ### Notification Channels
 
@@ -375,6 +381,8 @@ Alert emails include:
 - **Server silencing** — right-click a server tab to acknowledge alerts, silence all alerts, or unsilence
 - **Always-on** — the Dashboard alert engine runs independently of which tab is active, including when minimized to the system tray. The Lite edition's alert engine also runs regardless of tab visibility.
 - **Alert history** — Dashboard keeps an in-memory alert log (accessible via MCP). Lite logs alerts to DuckDB (`config_alert_log`).
+- **Alert muting** — create rules to suppress specific recurring alerts while still logging them. Rules match on server name, metric type, database, query text, wait type, or job name (AND logic across fields). Access via Settings → Manage Mute Rules, or right-click an alert in the Alert History tab. The context menu offers two muting options: **Mute This Alert** (pre-fills server + metric for a targeted rule) and **Mute Similar Alerts** (pre-fills metric only, matching across all servers). Muted alerts appear grayed out in alert history and are still recorded for auditability. Rules support optional expiration (1h, 24h, 7 days, or permanent).
+- **Alert details** — right-click any alert in the Alert History tab and choose **View Details** to open a detail window. The window shows core alert fields (time, server, metric, value, threshold, notification type, status) plus context-sensitive details that vary by metric: query text and session info for long-running queries, job name and duration stats for anomalous agent jobs, per-wait-type breakdowns for poison waits, space usage by category for TempDB, and blocking/deadlock session counts.
 
 ---
 
@@ -420,13 +428,13 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-Full Edition exposes 27 tools, Lite Edition exposes 31. Core tools are shared across both editions.
+Full Edition exposes 28 tools, Lite Edition exposes 32. Core tools are shared across both editions.
 
 | Category | Tools |
 |---|---|
 | Discovery | `list_servers` |
 | Health | `get_server_summary`\*, `get_daily_summary`\*\*, `get_collection_health` |
-| Alerts | `get_alert_history`, `get_alert_settings` |
+| Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`\*, `get_wait_trend`, `get_waiting_tasks`\* |
 | Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_expensive_queries`\*\*, `get_query_duration_trend`\*, `get_query_trend` |
 | CPU | `get_cpu_utilization` |

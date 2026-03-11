@@ -22,15 +22,17 @@ namespace PerformanceMonitorDashboard
     public partial class SettingsWindow : Window
     {
         private readonly IUserPreferencesService _preferencesService;
+        private readonly MuteRuleService? _muteRuleService;
         private bool _isLoading = true;
         private readonly string _originalTheme = ThemeManager.CurrentTheme;
         private bool _saved;
 
-        public SettingsWindow(IUserPreferencesService preferencesService)
+        public SettingsWindow(IUserPreferencesService preferencesService, MuteRuleService? muteRuleService = null)
         {
             InitializeComponent();
 
             _preferencesService = preferencesService;
+            _muteRuleService = muteRuleService;
             LoadSettings();
             _isLoading = false;
         }
@@ -321,6 +323,13 @@ namespace PerformanceMonitorDashboard
             EmailCooldownTextBox.Text = "15";
             AlertExcludedDatabasesTextBox.Text = "";
             UpdateAlertPreviewText();
+        }
+
+        private void ManageMuteRulesButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_muteRuleService == null) return;
+            var window = new ManageMuteRulesWindow(_muteRuleService) { Owner = this };
+            window.ShowDialog();
         }
 
         private void UpdateAlertPreviewText()

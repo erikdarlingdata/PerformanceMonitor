@@ -148,7 +148,7 @@ namespace PerformanceMonitorDashboard.Services
         /// </summary>
         public void RecordAlert(string serverId, string serverName, string metricName,
             string currentValue, string thresholdValue, bool alertSent,
-            string notificationType, string? sendError = null)
+            string notificationType, string? sendError = null, bool muted = false, string? detailText = null)
         {
             var entry = new AlertLogEntry
             {
@@ -160,7 +160,9 @@ namespace PerformanceMonitorDashboard.Services
                 ThresholdValue = thresholdValue,
                 AlertSent = alertSent,
                 NotificationType = notificationType,
-                SendError = sendError
+                SendError = sendError,
+                Muted = muted,
+                DetailText = detailText
             };
 
             lock (_alertLogLock)
@@ -410,5 +412,7 @@ namespace PerformanceMonitorDashboard.Services
         public string NotificationType { get; set; } = "";
         public string? SendError { get; set; }
         public bool Hidden { get; set; }
+        public bool Muted { get; set; }
+        public string? DetailText { get; set; }
     }
 }

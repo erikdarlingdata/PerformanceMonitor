@@ -142,7 +142,19 @@ public partial class ServerTab : UserControl
         {
             Interval = TimeSpan.FromSeconds(60)
         };
-        _refreshTimer.Tick += async (s, e) => await RefreshAllDataAsync(fullRefresh: false);
+        _refreshTimer.Tick += async (s, e) =>
+        {
+            if (_isRefreshing) return;
+            _isRefreshing = true;
+            try
+            {
+                await RefreshAllDataAsync(fullRefresh: false);
+            }
+            finally
+            {
+                _isRefreshing = false;
+            }
+        };
         _refreshTimer.Start();
 
         /* Initialize time picker ComboBoxes */

@@ -22,6 +22,10 @@
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>
+
+            <Style x:Key="DefaultRowStyle" TargetType="DataGridRow">
+                <Setter Property="ContextMenu" Value="{StaticResource DataGridContextMenu}"/>
+            </Style>
         </ResourceDictionary>
     </Window.Resources>
 

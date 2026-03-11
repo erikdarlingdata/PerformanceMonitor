@@ -29,6 +29,8 @@ public partial class AlertsHistoryTab : UserControl
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
+    public MuteRuleService? MuteRuleService { get; set; }
+
     public AlertsHistoryTab()
     {
         InitializeComponent();
@@ -393,6 +395,82 @@ public partial class AlertsHistoryTab : UserControl
         if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         return value;
+    }
+
+    #endregion
+
+    #region Mute Handlers
+
+    private void AlertsDataGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (sender is not DataGrid) return;
+
+        // Walk up the visual tree from the click target to find the DataGridRow
+        var source = e.OriginalSource as DependencyObject;
+        while (source != null && source is not DataGridRow && source is not DataGridColumnHeader)
+            source = System.Windows.Media.VisualTreeHelper.GetParent(source);
+
+        // Ignore clicks on column headers or outside rows
+        if (source is not DataGridRow row) return;
+        if (row.DataContext is not AlertHistoryRow item) return;
+
+        var owner = Window.GetWindow(this);
+        var detailWindow = new Windows.AlertDetailWindow(item);
+        if (owner != null) detailWindow.Owner = owner;
+        detailWindow.ShowDialog();
+    }
+
+    private void ViewAlertDetails_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem) return;
+        var dataGrid = FindParentDataGrid(menuItem);
+        if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
+
+        var owner = Window.GetWindow(this);
+        var detailWindow = new Windows.AlertDetailWindow(item);
+        if (owner != null) detailWindow.Owner = owner;
+        detailWindow.ShowDialog();
+    }
+
+    private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)
+    {
+        if (MuteRuleService == null) return;
+        if (sender is not MenuItem menuItem) return;
+        var dataGrid = FindParentDataGrid(menuItem);
+        if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
+
+        var context = new AlertMuteContext
+        {
+            ServerName = item.ServerName,
+            MetricName = item.MetricName
+        };
+
+        var dialog = new Windows.MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
+        if (dialog.ShowDialog() == true)
+        {
+            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            await LoadAlertsAsync();
+        }
+    }
+
+    private async void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
+    {
+        if (MuteRuleService == null) return;
+        if (sender is not MenuItem menuItem) return;
+        var dataGrid = FindParentDataGrid(menuItem);
+        if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
+
+        var context = new AlertMuteContext
+        {
+            MetricName = item.MetricName
+        };
+
+        var dialog = new Windows.MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
+        if (dialog.ShowDialog() == true)
+        {
+            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            await LoadAlertsAsync();
+        }
     }
 
     #endregion

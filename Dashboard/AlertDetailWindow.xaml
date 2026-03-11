@@ -1,0 +1,99 @@
+<Window x:Class="PerformanceMonitorDashboard.AlertDetailWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Alert Details"
+        Width="480" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Icon="/EDD.ico"
+        Background="{DynamicResource BackgroundBrush}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0" Text="Alert Details" FontSize="16" FontWeight="SemiBold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,16"/>
+
+        <!-- Detail fields -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="130"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Time:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="TimeText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Server:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="ServerText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Metric:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="2" Grid.Column="1" x:Name="MetricText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="Current Value:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="CurrentValueText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Threshold:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="4" Grid.Column="1" x:Name="ThresholdText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="5" Grid.Column="0" Text="Notification:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="5" Grid.Column="1" x:Name="NotificationText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="6" Grid.Column="0" Text="Status:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
+            <TextBlock Grid.Row="6" Grid.Column="1" x:Name="StatusText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+        </Grid>
+
+        <!-- Muted indicator -->
+        <Border Grid.Row="2" x:Name="MutedBanner" Visibility="Collapsed"
+                CornerRadius="4" Padding="8" Margin="0,12,0,0">
+            <Border.Background>
+                <SolidColorBrush Color="{StaticResource WarningColor}" Opacity="0.2"/>
+            </Border.Background>
+            <TextBlock Text="🔇 This alert was muted by a mute rule"
+                       Foreground="{DynamicResource ForegroundBrush}" FontStyle="Italic"/>
+        </Border>
+
+        <!-- Context-specific details -->
+        <Border Grid.Row="3" x:Name="DetailPanel" Visibility="Collapsed"
+                Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,12,0,0">
+            <StackPanel>
+                <TextBlock Text="Details" FontWeight="SemiBold" FontSize="13"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>
+                <TextBox x:Name="DetailTextBox" IsReadOnly="True" TextWrapping="Wrap"
+                         Background="Transparent" BorderThickness="0"
+                         Foreground="{DynamicResource ForegroundBrush}" FontFamily="Consolas"
+                         FontSize="12" MaxHeight="300"
+                         VerticalScrollBarVisibility="Auto"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

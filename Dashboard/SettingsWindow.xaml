@@ -283,6 +283,14 @@
                             <TextBox x:Name="AlertExcludedDatabasesTextBox" Margin="0,0,0,4"/>
                             <TextBlock Text="e.g. DBAtools, msdb, tempdb — applies to blocking, deadlock, and long-running query alerts"
                                        FontSize="11" FontStyle="Italic" Foreground="Gray" TextWrapping="Wrap"/>
+
+                            <!-- Mute Rules -->
+                            <TextBlock Text="Alert Muting" FontWeight="Bold" FontSize="12" Margin="0,16,0,6"/>
+                            <Button x:Name="ManageMuteRulesButton" Content="Manage Mute Rules..."
+                                    Click="ManageMuteRulesButton_Click" HorizontalAlignment="Left"
+                                    Padding="12,4" Margin="0,0,0,4"/>
+                            <TextBlock Text="Create rules to suppress specific recurring alerts while still logging them."
+                                       FontSize="11" FontStyle="Italic" Foreground="Gray" TextWrapping="Wrap"/>
                         </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
