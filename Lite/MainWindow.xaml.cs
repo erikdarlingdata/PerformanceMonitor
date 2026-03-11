@@ -314,10 +314,18 @@ public partial class MainWindow : Window
     private void UpdateStatusBar()
     {
         // Update database size
-        var sizeMb = _databaseInitializer.GetDatabaseSizeMb();
-        DatabaseSizeText.Text = sizeMb > 0
-            ? $"Database: {sizeMb:F1} MB"
-            : "Database: New";
+        var fileSizeMb = _databaseInitializer.GetDatabaseSizeMb();
+        var usedSizeMb = _databaseInitializer.GetUsedDataSizeMb();
+        if (fileSizeMb > 0)
+        {
+            DatabaseSizeText.Text = usedSizeMb.HasValue
+                ? $"Database: {usedSizeMb.Value:F1} / {fileSizeMb:F1} MB"
+                : $"Database: {fileSizeMb:F1} MB";
+        }
+        else
+        {
+            DatabaseSizeText.Text = "Database: New";
+        }
 
         // Update collection status
         if (_backgroundService != null)

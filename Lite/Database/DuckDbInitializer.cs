@@ -733,6 +733,31 @@ public class DuckDbInitializer
     }
 
     /// <summary>
+    /// Gets the actual used data size inside the database by querying pragma_database_size().
+    /// Returns null if the query fails (e.g., database busy).
+    /// </summary>
+    public double? GetUsedDataSizeMb()
+    {
+        try
+        {
+            using var connection = CreateConnection();
+            connection.Open();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT (used_blocks * block_size)::BIGINT FROM pragma_database_size()";
+            var result = cmd.ExecuteScalar();
+            if (result != null && result != DBNull.Value)
+            {
+                return Convert.ToInt64(result) / (1024.0 * 1024.0);
+            }
+        }
+        catch
+        {
+            /* Database may be busy — fall back to null */
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Deletes the database and WAL files, then reinitializes with fresh empty tables
     /// and archive views pointing at the parquet files.
     /// Acquires its own write lock — caller must NOT already hold the lock.
