@@ -78,7 +78,7 @@ public partial class ManageServersWindow : Window
         }
 
         var result = MessageBox.Show(
-            $"Delete server '{selected.DisplayName}'?\n\nThis will remove the server and its stored credentials.",
+            $"Delete server '{selected.DisplayNameWithIntent}'?\n\nThis will remove the server and its stored credentials.",
             "Delete Server",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);

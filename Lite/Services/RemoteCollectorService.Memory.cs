@@ -175,7 +175,7 @@ OPTION(RECOMPILE);";
                 row.AppendValue(GenerateCollectionId())
                    .AppendValue(collectionTime)
                    .AppendValue(serverId)
-                   .AppendValue(server.ServerName)
+                   .AppendValue(GetServerNameForStorage(server))
                    .AppendValue(totalPhysicalMb)
                    .AppendValue(availablePhysicalMb)
                    .AppendValue(totalPageFileMb)
@@ -249,7 +249,7 @@ OPTION(RECOMPILE);";
                     row.AppendValue(GenerateCollectionId())
                        .AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(reader.GetString(0))
                        .AppendValue(reader.GetDecimal(1))
                        .EndRow();

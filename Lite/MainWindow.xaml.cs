@@ -227,6 +227,7 @@ public partial class MainWindow : Window
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             ServerTimeHelper.UtcOffsetMinutes = serverTab.UtcOffsetMinutes;
+            StatusText.Text = $"Connected to {serverTab.Server.DisplayNameWithIntent}";
         }
 
         /* Refresh alerts tab when selected */
@@ -416,8 +417,8 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var serverId = RemoteCollectorService.GetDeterministicHashCode(server.ServerName);
-                    var summary = await _dataService.GetServerSummaryAsync(serverId, server.DisplayName);
+                    var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+                    var summary = await _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent);
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
@@ -563,23 +564,23 @@ public partial class MainWindow : Window
         // Then collect fresh data and refresh again
         if (_collectorService != null)
         {
-            StatusText.Text = $"Collecting data from {server.DisplayName}...";
+            StatusText.Text = $"Collecting data from {server.DisplayNameWithIntent}...";
             try
             {
                 await _collectorService.RunAllCollectorsForServerAsync(server);
-                StatusText.Text = $"Connected to {server.DisplayName} - Data loaded";
+                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Data loaded";
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
                 _ = RefreshOverviewAsync();
             }
             catch (Exception ex)
             {
-                StatusText.Text = $"Connected to {server.DisplayName} - Collection error: {ex.Message}";
+                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Collection error: {ex.Message}";
             }
         }
         else
         {
-            StatusText.Text = $"Connected to {server.DisplayName}";
+            StatusText.Text = $"Connected to {server.DisplayNameWithIntent}";
         }
     }
 
@@ -587,9 +588,10 @@ public partial class MainWindow : Window
     {
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
 
+        var tabLabel = server.ReadOnlyIntent ? $"{server.DisplayName} (RO)" : server.DisplayName;
         panel.Children.Add(new TextBlock
         {
-            Text = server.DisplayName,
+            Text = tabLabel,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 4, 0)
         });
@@ -795,7 +797,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() == true && dialog.AddedServer != null)
         {
             RefreshServerList();
-            StatusText.Text = $"Added server: {dialog.AddedServer.DisplayName}";
+            StatusText.Text = $"Added server: {dialog.AddedServer.DisplayNameWithIntent}";
         }
     }
 
@@ -880,7 +882,7 @@ public partial class MainWindow : Window
         if (server == null) return;
 
         var result = MessageBox.Show(
-            $"Remove server '{server.DisplayName}'?",
+            $"Remove server '{server.DisplayNameWithIntent}'?",
             "Remove Server",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -890,7 +892,7 @@ public partial class MainWindow : Window
             CloseServerTab(server.Id);
             _serverManager.DeleteServer(server.Id);
             RefreshServerList();
-            StatusText.Text = $"Removed server: {server.DisplayName}";
+            StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
         }
     }
 
@@ -961,14 +963,14 @@ public partial class MainWindow : Window
                         {
                             _trayService?.ShowNotification(
                                 "Server Offline",
-                                $"{server.DisplayName} is unreachable: {status.ErrorMessage ?? "unknown error"}",
+                                $"{server.DisplayNameWithIntent} is unreachable: {status.ErrorMessage ?? "unknown error"}",
                                 Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
                         }
                         else if (!wasOnline && isOnline)
                         {
                             _trayService?.ShowNotification(
                                 "Server Online",
-                                $"{server.DisplayName} is back online",
+                                $"{server.DisplayNameWithIntent} is back online",
                                 Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
                         }
                     }

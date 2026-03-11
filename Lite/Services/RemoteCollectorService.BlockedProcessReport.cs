@@ -418,7 +418,7 @@ OPTION(RECOMPILE);";
                         row.AppendValue(GenerateCollectionId())
                            .AppendValue(collectionTime)
                            .AppendValue(serverId)
-                           .AppendValue(server.ServerName)
+                           .AppendValue(GetServerNameForStorage(server))
                            .AppendValue(parsed.EventTime)
                            .AppendValue(parsed.DatabaseName)
                            .AppendValue(parsed.BlockedSpid)

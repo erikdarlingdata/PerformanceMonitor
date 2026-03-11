@@ -87,7 +87,7 @@ public partial class FinOpsTab : UserControl
     private int GetSelectedServerId()
     {
         if (ServerSelector.SelectedItem is ServerConnection server)
-            return RemoteCollectorService.GetDeterministicHashCode(server.ServerName);
+            return RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         return 0;
     }
 
@@ -347,7 +347,7 @@ public partial class FinOpsTab : UserControl
                     // Step 2: Get collected metrics from DuckDB
                     try
                     {
-                        var serverId = RemoteCollectorService.GetDeterministicHashCode(server.ServerName);
+                        var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
                         var (avgCpu, storageGb, idleDbs, status) = await _dataService!.GetServerMetricsAsync(serverId);
                         if (avgCpu.HasValue) item.AvgCpuPct = avgCpu;
                         if (storageGb.HasValue) item.StorageTotalGb = storageGb;

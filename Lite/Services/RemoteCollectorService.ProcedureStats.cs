@@ -290,7 +290,7 @@ OPTION(RECOMPILE);";
                     row.AppendValue(GenerateCollectionId())                                     /* collection_id */
                        .AppendValue(collectionTime)                                             /* collection_time */
                        .AppendValue(serverId)                                                   /* server_id */
-                       .AppendValue(server.ServerName)                                          /* server_name */
+                       .AppendValue(GetServerNameForStorage(server))                                          /* server_name */
                        .AppendValue(dbName)                                                     /* database_name */
                        .AppendValue(schemaName)                                                 /* schema_name */
                        .AppendValue(objectName)                                                 /* object_name */

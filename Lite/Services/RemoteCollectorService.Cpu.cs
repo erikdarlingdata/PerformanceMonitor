@@ -147,7 +147,7 @@ OPTION(RECOMPILE);";
                     row.AppendValue(GenerateCollectionId())
                        .AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(sampleTime)
                        .AppendValue(reader.IsDBNull(1) ? 0 : reader.GetInt32(1))
                        .AppendValue(reader.IsDBNull(2) ? 0 : reader.GetInt32(2))

@@ -137,7 +137,7 @@ OPTION(MAXDOP 1, RECOMPILE);
                 row.AppendValue(GenerateCollectionId())
                    .AppendValue(collectionTime)
                    .AppendValue(serverId)
-                   .AppendValue(server.ServerName)
+                   .AppendValue(GetServerNameForStorage(server))
                    .AppendValue(Convert.ToInt32(reader.GetValue(0)))                                       /* session_id */
                    .AppendValue(reader.IsDBNull(1) ? (string?)null : reader.GetString(1))                  /* database_name */
                    .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))                  /* elapsed_time_formatted */

@@ -24,7 +24,8 @@ internal static class ServerResolver
             if (servers.Count == 1)
             {
                 var s = servers[0];
-                return (RemoteCollectorService.GetDeterministicHashCode(s.ServerName), s.ServerName);
+                var storageName = RemoteCollectorService.GetServerNameForStorage(s);
+                return (RemoteCollectorService.GetDeterministicHashCode(storageName), storageName);
             }
 
             return null;
@@ -37,7 +38,8 @@ internal static class ServerResolver
 
         if (exact != null)
         {
-            return (RemoteCollectorService.GetDeterministicHashCode(exact.ServerName), exact.ServerName);
+            var exactName = RemoteCollectorService.GetServerNameForStorage(exact);
+            return (RemoteCollectorService.GetDeterministicHashCode(exactName), exactName);
         }
 
         /* Partial match */
@@ -47,7 +49,8 @@ internal static class ServerResolver
 
         if (partial != null)
         {
-            return (RemoteCollectorService.GetDeterministicHashCode(partial.ServerName), partial.ServerName);
+            var partialName = RemoteCollectorService.GetServerNameForStorage(partial);
+            return (RemoteCollectorService.GetDeterministicHashCode(partialName), partialName);
         }
 
         return null;
@@ -62,9 +65,12 @@ internal static class ServerResolver
         }
 
         var lines = servers.Select(s =>
-            string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName
-                ? s.ServerName
-                : $"{s.DisplayName} ({s.ServerName})");
+        {
+            var roTag = s.ReadOnlyIntent ? " [Read-Only]" : "";
+            return string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName
+                ? $"{s.ServerName}{roTag}"
+                : $"{s.DisplayName} ({s.ServerName}){roTag}";
+        });
 
         return string.Join("\n", lines);
     }

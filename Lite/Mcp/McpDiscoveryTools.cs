@@ -19,9 +19,10 @@ public sealed class McpDiscoveryTools
         var lines = new List<string> { $"Monitored servers ({servers.Count}):\n" };
         foreach (var s in servers)
         {
+            var roTag = s.ReadOnlyIntent ? " [Read-Only]" : "";
             var display = string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName
-                ? s.ServerName
-                : $"{s.DisplayName} ({s.ServerName})";
+                ? $"{s.ServerName}{roTag}"
+                : $"{s.DisplayName} ({s.ServerName}){roTag}";
 
             var status = serverManager.GetConnectionStatus(s.Id);
             var statusText = status.IsOnline switch
@@ -31,8 +32,8 @@ public sealed class McpDiscoveryTools
                 null => "Status not checked"
             };
 
-            var serverId = RemoteCollectorService.GetDeterministicHashCode(s.ServerName);
-            var summary = await dataService.GetServerSummaryAsync(serverId, s.DisplayName ?? s.ServerName);
+            var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s));
+            var summary = await dataService.GetServerSummaryAsync(serverId, s.DisplayNameWithIntent);
             var lastCollection = summary?.LastCollectionTime?.ToString("o") ?? "No data collected";
 
             lines.Add($"- {display} [{statusText}] (last collection: {lastCollection})");
