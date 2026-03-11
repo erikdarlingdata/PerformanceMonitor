@@ -49,6 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User's locale used for date/time formatting in WPF bindings ([#459])
 - XML processing instructions stripped from sql_command/sql_text display
 - Parameterized queries in blocking/deadlock alert filtering
+- **Lite UI responsiveness overhaul** — visible-tab-only refresh, sub-tab awareness, Query Store collector optimization (NULL plan XML + LOOP JOIN hint), and DuckDB write reduction ([#510])
+
+  Timer tick improvements measured under TPC-C load on SQL2022:
+
+  | Scenario | Before | After | Improvement |
+  |---|---|---|---|
+  | Lite idle | 6-13s | 546-750ms | ~90% |
+  | Lite under TPC-C | 6-13s | ~3s | ~70% |
+  | Dashboard idle | 5.6s | 0.6-0.8s | 86% |
+  | Dashboard under TPC-C | 5.6s | 1.8-2.0s | 64% |
+
+  Query Store collector specifically:
+
+  | Metric | Before | After |
+  |---|---|---|
+  | query_store collector total | 6-18s | ~600ms |
+  | query_store SQL time | 374-1,104ms | ~300ms (LOOP JOIN hint) |
+  | query_store DuckDB write | 6-16s | ~75-230ms (NULL plan XML) |
 
 ### Fixed
 
@@ -62,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Deadlock filter** using wrong column reference in `GetFilteredDeadlockCountAsync`
 - **RESTORING database** filter added to waiting_tasks collector ([#430])
 - Custom TrayToolTip crash — replaced with plain ToolTipText ([#422])
+- **Lite tab switch freeze** — added `_isRefreshing` guard to prevent tab switch handler from competing with timer ticks for DuckDB connection, eliminating "not responding" hangs ([#510])
 - DuckDB read lock acquisition resilience
 - Formatted duration columns sorting alphabetically instead of numerically
 - Settings window staying open on validation errors
@@ -463,3 +482,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#482]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/482
 [#488]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/488
 [#489]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/489
+[#510]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/510
