@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Volume-level drive space** enrichment in database size stats via `dm_os_volume_stats`
 - **GUI installer installation history** logging to `config.installation_history` ([#414])
 - **ReadOnlyIntent connection option** — Lite connections can set `ApplicationIntent=ReadOnly` for automatic read routing to Always On AG readable secondaries ([#515])
+- **Alert muting** — mute individual alerts or create pattern-based mute rules by server, metric, database, or application. Manage Mute Rules window with enable/disable toggle. Alert history detail view with double-click drill-down and context-sensitive detail text. Poison wait type documentation links. ([#512])
 - **SignPath code signing** — all release binaries (Dashboard, Lite, Installers) are digitally signed, eliminating Windows SmartScreen warnings ([#511])
 - CI version bump check on PRs to main
 - Permissions section in README with least-privilege setup ([#421])
@@ -107,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Rule 22 table variable** false positive on modification operators — INSERT/UPDATE/DELETE on table variables is expected ([#513])
 - **ComboBox focus steal** in plan viewer stealing keyboard focus from other controls ([#508])
 - **DOP 2 skew** false positive — parallel skew rule no longer fires at DOP 2 ([#508])
+- **ReadOnlyIntent connections** sharing server_id in DuckDB when the same server was added with and without ReadOnlyIntent ([#521])
 
 [2.2.0]: https://github.com/erikdarlingdata/PerformanceMonitor/compare/v2.1.0...v2.2.0
 
@@ -508,9 +510,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#504]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/504
 [#508]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/508
 [#510]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/510
+[#512]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/512
 [#511]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/511
 [#513]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/513
 [#515]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/515
 [#516]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/516
 [#517]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/517
 [#518]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/518
+[#521]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/521
