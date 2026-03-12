@@ -102,7 +102,13 @@ namespace PerformanceMonitorDashboard.Controls
                     LoadDatabaseResourcesAsync(),
                     LoadDatabaseSizesAsync(),
                     LoadApplicationConnectionsAsync(),
-                    LoadServerInventoryAsync()
+                    LoadServerInventoryAsync(),
+                    LoadStorageGrowthAsync(),
+                    LoadIdleDatabasesAsync(),
+                    LoadTempdbSummaryAsync(),
+                    LoadWaitCategorySummaryAsync(),
+                    LoadExpensiveQueriesAsync(),
+                    LoadMemoryGrantEfficiencyAsync()
                 );
             }
             catch (Exception ex)
@@ -132,6 +138,13 @@ namespace PerformanceMonitorDashboard.Controls
                     TopAvgGrid.ItemsSource = await _databaseService.GetFinOpsTopResourceConsumersByAvgAsync();
                     DbSizeChart.ItemsSource = await _databaseService.GetFinOpsDatabaseSizeSummaryAsync();
                     ProvisioningTrendGrid.ItemsSource = await _databaseService.GetFinOpsProvisioningTrendAsync();
+                }
+                else
+                {
+                    TopTotalGrid.ItemsSource = null;
+                    TopAvgGrid.ItemsSource = null;
+                    DbSizeChart.ItemsSource = null;
+                    ProvisioningTrendGrid.ItemsSource = null;
                 }
             }
             catch (Exception ex)

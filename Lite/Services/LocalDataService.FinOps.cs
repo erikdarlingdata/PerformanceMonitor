@@ -476,7 +476,7 @@ SELECT
     s.cpu_count
 FROM cpu_stats c
 CROSS JOIN mem_latest m
-CROSS JOIN server_info s";
+LEFT JOIN server_info s ON true";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });

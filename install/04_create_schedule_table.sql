@@ -74,7 +74,9 @@ FROM
     (N'plan_cache_stats_collector', 1, 5, 5, 30, N'Plan cache composition statistics - single-use plans and plan cache bloat detection'),
     (N'session_stats_collector', 1, 1, 2, 30, N'Session and connection statistics - connection leaks and application patterns'),
     (N'waiting_tasks_collector', 1, 1, 2, 30, N'Currently waiting tasks - blocking chains and wait analysis'),
-    (N'running_jobs_collector', 1, 1, 2, 7, N'Currently running SQL Agent jobs with historical duration comparison')
+    (N'running_jobs_collector', 1, 1, 2, 7, N'Currently running SQL Agent jobs with historical duration comparison'),
+    (N'database_size_stats_collector', 1, 60, 10, 90, N'Database file sizes for growth trending and capacity planning'),
+    (N'server_properties_collector', 1, 1440, 5, 365, N'Server edition, licensing, CPU/memory hardware metadata for license audit')
 ) AS v (collector_name, enabled, frequency_minutes, max_duration_minutes, retention_days, description)
 WHERE NOT EXISTS
 (

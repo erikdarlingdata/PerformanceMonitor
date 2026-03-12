@@ -108,10 +108,18 @@ public partial class FinOpsTab : UserControl
         var serverId = GetSelectedServerId();
         if (serverId == 0 || _dataService == null) return;
 
-        await LoadUtilizationAsync(serverId);
-        await LoadDatabaseResourcesAsync(serverId);
-        await LoadApplicationConnectionsAsync(serverId);
-        await LoadDatabaseSizesAsync(serverId);
+        await System.Threading.Tasks.Task.WhenAll(
+            LoadUtilizationAsync(serverId),
+            LoadDatabaseResourcesAsync(serverId),
+            LoadApplicationConnectionsAsync(serverId),
+            LoadDatabaseSizesAsync(serverId),
+            LoadStorageGrowthAsync(serverId),
+            LoadIdleDatabasesAsync(serverId),
+            LoadTempdbSummaryAsync(serverId),
+            LoadWaitCategorySummaryAsync(serverId),
+            LoadExpensiveQueriesAsync(serverId),
+            LoadMemoryGrantEfficiencyAsync(serverId)
+        );
     }
 
     private async System.Threading.Tasks.Task LoadUtilizationAsync(int serverId)
@@ -131,6 +139,13 @@ public partial class FinOpsTab : UserControl
                 TopAvgGrid.ItemsSource = await _dataService.GetTopResourceConsumersByAvgAsync(serverId);
                 DbSizeChart.ItemsSource = await _dataService.GetDatabaseSizeSummaryAsync(serverId);
                 ProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(serverId);
+            }
+            else
+            {
+                TopTotalGrid.ItemsSource = null;
+                TopAvgGrid.ItemsSource = null;
+                DbSizeChart.ItemsSource = null;
+                ProvisioningTrendGrid.ItemsSource = null;
             }
         }
         catch (Exception ex)

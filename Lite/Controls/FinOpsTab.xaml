@@ -430,10 +430,11 @@
 
                 <!-- Empty State -->
                 <TextBlock x:Name="NoUtilizationMessage"
-                           Grid.Row="1" Grid.RowSpan="3"
+                           Grid.Row="1" Grid.RowSpan="4"
                            Text="No utilization data collected yet. Select a server above."
                            FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
-                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           HorizontalAlignment="Center" VerticalAlignment="Top"
+                           Margin="0,20,0,0"
                            Visibility="Collapsed"/>
             </Grid>
         </TabItem>
