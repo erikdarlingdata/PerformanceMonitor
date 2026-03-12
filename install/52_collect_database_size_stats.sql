@@ -176,7 +176,7 @@ BEGIN
                     d.name,
                     d.database_id
                 FROM sys.databases AS d
-                WHERE d.state_desc = N'ONLINE'
+                WHERE d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
                 AND   d.database_id > 0
                 AND   HAS_DBACCESS(d.name) = 1
                 ORDER BY

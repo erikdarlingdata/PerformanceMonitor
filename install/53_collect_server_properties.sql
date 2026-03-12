@@ -133,8 +133,9 @@ BEGIN
                 SELECT
                     d.name
                 FROM sys.databases AS d
-                WHERE d.state_desc = N'ONLINE'
+                WHERE d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
                 AND   d.database_id > 4 /*Skip system databases*/
+                AND   HAS_DBACCESS(d.name) = 1
                 ORDER BY
                     d.database_id;
 
