@@ -569,11 +569,21 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
+    /// Gets the server name used for DuckDB storage and hashing.
+    /// Appends ":RO" for ReadOnlyIntent connections so they get a
+    /// different server_id than read-write connections to the same host.
+    /// </summary>
+    internal static string GetServerNameForStorage(ServerConnection server)
+    {
+        return server.ReadOnlyIntent ? server.ServerName + ":RO" : server.ServerName;
+    }
+
+    /// <summary>
     /// Gets the numeric server ID from the server connection.
     /// </summary>
     protected static int GetServerId(ServerConnection server)
     {
-        return GetDeterministicHashCode(server.ServerName);
+        return GetDeterministicHashCode(GetServerNameForStorage(server));
     }
 
     /// <summary>

@@ -165,7 +165,7 @@ OPTION(RECOMPILE);";
                     var row = appender.CreateRow();
                     row.AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(r.JobName)
                        .AppendValue(r.JobId)
                        .AppendValue(r.JobEnabled)

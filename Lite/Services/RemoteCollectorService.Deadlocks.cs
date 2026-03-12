@@ -401,7 +401,7 @@ OPTION(RECOMPILE);";
                         row.AppendValue(GenerateCollectionId())
                            .AppendValue(collectionTime)
                            .AppendValue(serverId)
-                           .AppendValue(server.ServerName)
+                           .AppendValue(GetServerNameForStorage(server))
                            .AppendValue(deadlockTime)
                            .AppendValue(victimProcessId)
                            .AppendValue(victimSqlText)

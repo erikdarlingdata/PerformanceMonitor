@@ -47,8 +47,8 @@
                   MouseDoubleClick="ServersGrid_MouseDoubleClick"
                   ContextMenu="{StaticResource DataGridContextMenu}">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayName}" Width="150"/>
-                <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="200"/>
+                <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayNameWithIntent}" Width="150"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding ServerNameDisplay}" Width="200"/>
                 <DataGridTextColumn Header="Auth" Binding="{Binding AuthenticationDisplay}" Width="100"/>
                 <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="80"/>
                 <DataGridTextColumn Header="Last Connected" Binding="{Binding LastConnected, StringFormat=yyyy-MM-dd HH:mm}" Width="140"/>

@@ -110,7 +110,7 @@ OPTION(RECOMPILE);";
                     row.AppendValue(GenerateCollectionId())
                        .AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(serverName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(edition)
                        .AppendValue(productVersion)
                        .AppendValue(productLevel)

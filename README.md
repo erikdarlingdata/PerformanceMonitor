@@ -24,6 +24,8 @@
 
 Both editions include real-time alerts (system tray + email), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude.
 
+All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
+
 ---
 
 ## What People Are Saying
@@ -79,6 +81,8 @@ Both editions include real-time alerts (system tray + email), charts and graphs,
 
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
+**Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear.
+
 ### Lite Collectors
 
 23 collectors run on independent, configurable schedules:
@@ -111,8 +115,9 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Data Storage
 
-- **Hot data** in DuckDB (7–90 days, configurable)
-- **Archive** to Parquet with ZSTD compression (~10x reduction, 30–180 days configurable)
+- **Hot data** in DuckDB 1.5.0 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
+- **Retention**: 3-month calendar-month rolling window
 - Typical size: ~50–200 MB per server per week
 
 ### Lite Configuration
@@ -328,7 +333,7 @@ Plus a NOC-style landing page with server health cards (green/yellow/red severit
 | **Blocking** | Blocking/deadlock trends, blocked process reports, deadlock history |
 | **Perfmon** | Selectable SQL Server performance counters over time |
 | **Configuration** | Server configuration, database configuration, scoped configuration, trace flags |
-| **FinOps** | Database size tracking, storage growth analysis (7d/30d), server properties, capacity planning |
+| **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, application connections, wait/query/TempDB/memory grant optimization |
 
 Both editions feature auto-refresh, configurable time ranges, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC).
 

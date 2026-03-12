@@ -231,7 +231,7 @@ OPTION(RECOMPILE);";
                     row.AppendValue(GenerateCollectionId())
                        .AppendValue(collectionTime)
                        .AppendValue(serverId)
-                       .AppendValue(server.ServerName)
+                       .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(r.DatabaseName)
                        .AppendValue(r.DatabaseId)
                        .AppendValue(r.FileId)

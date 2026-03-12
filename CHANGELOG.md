@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.2.0] - 2026-03-09
+## [2.2.0] - 2026-03-11
 
 **Contributors:** [@HannahVernon](https://github.com/HannahVernon), [@ClaudioESSilva](https://github.com/ClaudioESSilva), [@dphugo](https://github.com/dphugo), [@Orestes](https://github.com/Orestes) — thank you!
 
@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LOB compression and deduplication** for query stats tables to reduce storage ([#419])
 - **Volume-level drive space** enrichment in database size stats via `dm_os_volume_stats`
 - **GUI installer installation history** logging to `config.installation_history` ([#414])
+- **ReadOnlyIntent connection option** — Lite connections can set `ApplicationIntent=ReadOnly` for automatic read routing to Always On AG readable secondaries ([#515])
+- **Alert muting** — mute individual alerts or create pattern-based mute rules by server, metric, database, or application. Manage Mute Rules window with enable/disable toggle. Alert history detail view with double-click drill-down and context-sensitive detail text. Poison wait type documentation links. ([#512])
+- **SignPath code signing** — all release binaries (Dashboard, Lite, Installers) are digitally signed, eliminating Windows SmartScreen warnings ([#511])
 - CI version bump check on PRs to main
 - Permissions section in README with least-privilege setup ([#421])
 
@@ -49,6 +52,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - User's locale used for date/time formatting in WPF bindings ([#459])
 - XML processing instructions stripped from sql_command/sql_text display
 - Parameterized queries in blocking/deadlock alert filtering
+- **DuckDB 1.5.0 upgrade** — non-blocking checkpointing eliminates read stalls during WAL flushes, free block reuse stabilizes database file size without archive-and-reset cycles ([#516])
+- **Automatic parquet compaction** — archive files are merged into monthly files after each archive cycle, reducing file count from 2,600+ to ~75 and eliminating per-file metadata overhead on glob scans ([#516])
+
+  Combined with the UI responsiveness overhaul (#510), Lite's refresh cycle improved 13-26x:
+
+  | Metric | Before | After |
+  |---|---|---|
+  | Lite `RefreshAllDataAsync` | 6-13s | < 500ms |
+  | Parquet files scanned per query | 233 | 19 |
+  | Archive-and-reset frequency | 21/day | ~0 |
+  | `v_wait_stats` query time | 1,700ms | 27ms |
+
+- **Monthly archive retention** — switched from 90-day file-age deletion to 3-month calendar-month rolling window, aligned with compacted monthly filenames ([#516])
+- **Lite status bar** shows used data size vs file size (e.g., "Database: 175.5 / 423.8 MB") via DuckDB `pragma_database_size()` ([#517])
+- **Query Store collector diagnostics** — reader/append/flush timing breakdown logged when collection exceeds 2 seconds, for identifying SQL Server DMV contention under heavy workloads ([#518])
+- SSMS-parity edge tooltips on plan viewer operator connections and ManyToMany indicator always shown for merge join operators ([#504])
 - **Lite UI responsiveness overhaul** — visible-tab-only refresh, sub-tab awareness, Query Store collector optimization (NULL plan XML + LOOP JOIN hint), and DuckDB write reduction ([#510])
 
   Timer tick improvements measured under TPC-C load on SQL2022:
@@ -85,6 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Formatted duration columns sorting alphabetically instead of numerically
 - Settings window staying open on validation errors
 - Deserialization clamping and validation abort issues
+- **sp_IndexCleanup** summary grid column mapping off-by-one, expanded both grids to show all columns from both result sets ([#503])
+- **Rule 22 table variable** false positive on modification operators — INSERT/UPDATE/DELETE on table variables is expected ([#513])
+- **ComboBox focus steal** in plan viewer stealing keyboard focus from other controls ([#508])
+- **DOP 2 skew** false positive — parallel skew rule no longer fires at DOP 2 ([#508])
+- **ReadOnlyIntent connections** sharing server_id in DuckDB when the same server was added with and without ReadOnlyIntent ([#521])
 
 [2.2.0]: https://github.com/erikdarlingdata/PerformanceMonitor/compare/v2.1.0...v2.2.0
 
@@ -482,4 +506,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#482]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/482
 [#488]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/488
 [#489]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/489
+[#503]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/503
+[#504]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/504
+[#508]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/508
 [#510]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/510
+[#512]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/512
+[#511]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/511
+[#513]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/513
+[#515]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/515
+[#516]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/516
+[#517]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/517
+[#518]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/518
+[#521]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/521

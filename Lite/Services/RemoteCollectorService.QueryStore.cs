@@ -376,7 +376,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                             row.AppendValue(GenerateCollectionId())                                                             /* collection_id */
                                .AppendValue(collectionTime)                                                                     /* collection_time */
                                .AppendValue(serverId)                                                                           /* server_id */
-                               .AppendValue(server.ServerName)                                                                  /* server_name */
+                               .AppendValue(GetServerNameForStorage(server))                                                                  /* server_name */
                                .AppendValue(dbName)                                                                             /* database_name */
                                .AppendValue(reader.GetInt64(0))                                                                 /* query_id */
                                .AppendValue(reader.GetInt64(1))                                                                 /* plan_id */

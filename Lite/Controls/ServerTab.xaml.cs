@@ -36,6 +36,7 @@ public partial class ServerTab : UserControl
     private readonly LocalDataService _dataService;
     private readonly int _serverId;
     public int ServerId => _serverId;
+    public ServerConnection Server => _server;
     private readonly CredentialService _credentialService;
     private readonly DispatcherTimer _refreshTimer;
     private bool _isRefreshing;
@@ -117,13 +118,13 @@ public partial class ServerTab : UserControl
 
         _server = server;
         _dataService = new LocalDataService(duckDb);
-        _serverId = RemoteCollectorService.GetDeterministicHashCode(server.ServerName);
+        _serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         _credentialService = credentialService;
         UtcOffsetMinutes = utcOffsetMinutes;
         ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
 
-        ServerNameText.Text = server.DisplayName;
-        ConnectionStatusText.Text = server.ServerName;
+        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+        ConnectionStatusText.Text = server.ServerNameDisplay;
 
         /* Apply default time range from settings */
         TimeRangeCombo.SelectedIndex = App.DefaultTimeRangeHours switch
@@ -594,7 +595,7 @@ public partial class ServerTab : UserControl
             }
 
             var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
-            ConnectionStatusText.Text = $"{_server.ServerName} - Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
+            ConnectionStatusText.Text = $"{_server.ServerNameDisplay} - Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
         }
         catch (Exception ex)
         {

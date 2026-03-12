@@ -90,7 +90,7 @@ OPTION(RECOMPILE);";
                 row.AppendValue(GenerateCollectionId())
                    .AppendValue(collectionTime)
                    .AppendValue(serverId)
-                   .AppendValue(server.ServerName)
+                   .AppendValue(GetServerNameForStorage(server))
                    .AppendValue(userObjMb)
                    .AppendValue(internalObjMb)
                    .AppendValue(versionStoreMb)

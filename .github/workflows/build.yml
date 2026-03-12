@@ -86,7 +86,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Dashboard-unsigned
-          path: releases/PerformanceMonitorDashboard-${{ steps.version.outputs.VERSION }}.zip
+          path: publish/Dashboard/
 
       - name: Upload Lite for signing
         if: github.event_name == 'release'
@@ -94,7 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Lite-unsigned
-          path: releases/PerformanceMonitorLite-${{ steps.version.outputs.VERSION }}.zip
+          path: publish/Lite/
 
       - name: Upload Installer for signing
         if: github.event_name == 'release'
@@ -102,7 +102,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Installer-unsigned
-          path: releases/PerformanceMonitorInstaller-${{ steps.version.outputs.VERSION }}.zip
+          path: publish/Installer/
 
       - name: Sign Dashboard
         if: github.event_name == 'release'
@@ -147,9 +147,14 @@ jobs:
         if: github.event_name == 'release'
         shell: pwsh
         run: |
-          Copy-Item 'signed/Dashboard/*' 'releases/' -Force
-          Copy-Item 'signed/Lite/*' 'releases/' -Force
-          Copy-Item 'signed/Installer/*' 'releases/' -Force
+          $version = "${{ steps.version.outputs.VERSION }}"
+          # Re-zip signed files into release archives
+          Remove-Item "releases/PerformanceMonitorDashboard-$version.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
+          Remove-Item "releases/PerformanceMonitorLite-$version.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
+          Remove-Item "releases/PerformanceMonitorInstaller-$version.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 
       - name: Generate checksums
         if: github.event_name == 'release'

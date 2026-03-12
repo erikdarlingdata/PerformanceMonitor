@@ -78,6 +78,20 @@ public class ServerConnection
     public bool ReadOnlyIntent { get; set; } = false;
 
     /// <summary>
+    /// Server name with "(Read-Only)" suffix when ReadOnlyIntent is enabled.
+    /// Used for sidebar subtitle and status text.
+    /// </summary>
+    [JsonIgnore]
+    public string ServerNameDisplay => ReadOnlyIntent ? $"{ServerName} (Read-Only)" : ServerName;
+
+    /// <summary>
+    /// Display name with "(Read-Only)" suffix when ReadOnlyIntent is enabled.
+    /// Used for alerts, tray notifications, status bar, and overview cards.
+    /// </summary>
+    [JsonIgnore]
+    public string DisplayNameWithIntent => ReadOnlyIntent ? $"{DisplayName} (Read-Only)" : DisplayName;
+
+    /// <summary>
     /// Display-only property for showing authentication type in UI.
     /// </summary>
     [JsonIgnore]

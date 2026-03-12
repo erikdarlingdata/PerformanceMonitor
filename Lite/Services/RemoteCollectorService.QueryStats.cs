@@ -253,7 +253,7 @@ OPTION(RECOMPILE);";
                     row.AppendValue(GenerateCollectionId())                                                 /* collection_id */
                        .AppendValue(collectionTime)                                                         /* collection_time */
                        .AppendValue(serverId)                                                               /* server_id */
-                       .AppendValue(server.ServerName)                                                      /* server_name */
+                       .AppendValue(GetServerNameForStorage(server))                                                      /* server_name */
                        .AppendValue(reader.IsDBNull(0) ? (string?)null : reader.GetString(0))               /* database_name */
                        .AppendValue(queryHash)                                                              /* query_hash */
                        .AppendValue(reader.IsDBNull(2) ? (string?)null : reader.GetString(2))               /* query_plan_hash */
