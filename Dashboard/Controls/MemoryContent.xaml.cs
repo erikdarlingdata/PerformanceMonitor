@@ -172,22 +172,37 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         /// <summary>
-        /// Refreshes all memory data. Can be called from parent control.
+        /// Refreshes memory data. When fullRefresh is false, only the visible sub-tab is refreshed.
         /// </summary>
-        public async Task RefreshAllDataAsync()
+        public async Task RefreshAllDataAsync(bool fullRefresh = true)
         {
             try
             {
                 using var _ = Helpers.MethodProfiler.StartTiming("Memory");
 
-                // Run all independent refreshes in parallel for better performance
-                await Task.WhenAll(
-                    RefreshMemoryStatsAsync(),
-                    RefreshMemoryGrantsAsync(),
-                    RefreshMemoryClerksAsync(),
-                    RefreshPlanCacheAsync(),
-                    RefreshMemoryPressureEventsAsync()
-                );
+                if (fullRefresh)
+                {
+                    // Run all independent refreshes in parallel for initial load / manual refresh
+                    await Task.WhenAll(
+                        RefreshMemoryStatsAsync(),
+                        RefreshMemoryGrantsAsync(),
+                        RefreshMemoryClerksAsync(),
+                        RefreshPlanCacheAsync(),
+                        RefreshMemoryPressureEventsAsync()
+                    );
+                }
+                else
+                {
+                    // Only refresh the visible sub-tab
+                    switch (SubTabControl.SelectedIndex)
+                    {
+                        case 0: await RefreshMemoryStatsAsync(); break;
+                        case 1: await RefreshMemoryGrantsAsync(); break;
+                        case 2: await RefreshMemoryClerksAsync(); break;
+                        case 3: await RefreshPlanCacheAsync(); break;
+                        case 4: await RefreshMemoryPressureEventsAsync(); break;
+                    }
+                }
             }
             catch (Exception ex)
             {

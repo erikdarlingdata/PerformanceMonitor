@@ -251,27 +251,45 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         /// <summary>
-        /// Refreshes all resource metrics data. Can be called from parent control.
+        /// Refreshes resource metrics data. When fullRefresh is false, only the visible sub-tab is refreshed.
         /// </summary>
-        public async Task RefreshAllDataAsync()
+        public async Task RefreshAllDataAsync(bool fullRefresh = true)
         {
             using var _ = Helpers.MethodProfiler.StartTiming("ResourceMetrics");
             if (_databaseService == null) return;
 
             try
             {
-                // Run all independent refreshes in parallel for better performance
-                await Task.WhenAll(
-                    RefreshLatchStatsAsync(),
-                    RefreshSpinlockStatsAsync(),
-                    RefreshTempdbStatsAsync(),
-                    RefreshSessionStatsAsync(),
-                    LoadFileIoLatencyChartsAsync(),
-                    LoadFileIoThroughputChartsAsync(),
-                    RefreshServerTrendsAsync(),
-                    RefreshPerfmonCountersTabAsync(),
-                    RefreshWaitStatsDetailTabAsync()
-                );
+                if (fullRefresh)
+                {
+                    // Run all independent refreshes in parallel for initial load / manual refresh
+                    await Task.WhenAll(
+                        RefreshLatchStatsAsync(),
+                        RefreshSpinlockStatsAsync(),
+                        RefreshTempdbStatsAsync(),
+                        RefreshSessionStatsAsync(),
+                        LoadFileIoLatencyChartsAsync(),
+                        LoadFileIoThroughputChartsAsync(),
+                        RefreshServerTrendsAsync(),
+                        RefreshPerfmonCountersTabAsync(),
+                        RefreshWaitStatsDetailTabAsync()
+                    );
+                }
+                else
+                {
+                    // Only refresh the visible sub-tab
+                    switch (SubTabControl.SelectedIndex)
+                    {
+                        case 0: await RefreshServerTrendsAsync(); break;
+                        case 1: await RefreshWaitStatsDetailTabAsync(); break;
+                        case 2: await RefreshTempdbStatsAsync(); break;
+                        case 3: await Task.WhenAll(LoadFileIoLatencyChartsAsync(), LoadFileIoThroughputChartsAsync()); break;
+                        case 4: await RefreshPerfmonCountersTabAsync(); break;
+                        case 5: await RefreshSessionStatsAsync(); break;
+                        case 6: await RefreshLatchStatsAsync(); break;
+                        case 7: await RefreshSpinlockStatsAsync(); break;
+                    }
+                }
             }
             catch (Exception ex)
             {

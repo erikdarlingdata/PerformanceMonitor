@@ -46,7 +46,7 @@
         </ResourceDictionary>
     </UserControl.Resources>
 
-    <TabControl TabStripPlacement="Top" Margin="0,5,0,0">
+    <TabControl x:Name="SubTabControl" TabStripPlacement="Top" Margin="0,5,0,0">
         <!-- Performance Trends Sub-Tab -->
         <TabItem Header="Performance Trends">
             <Grid>

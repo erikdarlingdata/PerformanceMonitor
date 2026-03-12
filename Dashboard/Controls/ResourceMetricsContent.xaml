@@ -24,7 +24,7 @@
         </ContextMenu>
     </UserControl.Resources>
 
-    <TabControl TabStripPlacement="Top" Margin="0,5,0,0">
+    <TabControl x:Name="SubTabControl" TabStripPlacement="Top" Margin="0,5,0,0">
         <!-- Server Trends Sub-Tab -->
         <TabItem Header="Server Trends">
             <!-- 2x2 Chart Grid -->

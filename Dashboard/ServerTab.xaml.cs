@@ -1174,19 +1174,19 @@ namespace PerformanceMonitorDashboard
                     await RefreshOverviewTabAsync();
                     break;
                 case "Queries":
-                    await RefreshQueriesTabAsync();
+                    await RefreshQueriesTabAsync(fullRefresh: false);
                     break;
                 case "Resource Metrics":
-                    await RefreshResourceMetricsTabAsync();
+                    await RefreshResourceMetricsTabAsync(fullRefresh: false);
                     break;
                 case "Memory":
-                    await RefreshMemoryTabAsync();
+                    await RefreshMemoryTabAsync(fullRefresh: false);
                     break;
                 case "Locking":
                     await RefreshLockingTabAsync();
                     break;
                 case "System Events":
-                    await RefreshSystemEventsTabAsync();
+                    await RefreshSystemEventsTabAsync(fullRefresh: false);
                     break;
                 // Plan Viewer has no data to refresh
             }
@@ -1230,11 +1230,11 @@ namespace PerformanceMonitorDashboard
         /// <summary>
         /// Refreshes the Queries tab (delegated to QueryPerformanceContent UserControl).
         /// </summary>
-        private async Task RefreshQueriesTabAsync()
+        private async Task RefreshQueriesTabAsync(bool fullRefresh = true)
         {
             try
             {
-                await PerformanceTab.RefreshAllDataAsync();
+                await PerformanceTab.RefreshAllDataAsync(fullRefresh);
             }
             catch (Exception ex)
             {
@@ -1245,11 +1245,11 @@ namespace PerformanceMonitorDashboard
         /// <summary>
         /// Refreshes the Resource Metrics tab (delegated to ResourceMetricsContent UserControl).
         /// </summary>
-        private async Task RefreshResourceMetricsTabAsync()
+        private async Task RefreshResourceMetricsTabAsync(bool fullRefresh = true)
         {
             try
             {
-                await ResourceMetricsContent.RefreshAllDataAsync();
+                await ResourceMetricsContent.RefreshAllDataAsync(fullRefresh);
             }
             catch (Exception ex)
             {
@@ -1260,11 +1260,11 @@ namespace PerformanceMonitorDashboard
         /// <summary>
         /// Refreshes the Memory tab (delegated to MemoryContent UserControl).
         /// </summary>
-        private async Task RefreshMemoryTabAsync()
+        private async Task RefreshMemoryTabAsync(bool fullRefresh = true)
         {
             try
             {
-                await MemoryTab.RefreshAllDataAsync();
+                await MemoryTab.RefreshAllDataAsync(fullRefresh);
             }
             catch (Exception ex)
             {
@@ -1338,11 +1338,11 @@ namespace PerformanceMonitorDashboard
         /// <summary>
         /// Refreshes the System Events tab (delegated to SystemEventsContent UserControl).
         /// </summary>
-        private async Task RefreshSystemEventsTabAsync()
+        private async Task RefreshSystemEventsTabAsync(bool fullRefresh = true)
         {
             try
             {
-                await SystemEventsContent.RefreshAllDataAsync();
+                await SystemEventsContent.RefreshAllDataAsync(fullRefresh);
             }
             catch (Exception ex)
             {

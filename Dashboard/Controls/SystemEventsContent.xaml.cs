@@ -312,26 +312,46 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         /// <summary>
-        /// Refreshes all system events data. Can be called from parent control.
+        /// Refreshes system events data. When fullRefresh is false, only the visible sub-tab is refreshed.
         /// </summary>
-        public async Task RefreshAllDataAsync()
+        public async Task RefreshAllDataAsync(bool fullRefresh = true)
         {
             using var _ = Helpers.MethodProfiler.StartTiming("SystemEvents");
             if (_databaseService == null) return;
 
             try
             {
-                // Run all independent refreshes in parallel for better performance
-                await Task.WhenAll(
-                    RefreshSystemHealthAsync(),
-                    RefreshSevereErrorsAsync(),
-                    RefreshIOIssuesAsync(),
-                    RefreshSchedulerIssuesAsync(),
-                    RefreshMemoryConditionsAsync(),
-                    RefreshCPUTasksAsync(),
-                    RefreshMemoryBrokerAsync(),
-                    RefreshMemoryNodeOOMAsync()
-                );
+                if (fullRefresh)
+                {
+                    // Run all independent refreshes in parallel for initial load / manual refresh
+                    await Task.WhenAll(
+                        RefreshSystemHealthAsync(),
+                        RefreshSevereErrorsAsync(),
+                        RefreshIOIssuesAsync(),
+                        RefreshSchedulerIssuesAsync(),
+                        RefreshMemoryConditionsAsync(),
+                        RefreshCPUTasksAsync(),
+                        RefreshMemoryBrokerAsync(),
+                        RefreshMemoryNodeOOMAsync()
+                    );
+                }
+                else
+                {
+                    // Only refresh the visible sub-tab
+                    switch (SubTabControl.SelectedIndex)
+                    {
+                        case 0: // Corruption Events
+                        case 1: // Contention Events — same data source
+                            await RefreshSystemHealthAsync(); break;
+                        case 2: await RefreshSevereErrorsAsync(); break;
+                        case 3: await RefreshIOIssuesAsync(); break;
+                        case 4: await RefreshSchedulerIssuesAsync(); break;
+                        case 5: await RefreshMemoryConditionsAsync(); break;
+                        case 6: await RefreshCPUTasksAsync(); break;
+                        case 7: await RefreshMemoryBrokerAsync(); break;
+                        case 8: await RefreshMemoryNodeOOMAsync(); break;
+                    }
+                }
             }
             catch (Exception ex)
             {

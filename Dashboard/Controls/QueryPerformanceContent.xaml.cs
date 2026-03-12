@@ -262,15 +262,34 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         /// <summary>
-        /// Refreshes all data for all sub-tabs.
+        /// Refreshes query performance data. When fullRefresh is false, only the visible sub-tab is refreshed.
         /// </summary>
-        public async Task RefreshAllDataAsync()
+        public async Task RefreshAllDataAsync(bool fullRefresh = true)
         {
             try
             {
                 using var _ = Helpers.MethodProfiler.StartTiming("QueryPerformance");
 
                 if (_databaseService == null) return;
+
+                if (!fullRefresh)
+                {
+                    // Only refresh the visible sub-tab
+                    switch (SubTabControl.SelectedIndex)
+                    {
+                        case 0: await RefreshPerformanceTrendsAsync(); break;
+                        case 1: await RefreshActiveQueriesAsync(); break;
+                        case 2: break; // Current Active Queries — manual refresh only
+                        case 3: await RefreshQueryStatsGridAsync(); break;
+                        case 4: await RefreshProcStatsGridAsync(); break;
+                        case 5: await RefreshQueryStoreGridAsync(); break;
+                        case 6: await RefreshQueryStoreRegressionsAsync(); break;
+                        case 7: await RefreshLongRunningPatternsAsync(); break;
+                    }
+                    return;
+                }
+
+                // Full refresh — all sub-tabs in parallel
 
                 // Only show loading overlay on initial load (no existing data)
                 if (QueryStatsDataGrid.ItemsSource == null)
@@ -303,20 +322,9 @@ namespace PerformanceMonitorDashboard.Controls
                 );
 
                 // Populate grids from summary data
-                var queryStats = await queryStatsTask;
-                QueryStatsDataGrid.ItemsSource = queryStats;
-                QueryStatsNoDataMessage.Visibility = queryStats.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                SetInitialSort(QueryStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
-
-                var procStats = await procStatsTask;
-                ProcStatsDataGrid.ItemsSource = procStats;
-                ProcStatsNoDataMessage.Visibility = procStats.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                SetInitialSort(ProcStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
-
-                var queryStore = await queryStoreTask;
-                QueryStoreDataGrid.ItemsSource = queryStore;
-                QueryStoreNoDataMessage.Visibility = queryStore.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                SetInitialSort(QueryStoreDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
+                PopulateQueryStatsGrid(await queryStatsTask);
+                PopulateProcStatsGrid(await procStatsTask);
+                PopulateQueryStoreGrid(await queryStoreTask);
 
                 // Populate charts from time-series data
                 LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0], _queryDurationHover);
@@ -332,6 +340,65 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 QueryStatsLoading.IsLoading = false;
             }
+        }
+
+        private async Task RefreshPerformanceTrendsAsync()
+        {
+            if (_databaseService == null) return;
+
+            var queryDurationTrendsTask = _databaseService.GetQueryDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
+            var procDurationTrendsTask = _databaseService.GetProcedureDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
+            var qsDurationTrendsTask = _databaseService.GetQueryStoreDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
+            var execTrendsTask = _databaseService.GetExecutionTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
+
+            await Task.WhenAll(queryDurationTrendsTask, procDurationTrendsTask, qsDurationTrendsTask, execTrendsTask);
+
+            LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0], _queryDurationHover);
+            LoadDurationChart(QueryPerfTrendsProcChart, await procDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[1], _procDurationHover);
+            LoadDurationChart(QueryPerfTrendsQsChart, await qsDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[4], _qsDurationHover);
+            LoadExecChart(await execTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
+        }
+
+        private async Task RefreshQueryStatsGridAsync()
+        {
+            if (_databaseService == null) return;
+            var data = await _databaseService.GetQueryStatsAsync(_queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
+            PopulateQueryStatsGrid(data);
+        }
+
+        private async Task RefreshProcStatsGridAsync()
+        {
+            if (_databaseService == null) return;
+            var data = await _databaseService.GetProcedureStatsAsync(_procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
+            PopulateProcStatsGrid(data);
+        }
+
+        private async Task RefreshQueryStoreGridAsync()
+        {
+            if (_databaseService == null) return;
+            var data = await _databaseService.GetQueryStoreDataAsync(_queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
+            PopulateQueryStoreGrid(data);
+        }
+
+        private void PopulateQueryStatsGrid(List<QueryStatsItem> data)
+        {
+            QueryStatsDataGrid.ItemsSource = data;
+            QueryStatsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            SetInitialSort(QueryStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
+        }
+
+        private void PopulateProcStatsGrid(List<ProcedureStatsItem> data)
+        {
+            ProcStatsDataGrid.ItemsSource = data;
+            ProcStatsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            SetInitialSort(ProcStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
+        }
+
+        private void PopulateQueryStoreGrid(List<QueryStoreItem> data)
+        {
+            QueryStoreDataGrid.ItemsSource = data;
+            QueryStoreNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            SetInitialSort(QueryStoreDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
         }
 
         private void SetStatus(string message)
