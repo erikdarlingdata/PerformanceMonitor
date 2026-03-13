@@ -178,9 +178,11 @@ OPTION(RECOMPILE);";
                     var instanceName = reader.IsDBNull(2) ? "" : reader.GetString(2);
                     var cntrValue = reader.GetInt64(3);
 
-                    /* Delta for per-second counters */
+                    /* Delta for per-second counters — gap detection at 5min (5x the 1-min collection interval)
+                       prevents inflated deltas after app restarts */
                     var deltaKey = $"{objectName}|{counterName}|{instanceName}";
-                    var deltaCntrValue = _deltaCalculator.CalculateDelta(serverId, "perfmon", deltaKey, cntrValue, baselineOnly: true);
+                    var deltaCntrValue = _deltaCalculator.CalculateDelta(serverId, "perfmon", deltaKey, cntrValue,
+                        baselineOnly: true, collectionTime: collectionTime, maxGapSeconds: 300);
 
                     var row = appender.CreateRow();
                     row.AppendValue(GenerateCollectionId())
@@ -192,7 +194,7 @@ OPTION(RECOMPILE);";
                        .AppendValue(instanceName)
                        .AppendValue(cntrValue)
                        .AppendValue(deltaCntrValue)
-                       .AppendValue(600) /* 10-minute interval */
+                       .AppendValue(60) /* 1-minute collection interval */
                        .EndRow();
 
                     rowsCollected++;

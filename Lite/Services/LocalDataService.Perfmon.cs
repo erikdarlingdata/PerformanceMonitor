@@ -95,13 +95,14 @@ ORDER BY counter_name";
         command.CommandText = @"
 SELECT
     collection_time,
-    cntr_value,
-    delta_cntr_value
+    SUM(cntr_value) AS cntr_value,
+    SUM(delta_cntr_value) AS delta_cntr_value
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   counter_name = $2
 AND   collection_time >= $3
 AND   collection_time <= $4
+GROUP BY collection_time
 ORDER BY collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
