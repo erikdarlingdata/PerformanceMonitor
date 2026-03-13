@@ -668,6 +668,45 @@ internal static class ToolRecommendations
         [
             new("get_waiting_tasks", "See what's waiting on schema locks"),
             new("get_blocked_process_reports", "Check if DDL operations are causing blocking")
+        ],
+        ["CPU_SQL_PERCENT"] =
+        [
+            new("get_cpu_utilization", "See CPU trend over time"),
+            new("get_top_queries_by_cpu", "Find queries consuming the most CPU"),
+            new("get_perfmon_trend", "Check batch requests/sec for throughput context", new() { ["counter_name"] = "Batch Requests/sec" })
+        ],
+        ["IO_READ_LATENCY_MS"] =
+        [
+            new("get_file_io_stats", "Check per-file read latency"),
+            new("get_file_io_trend", "Track read latency over time"),
+            new("get_memory_stats", "Check if buffer pool is undersized")
+        ],
+        ["IO_WRITE_LATENCY_MS"] =
+        [
+            new("get_file_io_stats", "Check per-file write latency"),
+            new("get_file_io_trend", "Track write latency over time")
+        ],
+        ["TEMPDB_USAGE"] =
+        [
+            new("get_tempdb_trend", "Track TempDB usage over time"),
+            new("get_top_queries_by_cpu", "Find queries that may be spilling to TempDB")
+        ],
+        ["MEMORY_GRANT_PENDING"] =
+        [
+            new("get_memory_grants", "Check active/pending memory grants"),
+            new("get_memory_stats", "Check overall memory allocation"),
+            new("get_top_queries_by_cpu", "Find queries requesting large grants")
+        ],
+        ["QUERY_SPILLS"] =
+        [
+            new("get_top_queries_by_cpu", "Find queries with spills"),
+            new("get_memory_grants", "Check memory grant pressure"),
+            new("get_tempdb_trend", "Check TempDB impact from spills")
+        ],
+        ["QUERY_HIGH_DOP"] =
+        [
+            new("get_top_queries_by_cpu", "Find high-DOP queries", new() { ["parallel_only"] = "true" }),
+            new("audit_config", "Check CTFP and MAXDOP settings")
         ]
     };
 

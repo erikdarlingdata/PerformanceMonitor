@@ -17,7 +17,7 @@ public class Fact
     public string? DatabaseName { get; set; }
 
     /// <summary>
-    /// Raw metric values for narrator and audit trail.
+    /// Raw metric values for analysis and audit trail.
     /// Keys are metric-specific (e.g., "wait_time_ms", "waiting_tasks_count").
     /// </summary>
     public Dictionary<string, double> Metadata { get; set; } = [];

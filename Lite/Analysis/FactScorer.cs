@@ -27,13 +27,19 @@ public class FactScorer
             {
                 "waits" => ScoreWaitFact(fact),
                 "blocking" => ScoreBlockingFact(fact),
+                "cpu" => ScoreCpuFact(fact),
+                "io" => ScoreIoFact(fact),
+                "tempdb" => ScoreTempDbFact(fact),
+                "memory" => ScoreMemoryFact(fact),
+                "queries" => ScoreQueryFact(fact),
                 _ => 0.0
             };
         }
 
-        // Build lookup for amplifier evaluation (include config facts for context)
+        // Build lookup for amplifier evaluation (include context facts that amplifiers reference)
+        var contextSources = new HashSet<string> { "config", "cpu", "io", "tempdb", "memory", "queries" };
         var factsByKey = facts
-            .Where(f => f.BaseSeverity > 0 || f.Source == "config")
+            .Where(f => f.BaseSeverity > 0 || contextSources.Contains(f.Source))
             .ToDictionary(f => f.Key, f => f);
 
         // Layer 2: amplifiers boost base severity using corroborating facts
@@ -108,6 +114,75 @@ public class FactScorer
     }
 
     /// <summary>
+    /// Scores CPU utilization. Value is average SQL CPU %.
+    /// </summary>
+    private static double ScoreCpuFact(Fact fact)
+    {
+        return fact.Key switch
+        {
+            // CPU %: concerning at 75%, critical at 95%
+            "CPU_SQL_PERCENT" => ApplyThresholdFormula(fact.Value, 75, 95),
+            _ => 0.0
+        };
+    }
+
+    /// <summary>
+    /// Scores I/O latency facts. Value is average latency in ms.
+    /// </summary>
+    private static double ScoreIoFact(Fact fact)
+    {
+        return fact.Key switch
+        {
+            // Read latency: concerning at 20ms, critical at 50ms
+            "IO_READ_LATENCY_MS" => ApplyThresholdFormula(fact.Value, 20, 50),
+            // Write latency: concerning at 10ms, critical at 30ms
+            "IO_WRITE_LATENCY_MS" => ApplyThresholdFormula(fact.Value, 10, 30),
+            _ => 0.0
+        };
+    }
+
+    /// <summary>
+    /// Scores TempDB usage. Value is usage fraction (reserved / total space).
+    /// </summary>
+    private static double ScoreTempDbFact(Fact fact)
+    {
+        return fact.Key switch
+        {
+            // TempDB usage: concerning at 75%, critical at 90%
+            "TEMPDB_USAGE" => ApplyThresholdFormula(fact.Value, 0.75, 0.90),
+            _ => 0.0
+        };
+    }
+
+    /// <summary>
+    /// Scores memory grant facts. Only MEMORY_GRANT_PENDING (from resource semaphore) for now.
+    /// </summary>
+    private static double ScoreMemoryFact(Fact fact)
+    {
+        return fact.Key switch
+        {
+            // Grant waiters: concerning at 1, critical at 5
+            "MEMORY_GRANT_PENDING" => ApplyThresholdFormula(fact.Value, 1, 5),
+            _ => 0.0
+        };
+    }
+
+    /// <summary>
+    /// Scores query-level aggregate facts.
+    /// </summary>
+    private static double ScoreQueryFact(Fact fact)
+    {
+        return fact.Key switch
+        {
+            // Spills: concerning at 100, critical at 1000 in the period
+            "QUERY_SPILLS" => ApplyThresholdFormula(fact.Value, 100, 1000),
+            // High DOP queries: concerning at 5, critical at 20 in the period
+            "QUERY_HIGH_DOP" => ApplyThresholdFormula(fact.Value, 5, 20),
+            _ => 0.0
+        };
+    }
+
+    /// <summary>
     /// Generic threshold formula used by waits, latency, and count-based metrics.
     /// Critical == null means "concerning only" — hitting concerning = 1.0.
     /// </summary>
@@ -143,6 +218,11 @@ public class FactScorer
             "BLOCKING_EVENTS" => BlockingEventsAmplifiers(),
             "DEADLOCKS" => DeadlockAmplifiers(),
             "LCK" => LckAmplifiers(),
+            "CPU_SQL_PERCENT" => CpuSqlPercentAmplifiers(),
+            "IO_READ_LATENCY_MS" => IoReadLatencyAmplifiers(),
+            "IO_WRITE_LATENCY_MS" => IoWriteLatencyAmplifiers(),
+            "MEMORY_GRANT_PENDING" => MemoryGrantAmplifiers(),
+            "QUERY_SPILLS" => QuerySpillAmplifiers(),
             _ => []
         };
     }
@@ -164,6 +244,12 @@ public class FactScorer
             Description = "THREADPOOL waits present — escalating to thread exhaustion",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("THREADPOOL") && facts["THREADPOOL"].BaseSeverity > 0
+        },
+        new()
+        {
+            Description = "SQL Server CPU > 80% — confirmed CPU saturation",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var cpu) && cpu.Value >= 80
         }
     ];
 
@@ -196,6 +282,12 @@ public class FactScorer
             Description = "MAXDOP at 0 — unlimited parallelism",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("CONFIG_MAXDOP", out var maxdop) && maxdop.Value == 0
+        },
+        new()
+        {
+            Description = "Queries running with DOP > 8 — excessive parallelism confirmed",
+            Boost = 0.2,
+            Predicate = facts => facts.TryGetValue("QUERY_HIGH_DOP", out var dop) && dop.BaseSeverity > 0
         }
     ];
 
@@ -230,6 +322,18 @@ public class FactScorer
             Description = "SOS_SCHEDULER_YIELD elevated — CPU pressure alongside I/O pressure",
             Boost = 0.1,
             Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.15)
+        },
+        new()
+        {
+            Description = "Read latency > 20ms — confirmed disk I/O bottleneck",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && io.Value >= 20
+        },
+        new()
+        {
+            Description = "Memory grant waiters present — grants competing with buffer pool",
+            Boost = 0.2,
+            Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var mg) && mg.Value >= 1
         }
     ];
 
@@ -301,6 +405,90 @@ public class FactScorer
             Description = "THREADPOOL waits present — blocking causing thread exhaustion",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("THREADPOOL") && facts["THREADPOOL"].BaseSeverity > 0
+        }
+    ];
+
+    /// <summary>
+    /// CPU_SQL_PERCENT: CPU saturation confirmed by scheduler yields and parallelism.
+    /// </summary>
+    private static List<AmplifierDefinition> CpuSqlPercentAmplifiers() =>
+    [
+        new()
+        {
+            Description = "SOS_SCHEDULER_YIELD elevated — scheduler pressure confirms CPU saturation",
+            Boost = 0.3,
+            Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.25)
+        },
+        new()
+        {
+            Description = "CXPACKET significant — parallelism contributing to CPU load",
+            Boost = 0.2,
+            Predicate = facts => HasSignificantWait(facts, "CXPACKET", 0.10)
+        }
+    ];
+
+    /// <summary>
+    /// IO_READ_LATENCY_MS: read latency confirmed by PAGEIOLATCH waits.
+    /// </summary>
+    private static List<AmplifierDefinition> IoReadLatencyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "PAGEIOLATCH waits elevated — buffer pool misses confirm I/O pressure",
+            Boost = 0.3,
+            Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
+                              || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
+        }
+    ];
+
+    /// <summary>
+    /// IO_WRITE_LATENCY_MS: write latency confirmed by WRITELOG waits.
+    /// </summary>
+    private static List<AmplifierDefinition> IoWriteLatencyAmplifiers() =>
+    [
+        new()
+        {
+            Description = "WRITELOG waits elevated — transaction log I/O bottleneck confirmed",
+            Boost = 0.3,
+            Predicate = facts => HasSignificantWait(facts, "WRITELOG", 0.05)
+        }
+    ];
+
+    /// <summary>
+    /// MEMORY_GRANT_PENDING: grant pressure confirmed by RESOURCE_SEMAPHORE waits and spills.
+    /// </summary>
+    private static List<AmplifierDefinition> MemoryGrantAmplifiers() =>
+    [
+        new()
+        {
+            Description = "RESOURCE_SEMAPHORE waits present — memory grant pressure in wait stats",
+            Boost = 0.3,
+            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
+        },
+        new()
+        {
+            Description = "Query spills present — queries running with insufficient memory grants",
+            Boost = 0.2,
+            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && s.BaseSeverity > 0
+        }
+    ];
+
+    /// <summary>
+    /// QUERY_SPILLS: spills confirmed by memory grant pressure.
+    /// </summary>
+    private static List<AmplifierDefinition> QuerySpillAmplifiers() =>
+    [
+        new()
+        {
+            Description = "Memory grant waiters present — insufficient memory for query grants",
+            Boost = 0.3,
+            Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var mg) && mg.Value >= 1
+        },
+        new()
+        {
+            Description = "RESOURCE_SEMAPHORE waits — grant pressure visible in wait stats",
+            Boost = 0.2,
+            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
         }
     ];
 

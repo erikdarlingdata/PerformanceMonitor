@@ -9,7 +9,7 @@ using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Analysis;
 
 /// <summary>
-/// Orchestrates the full analysis pipeline: collect → score → traverse → narrate → store.
+/// Orchestrates the full analysis pipeline: collect → score → traverse → persist.
 /// Can be run on-demand or on a timer. Each run analyzes a single server's data
 /// for a given time window and persists the findings.
 /// </summary>
@@ -27,7 +27,7 @@ public class AnalysisService
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
     /// Production: 72. Dev/testing: 0.5 (raise before release).
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 0.5; // TODO: raise to 72 before release
+    internal double MinimumDataHours { get; set; } = 72;
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings for UI display.

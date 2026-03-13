@@ -68,6 +68,9 @@ public class RelationshipGraph
         BuildCpuPressureEdges();
         BuildMemoryPressureEdges();
         BuildBlockingEdges();
+        BuildIoPressureEdges();
+        BuildTempDbEdges();
+        BuildQueryEdges();
     }
 
     /* ── CPU Pressure ── */
@@ -103,6 +106,21 @@ public class RelationshipGraph
         AddEdge("THREADPOOL", "LCK", "thread_exhaustion",
             "Lock contention — blocked queries holding worker threads",
             facts => HasFact(facts, "LCK") && facts["LCK"].Severity >= 0.5);
+
+        // CPU_SQL_PERCENT → SOS_SCHEDULER_YIELD (CPU confirms scheduler pressure)
+        AddEdge("CPU_SQL_PERCENT", "SOS_SCHEDULER_YIELD", "cpu_pressure",
+            "Scheduler yields confirm CPU saturation",
+            facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].Severity >= 0.5);
+
+        // CPU_SQL_PERCENT → CXPACKET (CPU load from parallelism)
+        AddEdge("CPU_SQL_PERCENT", "CXPACKET", "cpu_pressure",
+            "Parallelism waits contributing to CPU load",
+            facts => HasFact(facts, "CXPACKET") && facts["CXPACKET"].Severity >= 0.5);
+
+        // SOS_SCHEDULER_YIELD → CPU_SQL_PERCENT (scheduler yields with high CPU)
+        AddEdge("SOS_SCHEDULER_YIELD", "CPU_SQL_PERCENT", "cpu_pressure",
+            "SQL CPU > 80% — confirms CPU is the bottleneck",
+            facts => HasFact(facts, "CPU_SQL_PERCENT") && facts["CPU_SQL_PERCENT"].Value >= 80);
     }
 
     /* ── Memory Pressure ── */
@@ -123,6 +141,36 @@ public class RelationshipGraph
         AddEdge("RESOURCE_SEMAPHORE", "PAGEIOLATCH_SH", "memory_grants",
             "PAGEIOLATCH elevated — memory grant pressure causing buffer pool shrinkage",
             facts => HasFact(facts, "PAGEIOLATCH_SH") && facts["PAGEIOLATCH_SH"].Severity >= 0.5);
+
+        // RESOURCE_SEMAPHORE → MEMORY_GRANT_PENDING (grant pressure confirmed by semaphore waiters)
+        AddEdge("RESOURCE_SEMAPHORE", "MEMORY_GRANT_PENDING", "memory_grants",
+            "Memory grant waiters present — queries queued for memory",
+            facts => HasFact(facts, "MEMORY_GRANT_PENDING") && facts["MEMORY_GRANT_PENDING"].BaseSeverity > 0);
+
+        // RESOURCE_SEMAPHORE → QUERY_SPILLS (grant pressure causing spills)
+        AddEdge("RESOURCE_SEMAPHORE", "QUERY_SPILLS", "memory_grants",
+            "Query spills present — queries running with insufficient memory",
+            facts => HasFact(facts, "QUERY_SPILLS") && facts["QUERY_SPILLS"].BaseSeverity > 0);
+
+        // MEMORY_GRANT_PENDING → RESOURCE_SEMAPHORE (waiters confirm RESOURCE_SEMAPHORE waits)
+        AddEdge("MEMORY_GRANT_PENDING", "RESOURCE_SEMAPHORE", "memory_grants",
+            "RESOURCE_SEMAPHORE waits — grant pressure visible in wait stats",
+            facts => HasFact(facts, "RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].Severity > 0);
+
+        // MEMORY_GRANT_PENDING → QUERY_SPILLS (insufficient grants causing spills)
+        AddEdge("MEMORY_GRANT_PENDING", "QUERY_SPILLS", "memory_grants",
+            "Query spills — queries getting insufficient memory grants",
+            facts => HasFact(facts, "QUERY_SPILLS") && facts["QUERY_SPILLS"].BaseSeverity > 0);
+
+        // PAGEIOLATCH_SH → IO_READ_LATENCY_MS (buffer miss confirmed by disk latency)
+        AddEdge("PAGEIOLATCH_SH", "IO_READ_LATENCY_MS", "memory_pressure",
+            "Read latency elevated — disk confirms buffer pool pressure",
+            facts => HasFact(facts, "IO_READ_LATENCY_MS") && facts["IO_READ_LATENCY_MS"].BaseSeverity > 0);
+
+        // PAGEIOLATCH_EX → IO_READ_LATENCY_MS
+        AddEdge("PAGEIOLATCH_EX", "IO_READ_LATENCY_MS", "memory_pressure",
+            "Read latency elevated — disk confirms buffer pool pressure",
+            facts => HasFact(facts, "IO_READ_LATENCY_MS") && facts["IO_READ_LATENCY_MS"].BaseSeverity > 0);
     }
 
     /* ── Blocking & Deadlocking ── */
@@ -168,6 +216,66 @@ public class RelationshipGraph
         AddEdge("THREADPOOL", "BLOCKING_EVENTS", "thread_exhaustion",
             "Blocking events present — blocked queries holding worker threads",
             facts => HasFact(facts, "BLOCKING_EVENTS") && facts["BLOCKING_EVENTS"].BaseSeverity > 0);
+    }
+
+    /* ── I/O Pressure ── */
+
+    private void BuildIoPressureEdges()
+    {
+        // IO_READ_LATENCY_MS → PAGEIOLATCH_SH (disk latency with buffer pool misses)
+        AddEdge("IO_READ_LATENCY_MS", "PAGEIOLATCH_SH", "io_pressure",
+            "PAGEIOLATCH waits — buffer pool misses driving read I/O",
+            facts => HasFact(facts, "PAGEIOLATCH_SH") && facts["PAGEIOLATCH_SH"].Severity >= 0.5);
+
+        // IO_WRITE_LATENCY_MS → WRITELOG (write latency with log waits)
+        AddEdge("IO_WRITE_LATENCY_MS", "WRITELOG", "io_pressure",
+            "WRITELOG waits — transaction log I/O bottleneck",
+            facts => HasFact(facts, "WRITELOG") && facts["WRITELOG"].Severity > 0);
+
+        // WRITELOG → IO_WRITE_LATENCY_MS (log waits confirmed by disk latency)
+        AddEdge("WRITELOG", "IO_WRITE_LATENCY_MS", "log_io",
+            "Write latency elevated — disk confirms log I/O bottleneck",
+            facts => HasFact(facts, "IO_WRITE_LATENCY_MS") && facts["IO_WRITE_LATENCY_MS"].BaseSeverity > 0);
+    }
+
+    /* ── TempDB ── */
+
+    private void BuildTempDbEdges()
+    {
+        // TEMPDB_USAGE → PAGEIOLATCH_SH (tempdb pressure causing I/O)
+        AddEdge("TEMPDB_USAGE", "PAGEIOLATCH_SH", "tempdb_pressure",
+            "PAGEIOLATCH waits — TempDB pressure contributing to I/O",
+            facts => HasFact(facts, "PAGEIOLATCH_SH") && facts["PAGEIOLATCH_SH"].Severity >= 0.5);
+
+        // TEMPDB_USAGE → QUERY_SPILLS (spills consuming tempdb)
+        AddEdge("TEMPDB_USAGE", "QUERY_SPILLS", "tempdb_pressure",
+            "Query spills — spilling to TempDB consuming space",
+            facts => HasFact(facts, "QUERY_SPILLS") && facts["QUERY_SPILLS"].BaseSeverity > 0);
+    }
+
+    /* ── Query-Level ── */
+
+    private void BuildQueryEdges()
+    {
+        // QUERY_SPILLS → MEMORY_GRANT_PENDING (spills from insufficient grants)
+        AddEdge("QUERY_SPILLS", "MEMORY_GRANT_PENDING", "query_performance",
+            "Memory grant waiters — spills caused by insufficient memory grants",
+            facts => HasFact(facts, "MEMORY_GRANT_PENDING") && facts["MEMORY_GRANT_PENDING"].BaseSeverity > 0);
+
+        // QUERY_SPILLS → TEMPDB_USAGE (spills consuming tempdb space)
+        AddEdge("QUERY_SPILLS", "TEMPDB_USAGE", "query_performance",
+            "TempDB usage elevated — spills consuming TempDB space",
+            facts => HasFact(facts, "TEMPDB_USAGE") && facts["TEMPDB_USAGE"].BaseSeverity > 0);
+
+        // QUERY_HIGH_DOP → CXPACKET (high-DOP queries causing parallelism waits)
+        AddEdge("QUERY_HIGH_DOP", "CXPACKET", "query_performance",
+            "CXPACKET waits — high-DOP queries causing excessive parallelism",
+            facts => HasFact(facts, "CXPACKET") && facts["CXPACKET"].Severity >= 0.5);
+
+        // QUERY_HIGH_DOP → SOS_SCHEDULER_YIELD (high-DOP queries causing CPU pressure)
+        AddEdge("QUERY_HIGH_DOP", "SOS_SCHEDULER_YIELD", "query_performance",
+            "Scheduler yields — high-DOP queries saturating CPU",
+            facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].Severity >= 0.5);
     }
 
     private static bool HasFact(IReadOnlyDictionary<string, Fact> facts, string key)
