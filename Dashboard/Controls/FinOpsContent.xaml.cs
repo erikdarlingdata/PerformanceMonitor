@@ -101,6 +101,13 @@ namespace PerformanceMonitorDashboard.Controls
         {
             try
             {
+                // Re-read monthly cost from server manager in case user edited the server config
+                if (ServerSelector.SelectedItem is ServerConnection selectedServer && _serverManager != null)
+                {
+                    var fresh = _serverManager.GetServerById(selectedServer.Id);
+                    _currentServerMonthlyCost = fresh?.MonthlyCostUsd ?? selectedServer.MonthlyCostUsd;
+                }
+
                 await Task.WhenAll(
                     LoadRecommendationsAsync(),
                     LoadUtilizationAsync(),

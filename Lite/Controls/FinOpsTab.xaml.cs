@@ -125,9 +125,12 @@ public partial class FinOpsTab : UserControl
         var serverId = GetSelectedServerId();
         if (serverId == 0 || _dataService == null) return;
 
-        // Capture monthly cost from selected server
-        if (ServerSelector.SelectedItem is Models.ServerConnection selectedServer)
-            _currentServerMonthlyCost = selectedServer.MonthlyCostUsd;
+        // Re-read monthly cost from server manager in case user edited the server config
+        if (ServerSelector.SelectedItem is Models.ServerConnection selectedServer && _serverManager != null)
+        {
+            var fresh = _serverManager.GetServerById(selectedServer.Id);
+            _currentServerMonthlyCost = fresh?.MonthlyCostUsd ?? selectedServer.MonthlyCostUsd;
+        }
 
         await System.Threading.Tasks.Task.WhenAll(
             LoadRecommendationsAsync(serverId),

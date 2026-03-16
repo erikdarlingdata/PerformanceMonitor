@@ -194,7 +194,7 @@ idle_dbs AS (
             WHERE server_id = $1
             GROUP BY server_id
         )
-        AND database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
+        AND database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
         EXCEPT
         SELECT DISTINCT database_name
         FROM v_query_stats
@@ -321,7 +321,7 @@ idle_dbs AS (
             FROM v_database_size_stats
             GROUP BY server_id
         )
-        AND database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
+        AND database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
         EXCEPT
         SELECT DISTINCT server_id, database_name
         FROM v_query_stats
@@ -1004,7 +1004,7 @@ SELECT
 FROM db_sizes ds
 LEFT JOIN db_activity a ON a.database_name = ds.database_name
 WHERE COALESCE(a.total_executions, 0) = 0
-AND   ds.database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
+AND   ds.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
 ORDER BY ds.total_size_mb DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1743,44 +1743,6 @@ AND   database_id > 4", sqlConn);
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Recommendation check failed (Dev/test detection): {ex.Message}");
-        }
-
-        // 8. tempdb over-provisioning (DuckDB for peak usage, live SQL for allocated size)
-        try
-        {
-            // Get peak usage from DuckDB
-            var tempdbData = await GetTempdbSummaryAsync(serverId);
-            var totalReservedRow = tempdbData.FirstOrDefault(t => t.Metric == "Total Reserved");
-            var peakUsedMb = totalReservedRow?.Peak24hMb ?? 0m;
-
-            // Get allocated size from live SQL
-            using var sqlConn = new SqlConnection(connectionString);
-            await sqlConn.OpenAsync();
-
-            using var allocCmd = new SqlCommand(
-                "SELECT SUM(size) * 8.0 / 1024 FROM tempdb.sys.database_files WHERE type = 0", sqlConn);
-            allocCmd.CommandTimeout = 30;
-            var allocResult = await allocCmd.ExecuteScalarAsync();
-            var allocatedMb = allocResult != null && allocResult != DBNull.Value
-                ? Convert.ToDecimal(allocResult) : 0m;
-
-            if (allocatedMb > 1024 && peakUsedMb > 0 && (peakUsedMb / allocatedMb) < 0.25m)
-            {
-                var usagePct = peakUsedMb / allocatedMb * 100m;
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "tempdb",
-                    Severity = usagePct < 10 ? "Medium" : "Low",
-                    Confidence = "Medium",
-                    Finding = $"tempdb over-provisioned (peak usage {usagePct:N0}% of {allocatedMb / 1024:N1}GB allocated)",
-                    Detail = $"tempdb is pre-allocated at {allocatedMb:N0}MB but peak usage was only " +
-                             $"{peakUsedMb:N0}MB ({usagePct:N1}%). Consider reducing initial size to reclaim disk space."
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("FinOps", $"Recommendation check failed (tempdb): {ex.Message}");
         }
 
         return recommendations;

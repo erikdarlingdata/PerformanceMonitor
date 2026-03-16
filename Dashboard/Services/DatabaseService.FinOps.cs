@@ -1005,7 +1005,7 @@ FROM db_sizes AS ds
 LEFT JOIN db_activity AS a
   ON a.database_name = ds.database_name
 WHERE ISNULL(a.total_executions, 0) = 0
-AND   ds.database_name NOT IN (N'master', N'model', N'msdb', N'tempdb')
+AND   ds.database_name NOT IN (N'master', N'model', N'msdb', N'tempdb', N'PerformanceMonitor')
 ORDER BY
     ds.total_size_mb DESC
 OPTION(MAXDOP 1, RECOMPILE);";
@@ -1939,46 +1939,6 @@ AND   database_id > 4", connection);
             catch (Exception ex)
             {
                 Logger.Error($"Recommendation check failed (Dev/test detection): {ex.Message}", ex);
-            }
-
-            // 8. tempdb over-provisioning
-            try
-            {
-                using var tempdbCmd = new SqlCommand(@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SELECT
-    allocated_mb =
-        (SELECT SUM(size) * 8.0 / 1024 FROM tempdb.sys.database_files WHERE type = 0),
-    peak_used_mb =
-        ISNULL((SELECT MAX(total_reserved_mb) FROM collect.tempdb_stats
-         WHERE collection_time >= DATEADD(DAY, -7, SYSDATETIME())), 0)
-OPTION(MAXDOP 1, RECOMPILE);", connection);
-                tempdbCmd.CommandTimeout = 30;
-
-                using var tempdbReader = await tempdbCmd.ExecuteReaderAsync();
-                if (await tempdbReader.ReadAsync())
-                {
-                    var allocatedMb = tempdbReader.IsDBNull(0) ? 0m : Convert.ToDecimal(tempdbReader.GetValue(0));
-                    var peakUsedMb = tempdbReader.IsDBNull(1) ? 0m : Convert.ToDecimal(tempdbReader.GetValue(1));
-
-                    if (allocatedMb > 1024 && peakUsedMb > 0 && (peakUsedMb / allocatedMb) < 0.25m)
-                    {
-                        var usagePct = peakUsedMb / allocatedMb * 100m;
-                        recommendations.Add(new FinOpsRecommendation
-                        {
-                            Category = "tempdb",
-                            Severity = usagePct < 10 ? "Medium" : "Low",
-                            Confidence = "Medium",
-                            Finding = $"tempdb over-provisioned (peak usage {usagePct:N0}% of {allocatedMb / 1024:N1}GB allocated)",
-                            Detail = $"tempdb is pre-allocated at {allocatedMb:N0}MB but 7-day peak usage was only " +
-                                     $"{peakUsedMb:N0}MB ({usagePct:N1}%). Consider reducing initial size to reclaim disk space."
-                        });
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Recommendation check failed (tempdb): {ex.Message}", ex);
             }
 
             return recommendations;
