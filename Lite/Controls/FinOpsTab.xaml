@@ -772,8 +772,8 @@
 
                 <Grid Grid.Row="1" Margin="10,0,10,10">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="2*"/>
                     </Grid.RowDefinitions>
 
                     <DataGrid x:Name="IndexAnalysisSummaryGrid" Grid.Row="0"
