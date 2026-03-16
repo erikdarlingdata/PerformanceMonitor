@@ -200,8 +200,10 @@ OPTION(RECOMPILE);";
                 new SqlConnectionStringBuilder(baseConnStr) { ConnectTimeout = ConnectionTimeoutSeconds, InitialCatalog = "master" }.ConnectionString))
             {
                 await masterConn.OpenAsync(cancellationToken);
+                // HAS_DBACCESS() returns false for user databases when queried from master on Azure SQL DB,
+                // so we skip that filter here — inaccessible databases are handled by the try/catch below.
                 using var dbListCmd = new SqlCommand(
-                    "SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 AND HAS_DBACCESS(name) = 1 ORDER BY name;",
+                    "SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 ORDER BY name;",
                     masterConn);
                 dbListCmd.CommandTimeout = CommandTimeoutSeconds;
                 using var dbReader = await dbListCmd.ExecuteReaderAsync(cancellationToken);
