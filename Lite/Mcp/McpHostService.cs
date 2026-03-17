@@ -51,7 +51,8 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_dataService);
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
-            builder.Services.AddSingleton(new AnalysisService(_duckDb));
+            var planFetcher = new SqlPlanFetcher(_serverManager);
+            builder.Services.AddSingleton(new AnalysisService(_duckDb, planFetcher));
 
             /* Register MCP server with all tool classes */
             builder.Services

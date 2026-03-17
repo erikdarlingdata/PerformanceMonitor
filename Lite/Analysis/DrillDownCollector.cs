@@ -21,11 +21,13 @@ namespace PerformanceMonitorLite.Analysis;
 public class DrillDownCollector
 {
     private readonly DuckDbInitializer _duckDb;
+    private readonly IPlanFetcher? _planFetcher;
     private const int TextLimit = 500;
 
-    public DrillDownCollector(DuckDbInitializer duckDb)
+    public DrillDownCollector(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null)
     {
         _duckDb = duckDb;
+        _planFetcher = planFetcher;
     }
 
     /// <summary>
@@ -550,106 +552,102 @@ LIMIT 5";
     }
 
     /// <summary>
-    /// For findings that have query hashes (from top_cpu_queries, bad_actor_query, or queries_at_spike),
-    /// fetch cached plan XML and run PlanAnalyzer to surface warnings and missing indexes.
+    /// For findings that have query hashes (bad actors), fetch the execution plan
+    /// live from SQL Server via IPlanFetcher, then run PlanAnalyzer to surface
+    /// warnings and missing indexes. No plan storage needed — fetch on demand
+    /// only for queries that make it into high-impact findings.
     /// </summary>
     private async Task CollectPlanAnalysis(AnalysisFinding finding, AnalysisContext context)
     {
-        if (finding.DrillDown == null) return;
+        if (finding.DrillDown == null || _planFetcher == null) return;
 
-        // Collect query hashes from drill-down data
-        var queryHashes = new List<string>();
+        // Only analyze plans for bad actor findings (1 plan each).
+        // Skip top_cpu_queries (5 plans would be too heavy).
+        if (!finding.RootFactKey.StartsWith("BAD_ACTOR_")) return;
 
-        if (finding.DrillDown.TryGetValue("bad_actor_query", out var badActor) && badActor != null)
+        var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
+        if (string.IsNullOrEmpty(queryHash)) return;
+
+        // Look up plan_handle from DuckDB for this query_hash
+        string? planHandle = null;
+        try
         {
-            // bad_actor_query is a single anonymous object — extract hash from finding key
-            var hash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
-            if (!string.IsNullOrEmpty(hash)) queryHashes.Add(hash);
-        }
+            using var readLock = _duckDb.AcquireReadLock();
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
 
-        // Only analyze plans for findings with a small number of query hashes (bad actors).
-        // Skip top_cpu_queries (5 plans would be too heavy) — those have next_tools for manual follow-up.
-        if (queryHashes.Count == 0) return;
-
-        using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-
-        var planFindings = new List<object>();
-
-        foreach (var hash in queryHashes.Take(3)) // Max 3 plans to analyze
-        {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-SELECT query_plan_xml
+SELECT plan_handle
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
-AND   query_plan_xml IS NOT NULL
-AND   LENGTH(query_plan_xml) > 100
+AND   plan_handle IS NOT NULL AND plan_handle != ''
 ORDER BY collection_time DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = hash });
+            cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
 
             using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) continue;
-
-            var planXml = reader.IsDBNull(0) ? null : reader.GetString(0);
-            if (string.IsNullOrEmpty(planXml)) continue;
-
-            try
-            {
-                var plan = ShowPlanParser.Parse(planXml);
-                PlanAnalyzer.Analyze(plan);
-
-                var allWarnings = plan.Batches
-                    .SelectMany(b => b.Statements)
-                    .Where(s => s.RootNode != null)
-                    .SelectMany(s =>
-                    {
-                        var nodeWarnings = new List<PlanNode>();
-                        CollectPlanNodes(s.RootNode!, nodeWarnings);
-                        return s.PlanWarnings
-                            .Concat(nodeWarnings.SelectMany(n => n.Warnings));
-                    })
-                    .ToList();
-
-                var missingIndexes = plan.AllMissingIndexes;
-
-                if (allWarnings.Count == 0 && missingIndexes.Count == 0) continue;
-
-                planFindings.Add(new
-                {
-                    query_hash = hash,
-                    warning_count = allWarnings.Count,
-                    critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
-                    warnings = allWarnings
-                        .OrderByDescending(w => w.Severity)
-                        .Take(10)
-                        .Select(w => new
-                        {
-                            severity = w.Severity.ToString(),
-                            type = w.WarningType,
-                            message = McpHelpers.Truncate(w.Message, 300)
-                        }),
-                    missing_indexes = missingIndexes.Take(5).Select(idx => new
-                    {
-                        table = $"{idx.Schema}.{idx.Table}",
-                        impact = idx.Impact,
-                        create_statement = idx.CreateStatement
-                    })
-                });
-            }
-            catch
-            {
-                // Plan parsing can fail on malformed XML — skip silently
-            }
+            if (await reader.ReadAsync() && !reader.IsDBNull(0))
+                planHandle = reader.GetString(0);
         }
+        catch { return; }
 
-        if (planFindings.Count > 0)
-            finding.DrillDown["plan_analysis"] = planFindings;
+        if (string.IsNullOrEmpty(planHandle)) return;
+
+        // Fetch plan XML live from SQL Server
+        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle);
+        if (string.IsNullOrEmpty(planXml)) return;
+
+        try
+        {
+            var plan = ShowPlanParser.Parse(planXml);
+            PlanAnalyzer.Analyze(plan);
+
+            var allWarnings = plan.Batches
+                .SelectMany(b => b.Statements)
+                .Where(s => s.RootNode != null)
+                .SelectMany(s =>
+                {
+                    var nodeWarnings = new List<PlanNode>();
+                    CollectPlanNodes(s.RootNode!, nodeWarnings);
+                    return s.PlanWarnings
+                        .Concat(nodeWarnings.SelectMany(n => n.Warnings));
+                })
+                .ToList();
+
+            var missingIndexes = plan.AllMissingIndexes;
+
+            if (allWarnings.Count == 0 && missingIndexes.Count == 0) return;
+
+            finding.DrillDown["plan_analysis"] = new
+            {
+                query_hash = queryHash,
+                warning_count = allWarnings.Count,
+                critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
+                warnings = allWarnings
+                    .OrderByDescending(w => w.Severity)
+                    .Take(10)
+                    .Select(w => new
+                    {
+                        severity = w.Severity.ToString(),
+                        type = w.WarningType,
+                        message = McpHelpers.Truncate(w.Message, 300)
+                    }),
+                missing_indexes = missingIndexes.Take(5).Select(idx => new
+                {
+                    table = $"{idx.Schema}.{idx.Table}",
+                    impact = idx.Impact,
+                    create_statement = idx.CreateStatement
+                })
+            };
+        }
+        catch
+        {
+            // Plan parsing can fail on malformed XML — skip silently
+        }
     }
 
     private static void CollectPlanNodes(PlanNode node, List<PlanNode> nodes)
