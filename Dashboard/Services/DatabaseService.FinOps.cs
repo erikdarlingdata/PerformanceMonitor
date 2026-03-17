@@ -322,7 +322,10 @@ OPTION(MAXDOP 1, RECOMPILE);";
                     state_desc,
                     volume_mount_point,
                     volume_total_mb,
-                    volume_free_mb
+                    volume_free_mb,
+                    is_percent_growth,
+                    growth_pct,
+                    vlf_count
                 FROM collect.database_size_stats
                 WHERE collection_time =
                 (
@@ -364,7 +367,10 @@ OPTION(MAXDOP 1, RECOMPILE);";
                         StateDesc = reader.IsDBNull(15) ? "" : reader.GetString(15),
                         VolumeMountPoint = reader.IsDBNull(16) ? "" : reader.GetString(16),
                         VolumeTotalMb = reader.IsDBNull(17) ? 0m : Convert.ToDecimal(reader.GetValue(17)),
-                        VolumeFreeMb = reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18))
+                        VolumeFreeMb = reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18)),
+                        IsPercentGrowth = reader.IsDBNull(19) ? null : (bool?)(Convert.ToInt32(reader.GetValue(19)) == 1),
+                        GrowthPct = reader.IsDBNull(20) ? null : Convert.ToInt32(reader.GetValue(20)),
+                        VlfCount = reader.IsDBNull(21) ? null : Convert.ToInt32(reader.GetValue(21))
                     });
                 }
             }
@@ -2348,9 +2354,22 @@ ORDER BY SUM(CAST(is_running_long AS int)) DESC", connection);
         public string VolumeMountPoint { get; set; } = "";
         public decimal VolumeTotalMb { get; set; }
         public decimal VolumeFreeMb { get; set; }
+        public bool? IsPercentGrowth { get; set; }
+        public int? GrowthPct { get; set; }
+        public int? VlfCount { get; set; }
 
         // FinOps cost — proportional share of server monthly budget
         public decimal MonthlyCostShare { get; set; }
+
+        public string GrowthDisplay => IsPercentGrowth switch
+        {
+            null  => "-",
+            true  => GrowthPct.HasValue ? $"{GrowthPct}%" : "-",
+            false => AutoGrowthMb == 0 ? "Disabled" : $"{AutoGrowthMb:N0} MB"
+        };
+
+        public string VlfCountDisplay => string.Equals(FileTypeDesc, "LOG", StringComparison.OrdinalIgnoreCase)
+            ? (VlfCount?.ToString() ?? "-") : "N/A";
     }
 
     public class FinOpsTopResourceConsumer
