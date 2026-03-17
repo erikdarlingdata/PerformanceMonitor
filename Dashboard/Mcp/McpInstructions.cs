@@ -103,6 +103,31 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `get_running_jobs` | Currently running SQL Agent jobs with duration vs historical average/p95 | `server_name` |
 
+        ### Latch & Spinlock Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_latch_stats` | Top latch contention by class with per-second rates | `server_name`, `hours_back`, `top` |
+        | `get_spinlock_stats` | Top spinlock contention with collisions, spins, backoffs | `server_name`, `hours_back`, `top` |
+
+        ### Scheduler Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_cpu_scheduler_pressure` | Runnable task queue, worker thread utilization, pressure warnings | `server_name` |
+
+        ### Configuration History Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_server_config_changes` | sp_configure change history with old/new values | `server_name`, `hours_back` (default 168) |
+        | `get_database_config_changes` | Database setting change history (RCSI, recovery model, etc.) | `server_name`, `hours_back` (default 168) |
+        | `get_trace_flag_changes` | Trace flag enable/disable history | `server_name`, `hours_back` (default 168) |
+
+        ### Diagnostic Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_plan_cache_bloat` | Plan cache composition: single-use vs multi-use plan counts and sizes | `server_name`, `hours_back` |
+        | `get_critical_issues` | Detected performance issues with severity, problem area, and investigation queries | `server_name`, `hours_back` |
+        | `get_session_stats` | Session/connection counts: running, sleeping, dormant, top application/host | `server_name`, `hours_back` |
+
         ### Execution Plan Analysis Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
