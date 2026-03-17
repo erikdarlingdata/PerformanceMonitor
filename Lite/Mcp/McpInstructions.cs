@@ -107,6 +107,26 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `get_running_jobs` | Currently running SQL Agent jobs with duration vs historical average/p95 | `server_name` |
 
+        ### Configuration Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_server_config` | sp_configure settings with configured and in-use values | `server_name` |
+        | `get_database_config` | Database-level settings: RCSI, recovery model, auto-shrink, Query Store, etc. | `server_name`, `database_name` |
+        | `get_database_scoped_config` | Database-scoped configuration (MAXDOP, legacy CE, parameter sniffing) | `server_name`, `database_name` |
+        | `get_trace_flags` | Active trace flags with global/session scope | `server_name` |
+
+        ### Server Information Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_server_properties` | Server inventory: edition, version, CPU count, memory, socket topology | `server_name` |
+        | `get_database_sizes` | Database file sizes, space usage, and volume free space | `server_name` |
+
+        ### Session & Active Query Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_active_queries` | Active query snapshots from sp_WhoIsActive — what was running at each collection point | `server_name`, `hours_back` (default 1), `database_name`, `blocking_only`, `limit` |
+        | `get_session_stats` | Connection counts and resource usage grouped by application | `server_name` |
+
         ### Execution Plan Analysis Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
@@ -151,8 +171,10 @@ internal static class McpInstructions
         5. **Deep dive**: Use `get_analysis_facts` to inspect what the engine sees, including amplifier details and raw metric values
         6. **Compare**: Use `compare_analysis` to see if problems are new (compare last 4 hours vs yesterday same time)
         7. **Config**: Use `audit_config` for edition-aware configuration recommendations
-        8. **Query investigation**: After finding a problematic query via `get_top_queries_by_cpu`, use `get_query_trend` with its `query_hash` to see performance history
-        9. **Plan analysis**: Use `analyze_query_plan` with the `query_hash` from step 8 to get detailed plan analysis with warnings, missing indexes, and optimization recommendations
+        8. **Active queries**: Use `get_active_queries` to see what was running at a specific time — critical for correlating CPU spikes, blocking events, or deadlocks with actual queries
+        9. **Configuration**: Use `get_server_config`, `get_database_config`, or `get_database_scoped_config` to check server and database settings
+        10. **Query investigation**: After finding a problematic query via `get_top_queries_by_cpu`, use `get_query_trend` with its `query_hash` to see performance history
+        11. **Plan analysis**: Use `analyze_query_plan` with the `query_hash` from step 10 to get detailed plan analysis with warnings, missing indexes, and optimization recommendations
 
         ## Wait Type to Tool Mapping
 
