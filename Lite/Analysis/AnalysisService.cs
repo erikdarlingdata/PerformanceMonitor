@@ -21,6 +21,7 @@ public class AnalysisService
     private readonly FactScorer _scorer;
     private readonly RelationshipGraph _graph;
     private readonly InferenceEngine _engine;
+    private readonly DrillDownCollector _drillDown;
     /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —
@@ -57,6 +58,7 @@ public class AnalysisService
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
+        _drillDown = new DrillDownCollector(duckDb);
     }
 
     /// <summary>
@@ -132,6 +134,9 @@ public class AnalysisService
 
             // 4. Persist findings (filtering out muted)
             var findings = await _findingStore.SaveFindingsAsync(stories, context);
+
+            // 5. Enrich findings with drill-down data (ephemeral, not persisted)
+            await _drillDown.EnrichFindingsAsync(findings, context);
 
             LastAnalysisTime = DateTime.UtcNow;
 

@@ -98,6 +98,12 @@ public class AnalysisFinding
     public string? LeafFactKey { get; set; }
     public double? LeafFactValue { get; set; }
     public int FactCount { get; set; }
+
+    /// <summary>
+    /// Drill-down data collected after graph traversal. Ephemeral — not persisted to DuckDB.
+    /// Contains supporting detail keyed by category (e.g., "top_deadlocks", "queries_at_spike").
+    /// </summary>
+    public Dictionary<string, object>? DrillDown { get; set; }
 }
 
 /// <summary>
