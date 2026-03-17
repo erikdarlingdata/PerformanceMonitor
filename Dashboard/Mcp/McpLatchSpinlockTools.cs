@@ -32,26 +32,40 @@ public sealed class McpLatchSpinlockTools
             if (rows.Count == 0)
                 return "No latch statistics available in the requested time range.";
 
+            // Service returns all snapshots for top N classes (for UI charting).
+            // For MCP, return only the latest snapshot per class with aggregated deltas.
+            var latestPerClass = rows
+                .GroupBy(r => r.LatchClass)
+                .Select(g =>
+                {
+                    var latest = g.OrderByDescending(r => r.CollectionTime).First();
+                    var totalDeltaWaitMs = g.Sum(r => r.WaitTimeMsDelta ?? 0);
+                    var totalDeltaRequests = g.Sum(r => r.WaitingRequestsCountDelta ?? 0);
+                    return new
+                    {
+                        latch_class = latest.LatchClass,
+                        total_delta_wait_time_ms = totalDeltaWaitMs,
+                        total_delta_waiting_requests = totalDeltaRequests,
+                        avg_wait_ms_per_request = totalDeltaRequests > 0
+                            ? Math.Round((double)totalDeltaWaitMs / totalDeltaRequests, 2)
+                            : (double?)null,
+                        waits_per_second = latest.WaitingRequestsCountPerSecond,
+                        wait_ms_per_second = latest.WaitTimeMsPerSecond,
+                        severity = string.IsNullOrEmpty(latest.Severity) ? null : latest.Severity,
+                        description = string.IsNullOrEmpty(latest.LatchDescription) ? null : latest.LatchDescription,
+                        recommendation = string.IsNullOrEmpty(latest.Recommendation) ? null : latest.Recommendation,
+                        latest_collection_time = latest.CollectionTime.ToString("o")
+                    };
+                })
+                .OrderByDescending(r => r.total_delta_wait_time_ms)
+                .ToList();
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.Value.ServerName,
                 hours_back,
-                latch_count = rows.Count,
-                latches = rows.Select(r => new
-                {
-                    latch_class = r.LatchClass,
-                    waiting_requests_count = r.WaitingRequestsCount,
-                    wait_time_ms = r.WaitTimeMs,
-                    max_wait_time_ms = r.MaxWaitTimeMs,
-                    delta_waiting_requests = r.WaitingRequestsCountDelta,
-                    delta_wait_time_ms = r.WaitTimeMsDelta,
-                    waits_per_second = r.WaitingRequestsCountPerSecond,
-                    wait_ms_per_second = r.WaitTimeMsPerSecond,
-                    avg_wait_ms_per_request = r.AvgWaitMsPerRequest,
-                    severity = string.IsNullOrEmpty(r.Severity) ? null : r.Severity,
-                    recommendation = string.IsNullOrEmpty(r.Recommendation) ? null : r.Recommendation,
-                    collection_time = r.CollectionTime.ToString("o")
-                })
+                latch_count = latestPerClass.Count,
+                latches = latestPerClass
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -81,26 +95,39 @@ public sealed class McpLatchSpinlockTools
             if (rows.Count == 0)
                 return "No spinlock statistics available in the requested time range.";
 
+            // Aggregate to one row per spinlock class with totals over the period
+            var latestPerClass = rows
+                .GroupBy(r => r.SpinlockName)
+                .Select(g =>
+                {
+                    var latest = g.OrderByDescending(r => r.CollectionTime).First();
+                    var totalDeltaCollisions = g.Sum(r => r.CollisionsDelta ?? 0);
+                    var totalDeltaSpins = g.Sum(r => r.SpinsDelta ?? 0);
+                    var totalDeltaBackoffs = g.Sum(r => r.BackoffsDelta ?? 0);
+                    return new
+                    {
+                        spinlock_name = latest.SpinlockName,
+                        total_delta_collisions = totalDeltaCollisions,
+                        total_delta_spins = totalDeltaSpins,
+                        total_delta_backoffs = totalDeltaBackoffs,
+                        spins_per_collision = totalDeltaCollisions > 0
+                            ? Math.Round((double)totalDeltaSpins / totalDeltaCollisions, 1)
+                            : (double?)null,
+                        collisions_per_second = latest.CollisionsPerSecond,
+                        spins_per_second = latest.SpinsPerSecond,
+                        description = string.IsNullOrEmpty(latest.SpinlockDescription) ? null : latest.SpinlockDescription,
+                        latest_collection_time = latest.CollectionTime.ToString("o")
+                    };
+                })
+                .OrderByDescending(r => r.total_delta_collisions)
+                .ToList();
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.Value.ServerName,
                 hours_back,
-                spinlock_count = rows.Count,
-                spinlocks = rows.Select(r => new
-                {
-                    spinlock_name = r.SpinlockName,
-                    collisions = r.Collisions,
-                    spins = r.Spins,
-                    spins_per_collision = r.SpinsPerCollision,
-                    sleep_time = r.SleepTime,
-                    backoffs = r.Backoffs,
-                    delta_collisions = r.CollisionsDelta,
-                    delta_spins = r.SpinsDelta,
-                    delta_backoffs = r.BackoffsDelta,
-                    collisions_per_second = r.CollisionsPerSecond,
-                    spins_per_second = r.SpinsPerSecond,
-                    collection_time = r.CollectionTime.ToString("o")
-                })
+                spinlock_count = latestPerClass.Count,
+                spinlocks = latestPerClass
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

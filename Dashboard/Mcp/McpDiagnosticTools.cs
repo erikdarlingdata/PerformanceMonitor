@@ -31,15 +31,20 @@ public sealed class McpDiagnosticTools
             if (rows.Count == 0)
                 return "No plan cache statistics available in the requested time range.";
 
-            var totalPlans = rows.Sum(r => r.TotalPlans);
-            var totalSingleUse = rows.Sum(r => r.SingleUsePlans);
-            var totalSizeMb = rows.Sum(r => r.TotalSizeMb);
-            var singleUseSizeMb = rows.Sum(r => r.SingleUseSizeMb);
+            // Service returns all snapshots (for UI charting).
+            // For MCP, return only the latest snapshot per cache/object type.
+            var latestTime = rows.Max(r => r.CollectionTime);
+            var latest = rows.Where(r => r.CollectionTime == latestTime).ToList();
+
+            var totalPlans = latest.Sum(r => r.TotalPlans);
+            var totalSingleUse = latest.Sum(r => r.SingleUsePlans);
+            var totalSizeMb = latest.Sum(r => r.TotalSizeMb);
+            var singleUseSizeMb = latest.Sum(r => r.SingleUseSizeMb);
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.Value.ServerName,
-                hours_back,
+                collection_time = latestTime.ToString("o"),
                 summary = new
                 {
                     total_plans = totalPlans,
@@ -49,7 +54,7 @@ public sealed class McpDiagnosticTools
                     single_use_size_mb = singleUseSizeMb,
                     wasted_percent = totalSizeMb > 0 ? Math.Round(100.0 * singleUseSizeMb / totalSizeMb, 1) : 0
                 },
-                cache_types = rows.Select(r => new
+                cache_types = latest.Select(r => new
                 {
                     cache_type = r.CacheObjType,
                     object_type = r.ObjType,
@@ -59,8 +64,7 @@ public sealed class McpDiagnosticTools
                     single_use_size_mb = r.SingleUseSizeMb,
                     multi_use_plans = r.MultiUsePlans,
                     multi_use_size_mb = r.MultiUseSizeMb,
-                    avg_use_count = r.AvgUseCount,
-                    collection_time = r.CollectionTime.ToString("o")
+                    avg_use_count = r.AvgUseCount
                 })
             }, McpHelpers.JsonOptions);
         }
