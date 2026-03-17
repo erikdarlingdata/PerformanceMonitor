@@ -1434,7 +1434,7 @@ WITH
                 SELECT TOP (1)
                     CASE
                         WHEN qs2.query_text IS NOT NULL
-                        THEN CAST(DECOMPRESS(qs2.query_text) AS nvarchar(max))
+                        THEN LEFT(CAST(DECOMPRESS(qs2.query_text) AS nvarchar(max)), 200)
                         ELSE N''
                     END
                 FROM collect.query_stats AS qs2
