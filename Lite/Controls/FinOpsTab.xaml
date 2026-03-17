@@ -1016,7 +1016,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding GrowthDisplay}" Width="110">
+                            <DataGridTextColumn Binding="{Binding GrowthDisplay}" Width="110" SortMemberPath="AutoGrowthSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrowthDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1024,7 +1024,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding VlfCountDisplay}" Width="80">
+                            <DataGridTextColumn Binding="{Binding VlfCountDisplay}" Width="80" SortMemberPath="VlfCountSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VlfCountDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
