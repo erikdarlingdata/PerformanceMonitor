@@ -2368,8 +2368,18 @@ ORDER BY SUM(CAST(is_running_long AS int)) DESC", connection);
             false => AutoGrowthMb == 0 ? "Disabled" : $"{AutoGrowthMb:N0} MB"
         };
 
+        public decimal AutoGrowthSort => IsPercentGrowth switch
+        {
+            null  => -1m,
+            true  => (decimal)(GrowthPct ?? -1),
+            false => AutoGrowthMb
+        };
+
         public string VlfCountDisplay => string.Equals(FileTypeDesc, "LOG", StringComparison.OrdinalIgnoreCase)
             ? (VlfCount?.ToString() ?? "-") : "N/A";
+
+        public int VlfCountSort => string.Equals(FileTypeDesc, "LOG", StringComparison.OrdinalIgnoreCase)
+            ? (VlfCount ?? 0) : -1;
     }
 
     public class FinOpsTopResourceConsumer

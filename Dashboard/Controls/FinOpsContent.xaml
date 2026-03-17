@@ -830,8 +830,8 @@
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="Recovery Model" Binding="{Binding RecoveryModelDesc}" Width="120"/>
-                            <DataGridTextColumn Header="Auto Growth" Binding="{Binding GrowthDisplay}" Width="110"/>
-                            <DataGridTextColumn Header="VLF Count" Binding="{Binding VlfCountDisplay}" Width="80">
+                            <DataGridTextColumn Header="Auto Growth" Binding="{Binding GrowthDisplay}" Width="110" SortMemberPath="AutoGrowthSort"/>
+                            <DataGridTextColumn Header="VLF Count" Binding="{Binding VlfCountDisplay}" Width="80" SortMemberPath="VlfCountSort">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="HorizontalAlignment" Value="Right"/>
