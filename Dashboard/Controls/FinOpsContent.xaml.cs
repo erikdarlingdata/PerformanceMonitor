@@ -14,6 +14,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Media;
 using Microsoft.Win32;
@@ -31,6 +32,11 @@ namespace PerformanceMonitorDashboard.Controls
         private List<FinOpsServerInventory>? _serverInventoryCache;
         private DateTime _serverInventoryCacheTime;
         private decimal _currentServerMonthlyCost;
+
+        private List<FinOpsDatabaseSizeStats> _allDatabaseSizes = new();
+        private readonly Dictionary<string, ColumnFilterState> _dbSizeColumnFilters = new();
+        private Popup? _dbSizeFilterPopup;
+        private ColumnFilterPopup? _dbSizeFilterPopupContent;
 
         public FinOpsContent()
         {
@@ -623,13 +629,114 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                 }
 
-                DatabaseSizesDataGrid.ItemsSource = data;
-                DatabaseSizesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                DbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s)" : "";
+                _allDatabaseSizes = data;
+                _dbSizeColumnFilters.Clear();
+                ApplyDbSizeFilters();
+                UpdateDbSizeFilterButtonStyles();
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading database sizes: {ex.Message}", ex);
+            }
+        }
+
+        private void ApplyDbSizeFilters()
+        {
+            var filtered = _allDatabaseSizes.AsEnumerable();
+
+            if (_dbSizeColumnFilters.Count > 0)
+            {
+                filtered = filtered.Where(item =>
+                {
+                    foreach (var filter in _dbSizeColumnFilters.Values)
+                    {
+                        if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
+                            return false;
+                    }
+                    return true;
+                });
+            }
+
+            var list = filtered.ToList();
+            DatabaseSizesDataGrid.ItemsSource = list;
+            DatabaseSizesNoDataMessage.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            DbSizeCountIndicator.Text = list.Count > 0 ? $"{list.Count} file(s)" : "";
+        }
+
+        private void DatabaseSizesFilter_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.Tag is not string columnName) return;
+            ShowDbSizeFilterPopup(button, columnName);
+        }
+
+        private void ShowDbSizeFilterPopup(Button button, string columnName)
+        {
+            if (_dbSizeFilterPopup == null)
+            {
+                _dbSizeFilterPopupContent = new ColumnFilterPopup();
+                _dbSizeFilterPopupContent.FilterApplied += FilterPopup_DbSizeFilterApplied;
+                _dbSizeFilterPopupContent.FilterCleared += FilterPopup_DbSizeFilterCleared;
+
+                _dbSizeFilterPopup = new Popup
+                {
+                    Child = _dbSizeFilterPopupContent,
+                    StaysOpen = false,
+                    Placement = PlacementMode.Bottom,
+                    AllowsTransparency = true
+                };
+            }
+
+            _dbSizeColumnFilters.TryGetValue(columnName, out var existingFilter);
+            _dbSizeFilterPopupContent!.Initialize(columnName, existingFilter);
+            _dbSizeFilterPopup.PlacementTarget = button;
+            _dbSizeFilterPopup.IsOpen = true;
+        }
+
+        private void FilterPopup_DbSizeFilterApplied(object? sender, FilterAppliedEventArgs e)
+        {
+            if (_dbSizeFilterPopup != null)
+                _dbSizeFilterPopup.IsOpen = false;
+
+            if (e.FilterState.IsActive)
+                _dbSizeColumnFilters[e.FilterState.ColumnName] = e.FilterState;
+            else
+                _dbSizeColumnFilters.Remove(e.FilterState.ColumnName);
+
+            ApplyDbSizeFilters();
+            UpdateDbSizeFilterButtonStyles();
+        }
+
+        private void FilterPopup_DbSizeFilterCleared(object? sender, EventArgs e)
+        {
+            if (_dbSizeFilterPopup != null)
+                _dbSizeFilterPopup.IsOpen = false;
+        }
+
+        private void UpdateDbSizeFilterButtonStyles()
+        {
+            foreach (var column in DatabaseSizesDataGrid.Columns)
+            {
+                if (column.Header is StackPanel stackPanel)
+                {
+                    var filterButton = stackPanel.Children.OfType<Button>().FirstOrDefault();
+                    if (filterButton != null && filterButton.Tag is string columnName)
+                    {
+                        bool hasActiveFilter = _dbSizeColumnFilters.TryGetValue(columnName, out var filter) && filter.IsActive;
+
+                        var textBlock = new TextBlock
+                        {
+                            Text = "\uE71C",
+                            FontFamily = new System.Windows.Media.FontFamily("Segoe MDL2 Assets"),
+                            Foreground = hasActiveFilter
+                                ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xD7, 0x00))
+                                : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF))
+                        };
+                        filterButton.Content = textBlock;
+                        filterButton.ToolTip = hasActiveFilter && filter != null
+                            ? $"Filter: {filter.DisplayText}\n(Click to modify)"
+                            : "Click to filter";
+                    }
+                }
             }
         }
 
