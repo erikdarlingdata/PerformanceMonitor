@@ -614,7 +614,10 @@ CREATE TABLE IF NOT EXISTS database_size_stats (
     state_desc VARCHAR,
     volume_mount_point VARCHAR,
     volume_total_mb DECIMAL(19,2),
-    volume_free_mb DECIMAL(19,2)
+    volume_free_mb DECIMAL(19,2),
+    is_percent_growth BOOLEAN,
+    growth_pct INTEGER,
+    vlf_count INTEGER
 )";
 
     public const string CreateDatabaseSizeStatsIndex = @"
