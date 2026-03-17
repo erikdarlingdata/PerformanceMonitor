@@ -51,7 +51,7 @@ public class AnalysisService
     /// </summary>
     public string? InsufficientDataMessage { get; private set; }
 
-    public AnalysisService(DuckDbInitializer duckDb)
+    public AnalysisService(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null)
     {
         _duckDb = duckDb;
         _findingStore = new FindingStore(duckDb);
@@ -59,7 +59,7 @@ public class AnalysisService
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
-        _drillDown = new DrillDownCollector(duckDb);
+        _drillDown = new DrillDownCollector(duckDb, planFetcher);
         _anomalyDetector = new AnomalyDetector(duckDb);
     }
 
