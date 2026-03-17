@@ -42,7 +42,8 @@ SELECT
      WHERE server_id = $1
      AND   collection_time >= $2 AND collection_time < $3
      AND   delta_wait_time_ms > 0
-     ORDER BY delta_wait_time_ms DESC
+     GROUP BY wait_type
+     ORDER BY SUM(delta_wait_time_ms) DESC
      LIMIT 1
     ) AS top_wait_type,
     COALESCE(

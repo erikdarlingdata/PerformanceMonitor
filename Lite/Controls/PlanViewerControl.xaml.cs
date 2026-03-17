@@ -353,16 +353,17 @@ public partial class PlanViewerControl : UserControl
                 HorizontalAlignment = HorizontalAlignment.Center
             });
 
-            // Actual rows of Estimated rows (accuracy %) — red if off by 10x+
+            // Actual rows per execution vs Estimated rows (accuracy %) — red if off by 10x+
             var estRows = node.EstimateRows;
-            var accuracyRatio = estRows > 0 ? node.ActualRows / estRows : (node.ActualRows > 0 ? double.MaxValue : 1.0);
+            var actualRowsPerExec = node.ActualExecutions > 0 ? node.ActualRows / (double)node.ActualExecutions : node.ActualRows;
+            var accuracyRatio = estRows > 0 ? actualRowsPerExec / estRows : (actualRowsPerExec > 0 ? double.MaxValue : 1.0);
             var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? Brushes.OrangeRed : fgBrush;
             var accuracy = estRows > 0
                 ? $" ({accuracyRatio * 100:F0}%)"
                 : "";
             stack.Children.Add(new TextBlock
             {
-                Text = $"{node.ActualRows:N0} of {estRows:N0}{accuracy}",
+                Text = $"{actualRowsPerExec:N0} of {estRows:N0}{accuracy}",
                 FontSize = 9,
                 Foreground = rowBrush,
                 TextAlignment = TextAlignment.Center,

@@ -861,25 +861,28 @@ public partial class SettingsWindow : Window
 
     private async void TestEmailButton_Click(object sender, RoutedEventArgs e)
     {
-        /* Temporarily apply current UI values for the test */
-        App.SmtpServer = SmtpServerBox.Text?.Trim() ?? "";
-        if (int.TryParse(SmtpPortBox.Text, out var port))
-            App.SmtpPort = port;
-        App.SmtpUseSsl = SmtpSslCheckBox.IsChecked == true;
-        App.SmtpUsername = SmtpUsernameBox.Text?.Trim() ?? "";
-        App.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
-        App.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
-
-        if (!string.IsNullOrEmpty(SmtpPasswordBox.Password))
-        {
-            App.SaveSmtpPassword(SmtpPasswordBox.Password);
-        }
+        /* Save current App values so we can restore after the test */
+        var origServer = App.SmtpServer;
+        var origPort = App.SmtpPort;
+        var origSsl = App.SmtpUseSsl;
+        var origUsername = App.SmtpUsername;
+        var origFrom = App.SmtpFromAddress;
+        var origRecipients = App.SmtpRecipients;
 
         TestEmailButton.IsEnabled = false;
         TestEmailButton.Content = "Sending...";
 
         try
         {
+            /* Temporarily apply current UI values for the test */
+            App.SmtpServer = SmtpServerBox.Text?.Trim() ?? "";
+            if (int.TryParse(SmtpPortBox.Text, out var port))
+                App.SmtpPort = port;
+            App.SmtpUseSsl = SmtpSslCheckBox.IsChecked == true;
+            App.SmtpUsername = SmtpUsernameBox.Text?.Trim() ?? "";
+            App.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
+            App.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+
             var error = await Services.EmailAlertService.SendTestEmailAsync();
             if (error == null)
             {
@@ -892,6 +895,14 @@ public partial class SettingsWindow : Window
         }
         finally
         {
+            /* Restore original values — only Save should persist changes */
+            App.SmtpServer = origServer;
+            App.SmtpPort = origPort;
+            App.SmtpUseSsl = origSsl;
+            App.SmtpUsername = origUsername;
+            App.SmtpFromAddress = origFrom;
+            App.SmtpRecipients = origRecipients;
+
             TestEmailButton.Content = "Send Test Email";
             TestEmailButton.IsEnabled = true;
         }

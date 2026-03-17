@@ -260,7 +260,12 @@ LIMIT 10";
                 var currentMs = Convert.ToInt64(reader.GetValue(1));
                 var baselineMs = Convert.ToInt64(reader.GetValue(2));
 
-                // New wait (absent in baseline) or 5x+ increase
+                // Normalize to per-hour rates before comparing (windows are different lengths)
+                var baselineHours = (baselineEnd - baselineStart).TotalHours;
+                var currentHours = (context.TimeRangeEnd - context.TimeRangeStart).TotalHours;
+                if (baselineHours <= 0) baselineHours = 1;
+                if (currentHours <= 0) currentHours = 1;
+
                 double ratio;
                 string anomalyType;
 
@@ -271,7 +276,9 @@ LIMIT 10";
                 }
                 else
                 {
-                    ratio = (double)currentMs / baselineMs;
+                    var baselineRate = baselineMs / baselineHours;
+                    var currentRate = currentMs / currentHours;
+                    ratio = baselineRate > 0 ? currentRate / baselineRate : 100.0;
                     anomalyType = "spike";
                 }
 
@@ -353,8 +360,22 @@ SELECT
             var baselineDeadlocks = Convert.ToInt64(reader.GetValue(2));
             var currentDeadlocks = Convert.ToInt64(reader.GetValue(3));
 
-            // Blocking spike: at least 5 events AND 3x baseline (or new)
-            if (currentBlocking >= 5 && (baselineBlocking == 0 || (double)currentBlocking / baselineBlocking >= 3))
+            // Normalize to per-hour rates (windows are different lengths)
+            var baselineHours = (baselineEnd - baselineStart).TotalHours;
+            var currentHours = (context.TimeRangeEnd - context.TimeRangeStart).TotalHours;
+            if (baselineHours <= 0) baselineHours = 1;
+            if (currentHours <= 0) currentHours = 1;
+
+            var baselineBlockingRate = baselineBlocking / baselineHours;
+            var currentBlockingRate = currentBlocking / currentHours;
+            var blockingRatio = baselineBlocking > 0 ? currentBlockingRate / baselineBlockingRate : 100.0;
+
+            var baselineDeadlockRate = baselineDeadlocks / baselineHours;
+            var currentDeadlockRate = currentDeadlocks / currentHours;
+            var deadlockRatio = baselineDeadlocks > 0 ? currentDeadlockRate / baselineDeadlockRate : 100.0;
+
+            // Blocking spike: at least 5 events AND 3x baseline rate (or new)
+            if (currentBlocking >= 5 && (baselineBlocking == 0 || blockingRatio >= 3))
             {
                 anomalies.Add(new Fact
                 {
@@ -366,13 +387,13 @@ SELECT
                     {
                         ["current_count"] = currentBlocking,
                         ["baseline_count"] = baselineBlocking,
-                        ["ratio"] = baselineBlocking > 0 ? (double)currentBlocking / baselineBlocking : 100
+                        ["ratio"] = blockingRatio
                     }
                 });
             }
 
-            // Deadlock spike: at least 3 events AND 3x baseline (or new)
-            if (currentDeadlocks >= 3 && (baselineDeadlocks == 0 || (double)currentDeadlocks / baselineDeadlocks >= 3))
+            // Deadlock spike: at least 3 events AND 3x baseline rate (or new)
+            if (currentDeadlocks >= 3 && (baselineDeadlocks == 0 || deadlockRatio >= 3))
             {
                 anomalies.Add(new Fact
                 {
@@ -384,7 +405,7 @@ SELECT
                     {
                         ["current_count"] = currentDeadlocks,
                         ["baseline_count"] = baselineDeadlocks,
-                        ["ratio"] = baselineDeadlocks > 0 ? (double)currentDeadlocks / baselineDeadlocks : 100
+                        ["ratio"] = deadlockRatio
                     }
                 });
             }

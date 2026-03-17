@@ -578,7 +578,7 @@ public partial class FinOpsTab : UserControl
         {
             var hoursBack = GetHighImpactHoursBack();
             var data = await _dataService.GetHighImpactQueriesAsync(serverId, hoursBack);
-            HighImpactDataGrid.ItemsSource = data;
+            _highImpactFilterMgr!.UpdateData(data);
             HighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             HighImpactCountIndicator.Text = data.Count > 0 ? $"{data.Count} high-impact query(s)" : "";
         }
