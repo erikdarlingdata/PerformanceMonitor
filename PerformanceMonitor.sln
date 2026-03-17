@@ -13,6 +13,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Lite.Tests", "Lite.Tests\Li
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PerformanceMonitorInstaller", "Installer\PerformanceMonitorInstaller.csproj", "{0F1EFD0D-61B6-D475-3A2E-ED7FD83BCE6E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Installer.Tests", "Installer.Tests\Installer.Tests.csproj", "{9B2800D2-8F32-450E-A169-86B381EA5560}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -39,6 +41,10 @@ Global
 		{0F1EFD0D-61B6-D475-3A2E-ED7FD83BCE6E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0F1EFD0D-61B6-D475-3A2E-ED7FD83BCE6E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0F1EFD0D-61B6-D475-3A2E-ED7FD83BCE6E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9B2800D2-8F32-450E-A169-86B381EA5560}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9B2800D2-8F32-450E-A169-86B381EA5560}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9B2800D2-8F32-450E-A169-86B381EA5560}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9B2800D2-8F32-450E-A169-86B381EA5560}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,0 +1,148 @@
+using Installer.Tests.Helpers;
+using PerformanceMonitorInstallerGui.Services;
+
+namespace Installer.Tests;
+
+/// <summary>
+/// Tests the upgrade folder discovery and ordering logic.
+/// Uses temp directories to simulate various upgrade folder configurations.
+/// </summary>
+public class UpgradeOrderingTests
+{
+    [Fact]
+    public void ReturnsCorrectUpgradesForVersionRange()
+    {
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("1.3.0", "2.0.0", "01_schema.sql")
+            .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
+            .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "1.3.0", "2.2.0");
+
+        Assert.Equal(3, upgrades.Count);
+        Assert.Equal("1.3.0-to-2.0.0", upgrades[0].FolderName);
+        Assert.Equal("2.0.0-to-2.1.0", upgrades[1].FolderName);
+        Assert.Equal("2.1.0-to-2.2.0", upgrades[2].FolderName);
+    }
+
+    [Fact]
+    public void SkipsAlreadyAppliedUpgrades()
+    {
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("1.3.0", "2.0.0", "01_schema.sql")
+            .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
+            .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+
+        Assert.Equal(2, upgrades.Count);
+        Assert.Equal("2.0.0-to-2.1.0", upgrades[0].FolderName);
+        Assert.Equal("2.1.0-to-2.2.0", upgrades[1].FolderName);
+    }
+
+    [Fact]
+    public void AlreadyAtTargetVersion_ReturnsEmpty()
+    {
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
+            .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.2.0", "2.2.0");
+
+        Assert.Empty(upgrades);
+    }
+
+    [Fact]
+    public void FourPartVersion_NormalizedToThreePart()
+    {
+        // The installer normalizes 4-part "2.2.0.0" (from DB) to 3-part "2.2.0" (folder names)
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.1.0.0", "2.2.0");
+
+        Assert.Single(upgrades);
+        Assert.Equal("2.1.0-to-2.2.0", upgrades[0].FolderName);
+    }
+
+    [Fact]
+    public void MalformedFolderNames_Skipped()
+    {
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
+            .WithMalformedUpgradeFolder("not-a-version")
+            .WithMalformedUpgradeFolder("foo-to-bar");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+
+        Assert.Single(upgrades);
+        Assert.Equal("2.0.0-to-2.1.0", upgrades[0].FolderName);
+    }
+
+    [Fact]
+    public void MissingUpgradeTxt_FolderSkipped()
+    {
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
+            .WithUpgradeNoManifest("2.1.0", "2.2.0");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+
+        Assert.Single(upgrades);
+        Assert.Equal("2.0.0-to-2.1.0", upgrades[0].FolderName);
+    }
+
+    [Fact]
+    public void NoUpgradesFolder_ReturnsEmpty()
+    {
+        using var dir = new TempDirectoryBuilder();
+        // Don't create any upgrade folders
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+
+        Assert.Empty(upgrades);
+    }
+
+    [Fact]
+    public void NullCurrentVersion_ReturnsEmpty()
+    {
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, null, "2.2.0");
+
+        Assert.Empty(upgrades);
+    }
+
+    [Fact]
+    public void OrderedByFromVersion()
+    {
+        // Create folders in reverse order to verify sorting
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.1.0", "2.2.0", "01_c.sql")
+            .WithUpgrade("1.3.0", "2.0.0", "01_a.sql")
+            .WithUpgrade("2.0.0", "2.1.0", "01_b.sql");
+
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "1.3.0", "2.2.0");
+
+        Assert.Equal(3, upgrades.Count);
+        Assert.Equal(new Version(1, 3, 0), upgrades[0].FromVersion);
+        Assert.Equal(new Version(2, 0, 0), upgrades[1].FromVersion);
+        Assert.Equal(new Version(2, 1, 0), upgrades[2].FromVersion);
+    }
+
+    [Fact]
+    public void DoesNotIncludeFutureUpgrades()
+    {
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.0.0", "2.1.0", "01_a.sql")
+            .WithUpgrade("2.1.0", "2.2.0", "01_b.sql")
+            .WithUpgrade("2.2.0", "2.3.0", "01_c.sql");
+
+        // Target is 2.2.0, so 2.2.0-to-2.3.0 should NOT be included
+        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+
+        Assert.Equal(2, upgrades.Count);
+        Assert.DoesNotContain(upgrades, u => u.FolderName == "2.2.0-to-2.3.0");
+    }
+}
