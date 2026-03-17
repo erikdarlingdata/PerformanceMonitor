@@ -177,11 +177,22 @@ internal static class McpInstructions
         - Join issues: OR clauses, high nested loop executions, many-to-many merge joins
         - UDF execution overhead, table variable usage, CTE multiple references
 
+        ### Diagnostic Analysis Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `analyze_server` | Runs the inference engine: scores facts, traverses relationship graph, returns evidence-backed findings with severity, drill-down data, and recommended next tools | `server_name`, `hours_back` (default 4) |
+        | `get_analysis_facts` | Exposes raw scored facts from the collect+score pipeline with base severity, amplifiers, and metadata | `server_name`, `hours_back` (default 4), `source` (filter), `min_severity` |
+        | `compare_analysis` | Compares two time periods showing severity deltas for each fact | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28) |
+        | `audit_config` | Edition-aware configuration audit: CTFP, MAXDOP, max memory, max worker threads | `server_name` |
+        | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs | `server_name`, `hours_back` (default 24) |
+        | `mute_analysis_finding` | Mutes a finding pattern by story_path_hash | `story_path_hash` (required), `server_name`, `reason` |
+
         ## Recommended Workflow
 
         1. **Start**: `list_servers` — see what's monitored and which servers are online
         2. **Verify**: `get_collection_health` — check collectors are running successfully
-        3. **Overview**: `get_daily_summary` — high-level health: blocking, deadlocks, CPU spikes, memory pressure
+        3. **Diagnose**: `analyze_server` — run the inference engine for evidence-backed assessment with drill-down data
+        4. **Overview**: `get_daily_summary` — high-level health: blocking, deadlocks, CPU spikes, memory pressure
         4. **Drill down** based on findings:
            - High wait times → `get_wait_stats` → `get_wait_trend` to see changes
            - CPU pressure → `get_cpu_utilization` → `get_top_queries_by_cpu` or `get_expensive_queries`

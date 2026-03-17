@@ -90,7 +90,8 @@ public sealed class McpHostService : BackgroundService
                 .WithTools<McpActiveQueryTools>()
                 .WithTools<McpSystemEventTools>()
                 .WithTools<McpHealthParserTools>()
-                .WithTools<McpServerInventoryTools>();
+                .WithTools<McpServerInventoryTools>()
+                .WithTools<McpAnalysisTools>();
 
             _app = builder.Build();
             _app.MapMcp();
