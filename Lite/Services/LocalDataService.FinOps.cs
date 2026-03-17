@@ -1880,10 +1880,10 @@ LIMIT 10";
             while (await jobReader.ReadAsync())
             {
                 var jobName = jobReader.IsDBNull(0) ? "" : jobReader.GetString(0);
-                var avgDuration = jobReader.IsDBNull(2) ? 0L : Convert.ToInt64(jobReader.GetValue(2));
-                var maxDuration = jobReader.IsDBNull(3) ? 0L : Convert.ToInt64(jobReader.GetValue(3));
-                var avgHistorical = jobReader.IsDBNull(4) ? 0L : Convert.ToInt64(jobReader.GetValue(4));
-                var timesLong = jobReader.IsDBNull(5) ? 0 : Convert.ToInt32(jobReader.GetValue(5));
+                var avgDuration = jobReader.IsDBNull(2) ? 0L : ToInt64(jobReader.GetValue(2));
+                var maxDuration = jobReader.IsDBNull(3) ? 0L : ToInt64(jobReader.GetValue(3));
+                var avgHistorical = jobReader.IsDBNull(4) ? 0L : ToInt64(jobReader.GetValue(4));
+                var timesLong = jobReader.IsDBNull(5) ? 0 : (int)ToInt64(jobReader.GetValue(5));
 
                 recommendations.Add(new RecommendationRow
                 {
@@ -2021,10 +2021,10 @@ HAVING SUM(delta_reads) > 1000";
             while (await ioReader.ReadAsync())
             {
                 var dbName = ioReader.IsDBNull(0) ? "" : ioReader.GetString(0);
-                var totalReads = ioReader.IsDBNull(1) ? 0L : Convert.ToInt64(ioReader.GetValue(1));
-                var totalStallRead = ioReader.IsDBNull(2) ? 0L : Convert.ToInt64(ioReader.GetValue(2));
-                var totalWrites = ioReader.IsDBNull(3) ? 0L : Convert.ToInt64(ioReader.GetValue(3));
-                var totalStallWrite = ioReader.IsDBNull(4) ? 0L : Convert.ToInt64(ioReader.GetValue(4));
+                var totalReads = ioReader.IsDBNull(1) ? 0L : ToInt64(ioReader.GetValue(1));
+                var totalStallRead = ioReader.IsDBNull(2) ? 0L : ToInt64(ioReader.GetValue(2));
+                var totalWrites = ioReader.IsDBNull(3) ? 0L : ToInt64(ioReader.GetValue(3));
+                var totalStallWrite = ioReader.IsDBNull(4) ? 0L : ToInt64(ioReader.GetValue(4));
 
                 var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
                 var avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : 0m;
