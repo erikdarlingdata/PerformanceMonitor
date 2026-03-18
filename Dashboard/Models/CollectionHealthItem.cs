@@ -19,7 +19,7 @@ namespace PerformanceMonitorDashboard.Models
         public decimal FailureRatePercent { get; set; }
         public long TotalRuns7d { get; set; }
         public long FailedRuns7d { get; set; }
-        public int AvgDurationMs { get; set; }
+        public long AvgDurationMs { get; set; }
         public long TotalRowsCollected7d { get; set; }
     }
 }

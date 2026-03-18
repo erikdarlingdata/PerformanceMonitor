@@ -69,7 +69,7 @@ WITH
             (
                 CASE
                     WHEN cl.collection_status = N'SUCCESS'
-                    THEN cl.duration_ms
+                    THEN CAST(cl.duration_ms AS bigint)
                     ELSE NULL
                 END
             ),
@@ -78,8 +78,8 @@ WITH
             (
                 CASE
                     WHEN cl.collection_status = N'SUCCESS'
-                    THEN cl.rows_collected
-                    ELSE 0
+                    THEN CAST(cl.rows_collected AS bigint)
+                    ELSE CAST(0 AS bigint)
                 END
             )
     FROM config.collection_log AS cl
@@ -157,7 +157,7 @@ SELECT
         ),
     total_runs_7d = cs.total_runs,
     failed_runs_7d = cs.failed_runs,
-    avg_duration_ms = CONVERT(integer, cs.avg_duration_ms),
+    avg_duration_ms = CONVERT(bigint, cs.avg_duration_ms),
     total_rows_collected_7d = cs.total_rows_collected
 FROM collector_stats AS cs
 LEFT JOIN recent_failures AS rf
