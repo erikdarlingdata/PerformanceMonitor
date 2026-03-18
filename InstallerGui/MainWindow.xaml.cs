@@ -518,6 +518,8 @@ namespace PerformanceMonitorInstallerGui
 
                 if (_installationResult.Success)
                 {
+                    _installedVersion = AppAssemblyVersion;
+
                     LogMessage("Installation completed successfully!", "Success");
                     LogMessage("", "Info");
                     LogMessage("NEXT STEPS:", "Info");

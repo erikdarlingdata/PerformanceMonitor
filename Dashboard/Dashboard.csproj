@@ -6,10 +6,10 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>PerformanceMonitorDashboard</AssemblyName>
     <Product>SQL Server Performance Monitor Dashboard</Product>
-    <Version>2.2.0</Version>
-    <AssemblyVersion>2.2.0.0</AssemblyVersion>
-    <FileVersion>2.2.0.0</FileVersion>
-    <InformationalVersion>2.2.0</InformationalVersion>
+    <Version>2.3.0</Version>
+    <AssemblyVersion>2.3.0.0</AssemblyVersion>
+    <FileVersion>2.3.0.0</FileVersion>
+    <InformationalVersion>2.3.0</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <ApplicationIcon>EDD.ico</ApplicationIcon>
