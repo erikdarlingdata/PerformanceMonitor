@@ -301,7 +301,8 @@ BEGIN
                     */
                     IF @debug = 1
                     BEGIN
-                        RAISERROR(N'Error collecting size stats for database [%s]: %s', 0, 1, @db_name, @error_message) WITH NOWAIT;
+                        DECLARE @db_error_message nvarchar(4000) = ERROR_MESSAGE();
+                        RAISERROR(N'Error collecting size stats for database [%s]: %s', 0, 1, @db_name, @db_error_message) WITH NOWAIT;
                     END;
                 END CATCH;
 
