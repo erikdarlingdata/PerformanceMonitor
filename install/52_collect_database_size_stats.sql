@@ -36,52 +36,6 @@ BEGIN
 END;
 GO
 
-/*
-Add growth-rate and VLF columns to an existing table (idempotent).
-Needed when re-running this script against a pre-2.3.0 database.
-The ALTER PROCEDURE below references these columns, so they must
-exist before SQL Server compiles the procedure body.
-*/
-IF OBJECT_ID(N'collect.database_size_stats', N'U') IS NOT NULL
-BEGIN
-    IF NOT EXISTS
-    (
-        SELECT 1/0
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = N'collect'
-        AND   TABLE_NAME  = N'database_size_stats'
-        AND   COLUMN_NAME = N'is_percent_growth'
-    )
-    BEGIN
-        ALTER TABLE collect.database_size_stats ADD is_percent_growth bit NULL;
-    END;
-
-    IF NOT EXISTS
-    (
-        SELECT 1/0
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = N'collect'
-        AND   TABLE_NAME  = N'database_size_stats'
-        AND   COLUMN_NAME = N'growth_pct'
-    )
-    BEGIN
-        ALTER TABLE collect.database_size_stats ADD growth_pct integer NULL;
-    END;
-
-    IF NOT EXISTS
-    (
-        SELECT 1/0
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = N'collect'
-        AND   TABLE_NAME  = N'database_size_stats'
-        AND   COLUMN_NAME = N'vlf_count'
-    )
-    BEGIN
-        ALTER TABLE collect.database_size_stats ADD vlf_count integer NULL;
-    END;
-END;
-GO
-
 ALTER PROCEDURE
     collect.database_size_stats_collector
 (
