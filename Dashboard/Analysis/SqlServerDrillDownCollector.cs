@@ -45,7 +45,7 @@ public class SqlServerDrillDownCollector
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
-                var pathKeys = finding.StoryPath.Split(" -> ", StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                var pathKeys = finding.StoryPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries).ToHashSet();
 
                 if (pathKeys.Contains("DEADLOCKS"))
                     await CollectTopDeadlocks(finding, context);
@@ -90,7 +90,7 @@ public class SqlServerDrillDownCollector
             catch (Exception ex)
             {
                 Logger.Error(
-                    $"[SqlServerDrillDownCollector] Drill-down failed for {finding.StoryPath}: {ex.GetType().Name}: {ex.Message}");
+                    $"[SqlServerDrillDownCollector] Drill-down failed for {finding.StoryPath}: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 // Don't null out -- keep whatever was collected before the error
             }
         }
