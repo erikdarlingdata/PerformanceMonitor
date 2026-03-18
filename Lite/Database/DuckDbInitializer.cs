@@ -595,7 +595,8 @@ public class DuckDbInitializer
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning("Migration to v22 encountered an error (non-fatal): {Error}", ex.Message);
+                _logger?.LogError(ex, "Migration to v22 failed");
+                throw;
             }
         }
     }
