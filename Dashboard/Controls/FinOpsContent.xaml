@@ -929,7 +929,7 @@
 
                 <!-- DataGrid -->
                 <Grid Grid.Row="1" Margin="10,0,10,10">
-                    <DataGrid x:Name="DatabaseSizesDataGrid" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                    <DataGrid x:Name="DatabaseSizesDataGrid" ScrollViewer.HorizontalScrollBarVisibility="Auto"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               CanUserSortColumns="True"
@@ -942,7 +942,7 @@
                             <DataGridTextColumn Binding="{Binding DatabaseName}" Width="160">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -950,7 +950,7 @@
                             <DataGridTextColumn Binding="{Binding FileTypeDesc}" Width="80">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FileTypeDesc" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FileTypeDesc" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="File Type" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -958,7 +958,7 @@
                             <DataGridTextColumn Binding="{Binding FileName}" Width="160">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FileName" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FileName" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="File Name" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -966,7 +966,7 @@
                             <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat='{}{0:N2}'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSizeMb" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSizeMb" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Total Size MB" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -979,7 +979,7 @@
                             <DataGridTextColumn Binding="{Binding UsedSizeMb, StringFormat='{}{0:N2}'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="UsedSizeMb" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="UsedSizeMb" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Used Size MB" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -992,7 +992,7 @@
                             <DataGridTextColumn Binding="{Binding FreeSpaceMb, StringFormat='{}{0:N2}'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FreeSpaceMb" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FreeSpaceMb" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Free Space MB" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -1005,7 +1005,7 @@
                             <DataGridTextColumn Binding="{Binding UsedPct, StringFormat='{}{0:N1}'}" Width="70">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="UsedPct" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="UsedPct" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Used %" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -1018,7 +1018,7 @@
                             <DataGridTextColumn Binding="{Binding VolumeMountPoint}" Width="80">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeMountPoint" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeMountPoint" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Volume" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -1026,7 +1026,7 @@
                             <DataGridTextColumn Binding="{Binding VolumeTotalMb, StringFormat='{}{0:N0}'}" Width="120">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeTotalMb" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeTotalMb" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Volume Total MB" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -1039,7 +1039,7 @@
                             <DataGridTextColumn Binding="{Binding VolumeFreeMb, StringFormat='{}{0:N0}'}" Width="120">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeFreeMb" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VolumeFreeMb" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Volume Free MB" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -1052,7 +1052,7 @@
                             <DataGridTextColumn Binding="{Binding RecoveryModelDesc}" Width="120">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecoveryModelDesc" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecoveryModelDesc" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Recovery Model" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -1081,7 +1081,7 @@
                             <DataGridTextColumn Binding="{Binding MonthlyCostShare, StringFormat='{}{0:N2}'}" Width="110">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MonthlyCostShare" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MonthlyCostShare" Click="DatabaseSizesFilter_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Monthly Cost ($)" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>

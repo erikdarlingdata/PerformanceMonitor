@@ -167,7 +167,7 @@ BEGIN
                 vlf_count =
                     CASE
                         WHEN df.type = 1 /*LOG*/
-                        THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()))
+                        THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id)
                         ELSE NULL
                     END
             FROM sys.database_files AS df
@@ -278,7 +278,7 @@ BEGIN
                         vlf_count =
                             CASE
                                 WHEN df.type = 1 /*LOG*/
-                                THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()))
+                                THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id)
                                 ELSE NULL
                             END
                     FROM sys.database_files AS df
