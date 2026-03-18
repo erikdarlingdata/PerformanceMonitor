@@ -1,0 +1,20 @@
+# SQL Server Performance Monitor
+
+> Free, open-source SQL Server performance monitoring tool by Erik Darling (Darling Data, LLC). 32 T-SQL collectors, real-time alerts, graphical execution plan viewer, and a built-in MCP server with 51-63 tools for AI-powered analysis. Two editions: Full (server-installed with SQL Agent) and Lite (standalone desktop app with DuckDB storage). Replaces expensive commercial tools like SentryOne and Solarwinds DPA. MIT licensed.
+
+- Supports SQL Server 2016-2025, Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite only)
+- Monitors wait stats, query performance, blocking chains, deadlocks, memory grants, file I/O, tempdb, CPU, perfmon counters, and more
+- Real-time alerts via system tray notifications and styled HTML emails
+- Built-in MCP server exposes monitoring data to Claude Code, Cursor, and other LLM clients
+- 4,300+ downloads across releases
+
+## Documentation
+
+- [README](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/README.md): Complete documentation including quick start, permissions, collector reference, alert configuration, MCP server setup, and edition comparison
+- [Releases](https://github.com/erikdarlingdata/PerformanceMonitor/releases): Download pre-built binaries
+- [Product page](https://erikdarling.com/free-sql-server-performance-monitoring/): Overview and commercial support options
+
+## Optional
+
+- [Third-party notices](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/THIRD_PARTY_NOTICES.md): License information for bundled components
+- [License](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/LICENSE): MIT License
