@@ -34,7 +34,11 @@ SELECT
     volume_mount_point,
     volume_total_mb,
     volume_free_mb,
-    recovery_model_desc
+    recovery_model_desc,
+    auto_growth_mb,
+    is_percent_growth,
+    growth_pct,
+    vlf_count
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -60,7 +64,11 @@ ORDER BY database_name, file_type_desc, file_name";
                 VolumeMountPoint = reader.IsDBNull(5) ? null : reader.GetString(5),
                 VolumeTotalMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
                 VolumeFreeMb = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
-                RecoveryModel = reader.IsDBNull(8) ? null : reader.GetString(8)
+                RecoveryModel = reader.IsDBNull(8) ? null : reader.GetString(8),
+                AutoGrowthMb = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
+                IsPercentGrowth = reader.IsDBNull(10) ? null : (bool?)(Convert.ToInt32(reader.GetValue(10)) == 1),
+                GrowthPct = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
+                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
             });
         }
 
@@ -2236,9 +2244,33 @@ public class DatabaseSizeRow
     public decimal? VolumeTotalMb { get; set; }
     public decimal? VolumeFreeMb { get; set; }
     public string? RecoveryModel { get; set; }
+    public decimal? AutoGrowthMb { get; set; }
+    public bool? IsPercentGrowth { get; set; }
+    public int? GrowthPct { get; set; }
+    public int? VlfCount { get; set; }
 
     // FinOps cost — proportional share of server monthly budget
     public decimal MonthlyCostShare { get; set; }
+
+    public string GrowthDisplay => IsPercentGrowth switch
+    {
+        null  => "-",
+        true  => GrowthPct.HasValue ? $"{GrowthPct}%" : "-",
+        false => AutoGrowthMb == null || AutoGrowthMb == 0 ? "Disabled" : $"{AutoGrowthMb:N0} MB"
+    };
+
+    public decimal AutoGrowthSort => IsPercentGrowth switch
+    {
+        null  => -1m,
+        true  => (decimal)(GrowthPct ?? -1),
+        false => AutoGrowthMb ?? 0m
+    };
+
+    public string VlfCountDisplay => string.Equals(FileTypeDesc, "LOG", StringComparison.OrdinalIgnoreCase)
+        ? (VlfCount?.ToString() ?? "-") : "N/A";
+
+    public int VlfCountSort => string.Equals(FileTypeDesc, "LOG", StringComparison.OrdinalIgnoreCase)
+        ? (VlfCount ?? 0) : -1;
 }
 
 public class ServerPropertyRow

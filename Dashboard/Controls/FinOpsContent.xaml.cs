@@ -14,6 +14,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
@@ -32,6 +33,10 @@ namespace PerformanceMonitorDashboard.Controls
         private List<FinOpsServerInventory>? _serverInventoryCache;
         private DateTime _serverInventoryCacheTime;
         private decimal _currentServerMonthlyCost;
+
+        private DataGridFilterManager<FinOpsDatabaseSizeStats>? _dbSizesFilterMgr;
+        private Popup? _dbSizeFilterPopup;
+        private ColumnFilterPopup? _dbSizeFilterPopupContent;
 
         public FinOpsContent()
         {
@@ -70,6 +75,8 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.FreezeColumns(ExpensiveQueriesDataGrid, 1);
             TabHelpers.FreezeColumns(IndexAnalysisDetailGrid, 1);
             TabHelpers.FreezeColumns(HighImpactDataGrid, 1);
+
+            _dbSizesFilterMgr = new DataGridFilterManager<FinOpsDatabaseSizeStats>(DatabaseSizesDataGrid);
         }
 
         /// <summary>
@@ -624,14 +631,60 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                 }
 
-                DatabaseSizesDataGrid.ItemsSource = data;
-                DatabaseSizesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                DbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s)" : "";
+                _dbSizesFilterMgr!.UpdateData(data);
+                UpdateDbSizeCountUI();
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading database sizes: {ex.Message}", ex);
             }
+        }
+
+        private void UpdateDbSizeCountUI()
+        {
+            var list = DatabaseSizesDataGrid.ItemsSource as System.Collections.IList;
+            int count = list?.Count ?? 0;
+            DatabaseSizesNoDataMessage.Visibility = count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            DbSizeCountIndicator.Text = count > 0 ? $"{count} file(s)" : "";
+        }
+
+        private void DatabaseSizesFilter_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.Tag is not string columnName) return;
+
+            if (_dbSizeFilterPopup == null)
+            {
+                _dbSizeFilterPopupContent = new ColumnFilterPopup();
+                _dbSizeFilterPopupContent.FilterApplied += FilterPopup_DbSizeFilterApplied;
+                _dbSizeFilterPopupContent.FilterCleared += FilterPopup_DbSizeFilterCleared;
+                _dbSizeFilterPopup = new Popup
+                {
+                    Child = _dbSizeFilterPopupContent,
+                    StaysOpen = false,
+                    Placement = PlacementMode.Bottom,
+                    AllowsTransparency = true
+                };
+            }
+
+            _dbSizesFilterMgr!.Filters.TryGetValue(columnName, out var existingFilter);
+            _dbSizeFilterPopupContent!.Initialize(columnName, existingFilter);
+            _dbSizeFilterPopup.PlacementTarget = button;
+            _dbSizeFilterPopup.IsOpen = true;
+        }
+
+        private void FilterPopup_DbSizeFilterApplied(object? sender, FilterAppliedEventArgs e)
+        {
+            if (_dbSizeFilterPopup != null)
+                _dbSizeFilterPopup.IsOpen = false;
+
+            _dbSizesFilterMgr!.SetFilter(e.FilterState);
+            UpdateDbSizeCountUI();
+        }
+
+        private void FilterPopup_DbSizeFilterCleared(object? sender, EventArgs e)
+        {
+            if (_dbSizeFilterPopup != null)
+                _dbSizeFilterPopup.IsOpen = false;
         }
 
         // ============================================

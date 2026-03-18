@@ -1113,6 +1113,9 @@ BEGIN
                 volume_mount_point nvarchar(512) NULL,
                 volume_total_mb decimal(19,2) NULL,
                 volume_free_mb decimal(19,2) NULL,
+                is_percent_growth bit NULL,
+                growth_pct integer NULL,
+                vlf_count integer NULL,
                 free_space_mb AS
                 (
                     total_size_mb - used_size_mb

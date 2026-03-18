@@ -1016,6 +1016,27 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding GrowthDisplay}" Width="110" SortMemberPath="AutoGrowthSort">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrowthDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Auto Growth" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding VlfCountDisplay}" Width="80" SortMemberPath="VlfCountSort">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="VlfCountDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="VLF Count" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="Monthly Cost ($)" Binding="{Binding MonthlyCostShare, StringFormat='{}{0:N2}'}" Width="110">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">

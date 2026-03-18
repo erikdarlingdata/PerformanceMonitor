@@ -115,7 +115,10 @@ BEGIN
                 state_desc,
                 volume_mount_point,
                 volume_total_mb,
-                volume_free_mb
+                volume_free_mb,
+                is_percent_growth,
+                growth_pct,
+                vlf_count
             )
             SELECT
                 collection_time = @start_time,
@@ -153,7 +156,20 @@ BEGIN
                 state_desc = N'ONLINE',
                 volume_mount_point = NULL,
                 volume_total_mb = NULL,
-                volume_free_mb = NULL
+                volume_free_mb = NULL,
+                is_percent_growth = df.is_percent_growth,
+                growth_pct =
+                    CASE
+                        WHEN df.is_percent_growth = 1
+                        THEN df.growth
+                        ELSE NULL
+                    END,
+                vlf_count =
+                    CASE
+                        WHEN df.type = 1 /*LOG*/
+                        THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()))
+                        ELSE NULL
+                    END
             FROM sys.database_files AS df
             OPTION(RECOMPILE);
 
@@ -208,7 +224,10 @@ BEGIN
                         state_desc,
                         volume_mount_point,
                         volume_total_mb,
-                        volume_free_mb
+                        volume_free_mb,
+                        is_percent_growth,
+                        growth_pct,
+                        vlf_count
                     )
                     SELECT
                         collection_time = @start_time,
@@ -248,7 +267,20 @@ BEGIN
                         volume_total_mb =
                             CONVERT(decimal(19,2), vs.total_bytes / 1048576.0),
                         volume_free_mb =
-                            CONVERT(decimal(19,2), vs.available_bytes / 1048576.0)
+                            CONVERT(decimal(19,2), vs.available_bytes / 1048576.0),
+                        is_percent_growth = df.is_percent_growth,
+                        growth_pct =
+                            CASE
+                                WHEN df.is_percent_growth = 1
+                                THEN df.growth
+                                ELSE NULL
+                            END,
+                        vlf_count =
+                            CASE
+                                WHEN df.type = 1 /*LOG*/
+                                THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()))
+                                ELSE NULL
+                            END
                     FROM sys.database_files AS df
                     CROSS JOIN sys.databases AS d
                     CROSS APPLY sys.dm_os_volume_stats(DB_ID(), df.file_id) AS vs

@@ -116,7 +116,13 @@ SELECT
     volume_total_mb =
         CONVERT(decimal(19,2), vs.total_bytes / 1048576.0),
     volume_free_mb =
-        CONVERT(decimal(19,2), vs.available_bytes / 1048576.0)
+        CONVERT(decimal(19,2), vs.available_bytes / 1048576.0),
+    is_percent_growth =
+        mf.is_percent_growth,
+    growth_pct =
+        CASE WHEN mf.is_percent_growth = 1 THEN mf.growth ELSE NULL END,
+    vlf_count =
+        CASE WHEN mf.type = 1 /*LOG*/ THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(mf.database_id)) ELSE NULL END
 FROM sys.master_files AS mf
 JOIN sys.databases AS d
   ON d.database_id = mf.database_id
@@ -169,7 +175,13 @@ SELECT
     volume_total_mb =
         CONVERT(decimal(19,2), NULL),
     volume_free_mb =
-        CONVERT(decimal(19,2), NULL)
+        CONVERT(decimal(19,2), NULL),
+    is_percent_growth =
+        df.is_percent_growth,
+    growth_pct =
+        CASE WHEN df.is_percent_growth = 1 THEN df.growth ELSE NULL END,
+    vlf_count =
+        CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID())) ELSE NULL END
 FROM sys.database_files AS df
 ORDER BY
     df.file_id
@@ -185,7 +197,8 @@ OPTION(RECOMPILE);";
             string FileName, string PhysicalName, decimal TotalSizeMb, decimal? UsedSizeMb,
             decimal? AutoGrowthMb, decimal? MaxSizeMb, string? RecoveryModel,
             int? CompatibilityLevel, string? StateDesc, string? VolumeMountPoint,
-            decimal? VolumeTotalMb, decimal? VolumeFreeMb)>();
+            decimal? VolumeTotalMb, decimal? VolumeFreeMb, bool? IsPercentGrowth,
+            int? GrowthPct, int? VlfCount)>();
 
         var sqlSw = Stopwatch.StartNew();
 
@@ -258,6 +271,9 @@ OPTION(RECOMPILE);";
                        .AppendValue(r.VolumeMountPoint)
                        .AppendValue(r.VolumeTotalMb)
                        .AppendValue(r.VolumeFreeMb)
+                       .AppendValue(r.IsPercentGrowth)
+                       .AppendValue(r.GrowthPct)
+                       .AppendValue(r.VlfCount)
                        .EndRow();
                     rowsCollected++;
                 }
@@ -276,7 +292,8 @@ OPTION(RECOMPILE);";
         string FileName, string PhysicalName, decimal TotalSizeMb, decimal? UsedSizeMb,
         decimal? AutoGrowthMb, decimal? MaxSizeMb, string? RecoveryModel,
         int? CompatibilityLevel, string? StateDesc, string? VolumeMountPoint,
-        decimal? VolumeTotalMb, decimal? VolumeFreeMb) ReadSizeRow(SqlDataReader reader)
+        decimal? VolumeTotalMb, decimal? VolumeFreeMb, bool? IsPercentGrowth,
+        int? GrowthPct, int? VlfCount) ReadSizeRow(SqlDataReader reader)
     {
         return (
             reader.GetString(0),
@@ -294,6 +311,9 @@ OPTION(RECOMPILE);";
             reader.IsDBNull(12) ? null : reader.GetString(12),
             reader.IsDBNull(13) ? null : reader.GetString(13),
             reader.IsDBNull(14) ? null : reader.GetDecimal(14),
-            reader.IsDBNull(15) ? null : reader.GetDecimal(15));
+            reader.IsDBNull(15) ? null : reader.GetDecimal(15),
+            reader.IsDBNull(16) ? null : (bool?)(Convert.ToInt32(reader.GetValue(16)) == 1),
+            reader.IsDBNull(17) ? null : Convert.ToInt32(reader.GetValue(17)),
+            reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)));
     }
 }
