@@ -350,7 +350,7 @@ BEGIN
                 (
                     @collector_name,
                     N'ERROR',
-                    DATEDIFF(MILLISECOND, @collector_start_time, SYSDATETIME()),
+                    IIF(DATEDIFF(MILLISECOND, @collector_start_time, SYSDATETIME()) < 0, 0, DATEDIFF(MILLISECOND, @collector_start_time, SYSDATETIME())),
                     @error_message
                 );
 
@@ -363,7 +363,7 @@ BEGIN
             /*
             Update schedule for next run regardless of success/failure
             */
-            SET @collector_duration_ms = DATEDIFF(MILLISECOND, @collector_start_time, SYSDATETIME());
+            SET @collector_duration_ms = IIF(DATEDIFF(MILLISECOND, @collector_start_time, SYSDATETIME()) < 0, 0, DATEDIFF(MILLISECOND, @collector_start_time, SYSDATETIME()));
             
             UPDATE
                 config.collection_schedule
@@ -411,14 +411,14 @@ BEGIN
                 ELSE N'PARTIAL'
             END,
             @total_collectors_run,
-            DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
-            CASE 
-                WHEN @total_errors > 0 
+            IIF(DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()) < 0, 0, DATEDIFF(MILLISECOND, @start_time, SYSDATETIME())),
+            CASE
+                WHEN @total_errors > 0
                 THEN N'Completed with ' + CONVERT(nvarchar(10), @total_errors) + N' collector errors'
                 ELSE NULL
             END
         );
-        
+
         IF @debug = 1
         BEGIN
             RAISERROR(N'Scheduled collection cycle completed - %d collectors run, %d errors', 0, 1, @total_collectors_run, @total_errors) WITH NOWAIT;
@@ -432,7 +432,7 @@ BEGIN
         END;
 
         SET @error_message = ERROR_MESSAGE();
-        
+
         /*
         Log the master collection error
         */
@@ -448,7 +448,7 @@ BEGIN
         (
             N'scheduled_master_collector',
             N'ERROR',
-            DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
+            IIF(DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()) < 0, 0, DATEDIFF(MILLISECOND, @start_time, SYSDATETIME())),
             @error_message
         );
         
