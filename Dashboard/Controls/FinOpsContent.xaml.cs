@@ -33,8 +33,7 @@ namespace PerformanceMonitorDashboard.Controls
         private DateTime _serverInventoryCacheTime;
         private decimal _currentServerMonthlyCost;
 
-        private List<FinOpsDatabaseSizeStats> _allDatabaseSizes = new();
-        private readonly Dictionary<string, ColumnFilterState> _dbSizeColumnFilters = new();
+        private DataGridFilterManager<FinOpsDatabaseSizeStats>? _dbSizesFilterMgr;
         private Popup? _dbSizeFilterPopup;
         private ColumnFilterPopup? _dbSizeFilterPopupContent;
 
@@ -75,6 +74,8 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.FreezeColumns(ExpensiveQueriesDataGrid, 1);
             TabHelpers.FreezeColumns(IndexAnalysisDetailGrid, 1);
             TabHelpers.FreezeColumns(HighImpactDataGrid, 1);
+
+            _dbSizesFilterMgr = new DataGridFilterManager<FinOpsDatabaseSizeStats>(DatabaseSizesDataGrid);
         }
 
         /// <summary>
@@ -629,10 +630,8 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                 }
 
-                _allDatabaseSizes = data;
-                _dbSizeColumnFilters.Clear();
-                ApplyDbSizeFilters();
-                UpdateDbSizeFilterButtonStyles();
+                _dbSizesFilterMgr!.UpdateData(data);
+                UpdateDbSizeCountUI();
             }
             catch (Exception ex)
             {
@@ -640,43 +639,23 @@ namespace PerformanceMonitorDashboard.Controls
             }
         }
 
-        private void ApplyDbSizeFilters()
+        private void UpdateDbSizeCountUI()
         {
-            var filtered = _allDatabaseSizes.AsEnumerable();
-
-            if (_dbSizeColumnFilters.Count > 0)
-            {
-                filtered = filtered.Where(item =>
-                {
-                    foreach (var filter in _dbSizeColumnFilters.Values)
-                    {
-                        if (filter.IsActive && !DataGridFilterService.MatchesFilter(item, filter))
-                            return false;
-                    }
-                    return true;
-                });
-            }
-
-            var list = filtered.ToList();
-            DatabaseSizesDataGrid.ItemsSource = list;
-            DatabaseSizesNoDataMessage.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            DbSizeCountIndicator.Text = list.Count > 0 ? $"{list.Count} file(s)" : "";
+            var list = DatabaseSizesDataGrid.ItemsSource as System.Collections.IList;
+            int count = list?.Count ?? 0;
+            DatabaseSizesNoDataMessage.Visibility = count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            DbSizeCountIndicator.Text = count > 0 ? $"{count} file(s)" : "";
         }
 
         private void DatabaseSizesFilter_Click(object sender, RoutedEventArgs e)
         {
             if (sender is not Button button || button.Tag is not string columnName) return;
-            ShowDbSizeFilterPopup(button, columnName);
-        }
 
-        private void ShowDbSizeFilterPopup(Button button, string columnName)
-        {
             if (_dbSizeFilterPopup == null)
             {
                 _dbSizeFilterPopupContent = new ColumnFilterPopup();
                 _dbSizeFilterPopupContent.FilterApplied += FilterPopup_DbSizeFilterApplied;
                 _dbSizeFilterPopupContent.FilterCleared += FilterPopup_DbSizeFilterCleared;
-
                 _dbSizeFilterPopup = new Popup
                 {
                     Child = _dbSizeFilterPopupContent,
@@ -686,7 +665,7 @@ namespace PerformanceMonitorDashboard.Controls
                 };
             }
 
-            _dbSizeColumnFilters.TryGetValue(columnName, out var existingFilter);
+            _dbSizesFilterMgr!.Filters.TryGetValue(columnName, out var existingFilter);
             _dbSizeFilterPopupContent!.Initialize(columnName, existingFilter);
             _dbSizeFilterPopup.PlacementTarget = button;
             _dbSizeFilterPopup.IsOpen = true;
@@ -697,47 +676,14 @@ namespace PerformanceMonitorDashboard.Controls
             if (_dbSizeFilterPopup != null)
                 _dbSizeFilterPopup.IsOpen = false;
 
-            if (e.FilterState.IsActive)
-                _dbSizeColumnFilters[e.FilterState.ColumnName] = e.FilterState;
-            else
-                _dbSizeColumnFilters.Remove(e.FilterState.ColumnName);
-
-            ApplyDbSizeFilters();
-            UpdateDbSizeFilterButtonStyles();
+            _dbSizesFilterMgr!.SetFilter(e.FilterState);
+            UpdateDbSizeCountUI();
         }
 
         private void FilterPopup_DbSizeFilterCleared(object? sender, EventArgs e)
         {
             if (_dbSizeFilterPopup != null)
                 _dbSizeFilterPopup.IsOpen = false;
-        }
-
-        private void UpdateDbSizeFilterButtonStyles()
-        {
-            foreach (var column in DatabaseSizesDataGrid.Columns)
-            {
-                if (column.Header is StackPanel stackPanel)
-                {
-                    var filterButton = stackPanel.Children.OfType<Button>().FirstOrDefault();
-                    if (filterButton != null && filterButton.Tag is string columnName)
-                    {
-                        bool hasActiveFilter = _dbSizeColumnFilters.TryGetValue(columnName, out var filter) && filter.IsActive;
-
-                        var textBlock = new TextBlock
-                        {
-                            Text = "\uE71C",
-                            FontFamily = new System.Windows.Media.FontFamily("Segoe MDL2 Assets"),
-                            Foreground = hasActiveFilter
-                                ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xD7, 0x00))
-                                : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF))
-                        };
-                        filterButton.Content = textBlock;
-                        filterButton.ToolTip = hasActiveFilter && filter != null
-                            ? $"Filter: {filter.DisplayText}\n(Click to modify)"
-                            : "Click to filter";
-                    }
-                }
-            }
         }
 
         // ============================================
