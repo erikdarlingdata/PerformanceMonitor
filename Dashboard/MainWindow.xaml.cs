@@ -151,6 +151,7 @@ namespace PerformanceMonitorDashboard
             // Sync preferences
             var startupPrefs = _preferencesService.GetPreferences();
             TabHelpers.CsvSeparator = startupPrefs.CsvSeparator;
+            MuteRuleDialog.DefaultExpiration = startupPrefs.MuteRuleDefaultExpiration;
             if (Enum.TryParse<Helpers.TimeDisplayMode>(startupPrefs.TimeDisplayMode, out var tdm))
                 Helpers.ServerTimeHelper.CurrentDisplayMode = tdm;
 
@@ -1652,7 +1653,7 @@ namespace PerformanceMonitorDashboard
         private static string Truncate(string text, int maxLength = 300)
         {
             if (string.IsNullOrEmpty(text)) return "";
-            text = text.Trim();
+            text = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
             return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
         }
 

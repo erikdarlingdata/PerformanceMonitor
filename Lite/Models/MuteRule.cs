@@ -97,4 +97,80 @@ public class AlertMuteContext
     public string? QueryText { get; set; }
     public string? WaitType { get; set; }
     public string? JobName { get; set; }
+
+    /// <summary>
+    /// Extracts context fields (Database, Query, Wait Type, Job Name) from the
+    /// structured detail_text stored with each alert. The format is label/value
+    /// pairs indented with two spaces, e.g. "  Database: MyDB".
+    /// Query values may span multiple lines and use variant labels
+    /// (Blocked Query, Blocking Query, Victim SQL).
+    /// </summary>
+    public void PopulateFromDetailText(string? detailText)
+    {
+        if (string.IsNullOrEmpty(detailText)) return;
+
+        System.Text.StringBuilder? queryBuilder = null;
+        var lines = detailText.Split('\n');
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+
+            if (DatabaseName == null && trimmed.StartsWith("Database: ", StringComparison.Ordinal))
+            {
+                FlushQuery(ref queryBuilder);
+                DatabaseName = trimmed.Substring("Database: ".Length).Trim();
+            }
+            else if (WaitType == null && trimmed.StartsWith("Wait Type: ", StringComparison.Ordinal))
+            {
+                FlushQuery(ref queryBuilder);
+                WaitType = trimmed.Substring("Wait Type: ".Length).Trim();
+            }
+            else if (JobName == null && trimmed.StartsWith("Job Name: ", StringComparison.Ordinal))
+            {
+                FlushQuery(ref queryBuilder);
+                JobName = trimmed.Substring("Job Name: ".Length).Trim();
+            }
+            else if (QueryText == null && queryBuilder == null && TryExtractQueryValue(trimmed, out var qv))
+            {
+                queryBuilder = new System.Text.StringBuilder(qv);
+            }
+            else if (queryBuilder != null)
+            {
+                // Continuation lines from multi-line query values don't start
+                // with the two-space indent used by ContextToDetailText fields.
+                if (string.IsNullOrWhiteSpace(trimmed) || line.StartsWith("  ", StringComparison.Ordinal))
+                {
+                    FlushQuery(ref queryBuilder);
+                }
+                else
+                {
+                    queryBuilder.Append(' ').Append(trimmed.Trim());
+                }
+            }
+        }
+
+        FlushQuery(ref queryBuilder);
+    }
+
+    private void FlushQuery(ref System.Text.StringBuilder? builder)
+    {
+        if (builder != null && QueryText == null)
+            QueryText = builder.ToString();
+        builder = null;
+    }
+
+    private static bool TryExtractQueryValue(string trimmed, out string value)
+    {
+        foreach (var prefix in new[] { "Query: ", "Blocked Query: ", "Blocking Query: ", "Victim SQL: " })
+        {
+            if (trimmed.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                value = trimmed.Substring(prefix.Length).Trim();
+                return true;
+            }
+        }
+        value = "";
+        return false;
+    }
 }

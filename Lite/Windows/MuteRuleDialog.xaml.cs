@@ -31,6 +31,7 @@ public partial class MuteRuleDialog : Window
         else
         {
             Rule = new MuteRule();
+            ApplyDefaultExpiration();
         }
     }
 
@@ -153,5 +154,16 @@ public partial class MuteRuleDialog : Window
 
         PatternFieldsGrid.Visibility = (showDatabase || showWaitType || showQueryText || showJobName)
             ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ApplyDefaultExpiration()
+    {
+        ExpirationCombo.SelectedIndex = App.MuteRuleDefaultExpiration switch
+        {
+            "1 hour" => 0,
+            "24 hours" => 1,
+            "7 days" => 2,
+            _ => 3
+        };
     }
 }

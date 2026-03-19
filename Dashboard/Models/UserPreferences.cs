@@ -141,6 +141,9 @@ namespace PerformanceMonitorDashboard.Models
         // Alert database exclusions
         public List<string> AlertExcludedDatabases { get; set; } = new();
 
+        // Default mute rule expiration ("1 hour", "24 hours", "7 days", "Never")
+        public string MuteRuleDefaultExpiration { get; set; } = "24 hours";
+
         // Alert suppression (persisted)
         public List<string> SilencedServers { get; set; } = new();
         public List<string> SilencedServerTabs { get; set; } = new();
