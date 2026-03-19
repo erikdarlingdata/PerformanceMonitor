@@ -133,7 +133,9 @@ END;";
             Console.WriteLine("Licensed under the MIT License");
             Console.WriteLine("https://github.com/erikdarlingdata/PerformanceMonitor");
             Console.WriteLine("================================================================================");
-            Console.WriteLine();
+
+            await CheckForInstallerUpdateAsync(version);
+
 
             /*
             Determine if running in automated mode (command-line arguments provided)
@@ -422,7 +424,7 @@ END;";
                 using (var connection = new SqlConnection(builder.ConnectionString))
                 {
                     await connection.OpenAsync().ConfigureAwait(false);
-                    Console.WriteLine("Connection successful!");
+                    WriteSuccess("Connection successful!");
 
                     /*Capture SQL Server version for summary report*/
                     using (var versionCmd = new SqlCommand(@"
@@ -468,7 +470,7 @@ END;";
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Connection failed: {ex.Message}");
+                WriteError($"Connection failed: {ex.Message}");
                 Console.WriteLine($"Exception type: {ex.GetType().Name}");
                 if (ex.InnerException != null)
                 {
@@ -655,7 +657,7 @@ END;";
                         }
                     }
 
-                    Console.WriteLine("✓ Clean install completed (jobs and database removed)");
+                    WriteSuccess("Clean install completed (jobs and database removed)");
                 }
                 catch (Exception ex)
                 {
@@ -736,7 +738,7 @@ END;";
                         {
                             Console.WriteLine();
                             Console.WriteLine("================================================================================");
-                            Console.WriteLine("Installation aborted: upgrade scripts must succeed before installation can proceed.");
+                            WriteError("Installation aborted: upgrade scripts must succeed before installation can proceed.");
                             Console.WriteLine("Fix the errors above and re-run the installer.");
                             Console.WriteLine("================================================================================");
                             if (!automatedMode)
@@ -854,12 +856,12 @@ END;";
                             }
                         }
 
-                        Console.WriteLine("✓ Success");
+                        WriteSuccess("Success");
                         installSuccessCount++;
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"✗ FAILED");
+                        WriteError("FAILED");
                         Console.WriteLine($"  Error: {ex.Message}");
                         installFailureCount++;
                         installationErrors.Add((fileName, ex.Message));
@@ -938,7 +940,7 @@ END;";
                             command.CommandTimeout = LongTimeoutSeconds;
                             await command.ExecuteNonQueryAsync().ConfigureAwait(false);
                         }
-                        Console.WriteLine("✓ Success");
+                        WriteSuccess("Success");
 
                         /*
                         Verify data was collected — only from this validation run, not historical errors
@@ -1089,7 +1091,7 @@ END;";
                                             }
                                         }
 
-                                        Console.WriteLine("✓ Success");
+                                        WriteSuccess("Success");
                                         installFailureCount = 0; /* Reset failure count */
                                     }
                                 }
@@ -1159,7 +1161,7 @@ END;";
 
             if (installationSuccessful)
             {
-                Console.WriteLine("Installation completed successfully!");
+                WriteSuccess("Installation completed successfully!");
                 Console.WriteLine();
                 Console.WriteLine("WHAT WAS INSTALLED:");
                 Console.WriteLine("✓ PerformanceMonitor database and all collection tables");
@@ -1179,7 +1181,7 @@ END;";
             }
             else
             {
-                Console.WriteLine($"Installation completed with {totalFailureCount} error(s).");
+                WriteWarning($"Installation completed with {totalFailureCount} error(s).");
                 Console.WriteLine("Review errors above and check PerformanceMonitor.config.collection_log for details.");
             }
 
@@ -1307,7 +1309,7 @@ END;";
                 await command.ExecuteNonQueryAsync().ConfigureAwait(false);
 
                 Console.WriteLine();
-                Console.WriteLine("✓ Uninstall completed successfully");
+                WriteSuccess("Uninstall completed successfully");
                 Console.WriteLine();
                 Console.WriteLine("Note: blocked process threshold (s) was NOT reset.");
             }
@@ -1550,12 +1552,12 @@ END;";
                         }
                     }
 
-                    Console.WriteLine("✓ Success");
+                    WriteSuccess("Success");
                     successCount++;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"✗ FAILED");
+                    WriteError("FAILED");
                     Console.WriteLine($"    Error: {ex.Message}");
                     failureCount++;
                 }
@@ -1899,7 +1901,7 @@ END;";
                         await command.ExecuteNonQueryAsync().ConfigureAwait(false);
                     }
 
-                    Console.WriteLine("✓ Success");
+                    WriteSuccess("Success");
                     Console.WriteLine($"  {description}");
                     successCount++;
                 }
@@ -2048,6 +2050,70 @@ END;";
             File.WriteAllText(reportPath, sb.ToString());
 
             return reportPath;
+        }
+
+        private static void WriteSuccess(string message)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.Write("√ ");
+            Console.ResetColor();
+            Console.WriteLine(message);
+        }
+
+        private static void WriteError(string message)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Write("✗ ");
+            Console.ResetColor();
+            Console.WriteLine(message);
+        }
+
+        private static void WriteWarning(string message)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write("! ");
+            Console.ResetColor();
+            Console.WriteLine(message);
+        }
+
+        private static async Task CheckForInstallerUpdateAsync(string currentVersion)
+        {
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                client.DefaultRequestHeaders.Add("User-Agent", "PerformanceMonitor");
+                client.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3+json");
+
+                var response = await client.GetAsync(
+                    "https://api.github.com/repos/erikdarlingdata/PerformanceMonitor/releases/latest")
+                    .ConfigureAwait(false);
+
+                if (!response.IsSuccessStatusCode) return;
+
+                var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var tagName = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
+                var versionString = tagName.TrimStart('v', 'V');
+
+                if (!Version.TryParse(versionString, out var latest)) return;
+                if (!Version.TryParse(currentVersion, out var current)) return;
+
+                if (latest > current)
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("╔══════════════════════════════════════════════════════════════════════╗");
+                    Console.WriteLine($"║  A newer version ({tagName}) is available!                          ");
+                    Console.WriteLine("║  https://github.com/erikdarlingdata/PerformanceMonitor/releases     ");
+                    Console.WriteLine("╚══════════════════════════════════════════════════════════════════════╝");
+                    Console.ResetColor();
+                    Console.WriteLine();
+                }
+            }
+            catch
+            {
+                /* Best effort — don't block installation if GitHub is unreachable */
+            }
         }
 
         [GeneratedRegex(@"^\s*GO\s*(?:--[^\r\n]*)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline)]
