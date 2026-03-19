@@ -97,7 +97,8 @@
             <TextBox Grid.Row="1" Grid.Column="2" x:Name="WaitTypePatternBox" Margin="0,0,0,8"/>
 
             <TextBlock Grid.Row="2" Grid.Column="0" x:Name="QueryTextLabel" Text="Query Text (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-            <TextBox Grid.Row="3" Grid.Column="0" x:Name="QueryTextPatternBox" Margin="0,0,0,8"/>
+            <TextBox Grid.Row="3" Grid.Column="0" x:Name="QueryTextPatternBox" Margin="0,0,0,8"
+                     ToolTip="Alerts whose query text contains this value (case-insensitive) will be muted. Use a distinctive fragment such as a table name or procedure call."/>
 
             <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
