@@ -292,28 +292,56 @@ BEGIN
 
         DECLARE @db_check_cursor CURSOR
 
-            SET @db_check_cursor =
-                CURSOR
-                LOCAL
-                FAST_FORWARD
-            FOR
-            SELECT
-                d.name
-            FROM sys.databases AS d
-            LEFT JOIN sys.dm_hadr_database_replica_states AS drs
-                ON d.database_id = drs.database_id
-                AND drs.is_local = 1
-            WHERE d.state_desc = N'ONLINE'
-            AND   d.database_id > 4
-            AND   d.is_read_only = 0
-            AND   d.name <> N'PerformanceMonitor'
-            AND   d.database_id < 32761 /*exclude contained AG system databases*/
-            AND
-            (
-                drs.database_id IS NULL          /*not in any AG*/
-                OR drs.is_primary_replica = 1    /*primary replica*/
-            )
-            OPTION(RECOMPILE);
+            IF @engine = 5 /*Azure SQL Database*/
+            BEGIN
+                SET @db_check_cursor =
+                    CURSOR
+                    LOCAL
+                    FAST_FORWARD
+                FOR
+                SELECT
+                    d.name
+                FROM sys.databases AS d
+                LEFT JOIN sys.dm_database_replica_states AS drs
+                    ON d.database_id = drs.database_id
+                    AND drs.is_local = 1
+                WHERE d.state_desc = N'ONLINE'
+                AND   d.database_id > 4
+                AND   d.is_read_only = 0
+                AND   d.name <> N'PerformanceMonitor'
+                AND   d.database_id < 32761 /*exclude contained AG system databases*/
+                AND
+                (
+                    drs.database_id IS NULL          /*not in any AG*/
+                    OR drs.is_primary_replica = 1    /*primary replica*/
+                )
+                OPTION(RECOMPILE);
+            END;
+            ELSE
+            BEGIN
+                SET @db_check_cursor =
+                    CURSOR
+                    LOCAL
+                    FAST_FORWARD
+                FOR
+                SELECT
+                    d.name
+                FROM sys.databases AS d
+                LEFT JOIN sys.dm_hadr_database_replica_states AS drs
+                    ON d.database_id = drs.database_id
+                    AND drs.is_local = 1
+                WHERE d.state_desc = N'ONLINE'
+                AND   d.database_id > 4
+                AND   d.is_read_only = 0
+                AND   d.name <> N'PerformanceMonitor'
+                AND   d.database_id < 32761 /*exclude contained AG system databases*/
+                AND
+                (
+                    drs.database_id IS NULL          /*not in any AG*/
+                    OR drs.is_primary_replica = 1    /*primary replica*/
+                )
+                OPTION(RECOMPILE);
+            END;
 
         OPEN @db_check_cursor;
 

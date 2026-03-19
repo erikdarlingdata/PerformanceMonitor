@@ -48,7 +48,13 @@ BEGIN
         @error_message nvarchar(4000),
         @database_name sysname,
         @database_id integer,
-        @sql nvarchar(max) = N'';
+        @sql nvarchar(max) = N'',
+        @engine integer =
+            CONVERT
+            (
+                integer,
+                SERVERPROPERTY('ENGINEEDITION')
+            );
 
     BEGIN TRY
         IF @debug = 1
@@ -156,7 +162,42 @@ BEGIN
         Collect database scoped configurations using dynamic SQL
         This avoids hardcoding configuration names which may change over time
         */
-        DECLARE database_cursor CURSOR LOCAL FAST_FORWARD FOR
+        DECLARE @database_cursor CURSOR;
+
+        IF @engine = 5 /*Azure SQL Database*/
+        BEGIN
+            SET @database_cursor =
+                CURSOR
+                LOCAL
+                FAST_FORWARD
+            FOR
+            SELECT
+                database_id = d.database_id,
+                database_name = d.name
+            FROM sys.databases AS d
+            LEFT JOIN sys.dm_database_replica_states AS drs
+                ON d.database_id = drs.database_id
+                AND drs.is_local = 1
+            WHERE d.database_id > 4
+            AND   d.name != DB_NAME()
+            AND   d.state_desc = N'ONLINE'
+            AND   d.database_id < 32761 /*exclude contained AG system databases*/
+            AND
+            (
+                drs.database_id IS NULL          /*not in any AG*/
+                OR drs.is_primary_replica = 1    /*primary replica*/
+            )
+            ORDER BY
+                d.name
+            OPTION (RECOMPILE);
+        END;
+        ELSE
+        BEGIN
+            SET @database_cursor =
+                CURSOR
+                LOCAL
+                FAST_FORWARD
+            FOR
             SELECT
                 database_id = d.database_id,
                 database_name = d.name
@@ -176,9 +217,10 @@ BEGIN
             ORDER BY
                 d.name
             OPTION (RECOMPILE);
+        END;
 
-        OPEN database_cursor;
-        FETCH NEXT FROM database_cursor INTO @database_id, @database_name;
+        OPEN @database_cursor;
+        FETCH NEXT FROM @database_cursor INTO @database_id, @database_name;
 
         WHILE @@FETCH_STATUS = 0
         BEGIN
@@ -256,11 +298,11 @@ OPTION (RECOMPILE);
                             END;
                         END CATCH;
 
-            FETCH NEXT FROM database_cursor INTO @database_id, @database_name;
+            FETCH NEXT FROM @database_cursor INTO @database_id, @database_name;
         END;
 
-        CLOSE database_cursor;
-        DEALLOCATE database_cursor;
+        CLOSE @database_cursor;
+        DEALLOCATE @database_cursor;
 
         /*
         Switch back to PerformanceMonitor database

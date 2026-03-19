@@ -356,10 +356,18 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT
     d.name
 FROM sys.databases AS d
+LEFT JOIN sys.dm_database_replica_states AS drs
+    ON d.database_id = drs.database_id
+    AND drs.is_local = 1
 WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
 AND   d.state_desc = N'ONLINE'
+AND
+(
+    drs.database_id IS NULL          /*not in any AG*/
+    OR drs.is_primary_replica = 1    /*primary replica*/
+)
 ORDER BY d.name
 OPTION(RECOMPILE);";
 

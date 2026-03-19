@@ -119,10 +119,18 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     SELECT /* PerformanceMonitorLite */
         d.name
     FROM sys.databases AS d
+    LEFT JOIN sys.dm_database_replica_states AS drs
+        ON d.database_id = drs.database_id
+        AND drs.is_local = 1
     WHERE d.database_id > 4
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
     AND   d.name <> N'PerformanceMonitor'
+    AND
+    (
+        drs.database_id IS NULL          /*not in any AG*/
+        OR drs.is_primary_replica = 1    /*primary replica*/
+    )
     OPTION(RECOMPILE);
 
 OPEN db_check;
