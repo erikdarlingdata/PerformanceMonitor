@@ -14,6 +14,7 @@ using System.Windows;
 using System.Windows.Markup;
 using System.Windows.Threading;
 using PerformanceMonitorDashboard.Helpers;
+using Velopack;
 
 namespace PerformanceMonitorDashboard
 {
@@ -25,6 +26,8 @@ namespace PerformanceMonitorDashboard
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            VelopackApp.Build().Run();
+
             NativeMethods.SetAppUserModelId("DarlingData.PerformanceMonitor.Dashboard");
 
             // Check for existing instance
