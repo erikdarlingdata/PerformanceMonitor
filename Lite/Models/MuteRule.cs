@@ -116,6 +116,8 @@ public class AlertMuteContext
                 QueryText = trimmed.Substring("Query: ".Length).Trim();
             else if (WaitType == null && trimmed.StartsWith("Wait Type: ", StringComparison.Ordinal))
                 WaitType = trimmed.Substring("Wait Type: ".Length).Trim();
+            else if (JobName == null && trimmed.StartsWith("Job Name: ", StringComparison.Ordinal))
+                JobName = trimmed.Substring("Job Name: ".Length).Trim();
         }
     }
 }
