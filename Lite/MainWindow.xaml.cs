@@ -840,7 +840,7 @@ public partial class MainWindow : Window
         window.ShowDialog();
     }
 
-    private void ImportConnectionsButton_Click(object sender, RoutedEventArgs e)
+    private void ImportSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFolderDialog
         {
@@ -849,12 +849,13 @@ public partial class MainWindow : Window
 
         if (dialog.ShowDialog() != true) return;
 
-        var serversJsonPath = System.IO.Path.Combine(dialog.FolderName, "config", "servers.json");
+        var oldConfigDir = System.IO.Path.Combine(dialog.FolderName, "config");
+        var serversJsonPath = System.IO.Path.Combine(oldConfigDir, "servers.json");
         if (!System.IO.File.Exists(serversJsonPath))
         {
             MessageBox.Show(
                 "No config\\servers.json found in the selected folder.\n\nSelect the root folder of a previous Lite installation.",
-                "Import Connections",
+                "Import Settings",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             return;
@@ -862,22 +863,52 @@ public partial class MainWindow : Window
 
         try
         {
+            // Import server connections (upsert by server name)
             var (imported, skipped) = _serverManager.ImportServersFromFile(serversJsonPath);
+
+            // Copy config files that don't already exist in the current install
+            var settingsFiles = new[] { "settings.json", "collection_schedule.json", "ignored_wait_types.json" };
+            int settingsCopied = 0;
+
+            foreach (var fileName in settingsFiles)
+            {
+                var source = System.IO.Path.Combine(oldConfigDir, fileName);
+                var target = System.IO.Path.Combine(App.ConfigDirectory, fileName);
+
+                if (System.IO.File.Exists(source) && !System.IO.File.Exists(target))
+                {
+                    System.IO.File.Copy(source, target);
+                    settingsCopied++;
+                }
+            }
+
+            // Copy alert_state.json from old root directory
+            var oldAlertState = System.IO.Path.Combine(dialog.FolderName, "alert_state.json");
+            var currentAlertState = System.IO.Path.Combine(App.DataDirectory, "alert_state.json");
+            if (System.IO.File.Exists(oldAlertState) && !System.IO.File.Exists(currentAlertState))
+            {
+                System.IO.File.Copy(oldAlertState, currentAlertState);
+                settingsCopied++;
+            }
 
             var message = $"Imported {imported} server connection(s).";
             if (skipped > 0)
                 message += $"\nSkipped {skipped} duplicate(s) (already configured).";
+            if (settingsCopied > 0)
+                message += $"\nCopied {settingsCopied} settings file(s).";
             if (imported > 0)
                 message += "\n\nCredentials from the previous install are preserved.\nIf any connections fail to authenticate, re-enter the password in Manage Servers.";
+            if (settingsCopied > 0)
+                message += "\n\nRestart the application to apply imported settings.";
 
-            MessageBox.Show(message, "Import Connections", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(message, "Import Settings", MessageBoxButton.OK, MessageBoxImage.Information);
 
             if (imported > 0)
                 RefreshServerList();
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to import connections: {ex.Message}", "Import Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to import settings: {ex.Message}", "Import Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
