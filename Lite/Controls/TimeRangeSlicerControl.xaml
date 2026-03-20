@@ -1,0 +1,43 @@
+<UserControl x:Class="PerformanceMonitorLite.Controls.TimeRangeSlicerControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border Background="{DynamicResource SlicerBackgroundBrush}"
+            BorderBrush="{DynamicResource SlicerBorderBrush}"
+            BorderThickness="0,0,0,1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Button x:Name="ToggleButton" Grid.Row="0"
+                    Background="Transparent" BorderThickness="0"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                    Padding="8,4" Cursor="Hand"
+                    Click="Toggle_Click">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock x:Name="ToggleIcon" Text="▾" FontSize="12"
+                               Foreground="{DynamicResource SlicerToggleBrush}"
+                               VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBlock x:Name="ToggleLabel" Text="Time Range"
+                               FontSize="11" FontWeight="SemiBold"
+                               Foreground="{DynamicResource SlicerToggleBrush}"
+                               VerticalAlignment="Center"/>
+                    <TextBlock x:Name="RangeLabel" Text=""
+                               FontSize="11"
+                               Foreground="{DynamicResource SlicerLabelBrush}"
+                               VerticalAlignment="Center" Margin="12,0,0,0"/>
+                </StackPanel>
+            </Button>
+            <Border x:Name="SlicerBorder" Grid.Row="1" Height="100" Margin="8,0,8,6"
+                    Background="{DynamicResource SlicerBackgroundBrush}"
+                    CornerRadius="4" ClipToBounds="True">
+                <Canvas x:Name="SlicerCanvas"
+                        Background="Transparent"
+                        MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
+                        MouseMove="Canvas_MouseMove"
+                        MouseLeftButtonUp="Canvas_MouseLeftButtonUp"
+                        MouseWheel="Canvas_MouseWheel"/>
+            </Border>
+        </Grid>
+    </Border>
+</UserControl>

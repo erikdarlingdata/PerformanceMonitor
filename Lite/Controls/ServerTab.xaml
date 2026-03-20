@@ -216,9 +216,11 @@
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                                <controls:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0"/>
+                                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
                                     <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                     <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
                                             Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
@@ -226,11 +228,12 @@
                                     <TextBlock x:Name="LiveSnapshotIndicator" Text="" FontSize="12"
                                                Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                 </StackPanel>
-                                <DataGrid Grid.Row="1" x:Name="QuerySnapshotsGrid"
+                                <DataGrid Grid.Row="2" x:Name="QuerySnapshotsGrid"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           RowStyle="{StaticResource GridRowStyle}"
                                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                          CanUserSortColumns="True">
+                                          CanUserSortColumns="True"
+                                          Sorting="QuerySnapshotsGrid_Sorting">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding SessionId}" ElementStyle="{StaticResource NumericCell}" Width="55">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="SPID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -328,11 +331,18 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Top Queries by Duration">
-                            <DataGrid x:Name="QueryStatsGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0"/>
+                            <DataGrid Grid.Row="1" x:Name="QueryStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      Sorting="QueryStatsGrid_Sorting"
                                       MouseDoubleClick="QueryStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
@@ -451,13 +461,21 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Top Procedures by Duration">
-                            <DataGrid x:Name="ProcedureStatsGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="ProcStatsSlicer" Grid.Row="0"/>
+                            <DataGrid Grid.Row="1" x:Name="ProcedureStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      Sorting="ProcedureStatsGrid_Sorting"
                                       MouseDoubleClick="ProcedureStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
@@ -555,13 +573,21 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Query Store by Duration">
-                            <DataGrid x:Name="QueryStoreGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="QueryStoreSlicer" Grid.Row="0"/>
+                            <DataGrid Grid.Row="1" x:Name="QueryStoreGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      Sorting="QueryStoreGrid_Sorting"
                                       MouseDoubleClick="QueryStoreGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
@@ -662,6 +688,7 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                     </TabControl>
                 </Grid>

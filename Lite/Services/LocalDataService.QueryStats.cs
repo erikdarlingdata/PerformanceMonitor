@@ -36,6 +36,52 @@ WHERE d.name = @database_name;", connection);
     /// <summary>
     /// Gets top queries by CPU for a server over a time period.
     /// </summary>
+    public async Task<List<Models.TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    date_trunc('hour', collection_time) AS bucket,
+    COUNT(DISTINCT query_hash) AS query_count,
+    COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
+    COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
+    COALESCE(SUM(delta_logical_reads), 0) AS total_reads,
+    COALESCE(SUM(delta_logical_writes), 0) AS total_writes,
+    COALESCE(SUM(delta_physical_reads), 0) AS total_physical_reads
+FROM v_query_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY date_trunc('hour', collection_time)
+ORDER BY bucket";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<Models.TimeSliceBucket>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new Models.TimeSliceBucket
+            {
+                BucketTimeUtc = reader.GetDateTime(0),
+                SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)), // default: total CPU
+            });
+        }
+        return items;
+    }
+
     public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0)
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
@@ -384,6 +430,52 @@ OPTION(RECOMPILE);',
     /// <summary>
     /// Gets top procedures by CPU for a server.
     /// </summary>
+    public async Task<List<Models.TimeSliceBucket>> GetProcStatsSlicerDataAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    date_trunc('hour', collection_time) AS bucket,
+    COUNT(DISTINCT object_name) AS proc_count,
+    COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
+    COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
+    COALESCE(SUM(delta_logical_reads), 0) AS total_reads,
+    COALESCE(SUM(delta_logical_writes), 0) AS total_writes,
+    COALESCE(SUM(delta_physical_reads), 0) AS total_physical_reads
+FROM v_procedure_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY date_trunc('hour', collection_time)
+ORDER BY bucket";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<Models.TimeSliceBucket>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new Models.TimeSliceBucket
+            {
+                BucketTimeUtc = reader.GetDateTime(0),
+                SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+            });
+        }
+        return items;
+    }
+
     public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, int utcOffsetMinutes = 0)
     {
         using var _q = TimeQuery("GetTopProceduresByCpuAsync", "v_procedure_stats top N by CPU");
