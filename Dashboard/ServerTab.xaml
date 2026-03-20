@@ -104,6 +104,13 @@
                         <Button x:Name="RefreshButton" Content="Refresh Tab" Click="RefreshButton_Click" Margin="2,0" Padding="12,5" Style="{DynamicResource SuccessButton}"/>
                         <ToggleButton x:Name="AutoRefreshToggle" Content="Auto-Refresh: Off" Click="AutoRefreshToggle_Click" Margin="8,0,2,0" Padding="12,5" MinWidth="130" ToolTip="Toggle auto-refresh on/off. Configure interval in Settings."/>
                         <Button Content="Edit Schedules" Click="EditSchedules_Click" Margin="8,0,2,0" Padding="12,5" Style="{DynamicResource AccentButton}" ToolTip="Edit collector schedules (frequency, retention, enabled/disabled)"/>
+                        <TextBlock Text="|" VerticalAlignment="Center" Margin="8,0,4,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                        <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                        <ComboBox x:Name="TimeDisplayModeBox" Width="120" SelectionChanged="TimeDisplayMode_SelectionChanged" ToolTip="How timestamps are displayed across all tabs">
+                            <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
+                            <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
+                            <ComboBoxItem Content="UTC" Tag="UTC"/>
+                        </ComboBox>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="2,4,0,0">
                         <TextBlock x:Name="GlobalDateRangeIndicator"

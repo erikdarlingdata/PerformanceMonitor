@@ -227,6 +227,17 @@ namespace PerformanceMonitorDashboard.Controls
             _statusCallback = statusCallback;
         }
 
+        public void RefreshGridBindings()
+        {
+            QueryStatsDataGrid.Items.Refresh();
+            ProcStatsDataGrid.Items.Refresh();
+            QueryStoreDataGrid.Items.Refresh();
+            QueryStoreRegressionsDataGrid.Items.Refresh();
+            ActiveQueriesDataGrid.Items.Refresh();
+            CurrentActiveQueriesDataGrid.Items.Refresh();
+            LongRunningQueryPatternsDataGrid.Items.Refresh();
+        }
+
         /// <summary>
         /// Sets the time range for all sub-tabs.
         /// </summary>

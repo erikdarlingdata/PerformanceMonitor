@@ -113,6 +113,14 @@
                         <ComboBoxItem Content="1m"/>
                         <ComboBoxItem Content="5m"/>
                     </ComboBox>
+                    <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
+                    <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="TimeDisplayModeBox" Width="120" SelectionChanged="TimeDisplayMode_SelectionChanged"
+                              ToolTip="How timestamps are displayed">
+                        <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
+                        <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
+                        <ComboBoxItem Content="UTC" Tag="UTC"/>
+                    </ComboBox>
                 </StackPanel>
             </Grid>
         </Border>

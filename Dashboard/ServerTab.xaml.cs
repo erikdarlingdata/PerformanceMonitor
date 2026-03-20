@@ -153,6 +153,17 @@ namespace PerformanceMonitorDashboard
             // Set default time range on UserControls based on user preferences
             var prefs = _preferencesService.GetPreferences();
             CriticalIssuesTab.SetTimeRange(prefs.DefaultHoursBack);
+
+            // Sync time display mode picker with current setting
+            var modeTag = ServerTimeHelper.CurrentDisplayMode.ToString();
+            for (int i = 0; i < TimeDisplayModeBox.Items.Count; i++)
+            {
+                if (TimeDisplayModeBox.Items[i] is ComboBoxItem item && item.Tag?.ToString() == modeTag)
+                {
+                    TimeDisplayModeBox.SelectedIndex = i;
+                    break;
+                }
+            }
         }
 
         private void ShowPlanLoading(string label)
@@ -1396,6 +1407,35 @@ namespace PerformanceMonitorDashboard
             var scheduleWindow = new CollectorScheduleWindow(_databaseService);
             scheduleWindow.Owner = Window.GetWindow(this);
             scheduleWindow.ShowDialog();
+        }
+
+        private void TimeDisplayMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (TimeDisplayModeBox.SelectedItem is not ComboBoxItem item) return;
+            var tag = item.Tag?.ToString();
+            var mode = tag switch
+            {
+                "LocalTime" => TimeDisplayMode.LocalTime,
+                "UTC" => TimeDisplayMode.UTC,
+                _ => TimeDisplayMode.ServerTime
+            };
+            if (mode == ServerTimeHelper.CurrentDisplayMode) return;
+
+            ServerTimeHelper.CurrentDisplayMode = mode;
+
+            // Persist preference
+            var prefs = _preferencesService.GetPreferences();
+            prefs.TimeDisplayMode = mode.ToString();
+            _preferencesService.SavePreferences(prefs);
+
+            // Refresh all DataGrid bindings so ServerTimeConverter re-evaluates
+            RefreshTimestampBindings();
+        }
+
+        private void RefreshTimestampBindings()
+        {
+            // Force WPF to re-evaluate converter bindings on all query performance grids
+            PerformanceTab.RefreshGridBindings();
         }
 
         private void DownloadQueryPlan_Click(object sender, RoutedEventArgs e)

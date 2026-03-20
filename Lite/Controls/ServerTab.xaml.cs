@@ -25,6 +25,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
 
@@ -159,6 +160,17 @@ public partial class ServerTab : UserControl
 
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();
+
+        /* Sync time display mode picker */
+        var modeTag = ServerTimeHelper.CurrentDisplayMode.ToString();
+        for (int i = 0; i < TimeDisplayModeBox.Items.Count; i++)
+        {
+            if (TimeDisplayModeBox.Items[i] is ComboBoxItem item && item.Tag?.ToString() == modeTag)
+            {
+                TimeDisplayModeBox.SelectedIndex = i;
+                break;
+            }
+        }
 
         /* Initialize column filter managers */
         InitializeFilterManagers();
@@ -400,6 +412,33 @@ public partial class ServerTab : UserControl
         {
             RefreshDataButton.IsEnabled = true;
         }
+    }
+
+    private void TimeDisplayMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        if (TimeDisplayModeBox.SelectedItem is not ComboBoxItem item) return;
+        var tag = item.Tag?.ToString();
+        var mode = tag switch
+        {
+            "LocalTime" => TimeDisplayMode.LocalTime,
+            "UTC" => TimeDisplayMode.UTC,
+            _ => TimeDisplayMode.ServerTime
+        };
+        if (mode == ServerTimeHelper.CurrentDisplayMode) return;
+
+        ServerTimeHelper.CurrentDisplayMode = mode;
+
+        // Refresh all DataGrid bindings so ServerTimeConverter re-evaluates
+        QuerySnapshotsGrid.Items.Refresh();
+        QueryStatsGrid.Items.Refresh();
+        ProcedureStatsGrid.Items.Refresh();
+        QueryStoreGrid.Items.Refresh();
+        BlockedProcessReportGrid.Items.Refresh();
+        DeadlockGrid.Items.Refresh();
+        RunningJobsGrid.Items.Refresh();
+        CollectionHealthGrid.Items.Refresh();
+        CollectionLogGrid.Items.Refresh();
     }
 
     private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
