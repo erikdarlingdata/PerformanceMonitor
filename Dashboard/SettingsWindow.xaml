@@ -286,6 +286,15 @@
 
                             <!-- Mute Rules -->
                             <TextBlock Text="Alert Muting" FontWeight="Bold" FontSize="12" Margin="0,16,0,6"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="Default expiration for new mute rules:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <ComboBox x:Name="MuteRuleDefaultExpirationCombo" Width="130" VerticalAlignment="Center">
+                                    <ComboBoxItem Content="1 hour"/>
+                                    <ComboBoxItem Content="24 hours"/>
+                                    <ComboBoxItem Content="7 days"/>
+                                    <ComboBoxItem Content="Never"/>
+                                </ComboBox>
+                            </StackPanel>
                             <Button x:Name="ManageMuteRulesButton" Content="Manage Mute Rules..."
                                     Click="ManageMuteRulesButton_Click" HorizontalAlignment="Left"
                                     Padding="12,4" Margin="0,0,0,4"/>

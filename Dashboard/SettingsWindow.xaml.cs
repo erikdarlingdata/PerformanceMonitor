@@ -179,6 +179,13 @@ namespace PerformanceMonitorDashboard
             LongRunningJobMultiplierTextBox.Text = prefs.LongRunningJobMultiplier.ToString(CultureInfo.InvariantCulture);
             AlertCooldownTextBox.Text = prefs.AlertCooldownMinutes.ToString(CultureInfo.InvariantCulture);
             EmailCooldownTextBox.Text = prefs.EmailCooldownMinutes.ToString(CultureInfo.InvariantCulture);
+            MuteRuleDefaultExpirationCombo.SelectedIndex = prefs.MuteRuleDefaultExpiration switch
+            {
+                "1 hour" => 0,
+                "24 hours" => 1,
+                "7 days" => 2,
+                _ => 3
+            };
 
             UpdateNotificationCheckboxStates();
 
@@ -323,6 +330,7 @@ namespace PerformanceMonitorDashboard
             AlertCooldownTextBox.Text = "5";
             EmailCooldownTextBox.Text = "15";
             AlertExcludedDatabasesTextBox.Text = "";
+            MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
             UpdateAlertPreviewText();
         }
 
@@ -659,6 +667,9 @@ namespace PerformanceMonitorDashboard
                 prefs.EmailCooldownMinutes = emailCooldown;
             else
                 validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes");
+
+            prefs.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
+            MuteRuleDialog.DefaultExpiration = prefs.MuteRuleDefaultExpiration;
 
             // Save SMTP email settings
             prefs.SmtpEnabled = SmtpEnabledCheckBox.IsChecked == true;

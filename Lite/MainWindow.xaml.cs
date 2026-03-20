@@ -1589,7 +1589,7 @@ public partial class MainWindow : Window
         private static string TruncateText(string text, int maxLength = 300)
         {
             if (string.IsNullOrEmpty(text)) return "";
-            text = text.Trim();
+            text = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
             return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
         }
 

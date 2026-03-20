@@ -559,6 +559,13 @@ public partial class SettingsWindow : Window
         AlertLongRunningJobMultiplierBox.Text = App.AlertLongRunningJobMultiplier.ToString();
         AlertCooldownBox.Text = App.AlertCooldownMinutes.ToString();
         EmailCooldownBox.Text = App.EmailCooldownMinutes.ToString();
+        MuteRuleDefaultExpirationCombo.SelectedIndex = App.MuteRuleDefaultExpiration switch
+        {
+            "1 hour" => 0,
+            "24 hours" => 1,
+            "7 days" => 2,
+            _ => 3
+        };
         UpdateAlertControlStates();
     }
 
@@ -608,6 +615,7 @@ public partial class SettingsWindow : Window
             App.EmailCooldownMinutes = emailCooldown;
         else
             validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.");
+        App.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -650,6 +658,7 @@ public partial class SettingsWindow : Window
             root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
             root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
             root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
+            root["mute_rule_default_expiration"] = App.MuteRuleDefaultExpiration;
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
@@ -688,6 +697,7 @@ public partial class SettingsWindow : Window
         AlertCooldownBox.Text = "5";
         EmailCooldownBox.Text = "15";
         AlertExcludedDatabasesBox.Text = "";
+        MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
     }
 

@@ -17,6 +17,12 @@ namespace PerformanceMonitorDashboard
     {
         public MuteRule Rule { get; private set; }
 
+        /// <summary>
+        /// Default expiration selection for new mute rules.
+        /// Set from UserPreferences at startup. Values: "1 hour", "24 hours", "7 days", "Never".
+        /// </summary>
+        public static string DefaultExpiration { get; set; } = "24 hours";
+
         public MuteRuleDialog(MuteRule? existingRule = null)
         {
             InitializeComponent();
@@ -31,6 +37,7 @@ namespace PerformanceMonitorDashboard
             else
             {
                 Rule = new MuteRule();
+                ApplyDefaultExpiration();
             }
         }
 
@@ -156,6 +163,17 @@ namespace PerformanceMonitorDashboard
             // Hide the entire pattern grid if no fields are relevant
             PatternFieldsGrid.Visibility = (showDatabase || showWaitType || showQueryText || showJobName)
                 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void ApplyDefaultExpiration()
+        {
+            ExpirationCombo.SelectedIndex = DefaultExpiration switch
+            {
+                "1 hour" => 0,
+                "24 hours" => 1,
+                "7 days" => 2,
+                _ => 3
+            };
         }
     }
 }
