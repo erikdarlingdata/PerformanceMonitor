@@ -12,6 +12,7 @@ namespace PerformanceMonitorDashboard.Models
         public string EventName { get; set; } = string.Empty;
         public string? DatabaseName { get; set; }
         public string? LoginName { get; set; }
+        public string? NtUserName { get; set; }
         public string? ApplicationName { get; set; }
         public string? HostName { get; set; }
         public int? Spid { get; set; }
