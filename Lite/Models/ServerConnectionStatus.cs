@@ -82,6 +82,12 @@ public class ServerConnectionStatus
     public bool IsAwsRds { get; set; }
 
     /// <summary>
+    /// Whether the connected login has access to msdb.
+    /// Used for gating collectors that query msdb system tables (e.g., running jobs).
+    /// </summary>
+    public bool HasMsdbAccess { get; set; } = true;
+
+    /// <summary>
     /// The server's UTC offset in minutes, queried via DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()).
     /// Used to convert UTC collection_time values to server-local time for display.
     /// </summary>

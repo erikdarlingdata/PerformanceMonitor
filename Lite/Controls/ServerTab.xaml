@@ -1204,10 +1204,15 @@
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="Currently Running SQL Agent Jobs" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                    <DataGrid Grid.Row="1" x:Name="RunningJobsGrid"
+                    <TextBlock Grid.Row="1" x:Name="RunningJobsMsdbWarning"
+                               Text="Running Jobs requires msdb access. Grant the login access to msdb to enable this feature."
+                               Foreground="#FFD700" FontSize="12" Margin="0,0,0,8" Visibility="Collapsed"
+                               TextWrapping="Wrap"/>
+                    <DataGrid Grid.Row="2" x:Name="RunningJobsGrid"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                               CanUserSortColumns="True">

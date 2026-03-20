@@ -317,8 +317,9 @@ public partial class RemoteCollectorService
             var majorVersion = serverStatus.SqlMajorVersion;
             var engineEdition = serverStatus.SqlEngineEdition;
             var isAwsRds = serverStatus.IsAwsRds;
+            var hasMsdbAccess = serverStatus.HasMsdbAccess;
 
-            if (!IsCollectorSupported(collectorName, majorVersion, engineEdition, isAwsRds))
+            if (!IsCollectorSupported(collectorName, majorVersion, engineEdition, isAwsRds, hasMsdbAccess))
             {
                 AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} SKIPPED (version {majorVersion}, edition {engineEdition})");
                 return;
@@ -740,7 +741,7 @@ WHERE server_id = $3";
     /// Version 13 = SQL Server 2016, 14 = 2017, 15 = 2019, 16 = 2022, 17 = 2025.
     /// Engine edition 5 = Azure SQL DB, 8 = Azure MI.
     /// </summary>
-    private static bool IsCollectorSupported(string collectorName, int majorVersion, int engineEdition, bool isAwsRds = false)
+    private static bool IsCollectorSupported(string collectorName, int majorVersion, int engineEdition, bool isAwsRds = false, bool hasMsdbAccess = true)
     {
         bool isAzureSqlDb = engineEdition == 5;
         bool isAzureMi = engineEdition == 8;
@@ -777,6 +778,16 @@ WHERE server_id = $3";
             switch (collectorName)
             {
                 case "running_jobs":      /* msdb.dbo.syssessions not accessible */
+                    return false;
+            }
+        }
+
+        /* msdb access gate — login may not have access to msdb on any edition */
+        if (!hasMsdbAccess)
+        {
+            switch (collectorName)
+            {
+                case "running_jobs":      /* requires msdb.dbo.sysjobs, sysjobactivity, etc. */
                     return false;
             }
         }

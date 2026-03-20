@@ -105,6 +105,7 @@ public partial class ServerTab : UserControl
     };
 
     public int UtcOffsetMinutes { get; }
+    private readonly bool _hasMsdbAccess;
 
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
@@ -113,7 +114,7 @@ public partial class ServerTab : UserControl
     public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
     public event Func<Task>? ManualRefreshRequested;
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0, bool hasMsdbAccess = true)
     {
         InitializeComponent();
 
@@ -122,6 +123,7 @@ public partial class ServerTab : UserControl
         _serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         _credentialService = credentialService;
         UtcOffsetMinutes = utcOffsetMinutes;
+        _hasMsdbAccess = hasMsdbAccess;
         ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
@@ -157,6 +159,12 @@ public partial class ServerTab : UserControl
             }
         };
         _refreshTimer.Start();
+
+        /* Show warning on Running Jobs tab if login lacks msdb access */
+        if (!_hasMsdbAccess)
+        {
+            RunningJobsMsdbWarning.Visibility = System.Windows.Visibility.Visible;
+        }
 
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();
