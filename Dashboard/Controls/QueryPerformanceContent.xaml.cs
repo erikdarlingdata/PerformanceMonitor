@@ -393,23 +393,20 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void PopulateQueryStatsGrid(List<QueryStatsItem> data)
         {
-            QueryStatsDataGrid.ItemsSource = data;
+            SetItemsSourcePreservingSort(QueryStatsDataGrid, data, "AvgCpuTimeMs", ListSortDirection.Descending);
             QueryStatsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            SetInitialSort(QueryStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
         }
 
         private void PopulateProcStatsGrid(List<ProcedureStatsItem> data)
         {
-            ProcStatsDataGrid.ItemsSource = data;
+            SetItemsSourcePreservingSort(ProcStatsDataGrid, data, "AvgCpuTimeMs", ListSortDirection.Descending);
             ProcStatsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            SetInitialSort(ProcStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
         }
 
         private void PopulateQueryStoreGrid(List<QueryStoreItem> data)
         {
-            QueryStoreDataGrid.ItemsSource = data;
+            SetItemsSourcePreservingSort(QueryStoreDataGrid, data, "AvgCpuTimeMs", ListSortDirection.Descending);
             QueryStoreNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            SetInitialSort(QueryStoreDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
         }
 
         private void SetStatus(string message)
@@ -417,16 +414,42 @@ namespace PerformanceMonitorDashboard.Controls
             _statusCallback?.Invoke(message);
         }
 
-        private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+        private static void SetItemsSourcePreservingSort(
+            DataGrid grid, System.Collections.IEnumerable? newSource,
+            string? defaultSortProperty = null,
+            ListSortDirection defaultDirection = ListSortDirection.Descending)
         {
-            foreach (var column in grid.Columns)
+            var savedSorts = grid.Items.SortDescriptions.ToList();
+
+            grid.ItemsSource = newSource;
+
+            if (savedSorts.Count > 0)
             {
-                if (column is DataGridBoundColumn bc &&
-                    bc.Binding is Binding b &&
-                    b.Path.Path == bindingPath)
+                foreach (var sort in savedSorts)
+                    grid.Items.SortDescriptions.Add(sort);
+
+                foreach (var column in grid.Columns)
                 {
-                    column.SortDirection = direction;
-                    return;
+                    if (column is DataGridBoundColumn bc &&
+                        bc.Binding is Binding b)
+                    {
+                        var match = savedSorts.FirstOrDefault(s => s.PropertyName == b.Path.Path);
+                        column.SortDirection = match.PropertyName != null ? match.Direction : null;
+                    }
+                }
+            }
+            else if (defaultSortProperty != null)
+            {
+                grid.Items.SortDescriptions.Add(new SortDescription(defaultSortProperty, defaultDirection));
+                foreach (var column in grid.Columns)
+                {
+                    if (column is DataGridBoundColumn bc &&
+                        bc.Binding is Binding b &&
+                        b.Path.Path == defaultSortProperty)
+                    {
+                        column.SortDirection = defaultDirection;
+                        return;
+                    }
                 }
             }
         }
@@ -541,7 +564,7 @@ namespace PerformanceMonitorDashboard.Controls
                 SetStatus("Loading active queries...");
 
                 var data = await _databaseService.GetQuerySnapshotsAsync(_activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
-                ActiveQueriesDataGrid.ItemsSource = data;
+                SetItemsSourcePreservingSort(ActiveQueriesDataGrid, data);
                 ActiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 SetStatus($"Loaded {data.Count} query snapshots");
             }
@@ -704,7 +727,7 @@ namespace PerformanceMonitorDashboard.Controls
                 var data = await _databaseService.GetCurrentActiveQueriesAsync();
 
                 _currentActiveUnfilteredData = data;
-                CurrentActiveQueriesDataGrid.ItemsSource = data;
+                SetItemsSourcePreservingSort(CurrentActiveQueriesDataGrid, data);
                 CurrentActiveNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 CurrentActiveTimestamp.Text = $"Last refreshed: {DateTime.Now:HH:mm:ss} — {data.Count} queries";
 
@@ -1446,9 +1469,8 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 SetStatus("Loading query store regressions...");
                 var data = await _databaseService.GetQueryStoreRegressionsAsync(_qsRegressionsHoursBack, _qsRegressionsFromDate, _qsRegressionsToDate);
-                QueryStoreRegressionsDataGrid.ItemsSource = data;
+                SetItemsSourcePreservingSort(QueryStoreRegressionsDataGrid, data, "DurationRegressionPercent", ListSortDirection.Descending);
                 QueryStoreRegressionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                SetInitialSort(QueryStoreRegressionsDataGrid, "DurationRegressionPercent", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} query store regression records");
             }
             catch (Exception ex)
@@ -1547,9 +1569,8 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 SetStatus("Loading long running query patterns...");
                 var data = await _databaseService.GetLongRunningQueryPatternsAsync(_lrqPatternsHoursBack, _lrqPatternsFromDate, _lrqPatternsToDate);
-                LongRunningQueryPatternsDataGrid.ItemsSource = data;
+                SetItemsSourcePreservingSort(LongRunningQueryPatternsDataGrid, data, "AvgDurationSec", ListSortDirection.Descending);
                 LongRunningQueryPatternsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                SetInitialSort(LongRunningQueryPatternsDataGrid, "AvgDurationSec", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} long running query pattern records");
             }
             catch (Exception ex)
