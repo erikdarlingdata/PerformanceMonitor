@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using PerformanceMonitorLite.Models;
 
@@ -45,7 +47,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
     /// <summary>
     /// Called when new data arrives (refresh cycle). Captures unfiltered data,
-    /// then re-applies any active filters.
+    /// then re-applies any active filters. Preserves user sort order.
     /// </summary>
     public void UpdateData(List<T> newData)
     {
@@ -53,7 +55,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
         if (!HasActiveFilters())
         {
-            _dataGrid.ItemsSource = newData;
+            SetItemsSourcePreservingSort(newData);
             return;
         }
 
@@ -85,7 +87,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
         if (!HasActiveFilters())
         {
-            _dataGrid.ItemsSource = _unfilteredData;
+            SetItemsSourcePreservingSort(_unfilteredData);
             return;
         }
 
@@ -99,7 +101,30 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
             return true;
         }).ToList();
 
-        _dataGrid.ItemsSource = filteredData;
+        SetItemsSourcePreservingSort(filteredData);
+    }
+
+    private void SetItemsSourcePreservingSort(System.Collections.IEnumerable? newSource)
+    {
+        var savedSorts = _dataGrid.Items.SortDescriptions.ToList();
+
+        _dataGrid.ItemsSource = newSource;
+
+        if (savedSorts.Count > 0)
+        {
+            foreach (var sort in savedSorts)
+                _dataGrid.Items.SortDescriptions.Add(sort);
+
+            foreach (var column in _dataGrid.Columns)
+            {
+                if (column is DataGridBoundColumn bc &&
+                    bc.Binding is Binding b)
+                {
+                    var match = savedSorts.FirstOrDefault(s => s.PropertyName == b.Path.Path);
+                    column.SortDirection = match.PropertyName != null ? match.Direction : null;
+                }
+            }
+        }
     }
 
     /// <summary>
