@@ -6,24 +6,27 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
-using PerformanceMonitorLite.Models;
-using PerformanceMonitorLite.Services;
+using PerformanceMonitorDashboard.Helpers;
+using PerformanceMonitorDashboard.Models;
 
-namespace PerformanceMonitorLite.Controls;
+namespace PerformanceMonitorDashboard.Controls;
 
+/// <summary>
+/// Time range slicer for Dashboard. Timestamps are in SERVER LOCAL TIME
+/// (matching Dashboard's collect.* tables which use SYSDATETIME()).
+/// </summary>
 public partial class TimeRangeSlicerControl : UserControl
 {
     private List<TimeSliceBucket> _data = new();
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
 
-    // Range as normalised [0..1] positions within the data span
     private double _rangeStart;
     private double _rangeEnd = 1.0;
 
     private const double HandleWidthPx = 8;
     private const double HandleGripWidthPx = 20;
-    private const double MinRangeNorm = 0.02; // minimum ~2% of total span
+    private const double MinRangeNorm = 0.02;
     private const double ChartPaddingTop = 16;
     private const double ChartPaddingBottom = 20;
 
@@ -35,7 +38,7 @@ public partial class TimeRangeSlicerControl : UserControl
 
     /// <summary>
     /// Fired when the user finishes adjusting the slicer handles.
-    /// StartUtc/EndUtc are in UTC (matching DuckDB collection_time).
+    /// Start/End are in server local time (matching Dashboard data).
     /// </summary>
     public event EventHandler<SlicerRangeEventArgs>? RangeChanged;
 
@@ -57,18 +60,14 @@ public partial class TimeRangeSlicerControl : UserControl
         }
     }
 
-    /// <summary>
-    /// Loads slicer data. All timestamps must be UTC.
-    /// Selection defaults to the full range (no filtering until user interacts).
-    /// </summary>
     public void LoadData(List<TimeSliceBucket> data, string metricLabel)
     {
         // Preserve selection if we already have data (auto-refresh)
         DateTime? prevStart = null, prevEnd = null;
         if (_data.Count > 0 && (_rangeStart > 0 || _rangeEnd < 1.0))
         {
-            prevStart = UtcAtNorm(_rangeStart);
-            prevEnd = UtcAtNorm(_rangeEnd);
+            prevStart = TimeAtNorm(_rangeStart);
+            prevEnd = TimeAtNorm(_rangeEnd);
         }
 
         _data = data;
@@ -76,8 +75,8 @@ public partial class TimeRangeSlicerControl : UserControl
 
         if (prevStart.HasValue && prevEnd.HasValue && _data.Count >= 2)
         {
-            _rangeStart = NormAtUtc(prevStart.Value);
-            _rangeEnd = NormAtUtc(prevEnd.Value);
+            _rangeStart = NormAtTime(prevStart.Value);
+            _rangeEnd = NormAtTime(prevEnd.Value);
         }
         else
         {
@@ -89,32 +88,30 @@ public partial class TimeRangeSlicerControl : UserControl
         Redraw();
     }
 
-    /// <summary>Updates the metric label and redraws (when sort column changes).</summary>
     public void UpdateMetric(string metricLabel)
     {
         _metricLabel = metricLabel;
         Redraw();
     }
 
-    public DateTime? SelectionStartUtc => _data.Count > 0 ? UtcAtNorm(_rangeStart) : null;
-    public DateTime? SelectionEndUtc => _data.Count > 0 ? UtcAtNorm(_rangeEnd) : null;
+    public DateTime? SelectionStart => _data.Count > 0 ? TimeAtNorm(_rangeStart) : null;
+    public DateTime? SelectionEnd => _data.Count > 0 ? TimeAtNorm(_rangeEnd) : null;
+    public bool HasNarrowedSelection => _data.Count > 0 && (_rangeStart > 0.01 || _rangeEnd < 0.99);
 
-    // ── Time mapping ──
+    private DateTime DataStart => _data[0].BucketTime;
+    private DateTime DataEnd => _data[^1].BucketTime.AddHours(1);
 
-    private DateTime DataStartUtc => _data[0].BucketTimeUtc;
-    private DateTime DataEndUtc => _data[^1].BucketTimeUtc.AddHours(1);
-
-    private DateTime UtcAtNorm(double norm)
+    private DateTime TimeAtNorm(double norm)
     {
-        var ticks = DataStartUtc.Ticks + (long)((DataEndUtc.Ticks - DataStartUtc.Ticks) * norm);
-        return new DateTime(Math.Clamp(ticks, DataStartUtc.Ticks, DataEndUtc.Ticks), DateTimeKind.Utc);
+        var ticks = DataStart.Ticks + (long)((DataEnd.Ticks - DataStart.Ticks) * norm);
+        return new DateTime(Math.Clamp(ticks, DataStart.Ticks, DataEnd.Ticks));
     }
 
-    private double NormAtUtc(DateTime utc)
+    private double NormAtTime(DateTime dt)
     {
-        var span = DataEndUtc.Ticks - DataStartUtc.Ticks;
+        var span = DataEnd.Ticks - DataStart.Ticks;
         if (span <= 0) return 0;
-        return Math.Clamp((double)(utc.Ticks - DataStartUtc.Ticks) / span, 0, 1);
+        return Math.Clamp((double)(dt.Ticks - DataStart.Ticks) / span, 0, 1);
     }
 
     // ── Drawing ──
@@ -139,11 +136,10 @@ public partial class TimeRangeSlicerControl : UserControl
 
         var n = values.Length;
 
-        // Area chart — position points proportionally by time
         var linePoints = new List<Point>(n);
         for (int i = 0; i < n; i++)
         {
-            var x = NormAtUtc(_data[i].BucketTimeUtc) * w;
+            var x = NormAtTime(_data[i].BucketTime) * w;
             var y = chartBottom - (values[i] / max) * chartHeight;
             linePoints.Add(new Point(x, y));
         }
@@ -167,34 +163,32 @@ public partial class TimeRangeSlicerControl : UserControl
         }
         SlicerCanvas.Children.Add(new Path { Data = lineGeo, Stroke = lineBrush, StrokeThickness = 1.5 });
 
-        // X-axis labels — evenly spaced by TIME, skip if too close
+        // X-axis labels — evenly spaced by TIME across the full range, skip if too close
         var labelBrush = FindBrush("SlicerLabelBrush", "#99E4E6EB");
         const double minLabelSpacingPx = 90;
         double lastLabelX = -minLabelSpacingPx;
         int targetLabels = Math.Max(2, (int)(w / minLabelSpacingPx));
-        var timeStep = (DataEndUtc - DataStartUtc).TotalHours / targetLabels;
+        var timeStep = (DataEnd - DataStart).TotalHours / targetLabels;
         for (int tick = 0; tick <= targetLabels; tick++)
         {
-            var tickTime = DataStartUtc.AddHours(tick * timeStep);
-            var x = NormAtUtc(tickTime) * w;
+            var tickTime = DataStart.AddHours(tick * timeStep);
+            var x = NormAtTime(tickTime) * w;
             if (x - lastLabelX < minLabelSpacingPx) continue;
-            if (x < 10 || x > w - 40) continue;
-            var dt = ServerTimeHelper.FormatServerTime(tickTime, "MM/dd HH:mm");
-            var tb = new TextBlock { Text = dt, FontSize = 9, Foreground = labelBrush };
+            if (x < 10 || x > w - 40) continue; // avoid edge clipping
+            var dt = ServerTimeHelper.ConvertForDisplay(tickTime, ServerTimeHelper.CurrentDisplayMode);
+            var tb = new TextBlock { Text = dt.ToString("MM/dd HH:mm"), FontSize = 9, Foreground = labelBrush };
             Canvas.SetLeft(tb, x - 25);
             Canvas.SetTop(tb, chartBottom + 2);
             SlicerCanvas.Children.Add(tb);
             lastLabelX = x;
         }
 
-        // Metric label top-right
         var metricBrush = FindBrush("SlicerToggleBrush", "#E4E6EB");
         var metricTb = new TextBlock { Text = _metricLabel, FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = metricBrush };
         Canvas.SetLeft(metricTb, w - 120);
         Canvas.SetTop(metricTb, 2);
         SlicerCanvas.Children.Add(metricTb);
 
-        // Selection overlays
         var overlayBrush = FindBrush("SlicerOverlayBrush", "#99000000");
         var selectedBrush = FindBrush("SlicerSelectedBrush", "#22FFFFFF");
         var handleBrush = FindBrush("SlicerHandleBrush", "#E4E6EB");
@@ -208,7 +202,6 @@ public partial class TimeRangeSlicerControl : UserControl
 
         DrawHandle(selLeft, h, handleBrush);
         DrawHandle(selRight - HandleWidthPx, h, handleBrush);
-
         AddLine(selLeft, 0, selRight, 0, handleBrush, 0.5);
         AddLine(selLeft, h, selRight, h, handleBrush, 0.5);
     }
@@ -255,10 +248,10 @@ public partial class TimeRangeSlicerControl : UserControl
     private void UpdateRangeLabel()
     {
         if (_data.Count == 0) { RangeLabel.Text = ""; return; }
-        var startDisplay = ServerTimeHelper.FormatServerTime(UtcAtNorm(_rangeStart), "yyyy-MM-dd HH:mm");
-        var endDisplay = ServerTimeHelper.FormatServerTime(UtcAtNorm(_rangeEnd), "yyyy-MM-dd HH:mm");
-        var spanHours = (UtcAtNorm(_rangeEnd) - UtcAtNorm(_rangeStart)).TotalHours;
-        RangeLabel.Text = $"{startDisplay} \u2192 {endDisplay}  ({spanHours:F0}h)";
+        var start = ServerTimeHelper.ConvertForDisplay(TimeAtNorm(_rangeStart), ServerTimeHelper.CurrentDisplayMode);
+        var end = ServerTimeHelper.ConvertForDisplay(TimeAtNorm(_rangeEnd), ServerTimeHelper.CurrentDisplayMode);
+        var span = end - start;
+        RangeLabel.Text = $"{start:yyyy-MM-dd HH:mm} \u2192 {end:yyyy-MM-dd HH:mm}  ({span.TotalHours:F0}h)";
     }
 
     // ── Mouse interaction ──
@@ -271,7 +264,6 @@ public partial class TimeRangeSlicerControl : UserControl
         var w = SlicerBorder.ActualWidth;
         if (w <= 0) return;
         var pos = e.GetPosition(SlicerCanvas);
-
         var selLeft = _rangeStart * w;
         var selRight = _rangeEnd * w;
 
@@ -308,7 +300,6 @@ public partial class TimeRangeSlicerControl : UserControl
         }
 
         var deltaNorm = (pos.X - _dragOriginX) / w;
-
         switch (_dragMode)
         {
             case DragMode.DragStart:
@@ -326,7 +317,6 @@ public partial class TimeRangeSlicerControl : UserControl
                 _rangeEnd = newStart + span;
                 break;
         }
-
         UpdateRangeLabel();
         Redraw();
         e.Handled = true;
@@ -347,7 +337,6 @@ public partial class TimeRangeSlicerControl : UserControl
     {
         if (_data.Count < 2) return;
         if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) return;
-
         var w = SlicerBorder.ActualWidth;
         if (w <= 0) return;
 
@@ -377,10 +366,10 @@ public partial class TimeRangeSlicerControl : UserControl
     private void FireRangeChanged()
     {
         if (_data.Count == 0) return;
-        // Snap to hour boundaries so slider positions align with the hourly buckets shown in the graph
-        var startUtc = FloorToHour(UtcAtNorm(_rangeStart));
-        var endUtc = CeilToHour(UtcAtNorm(_rangeEnd));
-        RangeChanged?.Invoke(this, new SlicerRangeEventArgs(startUtc, endUtc));
+        // Snap to hour boundaries so slider positions align with hourly buckets
+        var start = FloorToHour(TimeAtNorm(_rangeStart));
+        var end = CeilToHour(TimeAtNorm(_rangeEnd));
+        RangeChanged?.Invoke(this, new SlicerRangeEventArgs(start, end));
     }
 
     private static DateTime FloorToHour(DateTime dt) =>
@@ -395,7 +384,7 @@ public partial class TimeRangeSlicerControl : UserControl
 
 public class SlicerRangeEventArgs : EventArgs
 {
-    public DateTime StartUtc { get; }
-    public DateTime EndUtc { get; }
-    public SlicerRangeEventArgs(DateTime startUtc, DateTime endUtc) { StartUtc = startUtc; EndUtc = endUtc; }
+    public DateTime Start { get; }
+    public DateTime End { get; }
+    public SlicerRangeEventArgs(DateTime start, DateTime end) { Start = start; End = end; }
 }

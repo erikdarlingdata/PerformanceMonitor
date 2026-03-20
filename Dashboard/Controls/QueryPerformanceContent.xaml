@@ -80,7 +80,12 @@
         <!-- Active Queries Sub-Tab -->
         <TabItem Header="Active Queries">
             <Grid>
-            <DataGrid x:Name="ActiveQueriesDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <local:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0"/>
+            <DataGrid Grid.Row="1" x:Name="ActiveQueriesDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}">
@@ -565,10 +570,16 @@
         <!-- Query Stats Sub-Tab -->
         <TabItem Header="Query Stats">
             <Grid>
-            <DataGrid x:Name="QueryStatsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <local:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0"/>
+            <DataGrid Grid.Row="1" x:Name="QueryStatsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}"
+                      Sorting="QueryStatsDataGrid_Sorting"
                       MouseDoubleClick="QueryStatsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
@@ -859,10 +870,16 @@
         <!-- Procedure Stats Sub-Tab -->
         <TabItem Header="Procedure Stats">
             <Grid>
-            <DataGrid x:Name="ProcStatsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <local:TimeRangeSlicerControl x:Name="ProcStatsSlicer" Grid.Row="0"/>
+            <DataGrid Grid.Row="1" x:Name="ProcStatsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}"
+                      Sorting="ProcStatsDataGrid_Sorting"
                       MouseDoubleClick="ProcStatsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
@@ -1122,10 +1139,16 @@
         <!-- Query Store Sub-Tab -->
         <TabItem Header="Query Store">
             <Grid>
-            <DataGrid x:Name="QueryStoreDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <local:TimeRangeSlicerControl x:Name="QueryStoreSlicer" Grid.Row="0"/>
+            <DataGrid Grid.Row="1" x:Name="QueryStoreDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}"
+                      Sorting="QueryStoreDataGrid_Sorting"
                       MouseDoubleClick="QueryStoreDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
                     <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
