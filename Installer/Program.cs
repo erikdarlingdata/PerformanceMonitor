@@ -1132,7 +1132,7 @@ END;";
             */
             totalSuccessCount = upgradeSuccessCount + installSuccessCount;
             totalFailureCount = upgradeFailureCount + installFailureCount;
-            installationSuccessful = (totalFailureCount == 0) || (totalFailureCount == 1 && automatedMode);
+            installationSuccessful = totalFailureCount == 0;
 
             /*
             Log installation history to database
