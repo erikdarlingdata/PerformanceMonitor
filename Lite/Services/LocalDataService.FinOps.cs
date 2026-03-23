@@ -1219,8 +1219,6 @@ AND   delta_worker_time > 0
 GROUP BY
     database_name,
     sql_handle,
-    statement_start_offset,
-    statement_end_offset,
     query_text
 ORDER BY SUM(delta_worker_time) DESC
 LIMIT $3";
