@@ -777,13 +777,13 @@ public partial class ServerTab : UserControl
         _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
         LiveSnapshotIndicator.Text = "";
         _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
-        SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
-        SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
         _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(deadlockTask.Result));
         _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
-        SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+        SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
@@ -892,19 +892,19 @@ public partial class ServerTab : UserControl
                     case 2: // Top Queries by Duration
                         var queryStats = await _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
                         _queryStatsFilterMgr!.UpdateData(queryStats);
-                        SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                        SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadQueryStatsSlicerAsync();
                         break;
                     case 3: // Top Procedures by Duration
                         var procStats = await _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
                         _procStatsFilterMgr!.UpdateData(procStats);
-                        SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                        SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadProcStatsSlicerAsync();
                         break;
                     case 4: // Query Store by Duration
                         var qsData = await _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate);
                         _queryStoreFilterMgr!.UpdateData(qsData);
-                        SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+                        SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
                         _ = LoadQueryStoreSlicerAsync();
                         break;
                 }
@@ -931,13 +931,13 @@ public partial class ServerTab : UserControl
             _ = LoadActiveQueriesSlicerAsync();
 
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
-            SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _ = LoadQueryStatsSlicerAsync();
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
-            SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _ = LoadProcStatsSlicerAsync();
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
-            SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+            SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
             _ = LoadQueryStoreSlicerAsync();
 
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result);
@@ -4376,8 +4376,11 @@ public partial class ServerTab : UserControl
         return null;
     }
 
-    private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+    private static void SetDefaultSortIfNone(DataGrid grid, string bindingPath, ListSortDirection direction)
     {
+        if (grid.Items.SortDescriptions.Count > 0) return;
+
+        grid.Items.SortDescriptions.Add(new SortDescription(bindingPath, direction));
         foreach (var column in grid.Columns)
         {
             if (column is DataGridBoundColumn bc &&
