@@ -682,12 +682,18 @@ WHERE server_id = $3";
 
     /// <summary>
     /// Gets the server name used for DuckDB storage and hashing.
+    /// Appends the database name for Azure SQL Database connections so that
+    /// different databases on the same logical server get distinct server_ids.
     /// Appends ":RO" for ReadOnlyIntent connections so they get a
     /// different server_id than read-write connections to the same host.
     /// </summary>
     internal static string GetServerNameForStorage(ServerConnection server)
     {
-        return server.ReadOnlyIntent ? server.ServerName + ":RO" : server.ServerName;
+        var name = string.IsNullOrWhiteSpace(server.DatabaseName)
+            ? server.ServerName
+            : server.ServerName + ":" + server.DatabaseName;
+
+        return server.ReadOnlyIntent ? name + ":RO" : name;
     }
 
     /// <summary>
