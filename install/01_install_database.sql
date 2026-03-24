@@ -60,6 +60,10 @@ BEGIN
     END;
     ELSE
     BEGIN
+        DECLARE
+            @data_size_mb integer = 1024,
+            @log_size_mb integer = 256;
+
         /*
         Get the default data and log directories from instance properties
         */
@@ -80,6 +84,42 @@ BEGIN
                 N'PerformanceMonitor_log.ldf';
 
         /*
+        Check model database file sizes so CREATE DATABASE doesn't fail
+        if model is larger than our defaults (#676).
+        Wrapped in TRY/CATCH for restricted permission environments.
+        */
+        BEGIN TRY
+            SELECT
+                @data_size_mb =
+                    MAX
+                    (
+                        CASE
+                            WHEN mf.type = 0
+                            THEN CONVERT(integer, mf.size / 128)
+                        END
+                    ),
+                @log_size_mb =
+                    MAX
+                    (
+                        CASE
+                            WHEN mf.type = 1
+                            THEN CONVERT(integer, mf.size / 128)
+                        END
+                    )
+            FROM sys.master_files AS mf
+            WHERE mf.database_id = DB_ID(N'model');
+
+            IF @data_size_mb < 1024 OR @data_size_mb IS NULL
+                SET @data_size_mb = 1024;
+            IF @log_size_mb < 256 OR @log_size_mb IS NULL
+                SET @log_size_mb = 256;
+        END TRY
+        BEGIN CATCH
+            SET @data_size_mb = 1024;
+            SET @log_size_mb = 256;
+        END CATCH;
+
+        /*
         Build and execute CREATE DATABASE statement with proper file paths
         */
         SET @sql = N'
@@ -89,7 +129,7 @@ BEGIN
         (
             NAME = N''PerformanceMonitor'',
             FILENAME = N''' + @data_path + N''',
-            SIZE = 1024MB,
+            SIZE = ' + CONVERT(nvarchar(20), @data_size_mb) + N'MB,
             MAXSIZE = UNLIMITED,
             FILEGROWTH = 1024MB
         )
@@ -97,13 +137,99 @@ BEGIN
         (
             NAME = N''PerformanceMonitor_log'',
             FILENAME = N''' + @log_path + N''',
-            SIZE = 256MB,
+            SIZE = ' + CONVERT(nvarchar(20), @log_size_mb) + N'MB,
             MAXSIZE = UNLIMITED,
             FILEGROWTH = 64MB
         );';
 
-        EXECUTE sys.sp_executesql
-            @sql;
+        BEGIN TRY
+            EXECUTE sys.sp_executesql
+                @sql;
+        END TRY
+        BEGIN CATCH
+            /*
+            If model is larger than expected and sys.master_files was
+            inaccessible, error 1803 tells us the required size in MB.
+            Parse it from the error message and retry once.
+            */
+            IF ERROR_NUMBER() = 1803
+            BEGIN
+                DECLARE
+                    @error_msg nvarchar(4000) = ERROR_MESSAGE(),
+                    @mb_pos integer = 0,
+                    @num_start integer = 0,
+                    @required_mb integer = NULL;
+
+                /*MB is language-independent in error messages*/
+                SET @mb_pos = CHARINDEX(N' MB', @error_msg);
+
+                IF @mb_pos > 0
+                BEGIN
+                    SET @num_start = @mb_pos - 1;
+
+                    WHILE @num_start > 0
+                      AND SUBSTRING(@error_msg, @num_start, 1) LIKE N'[0-9]'
+                        SET @num_start = @num_start - 1;
+
+                    SET @num_start = @num_start + 1;
+
+                    SET @required_mb =
+                        TRY_CONVERT
+                        (
+                            integer,
+                            SUBSTRING
+                            (
+                                @error_msg,
+                                @num_start,
+                                @mb_pos - @num_start
+                            )
+                        );
+                END;
+
+                IF @required_mb IS NOT NULL
+                BEGIN
+                    PRINT N'Model database requires at least '
+                        + CONVERT(nvarchar(20), @required_mb)
+                        + N' MB, retrying CREATE DATABASE...';
+
+                    IF @required_mb > @data_size_mb
+                        SET @data_size_mb = @required_mb;
+                    IF @required_mb > @log_size_mb
+                        SET @log_size_mb = @required_mb;
+
+                    SET @sql = N'
+                    CREATE DATABASE
+                        PerformanceMonitor
+                    ON PRIMARY
+                    (
+                        NAME = N''PerformanceMonitor'',
+                        FILENAME = N''' + @data_path + N''',
+                        SIZE = ' + CONVERT(nvarchar(20), @data_size_mb) + N'MB,
+                        MAXSIZE = UNLIMITED,
+                        FILEGROWTH = 1024MB
+                    )
+                    LOG ON
+                    (
+                        NAME = N''PerformanceMonitor_log'',
+                        FILENAME = N''' + @log_path + N''',
+                        SIZE = ' + CONVERT(nvarchar(20), @log_size_mb) + N'MB,
+                        MAXSIZE = UNLIMITED,
+                        FILEGROWTH = 64MB
+                    );';
+
+                    EXECUTE sys.sp_executesql
+                        @sql;
+                END;
+                ELSE
+                BEGIN
+                    THROW;
+                END;
+            END;
+            ELSE
+            BEGIN
+                THROW;
+            END;
+        END CATCH;
 
         ALTER DATABASE
             PerformanceMonitor
