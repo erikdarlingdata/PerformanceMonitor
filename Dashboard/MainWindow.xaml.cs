@@ -152,8 +152,9 @@ namespace PerformanceMonitorDashboard
             var startupPrefs = _preferencesService.GetPreferences();
             TabHelpers.CsvSeparator = startupPrefs.CsvSeparator;
             MuteRuleDialog.DefaultExpiration = startupPrefs.MuteRuleDefaultExpiration;
-            if (Enum.TryParse<Helpers.TimeDisplayMode>(startupPrefs.TimeDisplayMode, out var tdm))
-                Helpers.ServerTimeHelper.CurrentDisplayMode = tdm;
+            // Charts always render in server time; force the dropdown to match on startup
+            // so the display isn't misleading. The preference is still saved when changed.
+            Helpers.ServerTimeHelper.CurrentDisplayMode = Helpers.TimeDisplayMode.ServerTime;
 
             await LoadServerListAsync();
             InitializeNotificationService();
