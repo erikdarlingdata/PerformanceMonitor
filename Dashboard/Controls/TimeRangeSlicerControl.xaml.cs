@@ -148,6 +148,7 @@ public partial class TimeRangeSlicerControl : UserControl
 
     public void Redraw()
     {
+        UpdateRangeLabel();
         SlicerCanvas.Children.Clear();
         if (_data.Count < 1) return;
 

@@ -46,6 +46,12 @@ namespace PerformanceMonitorDashboard.Controls
             DefaultTraceSlicer.RangeChanged += OnDefaultTraceSlicerChanged;
         }
 
+        public void RefreshTimeDisplay()
+        {
+            DefaultTraceEventsDataGrid.Items.Refresh();
+            DefaultTraceSlicer.Redraw();
+        }
+
         public void SetTimeRange(int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
         {
             _defaultTraceEventsHoursBack = hoursBack;

@@ -1442,6 +1442,15 @@ namespace PerformanceMonitorDashboard
         {
             // Force WPF to re-evaluate converter bindings on all query performance grids
             PerformanceTab.RefreshGridBindings();
+
+            // Refresh blocking/deadlock grids and slicers in Locking tab
+            BlockingEventsDataGrid.Items.Refresh();
+            DeadlocksDataGrid.Items.Refresh();
+            BlockingSlicer.Redraw();
+            DeadlockSlicer.Redraw();
+
+            // Refresh Default Trace slicer
+            DefaultTraceTab.RefreshTimeDisplay();
         }
 
         private void DownloadQueryPlan_Click(object sender, RoutedEventArgs e)
