@@ -38,6 +38,15 @@ namespace PerformanceMonitorDashboard.Controls
         private DatabaseService? _databaseService;
         private Action<string>? _statusCallback;
 
+        private static (DateTime start, DateTime end) GetSlicerTimeRange(
+            int hoursBack, DateTime? fromDate, DateTime? toDate)
+        {
+            if (fromDate.HasValue && toDate.HasValue)
+                return (fromDate.Value, toDate.Value);
+            var serverNow = Helpers.ServerTimeHelper.ServerNow;
+            return (serverNow.AddHours(-hoursBack), serverNow);
+        }
+
         /// <summary>Raised when user wants to view a plan in the Plan Viewer tab. Args: (planXml, label, queryText)</summary>
         public event Action<string, string, string?>? ViewPlanRequested;
 
@@ -240,8 +249,9 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 var data = await _databaseService.GetActiveQuerySlicerDataAsync(
                     _activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
                 if (data.Count > 0)
-                    ActiveQueriesSlicer.LoadData(data, "Sessions");
+                    ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
             }
             catch { }
         }
@@ -274,8 +284,9 @@ namespace PerformanceMonitorDashboard.Controls
                     _queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
                 _queryStatsSlicerData = data;
                 _queryStatsSlicerMetric = "TotalCpu";
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
                 if (data.Count > 0)
-                    QueryStatsSlicer.LoadData(data, "Total CPU (ms)");
+                    QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
             }
             catch { }
         }
@@ -348,8 +359,9 @@ namespace PerformanceMonitorDashboard.Controls
                     _procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
                 _procStatsSlicerData = data;
                 _procStatsSlicerMetric = "TotalCpu";
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
                 if (data.Count > 0)
-                    ProcStatsSlicer.LoadData(data, "Total CPU (ms)");
+                    ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
             }
             catch { }
         }
@@ -422,8 +434,9 @@ namespace PerformanceMonitorDashboard.Controls
                     _queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
                 _queryStoreSlicerData = data;
                 _queryStoreSlicerMetric = "TotalCpu";
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
                 if (data.Count > 0)
-                    QueryStoreSlicer.LoadData(data, "Total CPU (ms)");
+                    QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
             }
             catch { }
         }

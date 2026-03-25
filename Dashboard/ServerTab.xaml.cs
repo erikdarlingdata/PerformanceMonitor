@@ -120,6 +120,9 @@ namespace PerformanceMonitorDashboard
             SetupAutoRefresh();
             SetupSubTabContextMenus();
 
+            BlockingSlicer.RangeChanged += OnBlockingSlicerChanged;
+            DeadlockSlicer.RangeChanged += OnDeadlockSlicerChanged;
+
             Loaded += ServerTab_Loaded;
             Unloaded += ServerTab_Unloaded;
             KeyDown += ServerTab_KeyDown;
@@ -1324,6 +1327,9 @@ namespace PerformanceMonitorDashboard
                     Logger.Warning($"Could not load deadlocks: {deadlockEx.Message}");
                 }
 
+                _ = LoadBlockingSlicerAsync();
+                _ = LoadDeadlockSlicerAsync();
+
                 try
                 {
                     var blockingStats = await blockingStatsTask;
@@ -1623,6 +1629,73 @@ namespace PerformanceMonitorDashboard
                 168 => "Showing: Last 7 Days",
                 _ => $"Showing: Last {hoursBack} Hours"
             };
+        }
+
+        // ── Blocking Slicer ──
+
+        private async Task LoadBlockingSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetBlockingSlicerDataAsync(
+                    _blockingHoursBack, _blockingFromDate, _blockingToDate);
+                var (start, end) = GetLockingSlicerTimeRange(_blockingHoursBack, _blockingFromDate, _blockingToDate);
+                if (data.Count > 0)
+                    BlockingSlicer.LoadData(data, "Blocking Events", start, end);
+            }
+            catch { }
+        }
+
+        private async void OnBlockingSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetBlockingEventsAsync(0, e.Start, e.End);
+                BlockingEventsDataGrid.ItemsSource = data;
+                UpdateDataGridFilterButtonStyles(BlockingEventsDataGrid, _blockingEventsFilters);
+                BlockingEventsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch { }
+        }
+
+        // ── Deadlock Slicer ──
+
+        private async Task LoadDeadlockSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetDeadlockSlicerDataAsync(
+                    _deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
+                var (start, end) = GetLockingSlicerTimeRange(_deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
+                if (data.Count > 0)
+                    DeadlockSlicer.LoadData(data, "Deadlocks", start, end);
+            }
+            catch { }
+        }
+
+        private async void OnDeadlockSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetDeadlocksAsync(0, e.Start, e.End);
+                DeadlocksDataGrid.ItemsSource = data;
+                UpdateDataGridFilterButtonStyles(DeadlocksDataGrid, _deadlocksFilters);
+                DeadlocksNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch { }
+        }
+
+        private static (DateTime start, DateTime end) GetLockingSlicerTimeRange(
+            int hoursBack, DateTime? fromDate, DateTime? toDate)
+        {
+            if (fromDate.HasValue && toDate.HasValue)
+                return (fromDate.Value, toDate.Value);
+            var serverNow = Helpers.ServerTimeHelper.ServerNow;
+            return (serverNow.AddHours(-hoursBack), serverNow);
         }
 
         // Blocking date range filtering state

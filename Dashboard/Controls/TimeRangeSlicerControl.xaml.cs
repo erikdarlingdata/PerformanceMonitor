@@ -18,6 +18,8 @@ namespace PerformanceMonitorDashboard.Controls;
 public partial class TimeRangeSlicerControl : UserControl
 {
     private List<TimeSliceBucket> _data = new();
+    private DateTime? _requestedStart;
+    private DateTime? _requestedEnd;
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
 
@@ -60,7 +62,8 @@ public partial class TimeRangeSlicerControl : UserControl
         }
     }
 
-    public void LoadData(List<TimeSliceBucket> data, string metricLabel)
+    public void LoadData(List<TimeSliceBucket> data, string metricLabel,
+        DateTime? requestedStart = null, DateTime? requestedEnd = null)
     {
         // Preserve selection if we already have data (auto-refresh)
         DateTime? prevStart = null, prevEnd = null;
@@ -70,7 +73,9 @@ public partial class TimeRangeSlicerControl : UserControl
             prevEnd = TimeAtNorm(_rangeEnd);
         }
 
-        _data = data;
+        _requestedStart = requestedStart;
+        _requestedEnd = requestedEnd;
+        _data = FillEmptyBuckets(data, requestedStart, requestedEnd);
         _metricLabel = metricLabel;
 
         if (prevStart.HasValue && prevEnd.HasValue && _data.Count >= 2)
@@ -98,8 +103,33 @@ public partial class TimeRangeSlicerControl : UserControl
     public DateTime? SelectionEnd => _data.Count > 0 ? TimeAtNorm(_rangeEnd) : null;
     public bool HasNarrowedSelection => _data.Count > 0 && (_rangeStart > 0.01 || _rangeEnd < 0.99);
 
-    private DateTime DataStart => _data[0].BucketTime;
-    private DateTime DataEnd => _data[^1].BucketTime.AddHours(1);
+    private DateTime DataStart => _requestedStart ?? _data[0].BucketTime;
+    private DateTime DataEnd => _requestedEnd ?? _data[^1].BucketTime.AddHours(1);
+
+    private static List<TimeSliceBucket> FillEmptyBuckets(
+        List<TimeSliceBucket> data, DateTime? requestedStart, DateTime? requestedEnd)
+    {
+        if (data.Count == 0 || !requestedStart.HasValue || !requestedEnd.HasValue)
+            return data;
+
+        var floorStart = FloorToHour(requestedStart.Value);
+        var floorEnd = FloorToHour(requestedEnd.Value);
+
+        var existing = new Dictionary<long, TimeSliceBucket>();
+        foreach (var b in data)
+            existing[FloorToHour(b.BucketTime).Ticks] = b;
+
+        var result = new List<TimeSliceBucket>();
+        for (var t = floorStart; t <= floorEnd; t = t.AddHours(1))
+        {
+            if (existing.TryGetValue(t.Ticks, out var bucket))
+                result.Add(bucket);
+            else
+                result.Add(new TimeSliceBucket { BucketTime = t });
+        }
+
+        return result;
+    }
 
     private DateTime TimeAtNorm(double norm)
     {
@@ -119,7 +149,7 @@ public partial class TimeRangeSlicerControl : UserControl
     public void Redraw()
     {
         SlicerCanvas.Children.Clear();
-        if (_data.Count < 2) return;
+        if (_data.Count < 1) return;
 
         var w = SlicerBorder.ActualWidth;
         var h = SlicerBorder.ActualHeight;

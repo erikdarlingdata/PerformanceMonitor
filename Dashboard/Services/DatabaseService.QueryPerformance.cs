@@ -505,6 +505,96 @@ namespace PerformanceMonitorDashboard.Services
                     return items;
                 }
 
+                public async Task<List<Models.TimeSliceBucket>> GetBlockingSlicerDataAsync(
+                    int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+                {
+                    var items = new List<Models.TimeSliceBucket>();
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    var timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "WHERE b.collection_time >= @from_date AND b.collection_time <= @to_date"
+                        : "WHERE b.collection_time >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
+
+                    string query = $@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    DATEADD(HOUR, DATEDIFF(HOUR, 0, b.collection_time), 0) AS bucket_hour,
+    COUNT(*) AS event_count,
+    ISNULL(SUM(b.wait_time_ms), 0) / 1000.0 AS total_wait_sec,
+    COUNT(DISTINCT b.spid) AS distinct_blocked,
+    COUNT(DISTINCT b.database_name) AS distinct_databases
+FROM collect.blocking_BlockedProcessReport AS b
+{timeFilter}
+GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, b.collection_time), 0)
+ORDER BY bucket_hour;";
+
+                    using var command = new SqlCommand(query, connection) { CommandTimeout = 120 };
+                    command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = hoursBack });
+                    if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+                    if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var eventCount = Convert.ToInt64(reader.GetValue(1));
+                        items.Add(new Models.TimeSliceBucket
+                        {
+                            BucketTime = reader.GetDateTime(0),
+                            SessionCount = eventCount,
+                            TotalCpu = Convert.ToDouble(reader.GetValue(2)),
+                            TotalReads = Convert.ToDouble(reader.GetValue(3)),
+                            TotalLogicalReads = Convert.ToDouble(reader.GetValue(4)),
+                            Value = eventCount,
+                        });
+                    }
+
+                    return items;
+                }
+
+                public async Task<List<Models.TimeSliceBucket>> GetDeadlockSlicerDataAsync(
+                    int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+                {
+                    var items = new List<Models.TimeSliceBucket>();
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    var timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "WHERE d.event_date >= @from_date AND d.event_date <= @to_date"
+                        : "WHERE d.event_date >= DATEADD(HOUR, -@hours_back, SYSDATETIME())";
+
+                    string query = $@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    DATEADD(HOUR, DATEDIFF(HOUR, 0, d.event_date), 0) AS bucket_hour,
+    COUNT(*) AS deadlock_count
+FROM collect.deadlocks AS d
+{timeFilter}
+GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, d.event_date), 0)
+ORDER BY bucket_hour;";
+
+                    using var command = new SqlCommand(query, connection) { CommandTimeout = 120 };
+                    command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = hoursBack });
+                    if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+                    if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var count = Convert.ToInt64(reader.GetValue(1));
+                        items.Add(new Models.TimeSliceBucket
+                        {
+                            BucketTime = reader.GetDateTime(0),
+                            SessionCount = count,
+                            Value = count,
+                        });
+                    }
+
+                    return items;
+                }
+
                 public async Task<List<Models.TimeSliceBucket>> GetActiveQuerySlicerDataAsync(
                     int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
                 {
