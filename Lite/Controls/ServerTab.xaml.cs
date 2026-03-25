@@ -275,6 +275,8 @@ public partial class ServerTab : UserControl
         QueryStatsSlicer.RangeChanged += OnQueryStatsSlicerChanged;
         ProcStatsSlicer.RangeChanged += OnProcStatsSlicerChanged;
         QueryStoreSlicer.RangeChanged += OnQueryStoreSlicerChanged;
+        BlockingSlicer.RangeChanged += OnBlockingSlicerChanged;
+        DeadlockSlicer.RangeChanged += OnDeadlockSlicerChanged;
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -357,6 +359,22 @@ public partial class ServerTab : UserControl
             4 => 168,
             _ => 4
         };
+    }
+
+    /// <summary>
+    /// Gets the UTC time range for slicer display, matching GetTimeRange in LocalDataService.
+    /// </summary>
+    private static (DateTime start, DateTime end) GetSlicerTimeRange(
+        int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            var startUtc = fromDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
+            var endUtc = toDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
+            return (startUtc, endUtc);
+        }
+
+        return (DateTime.UtcNow.AddHours(-hoursBack), DateTime.UtcNow);
     }
 
     /// <summary>
@@ -458,6 +476,8 @@ public partial class ServerTab : UserControl
         QueryStatsSlicer.Redraw();
         ProcStatsSlicer.Redraw();
         QueryStoreSlicer.Redraw();
+        BlockingSlicer.Redraw();
+        DeadlockSlicer.Redraw();
     }
 
     private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1084,10 +1104,12 @@ public partial class ServerTab : UserControl
                     case 2: // Blocked Process Reports
                         var bpr = await _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate);
                         _blockedProcessFilterMgr!.UpdateData(bpr);
+                        await LoadBlockingSlicerAsync();
                         break;
                     case 3: // Deadlocks
                         var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate);
                         _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
+                        await LoadDeadlockSlicerAsync();
                         break;
                 }
                 /* Always keep alert badge current when Blocking tab is visible */
@@ -1118,6 +1140,9 @@ public partial class ServerTab : UserControl
             UpdateCurrentWaitsDurationChart(currentWaitsDurationTask.Result, hoursBack, fromDate, toDate);
             UpdateCurrentWaitsBlockedChart(currentWaitsBlockedTask.Result, hoursBack, fromDate, toDate);
 
+            await LoadBlockingSlicerAsync();
+            await LoadDeadlockSlicerAsync();
+
             /* Notify parent of alert counts for tab badge */
             var blockingCount = blockedProcessTask.Result.Count;
             var deadlockCount = deadlockTask.Result.Count;
@@ -1133,6 +1158,143 @@ public partial class ServerTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshBlockingAsync failed: {ex.Message}");
+        }
+    }
+
+    // ── Blocking Slicer ──
+
+    private string _blockingSlicerMetric = "Events";
+    private List<Models.TimeSliceBucket>? _blockingSlicerData;
+
+    private async System.Threading.Tasks.Task LoadBlockingSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetBlockingSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _blockingSlicerData = data;
+            _blockingSlicerMetric = "Events";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadBlockingSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private async void OnBlockingSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+
+            var bpr = await _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromServer, toServer);
+            _blockedProcessFilterMgr!.UpdateData(bpr);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnBlockingSlicerChanged failed: {ex.Message}");
+        }
+    }
+
+    private void BlockedProcessReportGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        if (_blockingSlicerData == null || _blockingSlicerData.Count == 0) return;
+
+        var col = e.Column.SortMemberPath ?? "";
+        if (string.IsNullOrEmpty(col))
+        {
+            if (e.Column is DataGridBoundColumn bc && bc.Binding is System.Windows.Data.Binding b)
+                col = b.Path.Path;
+        }
+        var (metric, label) = col switch
+        {
+            "WaitTimeMs" => ("TotalCpu", "Total Wait (sec)"),
+            "BlockingSpid" => ("TotalElapsed", "Distinct Blockers"),
+            "BlockedSpid" => ("TotalReads", "Distinct Blocked"),
+            "DatabaseName" => ("TotalLogicalReads", "Distinct Databases"),
+            _ => ("Events", "Blocking Events"),
+        };
+
+        if (metric == _blockingSlicerMetric) return;
+        _blockingSlicerMetric = metric;
+
+        foreach (var bucket in _blockingSlicerData)
+        {
+            bucket.Value = metric switch
+            {
+                "TotalCpu" => bucket.TotalCpu,
+                "TotalElapsed" => bucket.TotalElapsed,
+                "TotalReads" => bucket.TotalReads,
+                "TotalLogicalReads" => bucket.TotalLogicalReads,
+                _ => bucket.SessionCount,
+            };
+        }
+
+        BlockingSlicer.UpdateMetric(label);
+    }
+
+    // ── Deadlock Slicer ──
+
+    private List<Models.TimeSliceBucket>? _deadlockSlicerData;
+
+    private async System.Threading.Tasks.Task LoadDeadlockSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetDeadlockSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _deadlockSlicerData = data;
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadDeadlockSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private async void OnDeadlockSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+
+            var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromServer, toServer);
+            _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnDeadlockSlicerChanged failed: {ex.Message}");
         }
     }
 
@@ -3712,8 +3874,9 @@ public partial class ServerTab : UserControl
             var data = await _dataService.GetActiveQuerySlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
             _activeQueriesSlicerData = data;
             _activeQueriesSlicerMetric = "Sessions";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
             if (data.Count > 0)
-                ActiveQueriesSlicer.LoadData(data, "Sessions");
+                ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
         }
         catch (Exception ex)
         {
@@ -3807,8 +3970,9 @@ public partial class ServerTab : UserControl
             var data = await _dataService.GetQueryStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
             _queryStatsSlicerData = data;
             _queryStatsSlicerMetric = "TotalCpu";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
             if (data.Count > 0)
-                QueryStatsSlicer.LoadData(data, "Total CPU (ms)");
+                QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
         catch (Exception ex)
         {
@@ -3900,8 +4064,9 @@ public partial class ServerTab : UserControl
             var data = await _dataService.GetQueryStoreSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
             _queryStoreSlicerData = data;
             _queryStoreSlicerMetric = "TotalCpu";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
             if (data.Count > 0)
-                QueryStoreSlicer.LoadData(data, "Total CPU (ms)");
+                QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
         catch (Exception ex)
         {
@@ -3992,8 +4157,9 @@ public partial class ServerTab : UserControl
             var data = await _dataService.GetProcStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
             _procStatsSlicerData = data;
             _procStatsSlicerMetric = "TotalCpu";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
             if (data.Count > 0)
-                ProcStatsSlicer.LoadData(data, "Total CPU (ms)");
+                ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
         catch (Exception ex)
         {

@@ -968,11 +968,18 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Blocked Process Reports">
-                            <DataGrid x:Name="BlockedProcessReportGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
+                            <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="1"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource BlockingRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                                      Sorting="BlockedProcessReportGrid_Sorting">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="130">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -1065,9 +1072,16 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Deadlocks">
-                            <DataGrid x:Name="DeadlockGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
+                            <DataGrid x:Name="DeadlockGrid" Grid.Row="1"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -1149,6 +1163,7 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                     </TabControl>
                 </Grid>

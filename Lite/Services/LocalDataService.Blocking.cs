@@ -417,6 +417,96 @@ LIMIT 200";
     }
 
     /// <summary>
+    /// Gets hourly-bucketed metrics from blocked process reports for the time-range slicer.
+    /// </summary>
+    public async Task<List<Models.TimeSliceBucket>> GetBlockingSlicerDataAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    date_trunc('hour', collection_time) AS bucket,
+    COUNT(*) AS event_count,
+    COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
+    COUNT(DISTINCT blocking_spid) AS distinct_blockers,
+    COUNT(DISTINCT blocked_spid) AS distinct_blocked,
+    COUNT(DISTINCT database_name) AS distinct_databases
+FROM v_blocked_process_reports
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY date_trunc('hour', collection_time)
+ORDER BY bucket";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<Models.TimeSliceBucket>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var eventCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1));
+            items.Add(new Models.TimeSliceBucket
+            {
+                BucketTimeUtc = reader.GetDateTime(0),
+                SessionCount = eventCount,
+                TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalLogicalReads = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                Value = eventCount,
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Gets hourly-bucketed metrics from deadlocks for the time-range slicer.
+    /// </summary>
+    public async Task<List<Models.TimeSliceBucket>> GetDeadlockSlicerDataAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    date_trunc('hour', collection_time) AS bucket,
+    COUNT(*) AS deadlock_count
+FROM v_deadlocks
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY date_trunc('hour', collection_time)
+ORDER BY bucket";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<Models.TimeSliceBucket>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var count = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1));
+            items.Add(new Models.TimeSliceBucket
+            {
+                BucketTimeUtc = reader.GetDateTime(0),
+                SessionCount = count,
+                Value = count,
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Gets blocking incident trend (count of distinct blocking events per time bucket).
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
