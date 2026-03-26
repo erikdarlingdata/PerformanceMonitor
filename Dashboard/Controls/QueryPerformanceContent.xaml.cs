@@ -37,6 +37,7 @@ namespace PerformanceMonitorDashboard.Controls
     {
         private DatabaseService? _databaseService;
         private Action<string>? _statusCallback;
+        internal bool IsRefreshing { get; set; }
 
         private static (DateTime start, DateTime end) GetSlicerTimeRange(
             int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -509,7 +510,7 @@ namespace PerformanceMonitorDashboard.Controls
             if (_databaseService == null) return;
             if (QueryStatsDataGrid.SelectedItem is not Models.QueryStatsItem row || string.IsNullOrEmpty(row.QueryHash))
             {
-                QueryStatsSlicer.ClearOverlay();
+                if (!IsRefreshing) QueryStatsSlicer.ClearOverlay();
                 return;
             }
 
@@ -543,7 +544,7 @@ namespace PerformanceMonitorDashboard.Controls
             if (_databaseService == null) return;
             if (ProcStatsDataGrid.SelectedItem is not Models.ProcedureStatsItem row || string.IsNullOrEmpty(row.ProcedureName))
             {
-                ProcStatsSlicer.ClearOverlay();
+                if (!IsRefreshing) ProcStatsSlicer.ClearOverlay();
                 return;
             }
 
@@ -578,7 +579,7 @@ namespace PerformanceMonitorDashboard.Controls
             if (_databaseService == null) return;
             if (QueryStoreDataGrid.SelectedItem is not Models.QueryStoreItem row)
             {
-                QueryStoreSlicer.ClearOverlay();
+                if (!IsRefreshing) QueryStoreSlicer.ClearOverlay();
                 return;
             }
 

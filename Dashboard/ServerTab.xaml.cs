@@ -1059,7 +1059,9 @@ namespace PerformanceMonitorDashboard
                     case "Queries":
                         // Queries tab content is in QueryPerformanceContent UserControl
                         PerformanceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
-                        await PerformanceTab.RefreshAllDataAsync();
+                        PerformanceTab.IsRefreshing = true;
+                        try { await PerformanceTab.RefreshAllDataAsync(); }
+                        finally { PerformanceTab.IsRefreshing = false; }
                         break;
 
                     case "Memory":
@@ -1248,7 +1250,9 @@ namespace PerformanceMonitorDashboard
         {
             try
             {
-                await PerformanceTab.RefreshAllDataAsync(fullRefresh);
+                PerformanceTab.IsRefreshing = true;
+                try { await PerformanceTab.RefreshAllDataAsync(fullRefresh); }
+                finally { PerformanceTab.IsRefreshing = false; }
             }
             catch (Exception ex)
             {
