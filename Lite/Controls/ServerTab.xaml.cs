@@ -2381,7 +2381,7 @@ public partial class ServerTab : UserControl
     {
         if (QueryStatsGrid.SelectedItem is not QueryStatsRow row || string.IsNullOrEmpty(row.QueryHash))
         {
-            QueryStatsSlicer.ClearOverlay();
+            if (!_isRefreshing) QueryStatsSlicer.ClearOverlay();
             return;
         }
 
@@ -2401,7 +2401,7 @@ public partial class ServerTab : UserControl
     {
         if (ProcedureStatsGrid.SelectedItem is not ProcedureStatsRow row || string.IsNullOrEmpty(row.ObjectName))
         {
-            ProcStatsSlicer.ClearOverlay();
+            if (!_isRefreshing) ProcStatsSlicer.ClearOverlay();
             return;
         }
 
@@ -2422,7 +2422,7 @@ public partial class ServerTab : UserControl
     {
         if (QueryStoreGrid.SelectedItem is not QueryStoreRow row)
         {
-            QueryStoreSlicer.ClearOverlay();
+            if (!_isRefreshing) QueryStoreSlicer.ClearOverlay();
             return;
         }
 

@@ -262,10 +262,12 @@ public partial class TimeRangeSlicerControl : UserControl
             if (overlayMax <= 0) overlayMax = 1;
 
             var dotBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF6F00"));
+            var firstBucket = _data[0].BucketTime;
+            var lastBucket = _data[^1].BucketTime;
             foreach (var pt in _overlayData)
             {
+                if (pt.Time < firstBucket || pt.Time > lastBucket) continue;
                 var norm = NormAtTime(pt.Time);
-                if (norm < 0 || norm > 1) continue;
                 var ox = norm * w;
                 var oy = Math.Clamp(chartBottom - (pt.Value / overlayMax) * chartHeight, chartTop, chartBottom);
                 var dot = new Ellipse { Width = 5, Height = 5, Fill = dotBrush };
