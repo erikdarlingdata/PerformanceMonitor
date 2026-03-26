@@ -343,6 +343,9 @@ namespace PerformanceMonitorDashboard.Controls
             }
 
             QueryStatsSlicer.UpdateMetric(label);
+
+            if (QueryStatsDataGrid.SelectedItem != null)
+                QueryStatsDataGrid_SelectionChanged(QueryStatsDataGrid, null!);
         }
 
         // ── Procedure Stats Slicer ──
@@ -418,6 +421,9 @@ namespace PerformanceMonitorDashboard.Controls
             }
 
             ProcStatsSlicer.UpdateMetric(label);
+
+            if (ProcStatsDataGrid.SelectedItem != null)
+                ProcStatsDataGrid_SelectionChanged(ProcStatsDataGrid, null!);
         }
 
         // ── Query Store Slicer ──
@@ -491,6 +497,114 @@ namespace PerformanceMonitorDashboard.Controls
             }
 
             QueryStoreSlicer.UpdateMetric(label);
+
+            if (QueryStoreDataGrid.SelectedItem != null)
+                QueryStoreDataGrid_SelectionChanged(QueryStoreDataGrid, null!);
+        }
+
+        // ── Grid → Slicer Overlay (#683) ──
+
+        private async void QueryStatsDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_databaseService == null) return;
+            if (QueryStatsDataGrid.SelectedItem is not Models.QueryStatsItem row || string.IsNullOrEmpty(row.QueryHash))
+            {
+                QueryStatsSlicer.ClearOverlay();
+                return;
+            }
+
+            try
+            {
+                var history = await _databaseService.GetQueryStatsHistoryAsync(
+                    row.DatabaseName, row.QueryHash, _queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
+
+                Func<Models.QueryStatsHistoryItem, long?> selector = _queryStatsSlicerMetric switch
+                {
+                    "TotalCpu" or "AvgCpu" => h => h.TotalWorkerTimeDelta,
+                    "TotalReads" or "AvgReads" => h => h.TotalLogicalReadsDelta,
+                    "TotalWrites" => h => h.TotalLogicalWritesDelta,
+                    "TotalPhysReads" => h => h.TotalPhysicalReadsDelta,
+                    _ => h => h.TotalElapsedTimeDelta,
+                };
+                bool isMicroseconds = _queryStatsSlicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
+
+                var points = history
+                    .Where(h => (selector(h) ?? 0) > 0)
+                    .Select(h => (h.CollectionTime, isMicroseconds ? (selector(h) ?? 0) / 1000.0 : (double)(selector(h) ?? 0)))
+                    .ToList();
+
+                QueryStatsSlicer.SetOverlay(points, row.QueryHash);
+            }
+            catch { QueryStatsSlicer.ClearOverlay(); }
+        }
+
+        private async void ProcStatsDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_databaseService == null) return;
+            if (ProcStatsDataGrid.SelectedItem is not Models.ProcedureStatsItem row || string.IsNullOrEmpty(row.ProcedureName))
+            {
+                ProcStatsSlicer.ClearOverlay();
+                return;
+            }
+
+            try
+            {
+                var history = await _databaseService.GetProcedureStatsHistoryAsync(
+                    row.DatabaseName, row.SchemaName ?? "dbo", row.ProcedureName, _procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
+
+                Func<Models.ProcedureExecutionHistoryItem, long?> selector = _procStatsSlicerMetric switch
+                {
+                    "TotalCpu" or "AvgCpu" => h => h.TotalWorkerTimeDelta,
+                    "TotalReads" or "AvgReads" => h => h.TotalLogicalReadsDelta,
+                    "TotalWrites" => h => h.TotalLogicalWritesDelta,
+                    "TotalPhysReads" => h => h.TotalPhysicalReadsDelta,
+                    _ => h => h.TotalElapsedTimeDelta,
+                };
+                bool isMicroseconds = _procStatsSlicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
+
+                var points = history
+                    .Where(h => (selector(h) ?? 0) > 0)
+                    .Select(h => (h.CollectionTime, isMicroseconds ? (selector(h) ?? 0) / 1000.0 : (double)(selector(h) ?? 0)))
+                    .ToList();
+
+                var label = (row.ProcedureName?.Length ?? 0) > 30 ? row.ProcedureName![..30] + "..." : row.ProcedureName ?? "";
+                ProcStatsSlicer.SetOverlay(points, label);
+            }
+            catch { ProcStatsSlicer.ClearOverlay(); }
+        }
+
+        private async void QueryStoreDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_databaseService == null) return;
+            if (QueryStoreDataGrid.SelectedItem is not Models.QueryStoreItem row)
+            {
+                QueryStoreSlicer.ClearOverlay();
+                return;
+            }
+
+            try
+            {
+                var history = await _databaseService.GetQueryStoreHistoryAsync(
+                    row.DatabaseName, row.QueryId, _queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
+
+                Func<Models.QueryExecutionHistoryItem, double> selector = _queryStoreSlicerMetric switch
+                {
+                    "TotalCpu" or "AvgCpu" => h => h.AvgCpuTimeMs * h.CountExecutions,
+                    "TotalReads" or "AvgReads" => h => h.AvgLogicalReads * (double)h.CountExecutions,
+                    _ => h => h.AvgDurationMs * h.CountExecutions,
+                };
+
+                var points = history
+                    .Where(h => selector(h) > 0)
+                    .Select(h => (h.CollectionTime, selector(h)))
+                    .ToList();
+
+                var qsLabel = !string.IsNullOrWhiteSpace(row.ModuleName)
+                    ? row.ModuleName
+                    : $"Query {row.QueryId}";
+                QueryStoreSlicer.SetOverlay(points, qsLabel);
+            }
+            catch { QueryStoreSlicer.ClearOverlay(); }
         }
 
         public void RefreshGridBindings()

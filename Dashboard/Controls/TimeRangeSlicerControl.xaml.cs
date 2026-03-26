@@ -23,6 +23,9 @@ public partial class TimeRangeSlicerControl : UserControl
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
 
+    private List<(DateTime Time, double Value)>? _overlayData;
+    private string? _overlayLabel;
+
     private double _rangeStart;
     private double _rangeEnd = 1.0;
 
@@ -90,6 +93,21 @@ public partial class TimeRangeSlicerControl : UserControl
         }
 
         UpdateRangeLabel();
+        Redraw();
+    }
+
+    public void SetOverlay(List<(DateTime Time, double Value)> data, string label)
+    {
+        _overlayData = data.Count >= 3 ? data : null;
+        _overlayLabel = label;
+        Redraw();
+    }
+
+    public void ClearOverlay()
+    {
+        if (_overlayData == null) return;
+        _overlayData = null;
+        _overlayLabel = null;
         Redraw();
     }
 
@@ -235,6 +253,45 @@ public partial class TimeRangeSlicerControl : UserControl
         DrawHandle(selRight - HandleWidthPx, h, handleBrush);
         AddLine(selLeft, 0, selRight, 0, handleBrush, 0.5);
         AddLine(selLeft, h, selRight, h, handleBrush, 0.5);
+
+        // Overlay trend line (per-item highlight from grid selection)
+        if (_overlayData != null && _overlayData.Count >= 3)
+        {
+            var overlayMax = _overlayData.Max(d => d.Value);
+            if (overlayMax <= 0) overlayMax = 1;
+
+            var overlayPoints = new List<Point>();
+            foreach (var pt in _overlayData)
+            {
+                var ox = NormAtTime(pt.Time) * w;
+                var oy = Math.Clamp(chartBottom - (pt.Value / overlayMax) * chartHeight, chartTop, chartBottom);
+                overlayPoints.Add(new Point(ox, oy));
+            }
+
+            var overlayLineBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF6F00"));
+            var overlayGeo = new StreamGeometry();
+            using (var ctx = overlayGeo.Open())
+            {
+                ctx.BeginFigure(overlayPoints[0], false, false);
+                for (int i = 1; i < overlayPoints.Count; i++)
+                    ctx.LineTo(overlayPoints[i], true, false);
+            }
+            SlicerCanvas.Children.Add(new Path { Data = overlayGeo, Stroke = overlayLineBrush, StrokeThickness = 2 });
+
+            if (!string.IsNullOrEmpty(_overlayLabel))
+            {
+                var overlayLabelTb = new TextBlock
+                {
+                    Text = _overlayLabel,
+                    FontSize = 11,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = overlayLineBrush
+                };
+                Canvas.SetLeft(overlayLabelTb, 8);
+                Canvas.SetTop(overlayLabelTb, 2);
+                SlicerCanvas.Children.Add(overlayLabelTb);
+            }
+        }
     }
 
     private void AddRect(double x, double y, double width, double height, Brush fill)

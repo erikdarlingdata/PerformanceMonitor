@@ -579,6 +579,7 @@
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}"
+                      SelectionChanged="QueryStatsDataGrid_SelectionChanged"
                       Sorting="QueryStatsDataGrid_Sorting"
                       MouseDoubleClick="QueryStatsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
@@ -879,6 +880,7 @@
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}"
+                      SelectionChanged="ProcStatsDataGrid_SelectionChanged"
                       Sorting="ProcStatsDataGrid_Sorting"
                       MouseDoubleClick="ProcStatsDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
@@ -1148,6 +1150,7 @@
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
                       RowStyle="{DynamicResource DefaultRowStyle}"
+                      SelectionChanged="QueryStoreDataGrid_SelectionChanged"
                       Sorting="QueryStoreDataGrid_Sorting"
                       MouseDoubleClick="QueryStoreDataGrid_MouseDoubleClick">
                 <DataGrid.Columns>
