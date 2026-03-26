@@ -487,7 +487,7 @@ public partial class ServerTab : UserControl
 
     private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (!IsLoaded || _isRefreshing) return;
 
         /* Show/hide custom date pickers and time ComboBoxes */
         var isCustom = TimeRangeCombo.SelectedIndex == 5;
@@ -518,7 +518,7 @@ public partial class ServerTab : UserControl
 
     private async void CustomDateRange_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (!IsLoaded || _isRefreshing) return;
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {
             await RefreshAllDataAsync(fullRefresh: false);
@@ -527,7 +527,7 @@ public partial class ServerTab : UserControl
 
     private async void CustomTimeCombo_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (!IsLoaded || _isRefreshing) return;
         /* Only refresh if we have valid dates selected */
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {

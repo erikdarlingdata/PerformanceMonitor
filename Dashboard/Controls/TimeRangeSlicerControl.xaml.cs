@@ -337,7 +337,8 @@ public partial class TimeRangeSlicerControl : UserControl
         var start = ServerTimeHelper.ConvertForDisplay(TimeAtNorm(_rangeStart), ServerTimeHelper.CurrentDisplayMode);
         var end = ServerTimeHelper.ConvertForDisplay(TimeAtNorm(_rangeEnd), ServerTimeHelper.CurrentDisplayMode);
         var span = end - start;
-        RangeLabel.Text = $"{start:yyyy-MM-dd HH:mm} \u2192 {end:yyyy-MM-dd HH:mm}  ({span.TotalHours:F0}h)";
+        var spanLabel = span.TotalHours >= 1 ? $"{span.TotalHours:F0}h" : $"{span.TotalMinutes:F0}m";
+        RangeLabel.Text = $"{start:yyyy-MM-dd HH:mm} \u2192 {end:yyyy-MM-dd HH:mm}  ({spanLabel})";
     }
 
     // ── Mouse interaction ──
