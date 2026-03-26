@@ -410,7 +410,7 @@
             </TabItem>
 
             <!-- Queries Tab -->
-            <TabItem Header="Queries">
+            <TabItem Header="Queries" x:Name="QueriesTabItem">
                 <controls:QueryPerformanceContent x:Name="PerformanceTab"/>
             </TabItem>
 
@@ -488,7 +488,7 @@
                         </Border>
                     </StackPanel>
                 </TabItem.Header>
-                <TabControl>
+                <TabControl x:Name="LockingSubTabControl">
                     <!-- Blocking/Deadlock Stats Sub-Tab (default tab) -->
                     <TabItem Header="Blocking/Deadlock Trends">
                         <Grid>

@@ -38,6 +38,13 @@
               GridLinesVisibility="All" CanUserResizeColumns="True"
               RowStyle="{StaticResource DefaultRowStyle}">
         <DataGrid.Columns>
+            <DataGridTemplateColumn Header="Action" Width="80">
+                <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                        <Button Content="Investigate" Click="Investigate_Click" Padding="4,2" FontSize="11"/>
+                    </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
             <DataGridTextColumn Binding="{Binding IssueId}" ElementStyle="{StaticResource NumericCell}" Width="80">
                 <DataGridTextColumn.Header>
                     <StackPanel Orientation="Horizontal">
