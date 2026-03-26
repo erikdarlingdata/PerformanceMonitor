@@ -342,6 +342,7 @@
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      SelectionChanged="QueryStatsGrid_SelectionChanged"
                                       Sorting="QueryStatsGrid_Sorting"
                                       MouseDoubleClick="QueryStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
@@ -475,6 +476,7 @@
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      SelectionChanged="ProcedureStatsGrid_SelectionChanged"
                                       Sorting="ProcedureStatsGrid_Sorting"
                                       MouseDoubleClick="ProcedureStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
@@ -587,6 +589,7 @@
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      SelectionChanged="QueryStoreGrid_SelectionChanged"
                                       Sorting="QueryStoreGrid_Sorting"
                                       MouseDoubleClick="QueryStoreGrid_MouseDoubleClick">
                                 <DataGrid.Columns>

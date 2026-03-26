@@ -164,10 +164,11 @@ LIMIT $4";
     /// <summary>
     /// Gets collection-level history for a specific Query Store query (for drilldown).
     /// </summary>
-    public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, long planId, int hoursBack = 24)
+    public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, long planId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -187,13 +188,15 @@ AND   database_name = $2
 AND   query_id = $3
 AND   plan_id = $4
 AND   collection_time >= $5
+AND   collection_time <= $6
 ORDER BY collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
         command.Parameters.Add(new DuckDBParameter { Value = planId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
 
         var items = new List<QueryStoreHistoryRow>();
         using var reader = await command.ExecuteReaderAsync();

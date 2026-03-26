@@ -186,10 +186,11 @@ LIMIT $4";
     /// <summary>
     /// Gets collection-level history for a specific query hash (for drilldown).
     /// </summary>
-    public async Task<List<QueryStatsHistoryRow>> GetQueryStatsHistoryAsync(int serverId, string databaseName, string queryHash, int hoursBack = 24)
+    public async Task<List<QueryStatsHistoryRow>> GetQueryStatsHistoryAsync(int serverId, string databaseName, string queryHash, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -214,12 +215,14 @@ WHERE server_id = $1
 AND   database_name = $2
 AND   query_hash = $3
 AND   collection_time >= $4
+AND   collection_time <= $5
 ORDER BY collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryHash });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
 
         var items = new List<QueryStatsHistoryRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -253,10 +256,11 @@ ORDER BY collection_time";
     /// <summary>
     /// Gets collection-level history for a specific procedure (for drilldown).
     /// </summary>
-    public async Task<List<ProcedureStatsHistoryRow>> GetProcedureStatsHistoryAsync(int serverId, string databaseName, string schemaName, string objectName, int hoursBack = 24)
+    public async Task<List<ProcedureStatsHistoryRow>> GetProcedureStatsHistoryAsync(int serverId, string databaseName, string schemaName, string objectName, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -277,13 +281,15 @@ AND   database_name = $2
 AND   schema_name = $3
 AND   object_name = $4
 AND   collection_time >= $5
+AND   collection_time <= $6
 ORDER BY collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = schemaName });
         command.Parameters.Add(new DuckDBParameter { Value = objectName });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
 
         var items = new List<ProcedureStatsHistoryRow>();
         using var reader = await command.ExecuteReaderAsync();
