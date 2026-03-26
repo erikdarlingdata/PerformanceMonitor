@@ -37,7 +37,7 @@ namespace PerformanceMonitorDashboard.Controls
         public event Action<string, DateTime>? ChartDrillDownRequested;
 
         private void AddDrillDown(ScottPlot.WPF.WpfPlot chart, ContextMenu menu,
-            Helpers.ChartHoverHelper? hover, string label, string chartType)
+            Func<Helpers.ChartHoverHelper?> hoverGetter, string label, string chartType)
         {
             menu.Items.Insert(0, new Separator());
             var item = new MenuItem { Header = label };
@@ -46,7 +46,7 @@ namespace PerformanceMonitorDashboard.Controls
             menu.Opened += (s, _) =>
             {
                 var pos = System.Windows.Input.Mouse.GetPosition(chart);
-                var nearest = hover?.GetNearestSeries(pos);
+                var nearest = hoverGetter()?.GetNearestSeries(pos);
                 item.Tag = nearest?.Time;
                 item.IsEnabled = nearest.HasValue;
             };
@@ -216,9 +216,9 @@ namespace PerformanceMonitorDashboard.Controls
 
             // Server Utilization Trends charts
             var cpuTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsCpuChart, "Server_CPU_Trends", "collect.cpu_utilization_stats");
-            AddDrillDown(ServerUtilTrendsCpuChart, cpuTrendsMenu, _serverTrendsCpuHover, "Show Active Queries at This Time", "CPU");
+            AddDrillDown(ServerUtilTrendsCpuChart, cpuTrendsMenu, () => _serverTrendsCpuHover, "Show Active Queries at This Time", "CPU");
             var tempDbTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsTempdbChart, "Server_TempDB_Trends", "collect.tempdb_stats");
-            AddDrillDown(ServerUtilTrendsTempdbChart, tempDbTrendsMenu, _serverTrendsTempdbHover, "Show Active Queries at This Time", "TempDB");
+            AddDrillDown(ServerUtilTrendsTempdbChart, tempDbTrendsMenu, () => _serverTrendsTempdbHover, "Show Active Queries at This Time", "TempDB");
             TabHelpers.SetupChartContextMenu(ServerUtilTrendsMemoryChart, "Server_Memory_Trends", "collect.memory_stats");
             TabHelpers.SetupChartContextMenu(ServerUtilTrendsPerfmonChart, "Server_Perfmon_Trends", "collect.perfmon_stats");
 
