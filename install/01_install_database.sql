@@ -620,7 +620,7 @@ BEGIN
         installation_date datetime2(7) NOT NULL DEFAULT SYSDATETIME(),
         installer_version nvarchar(50) NOT NULL,
         installer_info_version nvarchar(100) NULL,
-        sql_server_version nvarchar(255) NOT NULL,
+        sql_server_version nvarchar(512) NOT NULL,
         sql_server_edition nvarchar(255) NOT NULL,
         installation_type nvarchar(20) NOT NULL, /*INSTALL, UPGRADE, REINSTALL*/
         previous_version nvarchar(50) NULL,
@@ -638,6 +638,34 @@ BEGIN
     );
 
     PRINT 'Created config.installation_history table';
+END;
+GO
+
+/*
+Widen sql_server_version when upgrading from older installs (nvarchar(255) or narrower).
+Idempotent: no-op if the column is already nvarchar(512) or wider, missing, or table absent.
+*/
+IF OBJECT_ID(N'config.installation_history', N'U') IS NOT NULL
+BEGIN
+    IF EXISTS
+    (
+        SELECT
+            1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = N'config'
+        AND   TABLE_NAME = N'installation_history'
+        AND   COLUMN_NAME = N'sql_server_version'
+        AND   DATA_TYPE = N'nvarchar'
+        AND   CHARACTER_MAXIMUM_LENGTH BETWEEN 1 AND 511
+    )
+    BEGIN
+        ALTER TABLE
+            config.installation_history
+        ALTER COLUMN
+            sql_server_version nvarchar(512) NOT NULL;
+
+        PRINT 'Widened config.installation_history.sql_server_version to nvarchar(512).';
+    END;
 END;
 GO
 
