@@ -674,6 +674,52 @@ BEGIN
         END;
 
         /*
+        Migration: widen config.installation_history.sql_server_edition (e.g. nvarchar(255) -> nvarchar(512))
+        for databases installed before this change. Idempotent: no-op if column missing or already >= 512 chars.
+        */
+        IF OBJECT_ID(N'config.installation_history', N'U') IS NOT NULL
+        AND EXISTS
+        (
+            SELECT
+                1
+            FROM sys.columns AS c
+            INNER JOIN sys.types AS t
+                ON t.user_type_id = c.user_type_id
+            WHERE c.object_id = OBJECT_ID(N'config.installation_history')
+            AND   c.name = N'sql_server_edition'
+            AND   t.name = N'nvarchar'
+            AND   c.max_length < 1024 /* nvarchar(512) stores as 1024 bytes in sys.columns */
+        )
+        BEGIN
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Altering config.installation_history.sql_server_edition to nvarchar(512) NOT NULL', 0, 1) WITH NOWAIT;
+            END;
+
+            ALTER TABLE
+                config.installation_history
+            ALTER COLUMN
+                sql_server_edition NVARCHAR(512) NOT NULL;
+
+            IF @log_to_table = 1
+            BEGIN
+                INSERT INTO
+                    config.collection_log
+                (
+                    collector_name,
+                    collection_status,
+                    error_message
+                )
+                VALUES
+                (
+                    N'ensure_config_tables',
+                    N'SCHEMA_UPDATED',
+                    N'Altered config.installation_history.sql_server_edition to nvarchar(512) NOT NULL'
+                );
+            END;
+        END;
+
+        /*
         Log final summary
         */
         INSERT INTO
