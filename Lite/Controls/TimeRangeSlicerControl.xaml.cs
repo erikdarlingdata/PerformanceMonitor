@@ -106,7 +106,7 @@ public partial class TimeRangeSlicerControl : UserControl
     /// </summary>
     public void SetOverlay(List<(DateTime TimeUtc, double Value)> data, string label)
     {
-        _overlayData = data.Count >= 3 ? data : null;
+        _overlayData = data.Count >= 1 ? data : null;
         _overlayLabel = label;
         Redraw();
     }
@@ -273,31 +273,25 @@ public partial class TimeRangeSlicerControl : UserControl
         AddLine(selLeft, 0, selRight, 0, handleBrush, 0.5);
         AddLine(selLeft, h, selRight, h, handleBrush, 0.5);
 
-        // Overlay trend line (per-item highlight from grid selection)
-        if (_overlayData != null && _overlayData.Count >= 2)
+        // Overlay dots (per-item highlight from grid selection)
+        if (_overlayData != null && _overlayData.Count >= 1)
         {
             var overlayMax = _overlayData.Max(d => d.Value);
             if (overlayMax <= 0) overlayMax = 1;
 
-            var overlayPoints = new List<Point>();
+            var dotBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF6F00"));
             foreach (var pt in _overlayData)
             {
-                var ox = NormAtUtc(pt.TimeUtc) * w;
+                var norm = NormAtUtc(pt.TimeUtc);
+                if (norm < 0 || norm > 1) continue; // skip points outside the visible range
+                var ox = norm * w;
                 var oy = Math.Clamp(chartBottom - (pt.Value / overlayMax) * chartHeight, chartTop, chartBottom);
-                overlayPoints.Add(new Point(ox, oy));
+                var dot = new Ellipse { Width = 5, Height = 5, Fill = dotBrush };
+                Canvas.SetLeft(dot, ox - 2.5);
+                Canvas.SetTop(dot, oy - 2.5);
+                SlicerCanvas.Children.Add(dot);
             }
 
-            var overlayLineBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF6F00"));
-            var overlayGeo = new StreamGeometry();
-            using (var ctx = overlayGeo.Open())
-            {
-                ctx.BeginFigure(overlayPoints[0], false, false);
-                for (int i = 1; i < overlayPoints.Count; i++)
-                    ctx.LineTo(overlayPoints[i], true, false);
-            }
-            SlicerCanvas.Children.Add(new Path { Data = overlayGeo, Stroke = overlayLineBrush, StrokeThickness = 2 });
-
-            // Overlay label top-left
             if (!string.IsNullOrEmpty(_overlayLabel))
             {
                 var overlayLabelTb = new TextBlock
@@ -305,7 +299,7 @@ public partial class TimeRangeSlicerControl : UserControl
                     Text = _overlayLabel,
                     FontSize = 11,
                     FontWeight = FontWeights.SemiBold,
-                    Foreground = overlayLineBrush
+                    Foreground = dotBrush
                 };
                 Canvas.SetLeft(overlayLabelTb, 8);
                 Canvas.SetTop(overlayLabelTb, 2);
