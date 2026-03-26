@@ -522,13 +522,16 @@ namespace PerformanceMonitorDashboard
         private void SetupChartContextMenus()
         {
             // Resource Overview charts
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewCpuChart, "CPU_Utilization", "collect.cpu_utilization_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewMemoryChart, "Memory_Utilization", "collect.memory_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewIoChart, "IO_Latency", "collect.file_io_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewWaitChart, "Wait_Stats", "collect.wait_stats");
+            var overviewCpuMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewCpuChart, "CPU_Utilization", "collect.cpu_utilization_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewCpuChart, overviewCpuMenu, _resourceOverviewCpuHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var overviewMemMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewMemoryChart, "Memory_Utilization", "collect.memory_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewMemoryChart, overviewMemMenu, _resourceOverviewMemoryHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var overviewIoMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewIoChart, "IO_Latency", "collect.file_io_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewIoChart, overviewIoMenu, _resourceOverviewIoHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var overviewWaitMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewWaitChart, "Wait_Stats", "collect.wait_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewWaitChart, overviewWaitMenu, _resourceOverviewWaitHover, "Show Active Queries at This Time", OnQueryDrillDown);
 
             // Blocking Stats charts
-            Helpers.TabHelpers.SetupChartContextMenu(LockWaitStatsChart, "Lock_Wait_Stats", "collect.wait_stats");
             var blockingEventsMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsBlockingEventsChart, "Blocking_Events", "collect.blocking_deadlock_stats");
             AddChartDrillDownMenuItem(BlockingStatsBlockingEventsChart, blockingEventsMenu, _blockingEventsHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
             var blockingDurationMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDurationChart, "Blocking_Duration", "collect.blocking_deadlock_stats");
@@ -538,9 +541,15 @@ namespace PerformanceMonitorDashboard
             var deadlockWaitMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlockWaitTimeChart, "Deadlock_Wait_Time", "collect.blocking_deadlock_stats");
             AddChartDrillDownMenuItem(BlockingStatsDeadlockWaitTimeChart, deadlockWaitMenu, _deadlockWaitTimeHover, "Show Deadlocks at This Time", OnDeadlockChartDrillDown);
 
+            // Lock Wait Stats chart
+            var lockWaitMenu = Helpers.TabHelpers.SetupChartContextMenu(LockWaitStatsChart, "Lock_Wait_Stats", "collect.wait_stats");
+            AddChartDrillDownMenuItem(LockWaitStatsChart, lockWaitMenu, _lockWaitStatsHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
+
             // Current Waits charts
-            Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration", "collect.waiting_tasks");
-            Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked", "collect.waiting_tasks");
+            var cwDurationMenu = Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration", "collect.waiting_tasks");
+            AddChartDrillDownMenuItem(CurrentWaitsDurationChart, cwDurationMenu, _currentWaitsDurationHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var cwBlockedMenu = Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked", "collect.waiting_tasks");
+            AddChartDrillDownMenuItem(CurrentWaitsBlockedChart, cwBlockedMenu, _currentWaitsBlockedHover, "Show Active Queries at This Time", OnQueryDrillDown);
 
             // Query Performance Trends charts now handled by QueryPerformanceContent UserControl
 
@@ -1506,6 +1515,20 @@ namespace PerformanceMonitorDashboard
             _deadlocksFromDate = from;
             _deadlocksToDate = to;
             await RefreshLockingTabAsync();
+        }
+
+        private async void OnQueryDrillDown(DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            QueriesTabItem.IsSelected = true;
+            PerformanceTab.SelectSubTab(1); // Active Queries
+            PerformanceTab.SetTimeRange(0, from, to);
+            PerformanceTab.IsRefreshing = true;
+            try { await RefreshQueriesTabAsync(); }
+            finally { PerformanceTab.IsRefreshing = false; }
         }
 
         private async void OnChildChartDrillDown(string chartType, DateTime time)
