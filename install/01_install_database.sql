@@ -621,7 +621,7 @@ BEGIN
         installer_version nvarchar(50) NOT NULL,
         installer_info_version nvarchar(100) NULL,
         sql_server_version nvarchar(255) NOT NULL,
-        sql_server_edition nvarchar(255) NOT NULL,
+        sql_server_edition nvarchar(512) NOT NULL,
         installation_type nvarchar(20) NOT NULL, /*INSTALL, UPGRADE, REINSTALL*/
         previous_version nvarchar(50) NULL,
         installation_status nvarchar(20) NOT NULL, /*SUCCESS, FAILED, PARTIAL*/
