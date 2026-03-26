@@ -28,6 +28,12 @@ namespace PerformanceMonitorDashboard.Controls
     /// </summary>
     public partial class CriticalIssuesContent : UserControl
     {
+        /// <summary>
+        /// Raised when the user clicks Investigate on an issue.
+        /// Args: (problemArea, logDate, affectedDatabase, investigateQuery)
+        /// </summary>
+        public event Action<string, DateTime, string?, string?>? InvestigateRequested;
+
         private DatabaseService? _databaseService;
 
         // Time range state
@@ -60,6 +66,16 @@ namespace PerformanceMonitorDashboard.Controls
         public void Initialize(DatabaseService databaseService)
         {
             _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
+        }
+
+        private void Investigate_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not CriticalIssueItem item) return;
+            InvestigateRequested?.Invoke(
+                item.ProblemArea,
+                item.LogDate,
+                string.IsNullOrWhiteSpace(item.AffectedDatabase) ? null : item.AffectedDatabase,
+                string.IsNullOrWhiteSpace(item.InvestigateQuery) ? null : item.InvestigateQuery);
         }
 
         /// <summary>
