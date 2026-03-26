@@ -46,6 +46,10 @@ public partial class ServerTab : UserControl
     private List<SelectableItem> _perfmonCounterItems = new();
     private Helpers.ChartHoverHelper? _waitStatsHover;
     private Helpers.ChartHoverHelper? _perfmonHover;
+    private Helpers.ChartHoverHelper? _overviewCpuHover;
+    private Helpers.ChartHoverHelper? _overviewMemoryHover;
+    private Helpers.ChartHoverHelper? _overviewFileIoHover;
+    private Helpers.ChartHoverHelper? _overviewWaitStatsHover;
     private Helpers.ChartHoverHelper? _cpuHover;
     private Helpers.ChartHoverHelper? _memoryHover;
     private Helpers.ChartHoverHelper? _tempDbHover;
@@ -193,6 +197,10 @@ public partial class ServerTab : UserControl
         }
 
         /* Apply theme immediately so charts don't flash white before data loads */
+        ApplyTheme(OverviewCpuChart);
+        ApplyTheme(OverviewMemoryChart);
+        ApplyTheme(OverviewFileIoChart);
+        ApplyTheme(OverviewWaitStatsChart);
         ApplyTheme(WaitStatsChart);
         ApplyTheme(QueryDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
@@ -218,6 +226,10 @@ public partial class ServerTab : UserControl
         ApplyTheme(CollectorDurationChart);
 
         /* Chart hover tooltips */
+        _overviewCpuHover = new Helpers.ChartHoverHelper(OverviewCpuChart, "%");
+        _overviewMemoryHover = new Helpers.ChartHoverHelper(OverviewMemoryChart, "MB");
+        _overviewFileIoHover = new Helpers.ChartHoverHelper(OverviewFileIoChart, "ms");
+        _overviewWaitStatsHover = new Helpers.ChartHoverHelper(OverviewWaitStatsChart, "ms/sec");
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
         _perfmonHover = new Helpers.ChartHoverHelper(PerfmonChart, "");
         _cpuHover = new Helpers.ChartHoverHelper(CpuChart, "%");
@@ -249,6 +261,16 @@ public partial class ServerTab : UserControl
         Helpers.ContextMenuHelper.SetupChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends");
+        /* Overview chart context menus */
+        var ovCpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewCpuChart, "Overview_CPU");
+        AddChartDrillDownMenuItem(OverviewCpuChart, ovCpuMenu, _overviewCpuHover, "Show Active Queries at This Time", OnCpuDrillDown);
+        var ovMemMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewMemoryChart, "Overview_Memory");
+        AddChartDrillDownMenuItem(OverviewMemoryChart, ovMemMenu, _overviewMemoryHover, "Show Active Queries at This Time", OnMemoryDrillDown);
+        var ovIoMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewFileIoChart, "Overview_FileIO");
+        AddChartDrillDownMenuItem(OverviewFileIoChart, ovIoMenu, _overviewFileIoHover, "Show Active Queries at This Time", OnCpuDrillDown);
+        var ovWaitMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewWaitStatsChart, "Overview_WaitStats");
+        AddChartDrillDownMenuItem(OverviewWaitStatsChart, ovWaitMenu, _overviewWaitStatsHover, "Show Active Queries at This Time", OnCpuDrillDown);
+
         var cpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage");
         AddChartDrillDownMenuItem(CpuChart, cpuMenu, _cpuHover, "Show Active Queries at This Time", OnCpuDrillDown);
         var memoryMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage");
@@ -673,7 +695,7 @@ public partial class ServerTab : UserControl
             {
                 await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true);
                 /* Always keep alert badge current even when Blocking tab is not visible */
-                if (MainTabControl.SelectedIndex != 7)
+                if (MainTabControl.SelectedIndex != 8)
                     await RefreshAlertCountsAsync(hoursBack, fromDate, toDate);
             }
 
@@ -695,19 +717,20 @@ public partial class ServerTab : UserControl
     {
         switch (MainTabControl.SelectedIndex)
         {
-            case 0: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
-            case 1: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
-            case 2: break; // Plan Viewer — no queries
-            case 3: await RefreshCpuAsync(hoursBack, fromDate, toDate); break;
-            case 4: await RefreshMemoryAsync(hoursBack, fromDate, toDate, subTabOnly); break;
-            case 5: await RefreshFileIoAsync(hoursBack, fromDate, toDate); break;
-            case 6: await RefreshTempDbAsync(hoursBack, fromDate, toDate); break;
-            case 7: await RefreshBlockingAsync(hoursBack, fromDate, toDate, subTabOnly); break;
-            case 8: await RefreshPerfmonAsync(hoursBack, fromDate, toDate); break;
-            case 9: await RefreshRunningJobsAsync(hoursBack, fromDate, toDate); break;
-            case 10: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
-            case 11: await RefreshDailySummaryAsync(hoursBack, fromDate, toDate); break;
-            case 12: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate); break;
+            case 0: await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
+            case 1: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
+            case 2: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case 3: break; // Plan Viewer — no queries
+            case 4: await RefreshCpuAsync(hoursBack, fromDate, toDate); break;
+            case 5: await RefreshMemoryAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case 6: await RefreshFileIoAsync(hoursBack, fromDate, toDate); break;
+            case 7: await RefreshTempDbAsync(hoursBack, fromDate, toDate); break;
+            case 8: await RefreshBlockingAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case 9: await RefreshPerfmonAsync(hoursBack, fromDate, toDate); break;
+            case 10: await RefreshRunningJobsAsync(hoursBack, fromDate, toDate); break;
+            case 11: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
+            case 12: await RefreshDailySummaryAsync(hoursBack, fromDate, toDate); break;
+            case 13: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate); break;
         }
     }
 
@@ -977,6 +1000,158 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>Tab 3 — CPU</summary>
+    /// <summary>Tab 0 — Overview (4 charts: CPU, Memory, File I/O, Wait Stats)</summary>
+    private async System.Threading.Tasks.Task RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        try
+        {
+            var cpuTask = SafeQueryAsync(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate));
+            var memoryTask = SafeQueryAsync(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var fileIoTask = SafeQueryAsync(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
+
+            // Get top 5 wait types then fetch trends for each
+            var waitStats = await SafeQueryAsync(() => _dataService.GetWaitStatsAsync(_serverId, hoursBack, fromDate, toDate));
+            var topWaits = waitStats.Take(5).Select(w => w.WaitType).ToList();
+            await System.Threading.Tasks.Task.WhenAll(cpuTask, memoryTask, fileIoTask);
+
+            UpdateOverviewCpuChart(cpuTask.Result);
+            UpdateOverviewMemoryChart(memoryTask.Result);
+            UpdateOverviewFileIoChart(fileIoTask.Result);
+            await UpdateOverviewWaitStatsChartAsync(topWaits, hoursBack, fromDate, toDate);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex.Message}");
+        }
+    }
+
+    private void UpdateOverviewCpuChart(List<CpuUtilizationRow> data)
+    {
+        ClearChart(OverviewCpuChart);
+        _overviewCpuHover?.Clear();
+        ApplyTheme(OverviewCpuChart);
+
+        if (data.Count == 0) { RefreshEmptyChart(OverviewCpuChart, "CPU Utilization", "CPU %"); return; }
+
+        var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
+        var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
+
+        var plot = OverviewCpuChart.Plot.Add.Scatter(times, sqlCpu);
+        plot.LegendText = "SQL CPU %";
+        plot.Color = ScottPlot.Color.FromHex("#4FC3F7");
+        _overviewCpuHover?.Add(plot, "SQL CPU %");
+
+        OverviewCpuChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewCpuChart);
+        OverviewCpuChart.Plot.Title("CPU Utilization");
+        OverviewCpuChart.Plot.YLabel("CPU %");
+        OverviewCpuChart.Plot.Axes.SetLimitsY(0, 105);
+        ShowChartLegend(OverviewCpuChart);
+        OverviewCpuChart.Refresh();
+    }
+
+    private void UpdateOverviewMemoryChart(List<MemoryTrendPoint> data)
+    {
+        ClearChart(OverviewMemoryChart);
+        _overviewMemoryHover?.Clear();
+        ApplyTheme(OverviewMemoryChart);
+
+        if (data.Count == 0) { RefreshEmptyChart(OverviewMemoryChart, "Memory Utilization", "MB"); return; }
+
+        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var bufferPool = data.Select(d => d.BufferPoolMb).ToArray();
+        var grants = data.Select(d => d.TotalGrantedMb).ToArray();
+
+        var bpPlot = OverviewMemoryChart.Plot.Add.Scatter(times, bufferPool);
+        bpPlot.LegendText = "Buffer Pool";
+        bpPlot.Color = ScottPlot.Color.FromHex("#CE93D8");
+        _overviewMemoryHover?.Add(bpPlot, "Buffer Pool");
+
+        var grantPlot = OverviewMemoryChart.Plot.Add.Scatter(times, grants);
+        grantPlot.LegendText = "Memory Grants";
+        grantPlot.Color = ScottPlot.Color.FromHex("#FFB74D");
+        _overviewMemoryHover?.Add(grantPlot, "Memory Grants");
+
+        OverviewMemoryChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewMemoryChart);
+        OverviewMemoryChart.Plot.Title("Memory Utilization");
+        OverviewMemoryChart.Plot.YLabel("MB");
+        SetChartYLimitsWithLegendPadding(OverviewMemoryChart, 0, bufferPool.Max());
+        ShowChartLegend(OverviewMemoryChart);
+        OverviewMemoryChart.Refresh();
+    }
+
+    private void UpdateOverviewFileIoChart(List<FileIoTrendPoint> data)
+    {
+        ClearChart(OverviewFileIoChart);
+        _overviewFileIoHover?.Clear();
+        ApplyTheme(OverviewFileIoChart);
+
+        if (data.Count == 0) { RefreshEmptyChart(OverviewFileIoChart, "File I/O Latency", "ms"); return; }
+
+        // Aggregate across all databases/files per collection time
+        var grouped = data
+            .GroupBy(d => d.CollectionTime)
+            .OrderBy(g => g.Key)
+            .Select(g => new { Time = g.Key, ReadMs = g.Average(x => x.AvgReadLatencyMs), WriteMs = g.Average(x => x.AvgWriteLatencyMs) })
+            .ToList();
+
+        var times = grouped.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var readMs = grouped.Select(d => d.ReadMs).ToArray();
+        var writeMs = grouped.Select(d => d.WriteMs).ToArray();
+
+        var readPlot = OverviewFileIoChart.Plot.Add.Scatter(times, readMs);
+        readPlot.LegendText = "Read ms";
+        readPlot.Color = ScottPlot.Color.FromHex("#81C784");
+        _overviewFileIoHover?.Add(readPlot, "Read ms");
+
+        var writePlot = OverviewFileIoChart.Plot.Add.Scatter(times, writeMs);
+        writePlot.LegendText = "Write ms";
+        writePlot.Color = ScottPlot.Color.FromHex("#FFB74D");
+        _overviewFileIoHover?.Add(writePlot, "Write ms");
+
+        OverviewFileIoChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewFileIoChart);
+        OverviewFileIoChart.Plot.Title("File I/O Latency");
+        OverviewFileIoChart.Plot.YLabel("Latency (ms)");
+        var maxVal = Math.Max(readMs.DefaultIfEmpty(0).Max(), writeMs.DefaultIfEmpty(0).Max());
+        SetChartYLimitsWithLegendPadding(OverviewFileIoChart, 0, maxVal);
+        ShowChartLegend(OverviewFileIoChart);
+        OverviewFileIoChart.Refresh();
+    }
+
+    private async System.Threading.Tasks.Task UpdateOverviewWaitStatsChartAsync(
+        List<string> topWaits, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(OverviewWaitStatsChart);
+        _overviewWaitStatsHover?.Clear();
+        ApplyTheme(OverviewWaitStatsChart);
+
+        if (topWaits.Count == 0) { RefreshEmptyChart(OverviewWaitStatsChart, "Wait Statistics", "ms/sec"); return; }
+
+        var colors = new[] { "#4FC3F7", "#81C784", "#FFB74D", "#CE93D8", "#E57373" };
+        for (int i = 0; i < Math.Min(topWaits.Count, 5); i++)
+        {
+            var trend = await _dataService.GetWaitStatsTrendAsync(_serverId, topWaits[i], hoursBack, fromDate, toDate);
+            if (trend.Count < 2) continue;
+
+            var times = trend.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = trend.Select(d => d.WaitTimeMsPerSecond).ToArray();
+
+            var plot = OverviewWaitStatsChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = topWaits[i];
+            plot.Color = ScottPlot.Color.FromHex(colors[i]);
+            _overviewWaitStatsHover?.Add(plot, topWaits[i]);
+        }
+
+        OverviewWaitStatsChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewWaitStatsChart);
+        OverviewWaitStatsChart.Plot.Title("Wait Statistics");
+        OverviewWaitStatsChart.Plot.YLabel("Wait Time (ms/sec)");
+        ShowChartLegend(OverviewWaitStatsChart);
+        OverviewWaitStatsChart.Refresh();
+    }
+
     private async System.Threading.Tasks.Task RefreshCpuAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         try
@@ -2676,7 +2851,7 @@ public partial class ServerTab : UserControl
         SetDrillDownTimeRange(fromDate, toDate);
 
         // Navigate to Queries > Active Queries with ±15 min window
-        MainTabControl.SelectedIndex = 1; // Queries
+        MainTabControl.SelectedIndex = 2; // Queries
         QueriesSubTabControl.SelectedIndex = 1; // Active Queries
         var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -2689,7 +2864,7 @@ public partial class ServerTab : UserControl
         var toDate = time.AddMinutes(30);
         SetDrillDownTimeRange(fromDate, toDate);
 
-        MainTabControl.SelectedIndex = 1; // Queries
+        MainTabControl.SelectedIndex = 2; // Queries
         QueriesSubTabControl.SelectedIndex = 1; // Active Queries
         var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -2703,7 +2878,7 @@ public partial class ServerTab : UserControl
         SetDrillDownTimeRange(fromDate, toDate);
 
         // Navigate to Active Queries — TempDB spills are visible there
-        MainTabControl.SelectedIndex = 1; // Queries
+        MainTabControl.SelectedIndex = 2; // Queries
         QueriesSubTabControl.SelectedIndex = 1; // Active Queries
         var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -2716,7 +2891,7 @@ public partial class ServerTab : UserControl
         var toDate = time.AddMinutes(30);
         SetDrillDownTimeRange(fromDate, toDate);
 
-        MainTabControl.SelectedIndex = 7; // Blocking
+        MainTabControl.SelectedIndex = 8; // Blocking
         BlockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
         var bpr = await _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromDate, toDate);
         _blockedProcessFilterMgr!.UpdateData(bpr);
@@ -2728,7 +2903,7 @@ public partial class ServerTab : UserControl
         var toDate = time.AddMinutes(30);
         SetDrillDownTimeRange(fromDate, toDate);
 
-        MainTabControl.SelectedIndex = 7; // Blocking
+        MainTabControl.SelectedIndex = 8; // Blocking
         BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
         var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromDate, toDate);
         _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
