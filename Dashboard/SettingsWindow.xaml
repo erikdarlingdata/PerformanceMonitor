@@ -300,6 +300,8 @@
                                     Padding="12,4" Margin="0,0,0,4"/>
                             <TextBlock Text="Create rules to suppress specific recurring alerts while still logging them."
                                        FontSize="11" FontStyle="Italic" Foreground="Gray" TextWrapping="Wrap"/>
+                            <CheckBox x:Name="LogAlertDismissalsCheckBox" Content="Log alert dismiss and mute actions"
+                                      Margin="0,8,0,0"/>
                         </StackPanel>
                     </StackPanel>
                 </ScrollViewer>

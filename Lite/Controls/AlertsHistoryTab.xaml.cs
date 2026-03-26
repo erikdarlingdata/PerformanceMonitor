@@ -72,6 +72,7 @@ public partial class AlertsHistoryTab : UserControl
             var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
             NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             AlertCountIndicator.Text = displayCount > 0 ? $"{displayCount} alert(s)" : "";
+            AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
 
             PopulateServerFilter(alerts);
         }
@@ -232,7 +233,11 @@ public partial class AlertsHistoryTab : UserControl
 
         try
         {
-            await _dataService.DismissAlertsAsync(selected);
+            var affected = await _dataService.DismissAlertsAsync(selected);
+            if (affected < selected.Count && App.LogAlertDismissals)
+            {
+                AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {selected.Count} alert(s) were updated — remaining alerts may have been archived to parquet");
+            }
             await LoadAlertsAsync();
         }
         catch (Exception ex)
@@ -260,7 +265,11 @@ public partial class AlertsHistoryTab : UserControl
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
-            await _dataService.DismissAllVisibleAlertsAsync(hoursBack, serverId);
+            var affected = await _dataService.DismissAllVisibleAlertsAsync(hoursBack, serverId);
+            if (affected < displayCount && App.LogAlertDismissals)
+            {
+                AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {displayCount} displayed alert(s) were updated — remaining alerts may have been archived to parquet");
+            }
             await LoadAlertsAsync();
         }
         catch (Exception ex)

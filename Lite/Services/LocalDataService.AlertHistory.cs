@@ -101,11 +101,15 @@ LIMIT $2";
     /// Dismisses specific alerts by marking them as dismissed in DuckDB.
     /// Identifies rows by (alert_time, server_id, metric_name) composite key.
     /// </summary>
-    public async Task DismissAlertsAsync(List<AlertHistoryRow> alerts)
+    public async Task<int> DismissAlertsAsync(List<AlertHistoryRow> alerts)
     {
-        if (alerts.Count == 0) return;
+        if (alerts.Count == 0) return 0;
+
+        if (App.LogAlertDismissals)
+            AppLogger.Info("AlertDismiss", $"Dismissing {alerts.Count} selected alert(s)");
 
         using var connection = await OpenConnectionAsync();
+        int totalAffected = 0;
 
         foreach (var alert in alerts)
         {
@@ -115,19 +119,31 @@ UPDATE config_alert_log
 SET    dismissed = TRUE
 WHERE  alert_time = $1
 AND    server_id = $2
-AND    metric_name = $3";
+AND    metric_name = $3
+AND    dismissed = FALSE";
             command.Parameters.Add(new DuckDBParameter { Value = alert.AlertTime });
             command.Parameters.Add(new DuckDBParameter { Value = alert.ServerId });
             command.Parameters.Add(new DuckDBParameter { Value = alert.MetricName });
-            await command.ExecuteNonQueryAsync();
+            var affected = await command.ExecuteNonQueryAsync();
+            totalAffected += affected;
+
+            if (affected == 0 && App.LogAlertDismissals)
+                AppLogger.Warn("AlertDismiss", $"No rows updated for alert: time={alert.AlertTime:O}, server_id={alert.ServerId}, metric={alert.MetricName} — may be archived to parquet");
         }
+
+        if (App.LogAlertDismissals)
+            AppLogger.Info("AlertDismiss", $"Dismiss complete: {totalAffected} row(s) updated out of {alerts.Count} selected");
+        return totalAffected;
     }
 
     /// <summary>
     /// Dismisses all visible (non-dismissed) alerts matching the current filter criteria.
     /// </summary>
-    public async Task DismissAllVisibleAlertsAsync(int hoursBack, int? serverId = null)
+    public async Task<int> DismissAllVisibleAlertsAsync(int hoursBack, int? serverId = null)
     {
+        if (App.LogAlertDismissals)
+            AppLogger.Info("AlertDismiss", $"Dismissing all visible alerts: hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"}");
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -154,7 +170,10 @@ AND    dismissed = FALSE";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
         }
 
-        await command.ExecuteNonQueryAsync();
+        var affected = await command.ExecuteNonQueryAsync();
+        if (App.LogAlertDismissals)
+            AppLogger.Info("AlertDismiss", $"Dismiss all complete: {affected} row(s) updated (cutoff={cutoff:O})");
+        return affected;
     }
 }
 

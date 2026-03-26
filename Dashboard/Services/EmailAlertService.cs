@@ -203,15 +203,22 @@ namespace PerformanceMonitorDashboard.Services
             if (keys.Count == 0) return;
 
             var keySet = new HashSet<(DateTime, string, string)>(keys);
+            int hidden = 0;
 
             lock (_alertLogLock)
             {
                 foreach (var alert in _alertLog)
                 {
                     if (keySet.Contains((alert.AlertTime, alert.ServerName, alert.MetricName)))
+                    {
                         alert.Hidden = true;
+                        hidden++;
+                    }
                 }
             }
+
+            if (_preferencesService.GetPreferences().LogAlertDismissals)
+                Logger.Info($"[AlertDismiss] Dismissed {hidden} of {keys.Count} selected alert(s)");
         }
 
         /// <summary>
@@ -220,6 +227,7 @@ namespace PerformanceMonitorDashboard.Services
         public void HideAllAlerts(int hoursBack, string? serverName = null)
         {
             var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+            int hidden = 0;
 
             lock (_alertLogLock)
             {
@@ -230,9 +238,13 @@ namespace PerformanceMonitorDashboard.Services
                         (serverName == null || alert.ServerName == serverName))
                     {
                         alert.Hidden = true;
+                        hidden++;
                     }
                 }
             }
+
+            if (_preferencesService.GetPreferences().LogAlertDismissals)
+                Logger.Info($"[AlertDismiss] Dismissed all: {hidden} alert(s) hidden (hoursBack={hoursBack}, server={serverName ?? "all"})");
         }
 
         /// <summary>

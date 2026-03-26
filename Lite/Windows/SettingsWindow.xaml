@@ -267,6 +267,8 @@
                 <TextBlock Text="Create rules to suppress specific recurring alerts while still logging them."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                <CheckBox x:Name="LogAlertDismissalsCheckBox" Content="Log alert dismiss and mute actions"
+                          Margin="20,8,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
             </StackPanel>
         </Border>
 

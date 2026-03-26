@@ -77,6 +77,7 @@ public partial class App : Application
     public static int AlertCooldownMinutes { get; set; } = 5;  // Tray notification cooldown between repeated alerts
     public static int EmailCooldownMinutes { get; set; } = 15; // Email cooldown between repeated alerts
     public static string MuteRuleDefaultExpiration { get; set; } = "24 hours"; // Default expiration for new mute rules
+    public static bool LogAlertDismissals { get; set; } = true; // Log alert dismiss/mute actions to file
 
     /* Connection settings */
     public static int ConnectionTimeoutSeconds { get; set; } = 5;
@@ -284,6 +285,7 @@ public partial class App : Application
                 if (exp is "1 hour" or "24 hours" or "7 days" or "Never")
                     MuteRuleDefaultExpiration = exp;
             }
+            if (root.TryGetProperty("log_alert_dismissals", out v)) LogAlertDismissals = v.GetBoolean();
 
             /* Connection settings */
             if (root.TryGetProperty("connection_timeout_seconds", out v))

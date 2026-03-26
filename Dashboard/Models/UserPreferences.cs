@@ -144,6 +144,9 @@ namespace PerformanceMonitorDashboard.Models
         // Default mute rule expiration ("1 hour", "24 hours", "7 days", "Never")
         public string MuteRuleDefaultExpiration { get; set; } = "24 hours";
 
+        // Log alert dismiss/mute actions to file
+        public bool LogAlertDismissals { get; set; } = true;
+
         // Alert suppression (persisted)
         public List<string> SilencedServers { get; set; } = new();
         public List<string> SilencedServerTabs { get; set; } = new();

@@ -186,6 +186,7 @@ namespace PerformanceMonitorDashboard
                 "7 days" => 2,
                 _ => 3
             };
+            LogAlertDismissalsCheckBox.IsChecked = prefs.LogAlertDismissals;
 
             UpdateNotificationCheckboxStates();
 
@@ -670,6 +671,7 @@ namespace PerformanceMonitorDashboard
 
             prefs.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
             MuteRuleDialog.DefaultExpiration = prefs.MuteRuleDefaultExpiration;
+            prefs.LogAlertDismissals = LogAlertDismissalsCheckBox.IsChecked == true;
 
             // Save SMTP email settings
             prefs.SmtpEnabled = SmtpEnabledCheckBox.IsChecked == true;
