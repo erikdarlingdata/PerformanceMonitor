@@ -1,1 +1,0 @@
-01_widen_installation_history_sql_server_version.sql
