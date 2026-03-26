@@ -19,6 +19,10 @@ public partial class TimeRangeSlicerControl : UserControl
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
 
+    // Overlay: per-item trend drawn on top of the aggregate area chart
+    private List<(DateTime TimeUtc, double Value)>? _overlayData;
+    private string? _overlayLabel;
+
     // Range as normalised [0..1] positions within the data span
     private double _rangeStart;
     private double _rangeEnd = 1.0;
@@ -93,6 +97,26 @@ public partial class TimeRangeSlicerControl : UserControl
         }
 
         UpdateRangeLabel();
+        Redraw();
+    }
+
+    /// <summary>
+    /// Sets an overlay trend line on the slicer. Drawn on its own Y scale
+    /// so it's visible regardless of the aggregate chart's magnitude.
+    /// </summary>
+    public void SetOverlay(List<(DateTime TimeUtc, double Value)> data, string label)
+    {
+        _overlayData = data.Count >= 3 ? data : null;
+        _overlayLabel = label;
+        Redraw();
+    }
+
+    /// <summary>Removes the overlay trend line.</summary>
+    public void ClearOverlay()
+    {
+        if (_overlayData == null) return;
+        _overlayData = null;
+        _overlayLabel = null;
         Redraw();
     }
 
@@ -248,6 +272,46 @@ public partial class TimeRangeSlicerControl : UserControl
 
         AddLine(selLeft, 0, selRight, 0, handleBrush, 0.5);
         AddLine(selLeft, h, selRight, h, handleBrush, 0.5);
+
+        // Overlay trend line (per-item highlight from grid selection)
+        if (_overlayData != null && _overlayData.Count >= 2)
+        {
+            var overlayMax = _overlayData.Max(d => d.Value);
+            if (overlayMax <= 0) overlayMax = 1;
+
+            var overlayPoints = new List<Point>();
+            foreach (var pt in _overlayData)
+            {
+                var ox = NormAtUtc(pt.TimeUtc) * w;
+                var oy = Math.Clamp(chartBottom - (pt.Value / overlayMax) * chartHeight, chartTop, chartBottom);
+                overlayPoints.Add(new Point(ox, oy));
+            }
+
+            var overlayLineBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF6F00"));
+            var overlayGeo = new StreamGeometry();
+            using (var ctx = overlayGeo.Open())
+            {
+                ctx.BeginFigure(overlayPoints[0], false, false);
+                for (int i = 1; i < overlayPoints.Count; i++)
+                    ctx.LineTo(overlayPoints[i], true, false);
+            }
+            SlicerCanvas.Children.Add(new Path { Data = overlayGeo, Stroke = overlayLineBrush, StrokeThickness = 2 });
+
+            // Overlay label top-left
+            if (!string.IsNullOrEmpty(_overlayLabel))
+            {
+                var overlayLabelTb = new TextBlock
+                {
+                    Text = _overlayLabel,
+                    FontSize = 11,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = overlayLineBrush
+                };
+                Canvas.SetLeft(overlayLabelTb, 8);
+                Canvas.SetTop(overlayLabelTb, 2);
+                SlicerCanvas.Children.Add(overlayLabelTb);
+            }
+        }
     }
 
     private void AddRect(double x, double y, double width, double height, Brush fill)
