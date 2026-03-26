@@ -626,6 +626,8 @@ namespace PerformanceMonitorDashboard.Controls
         /// <summary>
         /// Sets the time range for all sub-tabs.
         /// </summary>
+        public void SelectSubTab(int index) => SubTabControl.SelectedIndex = index;
+
         public void SetTimeRange(int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
         {
             _activeQueriesHoursBack = hoursBack;

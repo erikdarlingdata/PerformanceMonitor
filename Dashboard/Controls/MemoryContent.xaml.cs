@@ -149,17 +149,21 @@ namespace PerformanceMonitorDashboard.Controls
             AddDrillDown(MemoryStatsOverviewChart, memOverviewMenu, () => _memoryStatsOverviewHover, "Show Active Queries at This Time", "Memory");
 
             // Memory Grant charts
-            TabHelpers.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", "collect.memory_grant_stats");
-            TabHelpers.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity", "collect.memory_grant_stats");
+            var grantSizingMenu = TabHelpers.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", "collect.memory_grant_stats");
+            AddDrillDown(MemoryGrantSizingChart, grantSizingMenu, () => _memoryGrantSizingHover, "Show Active Queries at This Time", "MemoryGrant");
+            var grantActivityMenu = TabHelpers.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity", "collect.memory_grant_stats");
+            AddDrillDown(MemoryGrantActivityChart, grantActivityMenu, () => _memoryGrantActivityHover, "Show Active Queries at This Time", "MemoryGrant");
 
             // Memory Clerks chart
-            TabHelpers.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks", "collect.memory_clerks_stats");
+            var clerksMenu = TabHelpers.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks", "collect.memory_clerks_stats");
+            AddDrillDown(MemoryClerksChart, clerksMenu, () => _memoryClerksHover, "Show Active Queries at This Time", "MemoryClerks");
 
             // Plan Cache chart
             TabHelpers.SetupChartContextMenu(PlanCacheChart, "Plan_Cache", "collect.plan_cache_stats");
 
             // Memory Pressure Events chart
-            TabHelpers.SetupChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events", "collect.memory_pressure_events");
+            var pressureMenu = TabHelpers.SetupChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events", "collect.memory_pressure_events");
+            AddDrillDown(MemoryPressureEventsChart, pressureMenu, () => _memoryPressureEventsHover, "Show Active Queries at This Time", "MemoryPressure");
         }
 
         /// <summary>

@@ -531,10 +531,12 @@ namespace PerformanceMonitorDashboard
             Helpers.TabHelpers.SetupChartContextMenu(LockWaitStatsChart, "Lock_Wait_Stats", "collect.wait_stats");
             var blockingEventsMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsBlockingEventsChart, "Blocking_Events", "collect.blocking_deadlock_stats");
             AddChartDrillDownMenuItem(BlockingStatsBlockingEventsChart, blockingEventsMenu, _blockingEventsHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDurationChart, "Blocking_Duration", "collect.blocking_deadlock_stats");
+            var blockingDurationMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDurationChart, "Blocking_Duration", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsDurationChart, blockingDurationMenu, _blockingDurationHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
             var deadlocksMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlocksChart, "Deadlocks", "collect.blocking_deadlock_stats");
             AddChartDrillDownMenuItem(BlockingStatsDeadlocksChart, deadlocksMenu, _deadlocksHover, "Show Deadlocks at This Time", OnDeadlockChartDrillDown);
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlockWaitTimeChart, "Deadlock_Wait_Time", "collect.blocking_deadlock_stats");
+            var deadlockWaitMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlockWaitTimeChart, "Deadlock_Wait_Time", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsDeadlockWaitTimeChart, deadlockWaitMenu, _deadlockWaitTimeHover, "Show Deadlocks at This Time", OnDeadlockChartDrillDown);
 
             // Current Waits charts
             Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration", "collect.waiting_tasks");
@@ -1512,8 +1514,8 @@ namespace PerformanceMonitorDashboard
             var to = time.AddMinutes(30);
             SetDrillDownGlobalRange(from, to);
 
-            // All chart drill-downs go to Query Performance for root cause
             QueriesTabItem.IsSelected = true;
+            PerformanceTab.SelectSubTab(1); // Active Queries
             PerformanceTab.SetTimeRange(0, from, to);
             PerformanceTab.IsRefreshing = true;
             try { await RefreshQueriesTabAsync(); }
