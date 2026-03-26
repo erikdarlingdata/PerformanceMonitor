@@ -30,6 +30,30 @@ namespace PerformanceMonitorDashboard.Controls
     /// </summary>
     public partial class MemoryContent : UserControl
     {
+        public event Action<string, DateTime>? ChartDrillDownRequested;
+
+        private void AddDrillDown(ScottPlot.WPF.WpfPlot chart, ContextMenu menu,
+            Helpers.ChartHoverHelper? hover, string label, string chartType)
+        {
+            menu.Items.Insert(0, new Separator());
+            var item = new MenuItem { Header = label };
+            menu.Items.Insert(0, item);
+
+            menu.Opened += (s, _) =>
+            {
+                var pos = System.Windows.Input.Mouse.GetPosition(chart);
+                var nearest = hover?.GetNearestSeries(pos);
+                item.Tag = nearest?.Time;
+                item.IsEnabled = nearest.HasValue;
+            };
+
+            item.Click += (s, _) =>
+            {
+                if (item.Tag is DateTime time)
+                    ChartDrillDownRequested?.Invoke(chartType, time);
+            };
+        }
+
         private DatabaseService? _databaseService;
 
         // Memory Stats state
@@ -121,7 +145,8 @@ namespace PerformanceMonitorDashboard.Controls
         private void SetupChartContextMenus()
         {
             // Memory Stats Overview chart
-            TabHelpers.SetupChartContextMenu(MemoryStatsOverviewChart, "Memory_Stats_Overview", "collect.memory_stats");
+            var memOverviewMenu = TabHelpers.SetupChartContextMenu(MemoryStatsOverviewChart, "Memory_Stats_Overview", "collect.memory_stats");
+            AddDrillDown(MemoryStatsOverviewChart, memOverviewMenu, _memoryStatsOverviewHover, "Show Active Queries at This Time", "Memory");
 
             // Memory Grant charts
             TabHelpers.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", "collect.memory_grant_stats");

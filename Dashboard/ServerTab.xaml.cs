@@ -137,6 +137,7 @@ namespace PerformanceMonitorDashboard
             CurrentConfigTab.Initialize(_databaseService);
             ConfigChangesTab.Initialize(_databaseService);
             MemoryTab.Initialize(_databaseService);
+            MemoryTab.ChartDrillDownRequested += OnChildChartDrillDown;
             PerformanceTab.Initialize(_databaseService, s => StatusText.Text = s);
             PerformanceTab.ViewPlanRequested += (planXml, label, queryText) =>
             {
@@ -153,6 +154,7 @@ namespace PerformanceMonitorDashboard
             };
             SystemEventsContent.Initialize(_databaseService);
             ResourceMetricsContent.Initialize(_databaseService);
+            ResourceMetricsContent.ChartDrillDownRequested += OnChildChartDrillDown;
 
             // Set default time range on UserControls based on user preferences
             var prefs = _preferencesService.GetPreferences();
@@ -527,9 +529,11 @@ namespace PerformanceMonitorDashboard
 
             // Blocking Stats charts
             Helpers.TabHelpers.SetupChartContextMenu(LockWaitStatsChart, "Lock_Wait_Stats", "collect.wait_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsBlockingEventsChart, "Blocking_Events", "collect.blocking_deadlock_stats");
+            var blockingEventsMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsBlockingEventsChart, "Blocking_Events", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsBlockingEventsChart, blockingEventsMenu, _blockingEventsHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
             Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDurationChart, "Blocking_Duration", "collect.blocking_deadlock_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlocksChart, "Deadlocks", "collect.blocking_deadlock_stats");
+            var deadlocksMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlocksChart, "Deadlocks", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsDeadlocksChart, deadlocksMenu, _deadlocksHover, "Show Deadlocks at This Time", OnDeadlockChartDrillDown);
             Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlockWaitTimeChart, "Deadlock_Wait_Time", "collect.blocking_deadlock_stats");
 
             // Current Waits charts
@@ -1430,6 +1434,90 @@ namespace PerformanceMonitorDashboard
 
             win.Content = grid;
             win.ShowDialog();
+        }
+
+        // ── Chart Drill-Down (#682) ──
+
+        private void AddChartDrillDownMenuItem(
+            ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu,
+            Helpers.ChartHoverHelper? hover, string label, Action<DateTime> handler)
+        {
+            contextMenu.Items.Insert(0, new Separator());
+            var item = new MenuItem { Header = label };
+            contextMenu.Items.Insert(0, item);
+
+            contextMenu.Opened += (s, _) =>
+            {
+                var pos = System.Windows.Input.Mouse.GetPosition(chart);
+                var nearest = hover?.GetNearestSeries(pos);
+                if (nearest.HasValue)
+                {
+                    item.Tag = nearest.Value.Time;
+                    item.IsEnabled = true;
+                }
+                else
+                {
+                    item.Tag = null;
+                    item.IsEnabled = false;
+                }
+            };
+
+            item.Click += (s, _) =>
+            {
+                if (item.Tag is DateTime time)
+                    handler(time);
+            };
+        }
+
+        private void SetDrillDownGlobalRange(DateTime from, DateTime to)
+        {
+            SetPickersFromDateTime(from, GlobalFromDate, GlobalFromHour, GlobalFromMinute);
+            SetPickersFromDateTime(to, GlobalToDate, GlobalToHour, GlobalToMinute);
+            _globalHoursBack = 0;
+            _globalFromDate = from;
+            _globalToDate = to;
+            HighlightTimeButton(0);
+            GlobalDateRangeIndicator.Text = GetGlobalDateRangeText();
+        }
+
+        private async void OnBlockingChartDrillDown(DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            LockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
+            _blockingHoursBack = 0;
+            _blockingFromDate = from;
+            _blockingToDate = to;
+            await RefreshLockingTabAsync();
+        }
+
+        private async void OnDeadlockChartDrillDown(DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            LockingSubTabControl.SelectedIndex = 3; // Deadlocks
+            _deadlocksHoursBack = 0;
+            _deadlocksFromDate = from;
+            _deadlocksToDate = to;
+            await RefreshLockingTabAsync();
+        }
+
+        private async void OnChildChartDrillDown(string chartType, DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            // All chart drill-downs go to Query Performance for root cause
+            QueriesTabItem.IsSelected = true;
+            PerformanceTab.SetTimeRange(0, from, to);
+            PerformanceTab.IsRefreshing = true;
+            try { await RefreshQueriesTabAsync(); }
+            finally { PerformanceTab.IsRefreshing = false; }
         }
 
         private async Task RefreshLockingTabAsync()
