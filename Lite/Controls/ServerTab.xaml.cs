@@ -2625,8 +2625,8 @@ public partial class ServerTab : UserControl
         if (menuItem.Tag is not (string waitType, DateTime time)) return;
 
         // ±15 minute window around the clicked point (already in server local time from chart)
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
 
         var window = new Windows.WaitDrillDownWindow(
             _dataService, _serverId, waitType, 1, fromDate, toDate);
@@ -2669,8 +2669,8 @@ public partial class ServerTab : UserControl
 
     private async void OnCpuDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
 
         // Populate custom date pickers so user can explore other tabs
         SetDrillDownTimeRange(fromDate, toDate);
@@ -2685,8 +2685,8 @@ public partial class ServerTab : UserControl
 
     private async void OnMemoryDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 1; // Queries
@@ -2698,8 +2698,8 @@ public partial class ServerTab : UserControl
 
     private async void OnTempDbDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         // Navigate to Active Queries — TempDB spills are visible there
@@ -2712,8 +2712,8 @@ public partial class ServerTab : UserControl
 
     private async void OnBlockingDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 7; // Blocking
@@ -2724,8 +2724,8 @@ public partial class ServerTab : UserControl
 
     private async void OnDeadlockDrillDown(DateTime time)
     {
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 7; // Blocking
