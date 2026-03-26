@@ -252,7 +252,7 @@ public partial class ServerTab : UserControl
         var cpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage");
         AddChartDrillDownMenuItem(CpuChart, cpuMenu, _cpuHover, "Show Active Queries at This Time", OnCpuDrillDown);
         var memoryMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage");
-        AddChartDrillDownMenuItem(MemoryChart, memoryMenu, _memoryHover, "Show Memory Grants at This Time", OnMemoryDrillDown);
+        AddChartDrillDownMenuItem(MemoryChart, memoryMenu, _memoryHover, "Show Active Queries at This Time", OnMemoryDrillDown);
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks");
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing");
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity");
@@ -2689,10 +2689,11 @@ public partial class ServerTab : UserControl
         var toDate = time.AddMinutes(15);
         SetDrillDownTimeRange(fromDate, toDate);
 
-        MainTabControl.SelectedIndex = 4; // Memory
-        MemorySubTabControl.SelectedIndex = 2; // Memory Grants
-        // Refresh the memory tab with the drill-down range
-        await RefreshMemoryAsync(0, fromDate, toDate);
+        MainTabControl.SelectedIndex = 1; // Queries
+        QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
     }
 
     private async void OnTempDbDrillDown(DateTime time)
