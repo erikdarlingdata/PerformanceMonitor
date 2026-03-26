@@ -34,7 +34,7 @@ namespace PerformanceMonitorLite.Services
 
         public AlertStateService()
         {
-            _stateFilePath = Path.Combine(AppContext.BaseDirectory, "alert_state.json");
+            _stateFilePath = Path.Combine(App.DataDirectory, "alert_state.json");
             _silencedServers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             _acknowledgedAlerts = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             Load();

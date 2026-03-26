@@ -4,13 +4,14 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
+    <StartupObject>PerformanceMonitorLite.Program</StartupObject>
     <AssemblyName>PerformanceMonitorLite</AssemblyName>
     <RootNamespace>PerformanceMonitorLite</RootNamespace>
     <Product>SQL Server Performance Monitor Lite</Product>
-    <Version>2.3.0</Version>
-    <AssemblyVersion>2.3.0.0</AssemblyVersion>
-    <FileVersion>2.3.0.0</FileVersion>
-    <InformationalVersion>2.3.0</InformationalVersion>
+    <Version>2.4.1</Version>
+    <AssemblyVersion>2.4.1.0</AssemblyVersion>
+    <FileVersion>2.4.1.0</FileVersion>
+    <InformationalVersion>2.4.1</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <Description>Lightweight SQL Server performance monitoring - no installation required on target servers</Description>
@@ -63,6 +64,7 @@
     <!-- MCP server for LLM tool access -->
     <PackageReference Include="ModelContextProtocol" Version="0.7.0-preview.1" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.7.0-preview.1" />
+    <PackageReference Include="Velopack" Version="0.0.1298" />
   </ItemGroup>
 
   <ItemGroup>

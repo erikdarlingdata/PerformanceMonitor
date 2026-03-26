@@ -347,7 +347,8 @@ public class ServerManager
                         CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
                         DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
                         CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
-                        CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds
+                        CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
+                        HAS_DBACCESS(N'msdb') AS has_msdb_access
                     FROM sys.dm_os_sys_info", connection);
                 command.CommandTimeout = ConnectionCheckTimeoutSeconds;
 
@@ -366,6 +367,8 @@ public class ServerManager
                         status.SqlEngineEdition = Convert.ToInt32(reader.GetValue(4));
                     if (!reader.IsDBNull(5))
                         status.IsAwsRds = Convert.ToInt32(reader.GetValue(5)) == 1;
+                    if (!reader.IsDBNull(6))
+                        status.HasMsdbAccess = Convert.ToInt32(reader.GetValue(6)) == 1;
                 }
             }
             catch (SqlException metaEx)

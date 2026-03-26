@@ -21,6 +21,52 @@ public partial class LocalDataService
     /// Gets the latest Query Store snapshot for a server, aggregated across all databases.
     /// Shows top queries by total duration (execution_count * avg_duration).
     /// </summary>
+    public async Task<List<Models.TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    date_trunc('hour', collection_time) AS bucket,
+    COUNT(DISTINCT query_id) AS query_count,
+    COALESCE(SUM(CAST(avg_cpu_time_us AS DOUBLE) * execution_count), 0) / 1000.0 AS total_cpu_ms,
+    COALESCE(SUM(CAST(avg_duration_us AS DOUBLE) * execution_count), 0) / 1000.0 AS total_duration_ms,
+    COALESCE(SUM(CAST(avg_logical_io_reads AS DOUBLE) * execution_count), 0) AS total_reads,
+    COALESCE(SUM(CAST(avg_logical_io_writes AS DOUBLE) * execution_count), 0) AS total_writes,
+    COALESCE(SUM(CAST(avg_physical_io_reads AS DOUBLE) * execution_count), 0) AS total_physical_reads
+FROM v_query_store_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY date_trunc('hour', collection_time)
+ORDER BY bucket";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<Models.TimeSliceBucket>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new Models.TimeSliceBucket
+            {
+                BucketTimeUtc = reader.GetDateTime(0),
+                SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
+                TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+            });
+        }
+        return items;
+    }
+
     public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
@@ -118,10 +164,11 @@ LIMIT $4";
     /// <summary>
     /// Gets collection-level history for a specific Query Store query (for drilldown).
     /// </summary>
-    public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, long planId, int hoursBack = 24)
+    public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, long planId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -141,13 +188,15 @@ AND   database_name = $2
 AND   query_id = $3
 AND   plan_id = $4
 AND   collection_time >= $5
+AND   collection_time <= $6
 ORDER BY collection_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
         command.Parameters.Add(new DuckDBParameter { Value = planId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
 
         var items = new List<QueryStoreHistoryRow>();
         using var reader = await command.ExecuteReaderAsync();

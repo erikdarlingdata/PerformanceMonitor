@@ -129,6 +129,32 @@
         <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{DynamicResource BackgroundBrush}"
                     BorderThickness="0" Padding="0" SelectionChanged="MainTabControl_SelectionChanged">
 
+            <!-- Overview Tab -->
+            <TabItem Header="Overview">
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
+                        <ScottPlot:WpfPlot x:Name="OverviewCpuChart"/>
+                    </Border>
+                    <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
+                        <ScottPlot:WpfPlot x:Name="OverviewMemoryChart"/>
+                    </Border>
+                    <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
+                        <ScottPlot:WpfPlot x:Name="OverviewFileIoChart"/>
+                    </Border>
+                    <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
+                        <ScottPlot:WpfPlot x:Name="OverviewWaitStatsChart"/>
+                    </Border>
+                </Grid>
+            </TabItem>
+
             <!-- Wait Stats Tab -->
             <TabItem Header="Wait Stats">
                 <Grid Margin="8">
@@ -216,9 +242,11 @@
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                                <controls:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0"/>
+                                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
                                     <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                     <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
                                             Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
@@ -226,11 +254,12 @@
                                     <TextBlock x:Name="LiveSnapshotIndicator" Text="" FontSize="12"
                                                Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                 </StackPanel>
-                                <DataGrid Grid.Row="1" x:Name="QuerySnapshotsGrid"
+                                <DataGrid Grid.Row="2" x:Name="QuerySnapshotsGrid"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           RowStyle="{StaticResource GridRowStyle}"
                                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                          CanUserSortColumns="True">
+                                          CanUserSortColumns="True"
+                                          Sorting="QuerySnapshotsGrid_Sorting">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding SessionId}" ElementStyle="{StaticResource NumericCell}" Width="55">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="SPID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -328,15 +357,29 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Top Queries by Duration">
-                            <DataGrid x:Name="QueryStatsGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0"/>
+                            <DataGrid Grid.Row="1" x:Name="QueryStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      SelectionChanged="QueryStatsGrid_SelectionChanged"
+                                      Sorting="QueryStatsGrid_Sorting"
                                       MouseDoubleClick="QueryStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CreationTimeLocal}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CreationTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Creation Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TotalExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -445,13 +488,22 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Top Procedures by Duration">
-                            <DataGrid x:Name="ProcedureStatsGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="ProcStatsSlicer" Grid.Row="0"/>
+                            <DataGrid Grid.Row="1" x:Name="ProcedureStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      SelectionChanged="ProcedureStatsGrid_SelectionChanged"
+                                      Sorting="ProcedureStatsGrid_Sorting"
                                       MouseDoubleClick="ProcedureStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
@@ -462,6 +514,12 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ObjectType}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ObjectType" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Type" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CachedTimeFormatted}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CachedTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Cached Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TotalExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -529,9 +587,6 @@
                                     <DataGridTextColumn Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Max Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CachedTimeFormatted}" Width="140">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CachedTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Cached Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding PlanHandle}" Width="140">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PlanHandle" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Plan Handle" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -546,13 +601,22 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Query Store by Duration">
-                            <DataGrid x:Name="QueryStoreGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="QueryStoreSlicer" Grid.Row="0"/>
+                            <DataGrid Grid.Row="1" x:Name="QueryStoreGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="True"
+                                      SelectionChanged="QueryStoreGrid_SelectionChanged"
+                                      Sorting="QueryStoreGrid_Sorting"
                                       MouseDoubleClick="QueryStoreGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
@@ -563,6 +627,12 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding PlanId}" ElementStyle="{StaticResource NumericCell}" Width="70">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PlanId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Plan ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding FirstExecutionTimeLocal}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FirstExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TotalExecutions, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -591,9 +661,6 @@
                                     <DataGridTextColumn Binding="{Binding AvgRowcount, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgRowcount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Rows" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding MinDop}" ElementStyle="{StaticResource NumericCell}" Width="70">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinDop" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min DOP" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -617,9 +684,6 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ExecutionTypeDesc}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecutionTypeDesc" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Exec Type" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding FirstExecutionTimeLocal}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FirstExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding AvgClrTimeMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgClrTimeMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg CLR (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -653,6 +717,7 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -932,11 +997,18 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Blocked Process Reports">
-                            <DataGrid x:Name="BlockedProcessReportGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
+                            <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="1"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource BlockingRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                                      Sorting="BlockedProcessReportGrid_Sorting">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="130">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -1029,9 +1101,16 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Deadlocks">
-                            <DataGrid x:Name="DeadlockGrid"
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
+                            <DataGrid x:Name="DeadlockGrid" Grid.Row="1"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -1113,6 +1192,7 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            </Grid>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -1168,10 +1248,15 @@
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="Currently Running SQL Agent Jobs" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                    <DataGrid Grid.Row="1" x:Name="RunningJobsGrid"
+                    <TextBlock Grid.Row="1" x:Name="RunningJobsMsdbWarning"
+                               Text="Running Jobs requires msdb access. Grant the login access to msdb to enable this feature."
+                               Foreground="#FFD700" FontSize="12" Margin="0,0,0,8" Visibility="Collapsed"
+                               TextWrapping="Wrap"/>
+                    <DataGrid Grid.Row="2" x:Name="RunningJobsGrid"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                               CanUserSortColumns="True">

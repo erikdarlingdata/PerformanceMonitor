@@ -127,6 +127,52 @@ namespace PerformanceMonitorDashboard.Services
                     return items;
                 }
 
+                public async Task<List<Models.TimeSliceBucket>> GetDefaultTraceSlicerDataAsync(
+                    int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
+                {
+                    var items = new List<Models.TimeSliceBucket>();
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    var timeFilter = fromDate.HasValue && toDate.HasValue
+                        ? "WHERE dte.event_time >= @fromDate AND dte.event_time <= @toDate"
+                        : "WHERE dte.event_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME())";
+
+                    string query = $@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    DATEADD(HOUR, DATEDIFF(HOUR, 0, dte.event_time), 0) AS bucket_hour,
+    COUNT(*) AS event_count,
+    COUNT(DISTINCT dte.event_name) AS distinct_events,
+    COUNT(DISTINCT dte.database_name) AS distinct_databases
+FROM collect.default_trace_events AS dte
+{timeFilter}
+GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, dte.event_time), 0)
+ORDER BY bucket_hour;";
+
+                    using var command = new SqlCommand(query, connection) { CommandTimeout = 120 };
+                    command.Parameters.Add(new SqlParameter("@hoursBack", SqlDbType.Int) { Value = hoursBack });
+                    if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@fromDate", SqlDbType.DateTime2) { Value = fromDate.Value });
+                    if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@toDate", SqlDbType.DateTime2) { Value = toDate.Value });
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var count = Convert.ToInt64(reader.GetValue(1));
+                        items.Add(new Models.TimeSliceBucket
+                        {
+                            BucketTime = reader.GetDateTime(0),
+                            SessionCount = count,
+                            TotalCpu = Convert.ToDouble(reader.GetValue(2)),
+                            TotalLogicalReads = Convert.ToDouble(reader.GetValue(3)),
+                            Value = count,
+                        });
+                    }
+
+                    return items;
+                }
+
                 public async Task<List<TraceAnalysisItem>> GetTraceAnalysisAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
                 {
                     var items = new List<TraceAnalysisItem>();

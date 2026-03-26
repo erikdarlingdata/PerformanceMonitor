@@ -4,6 +4,8 @@
         xmlns:scottplot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
         Title="Procedure Execution History" Width="1200" Height="800"
         WindowStartupLocation="CenterOwner"
+        TextOptions.TextFormattingMode="Display"
+        UseLayoutRounding="True"
         Background="{DynamicResource BackgroundBrush}">
 
     <Window.Resources>

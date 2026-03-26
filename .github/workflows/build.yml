@@ -42,8 +42,16 @@ jobs:
       - name: Publish Dashboard
         run: dotnet publish Dashboard/Dashboard.csproj -c Release -o publish/Dashboard
 
+      - name: Publish Dashboard (self-contained for Velopack)
+        if: github.event_name == 'release'
+        run: dotnet publish Dashboard/Dashboard.csproj -c Release -r win-x64 --self-contained -o publish/Dashboard-velopack
+
       - name: Publish Lite
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
+
+      - name: Publish Lite (self-contained for Velopack)
+        if: github.event_name == 'release'
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
 
       - name: Publish CLI Installer
         run: dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
@@ -156,6 +164,25 @@ jobs:
           Remove-Item "releases/PerformanceMonitorInstaller-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 
+      - name: Create Velopack release (Dashboard)
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          dotnet tool install -g vpk
+          New-Item -ItemType Directory -Force -Path releases/velopack-dashboard
+          New-Item -ItemType Directory -Force -Path releases/velopack-lite
+
+          # Dashboard: download previous + pack
+          vpk download github --repoUrl https://github.com/${{ github.repository }} --channel dashboard -o releases/velopack-dashboard --token $env:GH_TOKEN
+          vpk pack -u PerformanceMonitorDashboard -v $env:VERSION -p publish/Dashboard-velopack -e PerformanceMonitorDashboard.exe -o releases/velopack-dashboard --channel dashboard
+
+          # Lite: download previous + pack
+          vpk download github --repoUrl https://github.com/${{ github.repository }} --channel lite -o releases/velopack-lite --token $env:GH_TOKEN
+          vpk pack -u PerformanceMonitorLite -v $env:VERSION -p publish/Lite-velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite
+
       - name: Generate checksums
         if: github.event_name == 'release'
         shell: pwsh
@@ -174,3 +201,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload ${{ github.event.release.tag_name }} releases/*.zip releases/SHA256SUMS.txt --clobber
+
+      - name: Upload Dashboard Velopack artifacts
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          vpk upload github --repoUrl https://github.com/${{ github.repository }} --channel dashboard -o releases/velopack-dashboard --releaseName "v$env:VERSION" --tag "v$env:VERSION" --merge --token $env:GH_TOKEN
+
+      - name: Upload Lite Velopack artifacts
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          vpk upload github --repoUrl https://github.com/${{ github.repository }} --channel lite -o releases/velopack-lite --releaseName "v$env:VERSION" --tag "v$env:VERSION" --merge --token $env:GH_TOKEN

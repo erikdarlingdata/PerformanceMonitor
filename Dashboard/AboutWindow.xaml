@@ -38,12 +38,11 @@
                     Report an Issue
                 </Hyperlink>
             </TextBlock>
-            <TextBlock FontSize="12">
-                <Hyperlink x:Name="CheckUpdatesLink" Click="CheckUpdatesLink_Click">
-                    Check for Updates
-                </Hyperlink>
-            </TextBlock>
-            <TextBlock x:Name="UpdateStatusText" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,3,0,0" Visibility="Collapsed"/>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                <Button Content="Check for Updates" Click="CheckUpdatesLink_Click" Padding="10,4" FontSize="12"/>
+                <TextBlock x:Name="UpdateStatusText" FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" Visibility="Collapsed"/>
+            </StackPanel>
         </StackPanel>
 
         <!-- Links -->

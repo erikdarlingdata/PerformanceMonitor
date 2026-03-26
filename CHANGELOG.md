@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-03-23
+
+### Important
+
+- **Lite data directory moved**: Lite now stores all data (config, DuckDB, archives, logs) in `%LOCALAPPDATA%\PerformanceMonitorLite\` instead of alongside the executable. This enables auto-update support. Existing users upgrading from the zip should use **Import Settings** and **Import Data** to bring over their configuration and historical data from the old install folder.
+- **Auto-update (Windows)**: Both Dashboard and Lite now include Velopack auto-update. Users who install via the new Setup.exe will receive update notifications and can download + apply updates from within the app. Existing zip distribution continues to work as before.
+
+### Added
+
+- **Velopack auto-update** for Dashboard and Lite — check on startup, download + apply from About window with confirmation dialog before restart ([#635])
+- **Per-tab time range slicers** on Dashboard and Lite query tabs — filter data directly on each tab without changing global time range ([#655], [#662])
+- **Time display picker** (Local/UTC/Server) in Dashboard and Lite toolbars ([#646])
+- **Import Settings** — renamed from "Import Connections", now also copies `settings.json`, `collection_schedule.json`, `ignored_wait_types.json`, and `alert_state.json` from a previous install
+- **Alert muting improvements** — pre-fill context fields (database, query, wait type, job name) from alert detail text, configurable default expiration for new mute rules, tooltip on query text field ([#642])
+- **Missing date columns** on Query Stats and Procedure Stats tabs (`creation_time`, `last_execution_time`) ([#649], [#651], [#654])
+- **Trace pattern drill-down** now includes `CollectionTime` and `NtUserName` columns ([#663])
+- **DataGrid sort preservation** across auto-refresh — sort order no longer resets when data refreshes ([#659])
+- **CLI installer**: colored output (green/red/yellow) and version check on startup ([#639])
+- **GUI installer**: version check on startup
+- **Growth rate and VLF count** columns in Database Sizes (from v2.3.0 nightly, now in upgrade path) ([#567])
+- `llms.txt` and `CITATION.cff` for project discoverability ([#630])
+
+### Changed
+
+- **Lite data directory** moved to `%LOCALAPPDATA%\PerformanceMonitorLite\` for Velopack compatibility
+- **Delta gap detection** added to all cumulative-counter collectors (file I/O, wait stats, query stats, procedure stats, memory grants) — prevents inflated spikes after app restart ([#633])
+- **File I/O NULL fallbacks** improved when `sys.master_files` is inaccessible — falls back to `DB_NAME()` and `File_{id}` instead of generic "Unknown" ([#633])
+- **Running jobs collector** skipped gracefully when login lacks msdb access ([#656])
+- NuGet packages updated to latest minor versions ([#653])
+
+### Fixed
+
+- **Installer writing SUCCESS when files fail** — CLI tolerated 1 failure in automated mode, GUI had a similar workaround. Now any failure = not success.
+- **Query stats collector causing SQL dumps** on passive mirror servers — removed `dm_exec_plan_attributes` CROSS APPLY, uses temp table of ONLINE database IDs instead ([#632])
+- **Trigger name extraction** fails when comment before `CREATE TRIGGER` contains " ON " ([#666])
+- **FinOps expensive queries** DuckDB error — query referenced `statement_start_offset` column that doesn't exist in schema
+- **Imported parquet files** not recognized by archive compaction — added regex patterns for `imported_` prefix
+- **Auto-refresh after Import Data** — views now refresh immediately after import completes
+
+[#630]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/630
+[#632]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/632
+[#633]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/633
+[#635]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/635
+[#639]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/639
+[#642]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/642
+[#646]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/646
+[#649]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/649
+[#651]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/651
+[#653]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/653
+[#654]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/654
+[#655]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/655
+[#656]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/656
+[#659]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/659
+[#662]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/662
+[#663]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/663
+[#666]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/666
+[#567]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/567
+
 ## [2.3.0] - 2026-03-18
 
 ### Important

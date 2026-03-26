@@ -87,6 +87,22 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding CollectionTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
+                    <DataGridTextColumn.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTime" Click="Filter_Click" Margin="0,0,4,0"/>
+                            <TextBlock Text="Collection Time" FontWeight="Bold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding StartTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
+                    <DataGridTextColumn.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StartTime" Click="Filter_Click" Margin="0,0,4,0"/>
+                            <TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
                 <DataGridTextColumn Binding="{Binding EventName}" Width="120">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
@@ -151,6 +167,14 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
+                <DataGridTextColumn Binding="{Binding NtUserName}" Width="120">
+                    <DataGridTextColumn.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NtUserName" Click="Filter_Click" Margin="0,0,4,0"/>
+                            <TextBlock Text="NT User" FontWeight="Bold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </DataGridTextColumn.Header>
+                </DataGridTextColumn>
                 <DataGridTextColumn Binding="{Binding ApplicationName}" Width="150">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
@@ -172,14 +196,6 @@
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Spid" Click="Filter_Click" Margin="0,0,4,0"/>
                             <TextBlock Text="SPID" FontWeight="Bold" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </DataGridTextColumn.Header>
-                </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding StartTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
-                    <DataGridTextColumn.Header>
-                        <StackPanel Orientation="Horizontal">
-                            <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StartTime" Click="Filter_Click" Margin="0,0,4,0"/>
-                            <TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/>
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>

@@ -33,6 +33,31 @@ namespace PerformanceMonitorDashboard.Controls
     /// </summary>
     public partial class ResourceMetricsContent : UserControl
     {
+        /// <summary>Raised when user drills down on a chart point. Args: (chartType, serverLocalTime)</summary>
+        public event Action<string, DateTime>? ChartDrillDownRequested;
+
+        private void AddDrillDown(ScottPlot.WPF.WpfPlot chart, ContextMenu menu,
+            Func<Helpers.ChartHoverHelper?> hoverGetter, string label, string chartType)
+        {
+            menu.Items.Insert(0, new Separator());
+            var item = new MenuItem { Header = label };
+            menu.Items.Insert(0, item);
+
+            menu.Opened += (s, _) =>
+            {
+                var pos = System.Windows.Input.Mouse.GetPosition(chart);
+                var nearest = hoverGetter()?.GetNearestSeries(pos);
+                item.Tag = nearest?.Time;
+                item.IsEnabled = nearest.HasValue;
+            };
+
+            item.Click += (s, _) =>
+            {
+                if (item.Tag is DateTime time)
+                    ChartDrillDownRequested?.Invoke(chartType, time);
+            };
+        }
+
         private DatabaseService? _databaseService;
 
         // Latch Stats state
@@ -190,10 +215,14 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.SetupChartContextMenu(TempDbLatencyChart, "TempDB_Latency", "collect.file_io_stats");
 
             // Server Utilization Trends charts
-            TabHelpers.SetupChartContextMenu(ServerUtilTrendsCpuChart, "Server_CPU_Trends", "collect.cpu_utilization_stats");
-            TabHelpers.SetupChartContextMenu(ServerUtilTrendsTempdbChart, "Server_TempDB_Trends", "collect.tempdb_stats");
-            TabHelpers.SetupChartContextMenu(ServerUtilTrendsMemoryChart, "Server_Memory_Trends", "collect.memory_stats");
-            TabHelpers.SetupChartContextMenu(ServerUtilTrendsPerfmonChart, "Server_Perfmon_Trends", "collect.perfmon_stats");
+            var cpuTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsCpuChart, "Server_CPU_Trends", "collect.cpu_utilization_stats");
+            AddDrillDown(ServerUtilTrendsCpuChart, cpuTrendsMenu, () => _serverTrendsCpuHover, "Show Active Queries at This Time", "CPU");
+            var tempDbTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsTempdbChart, "Server_TempDB_Trends", "collect.tempdb_stats");
+            AddDrillDown(ServerUtilTrendsTempdbChart, tempDbTrendsMenu, () => _serverTrendsTempdbHover, "Show Active Queries at This Time", "TempDB");
+            var memTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsMemoryChart, "Server_Memory_Trends", "collect.memory_stats");
+            AddDrillDown(ServerUtilTrendsMemoryChart, memTrendsMenu, () => _serverTrendsMemoryHover, "Show Active Queries at This Time", "Memory");
+            var perfmonTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsPerfmonChart, "Server_Perfmon_Trends", "collect.perfmon_stats");
+            AddDrillDown(ServerUtilTrendsPerfmonChart, perfmonTrendsMenu, () => _serverTrendsPerfmonHover, "Show Active Queries at This Time", "Perfmon");
 
             // Perfmon Counters chart
             TabHelpers.SetupChartContextMenu(PerfmonCountersChart, "Perfmon_Counters", "collect.perfmon_stats");

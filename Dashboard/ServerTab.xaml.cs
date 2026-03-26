@@ -120,6 +120,9 @@ namespace PerformanceMonitorDashboard
             SetupAutoRefresh();
             SetupSubTabContextMenus();
 
+            BlockingSlicer.RangeChanged += OnBlockingSlicerChanged;
+            DeadlockSlicer.RangeChanged += OnDeadlockSlicerChanged;
+
             Loaded += ServerTab_Loaded;
             Unloaded += ServerTab_Unloaded;
             KeyDown += ServerTab_KeyDown;
@@ -129,10 +132,12 @@ namespace PerformanceMonitorDashboard
             // Initialize Overview sub-tab UserControls
             DailySummaryTab.Initialize(_databaseService);
             CriticalIssuesTab.Initialize(_databaseService);
+            CriticalIssuesTab.InvestigateRequested += OnInvestigateCriticalIssue;
             DefaultTraceTab.Initialize(_databaseService);
             CurrentConfigTab.Initialize(_databaseService);
             ConfigChangesTab.Initialize(_databaseService);
             MemoryTab.Initialize(_databaseService);
+            MemoryTab.ChartDrillDownRequested += OnChildChartDrillDown;
             PerformanceTab.Initialize(_databaseService, s => StatusText.Text = s);
             PerformanceTab.ViewPlanRequested += (planXml, label, queryText) =>
             {
@@ -149,6 +154,7 @@ namespace PerformanceMonitorDashboard
             };
             SystemEventsContent.Initialize(_databaseService);
             ResourceMetricsContent.Initialize(_databaseService);
+            ResourceMetricsContent.ChartDrillDownRequested += OnChildChartDrillDown;
 
             // Set default time range on UserControls based on user preferences
             var prefs = _preferencesService.GetPreferences();
@@ -516,21 +522,34 @@ namespace PerformanceMonitorDashboard
         private void SetupChartContextMenus()
         {
             // Resource Overview charts
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewCpuChart, "CPU_Utilization", "collect.cpu_utilization_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewMemoryChart, "Memory_Utilization", "collect.memory_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewIoChart, "IO_Latency", "collect.file_io_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewWaitChart, "Wait_Stats", "collect.wait_stats");
+            var overviewCpuMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewCpuChart, "CPU_Utilization", "collect.cpu_utilization_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewCpuChart, overviewCpuMenu, _resourceOverviewCpuHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var overviewMemMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewMemoryChart, "Memory_Utilization", "collect.memory_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewMemoryChart, overviewMemMenu, _resourceOverviewMemoryHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var overviewIoMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewIoChart, "IO_Latency", "collect.file_io_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewIoChart, overviewIoMenu, _resourceOverviewIoHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var overviewWaitMenu = Helpers.TabHelpers.SetupChartContextMenu(ResourceOverviewWaitChart, "Wait_Stats", "collect.wait_stats");
+            AddChartDrillDownMenuItem(ResourceOverviewWaitChart, overviewWaitMenu, _resourceOverviewWaitHover, "Show Active Queries at This Time", OnQueryDrillDown);
 
             // Blocking Stats charts
-            Helpers.TabHelpers.SetupChartContextMenu(LockWaitStatsChart, "Lock_Wait_Stats", "collect.wait_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsBlockingEventsChart, "Blocking_Events", "collect.blocking_deadlock_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDurationChart, "Blocking_Duration", "collect.blocking_deadlock_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlocksChart, "Deadlocks", "collect.blocking_deadlock_stats");
-            Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlockWaitTimeChart, "Deadlock_Wait_Time", "collect.blocking_deadlock_stats");
+            var blockingEventsMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsBlockingEventsChart, "Blocking_Events", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsBlockingEventsChart, blockingEventsMenu, _blockingEventsHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
+            var blockingDurationMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDurationChart, "Blocking_Duration", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsDurationChart, blockingDurationMenu, _blockingDurationHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
+            var deadlocksMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlocksChart, "Deadlocks", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsDeadlocksChart, deadlocksMenu, _deadlocksHover, "Show Deadlocks at This Time", OnDeadlockChartDrillDown);
+            var deadlockWaitMenu = Helpers.TabHelpers.SetupChartContextMenu(BlockingStatsDeadlockWaitTimeChart, "Deadlock_Wait_Time", "collect.blocking_deadlock_stats");
+            AddChartDrillDownMenuItem(BlockingStatsDeadlockWaitTimeChart, deadlockWaitMenu, _deadlockWaitTimeHover, "Show Deadlocks at This Time", OnDeadlockChartDrillDown);
+
+            // Lock Wait Stats chart
+            var lockWaitMenu = Helpers.TabHelpers.SetupChartContextMenu(LockWaitStatsChart, "Lock_Wait_Stats", "collect.wait_stats");
+            AddChartDrillDownMenuItem(LockWaitStatsChart, lockWaitMenu, _lockWaitStatsHover, "Show Blocking at This Time", OnBlockingChartDrillDown);
 
             // Current Waits charts
-            Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration", "collect.waiting_tasks");
-            Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked", "collect.waiting_tasks");
+            var cwDurationMenu = Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration", "collect.waiting_tasks");
+            AddChartDrillDownMenuItem(CurrentWaitsDurationChart, cwDurationMenu, _currentWaitsDurationHover, "Show Active Queries at This Time", OnQueryDrillDown);
+            var cwBlockedMenu = Helpers.TabHelpers.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked", "collect.waiting_tasks");
+            AddChartDrillDownMenuItem(CurrentWaitsBlockedChart, cwBlockedMenu, _currentWaitsBlockedHover, "Show Active Queries at This Time", OnQueryDrillDown);
 
             // Query Performance Trends charts now handled by QueryPerformanceContent UserControl
 
@@ -1056,7 +1075,9 @@ namespace PerformanceMonitorDashboard
                     case "Queries":
                         // Queries tab content is in QueryPerformanceContent UserControl
                         PerformanceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
-                        await PerformanceTab.RefreshAllDataAsync();
+                        PerformanceTab.IsRefreshing = true;
+                        try { await PerformanceTab.RefreshAllDataAsync(); }
+                        finally { PerformanceTab.IsRefreshing = false; }
                         break;
 
                     case "Memory":
@@ -1245,7 +1266,9 @@ namespace PerformanceMonitorDashboard
         {
             try
             {
-                await PerformanceTab.RefreshAllDataAsync(fullRefresh);
+                PerformanceTab.IsRefreshing = true;
+                try { await PerformanceTab.RefreshAllDataAsync(fullRefresh); }
+                finally { PerformanceTab.IsRefreshing = false; }
             }
             catch (Exception ex)
             {
@@ -1287,6 +1310,241 @@ namespace PerformanceMonitorDashboard
         /// Refreshes the Locking tab: Blocking events, deadlocks, blocking/deadlock stats,
         /// lock wait stats, current waits duration, and current waits blocked sessions.
         /// </summary>
+
+        // ── Critical Issues → Investigate Navigation (#684) ──
+
+        private async void OnInvestigateCriticalIssue(string problemArea, DateTime logDate, string? affectedDatabase, string? investigateQuery)
+        {
+            // Set a 2-hour window centered on the incident
+            var from = logDate.AddHours(-1);
+            var to = logDate.AddHours(1);
+
+            // Populate global custom date pickers so user can Apply to All
+            SetPickersFromDateTime(from, GlobalFromDate, GlobalFromHour, GlobalFromMinute);
+            SetPickersFromDateTime(to, GlobalToDate, GlobalToHour, GlobalToMinute);
+
+            // Set global range so Apply to All works
+            _globalHoursBack = 0;
+            _globalFromDate = from;
+            _globalToDate = to;
+            HighlightTimeButton(0); // deselect preset buttons
+            GlobalDateRangeIndicator.Text = GetGlobalDateRangeText();
+
+            switch (problemArea)
+            {
+                case "Blocking":
+                    LockingTabItem.IsSelected = true;
+                    LockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
+                    _blockingHoursBack = 0;
+                    _blockingFromDate = from;
+                    _blockingToDate = to;
+                    await RefreshLockingTabAsync();
+                    break;
+
+                case "Deadlocking":
+                    LockingTabItem.IsSelected = true;
+                    LockingSubTabControl.SelectedIndex = 3; // Deadlocks
+                    _deadlocksHoursBack = 0;
+                    _deadlocksFromDate = from;
+                    _deadlocksToDate = to;
+                    await RefreshLockingTabAsync();
+                    break;
+
+                case "Blocking and Deadlocking":
+                    LockingTabItem.IsSelected = true;
+                    LockingSubTabControl.SelectedIndex = 0; // Blocking/Deadlock Trends
+                    _blockingStatsHoursBack = 0;
+                    _blockingStatsFromDate = from;
+                    _blockingStatsToDate = to;
+                    await RefreshLockingTabAsync();
+                    break;
+
+                case "CPU Scheduling Pressure":
+                    QueriesTabItem.IsSelected = true;
+                    PerformanceTab.SetTimeRange(0, from, to);
+                    await RefreshQueriesTabAsync();
+                    break;
+
+                case "Memory Pressure":
+                case "Memory Grant Pressure":
+                case "Memory Clerk Growth":
+                    MemoryTabItem.IsSelected = true;
+                    MemoryTab.SetTimeRange(0, from, to);
+                    await RefreshMemoryTabAsync();
+                    break;
+
+                default:
+                    ShowInvestigateQuery(problemArea, logDate, affectedDatabase, investigateQuery);
+                    break;
+            }
+        }
+
+        private void ShowInvestigateQuery(string problemArea, DateTime logDate, string? affectedDatabase, string? investigateQuery)
+        {
+            var query = investigateQuery;
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                query = $"-- No investigate query available for: {problemArea}";
+            }
+
+            var header = $"{problemArea}";
+            if (!string.IsNullOrWhiteSpace(affectedDatabase))
+                header += $" — {affectedDatabase}";
+            header += $"\n{Helpers.ServerTimeHelper.ConvertForDisplay(logDate, Helpers.ServerTimeHelper.CurrentDisplayMode):yyyy-MM-dd HH:mm:ss}";
+
+            var win = new Window
+            {
+                Title = "Investigate: " + problemArea,
+                Width = 700,
+                Height = 400,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = Window.GetWindow(this),
+                Background = (System.Windows.Media.Brush)FindResource("BackgroundBrush")
+            };
+
+            var grid = new Grid { Margin = new Thickness(12) };
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var headerTb = new TextBlock
+            {
+                Text = header,
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush"),
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            Grid.SetRow(headerTb, 0);
+            grid.Children.Add(headerTb);
+
+            var queryBox = new TextBox
+            {
+                Text = query,
+                IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+                FontSize = 12,
+                Background = (System.Windows.Media.Brush)FindResource("BackgroundLightBrush"),
+                Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush"),
+                Padding = new Thickness(8)
+            };
+            Grid.SetRow(queryBox, 1);
+            grid.Children.Add(queryBox);
+
+            var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
+            var copyBtn = new Button { Content = "Copy to Clipboard", Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 8, 0) };
+            copyBtn.Click += (_, _) => { Clipboard.SetText(query ?? ""); };
+            var closeBtn = new Button { Content = "Close", Padding = new Thickness(12, 4, 12, 4) };
+            closeBtn.Click += (_, _) => win.Close();
+            buttonPanel.Children.Add(copyBtn);
+            buttonPanel.Children.Add(closeBtn);
+            Grid.SetRow(buttonPanel, 2);
+            grid.Children.Add(buttonPanel);
+
+            win.Content = grid;
+            win.ShowDialog();
+        }
+
+        // ── Chart Drill-Down (#682) ──
+
+        private void AddChartDrillDownMenuItem(
+            ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu,
+            Helpers.ChartHoverHelper? hover, string label, Action<DateTime> handler)
+        {
+            contextMenu.Items.Insert(0, new Separator());
+            var item = new MenuItem { Header = label };
+            contextMenu.Items.Insert(0, item);
+
+            contextMenu.Opened += (s, _) =>
+            {
+                var pos = System.Windows.Input.Mouse.GetPosition(chart);
+                var nearest = hover?.GetNearestSeries(pos);
+                if (nearest.HasValue)
+                {
+                    item.Tag = nearest.Value.Time;
+                    item.IsEnabled = true;
+                }
+                else
+                {
+                    item.Tag = null;
+                    item.IsEnabled = false;
+                }
+            };
+
+            item.Click += (s, _) =>
+            {
+                if (item.Tag is DateTime time)
+                    handler(time);
+            };
+        }
+
+        private void SetDrillDownGlobalRange(DateTime from, DateTime to)
+        {
+            SetPickersFromDateTime(from, GlobalFromDate, GlobalFromHour, GlobalFromMinute);
+            SetPickersFromDateTime(to, GlobalToDate, GlobalToHour, GlobalToMinute);
+            _globalHoursBack = 0;
+            _globalFromDate = from;
+            _globalToDate = to;
+            HighlightTimeButton(0);
+            GlobalDateRangeIndicator.Text = GetGlobalDateRangeText();
+        }
+
+        private async void OnBlockingChartDrillDown(DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            LockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
+            _blockingHoursBack = 0;
+            _blockingFromDate = from;
+            _blockingToDate = to;
+            await RefreshLockingTabAsync();
+        }
+
+        private async void OnDeadlockChartDrillDown(DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            LockingSubTabControl.SelectedIndex = 3; // Deadlocks
+            _deadlocksHoursBack = 0;
+            _deadlocksFromDate = from;
+            _deadlocksToDate = to;
+            await RefreshLockingTabAsync();
+        }
+
+        private async void OnQueryDrillDown(DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            QueriesTabItem.IsSelected = true;
+            PerformanceTab.SelectSubTab(1); // Active Queries
+            PerformanceTab.SetTimeRange(0, from, to);
+            PerformanceTab.IsRefreshing = true;
+            try { await RefreshQueriesTabAsync(); }
+            finally { PerformanceTab.IsRefreshing = false; }
+        }
+
+        private async void OnChildChartDrillDown(string chartType, DateTime time)
+        {
+            var from = time.AddMinutes(-30);
+            var to = time.AddMinutes(30);
+            SetDrillDownGlobalRange(from, to);
+
+            QueriesTabItem.IsSelected = true;
+            PerformanceTab.SelectSubTab(1); // Active Queries
+            PerformanceTab.SetTimeRange(0, from, to);
+            PerformanceTab.IsRefreshing = true;
+            try { await RefreshQueriesTabAsync(); }
+            finally { PerformanceTab.IsRefreshing = false; }
+        }
+
         private async Task RefreshLockingTabAsync()
         {
             try
@@ -1323,6 +1581,9 @@ namespace PerformanceMonitorDashboard
                 {
                     Logger.Warning($"Could not load deadlocks: {deadlockEx.Message}");
                 }
+
+                _ = LoadBlockingSlicerAsync();
+                _ = LoadDeadlockSlicerAsync();
 
                 try
                 {
@@ -1436,6 +1697,15 @@ namespace PerformanceMonitorDashboard
         {
             // Force WPF to re-evaluate converter bindings on all query performance grids
             PerformanceTab.RefreshGridBindings();
+
+            // Refresh blocking/deadlock grids and slicers in Locking tab
+            BlockingEventsDataGrid.Items.Refresh();
+            DeadlocksDataGrid.Items.Refresh();
+            BlockingSlicer.Redraw();
+            DeadlockSlicer.Redraw();
+
+            // Refresh Default Trace slicer
+            DefaultTraceTab.RefreshTimeDisplay();
         }
 
         private void DownloadQueryPlan_Click(object sender, RoutedEventArgs e)
@@ -1623,6 +1893,73 @@ namespace PerformanceMonitorDashboard
                 168 => "Showing: Last 7 Days",
                 _ => $"Showing: Last {hoursBack} Hours"
             };
+        }
+
+        // ── Blocking Slicer ──
+
+        private async Task LoadBlockingSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetBlockingSlicerDataAsync(
+                    _blockingHoursBack, _blockingFromDate, _blockingToDate);
+                var (start, end) = GetLockingSlicerTimeRange(_blockingHoursBack, _blockingFromDate, _blockingToDate);
+                if (data.Count > 0)
+                    BlockingSlicer.LoadData(data, "Blocking Events", start, end);
+            }
+            catch { }
+        }
+
+        private async void OnBlockingSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetBlockingEventsAsync(0, e.Start, e.End);
+                BlockingEventsDataGrid.ItemsSource = data;
+                UpdateDataGridFilterButtonStyles(BlockingEventsDataGrid, _blockingEventsFilters);
+                BlockingEventsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch { }
+        }
+
+        // ── Deadlock Slicer ──
+
+        private async Task LoadDeadlockSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetDeadlockSlicerDataAsync(
+                    _deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
+                var (start, end) = GetLockingSlicerTimeRange(_deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
+                if (data.Count > 0)
+                    DeadlockSlicer.LoadData(data, "Deadlocks", start, end);
+            }
+            catch { }
+        }
+
+        private async void OnDeadlockSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetDeadlocksAsync(0, e.Start, e.End);
+                DeadlocksDataGrid.ItemsSource = data;
+                UpdateDataGridFilterButtonStyles(DeadlocksDataGrid, _deadlocksFilters);
+                DeadlocksNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch { }
+        }
+
+        private static (DateTime start, DateTime end) GetLockingSlicerTimeRange(
+            int hoursBack, DateTime? fromDate, DateTime? toDate)
+        {
+            if (fromDate.HasValue && toDate.HasValue)
+                return (fromDate.Value, toDate.Value);
+            var serverNow = Helpers.ServerTimeHelper.ServerNow;
+            return (serverNow.AddHours(-hoursBack), serverNow);
         }
 
         // Blocking date range filtering state

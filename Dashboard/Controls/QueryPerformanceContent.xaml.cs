@@ -37,6 +37,16 @@ namespace PerformanceMonitorDashboard.Controls
     {
         private DatabaseService? _databaseService;
         private Action<string>? _statusCallback;
+        internal bool IsRefreshing { get; set; }
+
+        private static (DateTime start, DateTime end) GetSlicerTimeRange(
+            int hoursBack, DateTime? fromDate, DateTime? toDate)
+        {
+            if (fromDate.HasValue && toDate.HasValue)
+                return (fromDate.Value, toDate.Value);
+            var serverNow = Helpers.ServerTimeHelper.ServerNow;
+            return (serverNow.AddHours(-hoursBack), serverNow);
+        }
 
         /// <summary>Raised when user wants to view a plan in the Plan Viewer tab. Args: (planXml, label, queryText)</summary>
         public event Action<string, string, string?>? ViewPlanRequested;
@@ -225,6 +235,377 @@ namespace PerformanceMonitorDashboard.Controls
         {
             _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
             _statusCallback = statusCallback;
+            ActiveQueriesSlicer.RangeChanged += OnActiveQueriesSlicerChanged;
+            QueryStatsSlicer.RangeChanged += OnQueryStatsSlicerChanged;
+            ProcStatsSlicer.RangeChanged += OnProcStatsSlicerChanged;
+            QueryStoreSlicer.RangeChanged += OnQueryStoreSlicerChanged;
+        }
+
+        // ── Active Queries Slicer ──
+
+        private async Task LoadActiveQueriesSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetActiveQuerySlicerDataAsync(
+                    _activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
+                if (data.Count > 0)
+                    ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
+            }
+            catch { }
+        }
+
+        private async void OnActiveQueriesSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                // Dashboard data is in server time; slicer sends server time directly
+                var data = await _databaseService.GetQuerySnapshotsAsync(0, e.Start, e.End);
+                _activeQueriesUnfilteredData = data;
+                ActiveQueriesDataGrid.ItemsSource = data;
+                ActiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch { }
+        }
+
+        // ── Query Stats Slicer ──
+
+        private List<Models.TimeSliceBucket>? _queryStatsSlicerData;
+        private string _queryStatsSlicerMetric = "TotalCpu";
+
+        private async Task LoadQueryStatsSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetQueryStatsSlicerDataAsync(
+                    _queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
+                _queryStatsSlicerData = data;
+                _queryStatsSlicerMetric = "TotalCpu";
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
+                if (data.Count > 0)
+                    QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+            }
+            catch { }
+        }
+
+        private async void OnQueryStatsSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetQueryStatsAsync(0, e.Start, e.End, fromSlicer: true);
+                PopulateQueryStatsGrid(data);
+            }
+            catch { }
+        }
+
+        private void QueryStatsDataGrid_Sorting(object sender, DataGridSortingEventArgs e)
+        {
+            if (_queryStatsSlicerData == null || _queryStatsSlicerData.Count == 0) return;
+
+            var col = e.Column.SortMemberPath ?? "";
+            if (string.IsNullOrEmpty(col) && e.Column is DataGridBoundColumn bc && bc.Binding is System.Windows.Data.Binding b)
+                col = b.Path.Path;
+
+            var (metric, label) = col switch
+            {
+                "TotalWorkerTimeMs" => ("TotalCpu", "Total CPU (ms)"),
+                "AvgWorkerTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
+                "TotalElapsedTimeMs" => ("TotalElapsed", "Total Duration (ms)"),
+                "AvgElapsedTimeMs" => ("AvgElapsed", "Avg Duration (ms)"),
+                "TotalLogicalReads" or "AvgLogicalReads" => ("TotalReads", "Total Reads"),
+                "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
+                "TotalPhysicalReads" => ("TotalReads", "Total Physical Reads"),
+                "IntervalExecutions" => ("Sessions", "Executions"),
+                _ => ("TotalCpu", "Total CPU (ms)"),
+            };
+
+            if (metric == _queryStatsSlicerMetric) return;
+            _queryStatsSlicerMetric = metric;
+
+            foreach (var bucket in _queryStatsSlicerData)
+            {
+                var n = bucket.SessionCount > 0 ? bucket.SessionCount : 1;
+                bucket.Value = metric switch
+                {
+                    "TotalCpu" => bucket.TotalCpu,
+                    "AvgCpu" => bucket.TotalCpu / n,
+                    "TotalElapsed" => bucket.TotalElapsed,
+                    "AvgElapsed" => bucket.TotalElapsed / n,
+                    "TotalReads" => bucket.TotalReads,
+                    "TotalWrites" => bucket.TotalWrites,
+                    "Sessions" => bucket.SessionCount,
+                    _ => bucket.TotalCpu,
+                };
+            }
+
+            QueryStatsSlicer.UpdateMetric(label);
+
+            if (QueryStatsDataGrid.SelectedItem != null)
+                QueryStatsDataGrid_SelectionChanged(QueryStatsDataGrid, null!);
+        }
+
+        // ── Procedure Stats Slicer ──
+
+        private List<Models.TimeSliceBucket>? _procStatsSlicerData;
+        private string _procStatsSlicerMetric = "TotalCpu";
+
+        private async Task LoadProcStatsSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetProcStatsSlicerDataAsync(
+                    _procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
+                _procStatsSlicerData = data;
+                _procStatsSlicerMetric = "TotalCpu";
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
+                if (data.Count > 0)
+                    ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+            }
+            catch { }
+        }
+
+        private async void OnProcStatsSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetProcedureStatsAsync(0, e.Start, e.End, fromSlicer: true);
+                PopulateProcStatsGrid(data);
+            }
+            catch { }
+        }
+
+        private void ProcStatsDataGrid_Sorting(object sender, DataGridSortingEventArgs e)
+        {
+            if (_procStatsSlicerData == null || _procStatsSlicerData.Count == 0) return;
+
+            var col = e.Column.SortMemberPath ?? "";
+            if (string.IsNullOrEmpty(col) && e.Column is DataGridBoundColumn bc2 && bc2.Binding is System.Windows.Data.Binding b2)
+                col = b2.Path.Path;
+
+            var (metric, label) = col switch
+            {
+                "TotalWorkerTimeMs" => ("TotalCpu", "Total CPU (ms)"),
+                "AvgWorkerTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
+                "TotalElapsedTimeMs" => ("TotalElapsed", "Total Duration (ms)"),
+                "AvgElapsedTimeMs" => ("AvgElapsed", "Avg Duration (ms)"),
+                "TotalLogicalReads" => ("TotalReads", "Total Reads"),
+                "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
+                "TotalPhysicalReads" => ("TotalReads", "Total Physical Reads"),
+                "IntervalExecutions" => ("Sessions", "Executions"),
+                _ => ("TotalCpu", "Total CPU (ms)"),
+            };
+
+            if (metric == _procStatsSlicerMetric) return;
+            _procStatsSlicerMetric = metric;
+
+            foreach (var bucket in _procStatsSlicerData)
+            {
+                var n = bucket.SessionCount > 0 ? bucket.SessionCount : 1;
+                bucket.Value = metric switch
+                {
+                    "TotalCpu" => bucket.TotalCpu,
+                    "AvgCpu" => bucket.TotalCpu / n,
+                    "TotalElapsed" => bucket.TotalElapsed,
+                    "AvgElapsed" => bucket.TotalElapsed / n,
+                    "TotalReads" => bucket.TotalReads,
+                    "TotalWrites" => bucket.TotalWrites,
+                    "Sessions" => bucket.SessionCount,
+                    _ => bucket.TotalCpu,
+                };
+            }
+
+            ProcStatsSlicer.UpdateMetric(label);
+
+            if (ProcStatsDataGrid.SelectedItem != null)
+                ProcStatsDataGrid_SelectionChanged(ProcStatsDataGrid, null!);
+        }
+
+        // ── Query Store Slicer ──
+
+        private List<Models.TimeSliceBucket>? _queryStoreSlicerData;
+        private string _queryStoreSlicerMetric = "TotalCpu";
+
+        private async Task LoadQueryStoreSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetQueryStoreSlicerDataAsync(
+                    _queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
+                _queryStoreSlicerData = data;
+                _queryStoreSlicerMetric = "TotalCpu";
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
+                if (data.Count > 0)
+                    QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+            }
+            catch { }
+        }
+
+        private async void OnQueryStoreSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetQueryStoreDataAsync(0, e.Start, e.End, fromSlicer: true);
+                PopulateQueryStoreGrid(data);
+            }
+            catch { }
+        }
+
+        private void QueryStoreDataGrid_Sorting(object sender, DataGridSortingEventArgs e)
+        {
+            if (_queryStoreSlicerData == null || _queryStoreSlicerData.Count == 0) return;
+
+            var col = e.Column.SortMemberPath ?? "";
+            if (string.IsNullOrEmpty(col) && e.Column is DataGridBoundColumn bc3 && bc3.Binding is System.Windows.Data.Binding b3)
+                col = b3.Path.Path;
+
+            var (metric, label) = col switch
+            {
+                "AvgCpuTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
+                "AvgDurationMs" => ("AvgElapsed", "Avg Duration (ms)"),
+                "AvgLogicalReads" => ("TotalReads", "Avg Reads"),
+                "AvgLogicalWrites" => ("TotalWrites", "Avg Writes"),
+                "AvgPhysicalReads" => ("TotalReads", "Avg Physical Reads"),
+                "ExecutionCount" => ("Sessions", "Executions"),
+                _ => ("TotalCpu", "Total CPU (ms)"),
+            };
+
+            if (metric == _queryStoreSlicerMetric) return;
+            _queryStoreSlicerMetric = metric;
+
+            foreach (var bucket in _queryStoreSlicerData)
+            {
+                var n = bucket.SessionCount > 0 ? bucket.SessionCount : 1;
+                bucket.Value = metric switch
+                {
+                    "TotalCpu" => bucket.TotalCpu,
+                    "AvgCpu" => bucket.TotalCpu / n,
+                    "TotalElapsed" => bucket.TotalElapsed,
+                    "AvgElapsed" => bucket.TotalElapsed / n,
+                    "TotalReads" => bucket.TotalReads,
+                    "TotalWrites" => bucket.TotalWrites,
+                    "Sessions" => bucket.SessionCount,
+                    _ => bucket.TotalCpu,
+                };
+            }
+
+            QueryStoreSlicer.UpdateMetric(label);
+
+            if (QueryStoreDataGrid.SelectedItem != null)
+                QueryStoreDataGrid_SelectionChanged(QueryStoreDataGrid, null!);
+        }
+
+        // ── Grid → Slicer Overlay (#683) ──
+
+        private async void QueryStatsDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_databaseService == null) return;
+            if (QueryStatsDataGrid.SelectedItem is not Models.QueryStatsItem row || string.IsNullOrEmpty(row.QueryHash))
+            {
+                if (!IsRefreshing) QueryStatsSlicer.ClearOverlay();
+                return;
+            }
+
+            try
+            {
+                var history = await _databaseService.GetQueryStatsHistoryAsync(
+                    row.DatabaseName, row.QueryHash, _queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
+
+                Func<Models.QueryStatsHistoryItem, long?> selector = _queryStatsSlicerMetric switch
+                {
+                    "TotalCpu" or "AvgCpu" => h => h.TotalWorkerTimeDelta,
+                    "TotalReads" or "AvgReads" => h => h.TotalLogicalReadsDelta,
+                    "TotalWrites" => h => h.TotalLogicalWritesDelta,
+                    "TotalPhysReads" => h => h.TotalPhysicalReadsDelta,
+                    _ => h => h.TotalElapsedTimeDelta,
+                };
+                bool isMicroseconds = _queryStatsSlicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
+
+                var points = history
+                    .Where(h => (selector(h) ?? 0) > 0)
+                    .Select(h => (h.CollectionTime, isMicroseconds ? (selector(h) ?? 0) / 1000.0 : (double)(selector(h) ?? 0)))
+                    .ToList();
+
+                QueryStatsSlicer.SetOverlay(points, row.QueryHash);
+            }
+            catch { QueryStatsSlicer.ClearOverlay(); }
+        }
+
+        private async void ProcStatsDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_databaseService == null) return;
+            if (ProcStatsDataGrid.SelectedItem is not Models.ProcedureStatsItem row || string.IsNullOrEmpty(row.ProcedureName))
+            {
+                if (!IsRefreshing) ProcStatsSlicer.ClearOverlay();
+                return;
+            }
+
+            try
+            {
+                var history = await _databaseService.GetProcedureStatsHistoryAsync(
+                    row.DatabaseName, row.SchemaName ?? "dbo", row.ProcedureName, _procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
+
+                Func<Models.ProcedureExecutionHistoryItem, long?> selector = _procStatsSlicerMetric switch
+                {
+                    "TotalCpu" or "AvgCpu" => h => h.TotalWorkerTimeDelta,
+                    "TotalReads" or "AvgReads" => h => h.TotalLogicalReadsDelta,
+                    "TotalWrites" => h => h.TotalLogicalWritesDelta,
+                    "TotalPhysReads" => h => h.TotalPhysicalReadsDelta,
+                    _ => h => h.TotalElapsedTimeDelta,
+                };
+                bool isMicroseconds = _procStatsSlicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
+
+                var points = history
+                    .Where(h => (selector(h) ?? 0) > 0)
+                    .Select(h => (h.CollectionTime, isMicroseconds ? (selector(h) ?? 0) / 1000.0 : (double)(selector(h) ?? 0)))
+                    .ToList();
+
+                var label = (row.ProcedureName?.Length ?? 0) > 30 ? row.ProcedureName![..30] + "..." : row.ProcedureName ?? "";
+                ProcStatsSlicer.SetOverlay(points, label);
+            }
+            catch { ProcStatsSlicer.ClearOverlay(); }
+        }
+
+        private async void QueryStoreDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_databaseService == null) return;
+            if (QueryStoreDataGrid.SelectedItem is not Models.QueryStoreItem row)
+            {
+                if (!IsRefreshing) QueryStoreSlicer.ClearOverlay();
+                return;
+            }
+
+            try
+            {
+                var history = await _databaseService.GetQueryStoreHistoryAsync(
+                    row.DatabaseName, row.QueryId, _queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
+
+                Func<Models.QueryExecutionHistoryItem, double> selector = _queryStoreSlicerMetric switch
+                {
+                    "TotalCpu" or "AvgCpu" => h => h.AvgCpuTimeMs * h.CountExecutions,
+                    "TotalReads" or "AvgReads" => h => h.AvgLogicalReads * (double)h.CountExecutions,
+                    _ => h => h.AvgDurationMs * h.CountExecutions,
+                };
+
+                var points = history
+                    .Where(h => selector(h) > 0)
+                    .Select(h => (h.CollectionTime, selector(h)))
+                    .ToList();
+
+                var qsLabel = !string.IsNullOrWhiteSpace(row.ModuleName)
+                    ? row.ModuleName
+                    : $"Query {row.QueryId}";
+                QueryStoreSlicer.SetOverlay(points, qsLabel);
+            }
+            catch { QueryStoreSlicer.ClearOverlay(); }
         }
 
         public void RefreshGridBindings()
@@ -236,11 +617,17 @@ namespace PerformanceMonitorDashboard.Controls
             ActiveQueriesDataGrid.Items.Refresh();
             CurrentActiveQueriesDataGrid.Items.Refresh();
             LongRunningQueryPatternsDataGrid.Items.Refresh();
+            ActiveQueriesSlicer.Redraw();
+            QueryStatsSlicer.Redraw();
+            ProcStatsSlicer.Redraw();
+            QueryStoreSlicer.Redraw();
         }
 
         /// <summary>
         /// Sets the time range for all sub-tabs.
         /// </summary>
+        public void SelectSubTab(int index) => SubTabControl.SelectedIndex = index;
+
         public void SetTimeRange(int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
         {
             _activeQueriesHoursBack = hoursBack;
@@ -333,9 +720,37 @@ namespace PerformanceMonitorDashboard.Controls
                 );
 
                 // Populate grids from summary data
-                PopulateQueryStatsGrid(await queryStatsTask);
-                PopulateProcStatsGrid(await procStatsTask);
-                PopulateQueryStoreGrid(await queryStoreTask);
+                // If slicer is narrowed, re-query with slicer dates instead of global range
+                if (QueryStatsSlicer.HasNarrowedSelection)
+                {
+                    var slicerData = await _databaseService.GetQueryStatsAsync(0, QueryStatsSlicer.SelectionStart, QueryStatsSlicer.SelectionEnd, fromSlicer: true);
+                    PopulateQueryStatsGrid(slicerData);
+                }
+                else
+                {
+                    PopulateQueryStatsGrid(await queryStatsTask);
+                }
+                LoadQueryStatsSlicerAsync().ConfigureAwait(false);
+                if (ProcStatsSlicer.HasNarrowedSelection)
+                {
+                    var slicerProcData = await _databaseService.GetProcedureStatsAsync(0, ProcStatsSlicer.SelectionStart, ProcStatsSlicer.SelectionEnd, fromSlicer: true);
+                    PopulateProcStatsGrid(slicerProcData);
+                }
+                else
+                {
+                    PopulateProcStatsGrid(await procStatsTask);
+                }
+                LoadProcStatsSlicerAsync().ConfigureAwait(false);
+                if (QueryStoreSlicer.HasNarrowedSelection)
+                {
+                    var slicerQsData = await _databaseService.GetQueryStoreDataAsync(0, QueryStoreSlicer.SelectionStart, QueryStoreSlicer.SelectionEnd, fromSlicer: true);
+                    PopulateQueryStoreGrid(slicerQsData);
+                }
+                else
+                {
+                    PopulateQueryStoreGrid(await queryStoreTask);
+                }
+                LoadQueryStoreSlicerAsync().ConfigureAwait(false);
 
                 // Populate charts from time-series data
                 LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0], _queryDurationHover);
@@ -373,43 +788,55 @@ namespace PerformanceMonitorDashboard.Controls
         private async Task RefreshQueryStatsGridAsync()
         {
             if (_databaseService == null) return;
-            var data = await _databaseService.GetQueryStatsAsync(_queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
+            List<QueryStatsItem> data;
+            if (QueryStatsSlicer.HasNarrowedSelection)
+                data = await _databaseService.GetQueryStatsAsync(0, QueryStatsSlicer.SelectionStart, QueryStatsSlicer.SelectionEnd, fromSlicer: true);
+            else
+                data = await _databaseService.GetQueryStatsAsync(_queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
             PopulateQueryStatsGrid(data);
+            LoadQueryStatsSlicerAsync().ConfigureAwait(false);
         }
 
         private async Task RefreshProcStatsGridAsync()
         {
             if (_databaseService == null) return;
-            var data = await _databaseService.GetProcedureStatsAsync(_procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
+            List<ProcedureStatsItem> data;
+            if (ProcStatsSlicer.HasNarrowedSelection)
+                data = await _databaseService.GetProcedureStatsAsync(0, ProcStatsSlicer.SelectionStart, ProcStatsSlicer.SelectionEnd, fromSlicer: true);
+            else
+                data = await _databaseService.GetProcedureStatsAsync(_procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
             PopulateProcStatsGrid(data);
+            LoadProcStatsSlicerAsync().ConfigureAwait(false);
         }
 
         private async Task RefreshQueryStoreGridAsync()
         {
             if (_databaseService == null) return;
-            var data = await _databaseService.GetQueryStoreDataAsync(_queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
+            List<QueryStoreItem> data;
+            if (QueryStoreSlicer.HasNarrowedSelection)
+                data = await _databaseService.GetQueryStoreDataAsync(0, QueryStoreSlicer.SelectionStart, QueryStoreSlicer.SelectionEnd, fromSlicer: true);
+            else
+                data = await _databaseService.GetQueryStoreDataAsync(_queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
             PopulateQueryStoreGrid(data);
+            LoadQueryStoreSlicerAsync().ConfigureAwait(false);
         }
 
         private void PopulateQueryStatsGrid(List<QueryStatsItem> data)
         {
-            QueryStatsDataGrid.ItemsSource = data;
+            SetItemsSourcePreservingSort(QueryStatsDataGrid, data, "AvgCpuTimeMs", ListSortDirection.Descending);
             QueryStatsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            SetInitialSort(QueryStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
         }
 
         private void PopulateProcStatsGrid(List<ProcedureStatsItem> data)
         {
-            ProcStatsDataGrid.ItemsSource = data;
+            SetItemsSourcePreservingSort(ProcStatsDataGrid, data, "AvgCpuTimeMs", ListSortDirection.Descending);
             ProcStatsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            SetInitialSort(ProcStatsDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
         }
 
         private void PopulateQueryStoreGrid(List<QueryStoreItem> data)
         {
-            QueryStoreDataGrid.ItemsSource = data;
+            SetItemsSourcePreservingSort(QueryStoreDataGrid, data, "AvgCpuTimeMs", ListSortDirection.Descending);
             QueryStoreNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            SetInitialSort(QueryStoreDataGrid, "AvgCpuTimeMs", ListSortDirection.Descending);
         }
 
         private void SetStatus(string message)
@@ -417,16 +844,42 @@ namespace PerformanceMonitorDashboard.Controls
             _statusCallback?.Invoke(message);
         }
 
-        private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+        private static void SetItemsSourcePreservingSort(
+            DataGrid grid, System.Collections.IEnumerable? newSource,
+            string? defaultSortProperty = null,
+            ListSortDirection defaultDirection = ListSortDirection.Descending)
         {
-            foreach (var column in grid.Columns)
+            var savedSorts = grid.Items.SortDescriptions.ToList();
+
+            grid.ItemsSource = newSource;
+
+            if (savedSorts.Count > 0)
             {
-                if (column is DataGridBoundColumn bc &&
-                    bc.Binding is Binding b &&
-                    b.Path.Path == bindingPath)
+                foreach (var sort in savedSorts)
+                    grid.Items.SortDescriptions.Add(sort);
+
+                foreach (var column in grid.Columns)
                 {
-                    column.SortDirection = direction;
-                    return;
+                    if (column is DataGridBoundColumn bc &&
+                        bc.Binding is Binding b)
+                    {
+                        var match = savedSorts.FirstOrDefault(s => s.PropertyName == b.Path.Path);
+                        column.SortDirection = match.PropertyName != null ? match.Direction : null;
+                    }
+                }
+            }
+            else if (defaultSortProperty != null)
+            {
+                grid.Items.SortDescriptions.Add(new SortDescription(defaultSortProperty, defaultDirection));
+                foreach (var column in grid.Columns)
+                {
+                    if (column is DataGridBoundColumn bc &&
+                        bc.Binding is Binding b &&
+                        b.Path.Path == defaultSortProperty)
+                    {
+                        column.SortDirection = defaultDirection;
+                        return;
+                    }
                 }
             }
         }
@@ -540,10 +993,21 @@ namespace PerformanceMonitorDashboard.Controls
                 }
                 SetStatus("Loading active queries...");
 
-                var data = await _databaseService.GetQuerySnapshotsAsync(_activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
-                ActiveQueriesDataGrid.ItemsSource = data;
+                // If user has narrowed the slicer, use slicer dates for the grid
+                List<QuerySnapshotItem> data;
+                if (ActiveQueriesSlicer.HasNarrowedSelection)
+                {
+                    data = await _databaseService.GetQuerySnapshotsAsync(0, ActiveQueriesSlicer.SelectionStart, ActiveQueriesSlicer.SelectionEnd);
+                }
+                else
+                {
+                    data = await _databaseService.GetQuerySnapshotsAsync(_activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
+                }
+
+                SetItemsSourcePreservingSort(ActiveQueriesDataGrid, data);
                 ActiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 SetStatus($"Loaded {data.Count} query snapshots");
+                LoadActiveQueriesSlicerAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -704,7 +1168,7 @@ namespace PerformanceMonitorDashboard.Controls
                 var data = await _databaseService.GetCurrentActiveQueriesAsync();
 
                 _currentActiveUnfilteredData = data;
-                CurrentActiveQueriesDataGrid.ItemsSource = data;
+                SetItemsSourcePreservingSort(CurrentActiveQueriesDataGrid, data);
                 CurrentActiveNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 CurrentActiveTimestamp.Text = $"Last refreshed: {DateTime.Now:HH:mm:ss} — {data.Count} queries";
 
@@ -1446,9 +1910,8 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 SetStatus("Loading query store regressions...");
                 var data = await _databaseService.GetQueryStoreRegressionsAsync(_qsRegressionsHoursBack, _qsRegressionsFromDate, _qsRegressionsToDate);
-                QueryStoreRegressionsDataGrid.ItemsSource = data;
+                SetItemsSourcePreservingSort(QueryStoreRegressionsDataGrid, data, "DurationRegressionPercent", ListSortDirection.Descending);
                 QueryStoreRegressionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                SetInitialSort(QueryStoreRegressionsDataGrid, "DurationRegressionPercent", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} query store regression records");
             }
             catch (Exception ex)
@@ -1547,9 +2010,8 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 SetStatus("Loading long running query patterns...");
                 var data = await _databaseService.GetLongRunningQueryPatternsAsync(_lrqPatternsHoursBack, _lrqPatternsFromDate, _lrqPatternsToDate);
-                LongRunningQueryPatternsDataGrid.ItemsSource = data;
+                SetItemsSourcePreservingSort(LongRunningQueryPatternsDataGrid, data, "AvgDurationSec", ListSortDirection.Descending);
                 LongRunningQueryPatternsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                SetInitialSort(LongRunningQueryPatternsDataGrid, "AvgDurationSec", ListSortDirection.Descending);
                 SetStatus($"Loaded {data.Count} long running query pattern records");
             }
             catch (Exception ex)

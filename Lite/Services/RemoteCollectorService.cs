@@ -163,6 +163,36 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
+    /// Clears collector health entries for a server that has been removed.
+    /// Prevents stale error counts from showing in the status bar.
+    /// </summary>
+    public void ClearHealthForServer(int serverId)
+    {
+        lock (_healthLock)
+        {
+            var keys = _collectorHealth.Keys.Where(k => k.ServerId == serverId).ToList();
+            foreach (var key in keys)
+                _collectorHealth.Remove(key);
+        }
+    }
+
+    /// <summary>
+    /// Clears collector health entries for all servers NOT in the provided set.
+    /// Used after Manage Servers to purge stale entries for removed servers.
+    /// </summary>
+    public void ClearHealthExcept(HashSet<int> activeServerIds)
+    {
+        lock (_healthLock)
+        {
+            var keys = _collectorHealth.Keys
+                .Where(k => !activeServerIds.Contains(k.ServerId))
+                .ToList();
+            foreach (var key in keys)
+                _collectorHealth.Remove(key);
+        }
+    }
+
+    /// <summary>
     /// Records a collector execution result for health tracking.
     /// </summary>
     private void RecordCollectorResult(int serverId, string collectorName, string status, string? errorMessage = null)
@@ -317,8 +347,9 @@ public partial class RemoteCollectorService
             var majorVersion = serverStatus.SqlMajorVersion;
             var engineEdition = serverStatus.SqlEngineEdition;
             var isAwsRds = serverStatus.IsAwsRds;
+            var hasMsdbAccess = serverStatus.HasMsdbAccess;
 
-            if (!IsCollectorSupported(collectorName, majorVersion, engineEdition, isAwsRds))
+            if (!IsCollectorSupported(collectorName, majorVersion, engineEdition, isAwsRds, hasMsdbAccess))
             {
                 AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} SKIPPED (version {majorVersion}, edition {engineEdition})");
                 return;
@@ -651,12 +682,18 @@ WHERE server_id = $3";
 
     /// <summary>
     /// Gets the server name used for DuckDB storage and hashing.
+    /// Appends the database name for Azure SQL Database connections so that
+    /// different databases on the same logical server get distinct server_ids.
     /// Appends ":RO" for ReadOnlyIntent connections so they get a
     /// different server_id than read-write connections to the same host.
     /// </summary>
     internal static string GetServerNameForStorage(ServerConnection server)
     {
-        return server.ReadOnlyIntent ? server.ServerName + ":RO" : server.ServerName;
+        var name = string.IsNullOrWhiteSpace(server.DatabaseName)
+            ? server.ServerName
+            : server.ServerName + ":" + server.DatabaseName;
+
+        return server.ReadOnlyIntent ? name + ":RO" : name;
     }
 
     /// <summary>
@@ -740,7 +777,7 @@ WHERE server_id = $3";
     /// Version 13 = SQL Server 2016, 14 = 2017, 15 = 2019, 16 = 2022, 17 = 2025.
     /// Engine edition 5 = Azure SQL DB, 8 = Azure MI.
     /// </summary>
-    private static bool IsCollectorSupported(string collectorName, int majorVersion, int engineEdition, bool isAwsRds = false)
+    private static bool IsCollectorSupported(string collectorName, int majorVersion, int engineEdition, bool isAwsRds = false, bool hasMsdbAccess = true)
     {
         bool isAzureSqlDb = engineEdition == 5;
         bool isAzureMi = engineEdition == 8;
@@ -777,6 +814,16 @@ WHERE server_id = $3";
             switch (collectorName)
             {
                 case "running_jobs":      /* msdb.dbo.syssessions not accessible */
+                    return false;
+            }
+        }
+
+        /* msdb access gate — login may not have access to msdb on any edition */
+        if (!hasMsdbAccess)
+        {
+            switch (collectorName)
+            {
+                case "running_jobs":      /* requires msdb.dbo.sysjobs, sysjobactivity, etc. */
                     return false;
             }
         }

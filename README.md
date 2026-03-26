@@ -81,7 +81,7 @@ All release binaries are digitally signed via [SignPath](https://signpath.io) �
 
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
-**Upgrading?** Click **Import Data** in the sidebar and point it at your old Lite folder — all historical data (DuckDB + Parquet archives) is imported into the new install.
+**Upgrading from zip?** Click **Import Settings** then **Import Data** in the sidebar and point both at your old Lite folder. Settings imports server connections, alert thresholds, SMTP config, and schedules. Data imports historical DuckDB + Parquet archives. **Auto-update users** (installed via Setup.exe) get updates automatically — no manual import needed.
 
 **Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear.
 
@@ -116,6 +116,8 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | trace_flags | On connect | `DBCC TRACESTATUS` |
 
 ### Lite Data Storage
+
+All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite\` — separate from the executable, so auto-updates don't affect your data.
 
 - **Hot data** in DuckDB 1.5.0 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)

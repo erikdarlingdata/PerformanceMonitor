@@ -46,6 +46,10 @@ public partial class ServerTab : UserControl
     private List<SelectableItem> _perfmonCounterItems = new();
     private Helpers.ChartHoverHelper? _waitStatsHover;
     private Helpers.ChartHoverHelper? _perfmonHover;
+    private Helpers.ChartHoverHelper? _overviewCpuHover;
+    private Helpers.ChartHoverHelper? _overviewMemoryHover;
+    private Helpers.ChartHoverHelper? _overviewFileIoHover;
+    private Helpers.ChartHoverHelper? _overviewWaitStatsHover;
     private Helpers.ChartHoverHelper? _cpuHover;
     private Helpers.ChartHoverHelper? _memoryHover;
     private Helpers.ChartHoverHelper? _tempDbHover;
@@ -105,6 +109,7 @@ public partial class ServerTab : UserControl
     };
 
     public int UtcOffsetMinutes { get; }
+    private readonly bool _hasMsdbAccess;
 
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
@@ -113,7 +118,7 @@ public partial class ServerTab : UserControl
     public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
     public event Func<Task>? ManualRefreshRequested;
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0, bool hasMsdbAccess = true)
     {
         InitializeComponent();
 
@@ -122,6 +127,7 @@ public partial class ServerTab : UserControl
         _serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         _credentialService = credentialService;
         UtcOffsetMinutes = utcOffsetMinutes;
+        _hasMsdbAccess = hasMsdbAccess;
         ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
@@ -158,6 +164,12 @@ public partial class ServerTab : UserControl
         };
         _refreshTimer.Start();
 
+        /* Show warning on Running Jobs tab if login lacks msdb access */
+        if (!_hasMsdbAccess)
+        {
+            RunningJobsMsdbWarning.Visibility = System.Windows.Visibility.Visible;
+        }
+
         /* Initialize time picker ComboBoxes */
         InitializeTimeComboBoxes();
 
@@ -185,6 +197,10 @@ public partial class ServerTab : UserControl
         }
 
         /* Apply theme immediately so charts don't flash white before data loads */
+        ApplyTheme(OverviewCpuChart);
+        ApplyTheme(OverviewMemoryChart);
+        ApplyTheme(OverviewFileIoChart);
+        ApplyTheme(OverviewWaitStatsChart);
         ApplyTheme(WaitStatsChart);
         ApplyTheme(QueryDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
@@ -210,6 +226,10 @@ public partial class ServerTab : UserControl
         ApplyTheme(CollectorDurationChart);
 
         /* Chart hover tooltips */
+        _overviewCpuHover = new Helpers.ChartHoverHelper(OverviewCpuChart, "%");
+        _overviewMemoryHover = new Helpers.ChartHoverHelper(OverviewMemoryChart, "MB");
+        _overviewFileIoHover = new Helpers.ChartHoverHelper(OverviewFileIoChart, "ms");
+        _overviewWaitStatsHover = new Helpers.ChartHoverHelper(OverviewWaitStatsChart, "ms/sec");
         _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsChart, "ms/sec");
         _perfmonHover = new Helpers.ChartHoverHelper(PerfmonChart, "");
         _cpuHover = new Helpers.ChartHoverHelper(CpuChart, "%");
@@ -241,8 +261,20 @@ public partial class ServerTab : UserControl
         Helpers.ContextMenuHelper.SetupChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage");
+        /* Overview chart context menus */
+        var ovCpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewCpuChart, "Overview_CPU");
+        AddChartDrillDownMenuItem(OverviewCpuChart, ovCpuMenu, _overviewCpuHover, "Show Active Queries at This Time", OnCpuDrillDown);
+        var ovMemMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewMemoryChart, "Overview_Memory");
+        AddChartDrillDownMenuItem(OverviewMemoryChart, ovMemMenu, _overviewMemoryHover, "Show Active Queries at This Time", OnMemoryDrillDown);
+        var ovIoMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewFileIoChart, "Overview_FileIO");
+        AddChartDrillDownMenuItem(OverviewFileIoChart, ovIoMenu, _overviewFileIoHover, "Show Active Queries at This Time", OnCpuDrillDown);
+        var ovWaitMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(OverviewWaitStatsChart, "Overview_WaitStats");
+        AddChartDrillDownMenuItem(OverviewWaitStatsChart, ovWaitMenu, _overviewWaitStatsHover, "Show Active Queries at This Time", OnCpuDrillDown);
+
+        var cpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage");
+        AddChartDrillDownMenuItem(CpuChart, cpuMenu, _cpuHover, "Show Active Queries at This Time", OnCpuDrillDown);
+        var memoryMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage");
+        AddChartDrillDownMenuItem(MemoryChart, memoryMenu, _memoryHover, "Show Active Queries at This Time", OnMemoryDrillDown);
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks");
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing");
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity");
@@ -250,11 +282,14 @@ public partial class ServerTab : UserControl
         Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteChart, "File_IO_Write_Latency");
         Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadThroughputChart, "File_IO_Read_Throughput");
         Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteThroughputChart, "File_IO_Write_Throughput");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbChart, "TempDB_Stats");
+        var tempDbMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbChart, "TempDB_Stats");
+        AddChartDrillDownMenuItem(TempDbChart, tempDbMenu, _tempDbHover, "Show Active Queries at This Time", OnTempDbDrillDown);
         Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbFileIoChart, "TempDB_File_IO");
         Helpers.ContextMenuHelper.SetupChartContextMenu(LockWaitTrendChart, "Lock_Wait_Trends");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(BlockingTrendChart, "Blocking_Trends");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(DeadlockTrendChart, "Deadlock_Trends");
+        var blockingMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(BlockingTrendChart, "Blocking_Trends");
+        AddChartDrillDownMenuItem(BlockingTrendChart, blockingMenu, _blockingTrendHover, "Show Blocking at This Time", OnBlockingDrillDown);
+        var deadlockMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(DeadlockTrendChart, "Deadlock_Trends");
+        AddChartDrillDownMenuItem(DeadlockTrendChart, deadlockMenu, _deadlockTrendHover, "Show Deadlocks at This Time", OnDeadlockDrillDown);
         Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration");
         Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked");
         Helpers.ContextMenuHelper.SetupChartContextMenu(PerfmonChart, "Perfmon_Counters");
@@ -262,6 +297,13 @@ public partial class ServerTab : UserControl
 
         Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
         Unloaded += (_, _) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+
+        ActiveQueriesSlicer.RangeChanged += OnActiveQueriesSlicerChanged;
+        QueryStatsSlicer.RangeChanged += OnQueryStatsSlicerChanged;
+        ProcStatsSlicer.RangeChanged += OnProcStatsSlicerChanged;
+        QueryStoreSlicer.RangeChanged += OnQueryStoreSlicerChanged;
+        BlockingSlicer.RangeChanged += OnBlockingSlicerChanged;
+        DeadlockSlicer.RangeChanged += OnDeadlockSlicerChanged;
 
         /* Initial load is triggered by MainWindow.ConnectToServer calling RefreshData()
            after collectors finish - no Loaded handler needed */
@@ -344,6 +386,22 @@ public partial class ServerTab : UserControl
             4 => 168,
             _ => 4
         };
+    }
+
+    /// <summary>
+    /// Gets the UTC time range for slicer display, matching GetTimeRange in LocalDataService.
+    /// </summary>
+    private static (DateTime start, DateTime end) GetSlicerTimeRange(
+        int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            var startUtc = fromDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
+            var endUtc = toDate.Value.AddMinutes(-ServerTimeHelper.UtcOffsetMinutes);
+            return (startUtc, endUtc);
+        }
+
+        return (DateTime.UtcNow.AddHours(-hoursBack), DateTime.UtcNow);
     }
 
     /// <summary>
@@ -439,11 +497,19 @@ public partial class ServerTab : UserControl
         RunningJobsGrid.Items.Refresh();
         CollectionHealthGrid.Items.Refresh();
         CollectionLogGrid.Items.Refresh();
+
+        // Refresh slicer labels
+        ActiveQueriesSlicer.Redraw();
+        QueryStatsSlicer.Redraw();
+        ProcStatsSlicer.Redraw();
+        QueryStoreSlicer.Redraw();
+        BlockingSlicer.Redraw();
+        DeadlockSlicer.Redraw();
     }
 
     private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (!IsLoaded || _isRefreshing) return;
 
         /* Show/hide custom date pickers and time ComboBoxes */
         var isCustom = TimeRangeCombo.SelectedIndex == 5;
@@ -474,7 +540,7 @@ public partial class ServerTab : UserControl
 
     private async void CustomDateRange_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (!IsLoaded || _isRefreshing) return;
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {
             await RefreshAllDataAsync(fullRefresh: false);
@@ -483,7 +549,7 @@ public partial class ServerTab : UserControl
 
     private async void CustomTimeCombo_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (!IsLoaded || _isRefreshing) return;
         /* Only refresh if we have valid dates selected */
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {
@@ -629,7 +695,7 @@ public partial class ServerTab : UserControl
             {
                 await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true);
                 /* Always keep alert badge current even when Blocking tab is not visible */
-                if (MainTabControl.SelectedIndex != 7)
+                if (MainTabControl.SelectedIndex != 8)
                     await RefreshAlertCountsAsync(hoursBack, fromDate, toDate);
             }
 
@@ -651,19 +717,20 @@ public partial class ServerTab : UserControl
     {
         switch (MainTabControl.SelectedIndex)
         {
-            case 0: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
-            case 1: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
-            case 2: break; // Plan Viewer — no queries
-            case 3: await RefreshCpuAsync(hoursBack, fromDate, toDate); break;
-            case 4: await RefreshMemoryAsync(hoursBack, fromDate, toDate, subTabOnly); break;
-            case 5: await RefreshFileIoAsync(hoursBack, fromDate, toDate); break;
-            case 6: await RefreshTempDbAsync(hoursBack, fromDate, toDate); break;
-            case 7: await RefreshBlockingAsync(hoursBack, fromDate, toDate, subTabOnly); break;
-            case 8: await RefreshPerfmonAsync(hoursBack, fromDate, toDate); break;
-            case 9: await RefreshRunningJobsAsync(hoursBack, fromDate, toDate); break;
-            case 10: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
-            case 11: await RefreshDailySummaryAsync(hoursBack, fromDate, toDate); break;
-            case 12: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate); break;
+            case 0: await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
+            case 1: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
+            case 2: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case 3: break; // Plan Viewer — no queries
+            case 4: await RefreshCpuAsync(hoursBack, fromDate, toDate); break;
+            case 5: await RefreshMemoryAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case 6: await RefreshFileIoAsync(hoursBack, fromDate, toDate); break;
+            case 7: await RefreshTempDbAsync(hoursBack, fromDate, toDate); break;
+            case 8: await RefreshBlockingAsync(hoursBack, fromDate, toDate, subTabOnly); break;
+            case 9: await RefreshPerfmonAsync(hoursBack, fromDate, toDate); break;
+            case 10: await RefreshRunningJobsAsync(hoursBack, fromDate, toDate); break;
+            case 11: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
+            case 12: await RefreshDailySummaryAsync(hoursBack, fromDate, toDate); break;
+            case 13: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate); break;
         }
     }
 
@@ -758,13 +825,13 @@ public partial class ServerTab : UserControl
         _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
         LiveSnapshotIndicator.Text = "";
         _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
-        SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
-        SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
         _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(deadlockTask.Result));
         _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
-        SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+        SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
@@ -868,21 +935,25 @@ public partial class ServerTab : UserControl
                         var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate);
                         _querySnapshotsFilterMgr!.UpdateData(snapshots);
                         LiveSnapshotIndicator.Text = "";
+                        _ = LoadActiveQueriesSlicerAsync();
                         break;
                     case 2: // Top Queries by Duration
                         var queryStats = await _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
                         _queryStatsFilterMgr!.UpdateData(queryStats);
-                        SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                        SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                        _ = LoadQueryStatsSlicerAsync();
                         break;
                     case 3: // Top Procedures by Duration
                         var procStats = await _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
                         _procStatsFilterMgr!.UpdateData(procStats);
-                        SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                        SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+                        _ = LoadProcStatsSlicerAsync();
                         break;
                     case 4: // Query Store by Duration
                         var qsData = await _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate);
                         _queryStoreFilterMgr!.UpdateData(qsData);
-                        SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+                        SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+                        _ = LoadQueryStoreSlicerAsync();
                         break;
                 }
                 return;
@@ -904,12 +975,18 @@ public partial class ServerTab : UserControl
 
             _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
             LiveSnapshotIndicator.Text = "";
+
+            _ = LoadActiveQueriesSlicerAsync();
+
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
-            SetInitialSort(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            _ = LoadQueryStatsSlicerAsync();
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
-            SetInitialSort(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            _ = LoadProcStatsSlicerAsync();
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
-            SetInitialSort(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+            SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+            _ = LoadQueryStoreSlicerAsync();
 
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result);
@@ -923,6 +1000,158 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>Tab 3 — CPU</summary>
+    /// <summary>Tab 0 — Overview (4 charts: CPU, Memory, File I/O, Wait Stats)</summary>
+    private async System.Threading.Tasks.Task RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        try
+        {
+            var cpuTask = SafeQueryAsync(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate));
+            var memoryTask = SafeQueryAsync(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var fileIoTask = SafeQueryAsync(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
+
+            // Get top 5 wait types then fetch trends for each
+            var waitStats = await SafeQueryAsync(() => _dataService.GetWaitStatsAsync(_serverId, hoursBack, fromDate, toDate));
+            var topWaits = waitStats.Take(5).Select(w => w.WaitType).ToList();
+            await System.Threading.Tasks.Task.WhenAll(cpuTask, memoryTask, fileIoTask);
+
+            UpdateOverviewCpuChart(cpuTask.Result);
+            UpdateOverviewMemoryChart(memoryTask.Result);
+            UpdateOverviewFileIoChart(fileIoTask.Result);
+            await UpdateOverviewWaitStatsChartAsync(topWaits, hoursBack, fromDate, toDate);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex.Message}");
+        }
+    }
+
+    private void UpdateOverviewCpuChart(List<CpuUtilizationRow> data)
+    {
+        ClearChart(OverviewCpuChart);
+        _overviewCpuHover?.Clear();
+        ApplyTheme(OverviewCpuChart);
+
+        if (data.Count == 0) { RefreshEmptyChart(OverviewCpuChart, "CPU Utilization", "CPU %"); return; }
+
+        var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
+        var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
+
+        var plot = OverviewCpuChart.Plot.Add.Scatter(times, sqlCpu);
+        plot.LegendText = "SQL CPU %";
+        plot.Color = ScottPlot.Color.FromHex("#4FC3F7");
+        _overviewCpuHover?.Add(plot, "SQL CPU %");
+
+        OverviewCpuChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewCpuChart);
+        OverviewCpuChart.Plot.Title("CPU Utilization");
+        OverviewCpuChart.Plot.YLabel("CPU %");
+        OverviewCpuChart.Plot.Axes.SetLimitsY(0, 105);
+        ShowChartLegend(OverviewCpuChart);
+        OverviewCpuChart.Refresh();
+    }
+
+    private void UpdateOverviewMemoryChart(List<MemoryTrendPoint> data)
+    {
+        ClearChart(OverviewMemoryChart);
+        _overviewMemoryHover?.Clear();
+        ApplyTheme(OverviewMemoryChart);
+
+        if (data.Count == 0) { RefreshEmptyChart(OverviewMemoryChart, "Memory Utilization", "MB"); return; }
+
+        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var bufferPool = data.Select(d => d.BufferPoolMb).ToArray();
+        var grants = data.Select(d => d.TotalGrantedMb).ToArray();
+
+        var bpPlot = OverviewMemoryChart.Plot.Add.Scatter(times, bufferPool);
+        bpPlot.LegendText = "Buffer Pool";
+        bpPlot.Color = ScottPlot.Color.FromHex("#CE93D8");
+        _overviewMemoryHover?.Add(bpPlot, "Buffer Pool");
+
+        var grantPlot = OverviewMemoryChart.Plot.Add.Scatter(times, grants);
+        grantPlot.LegendText = "Memory Grants";
+        grantPlot.Color = ScottPlot.Color.FromHex("#FFB74D");
+        _overviewMemoryHover?.Add(grantPlot, "Memory Grants");
+
+        OverviewMemoryChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewMemoryChart);
+        OverviewMemoryChart.Plot.Title("Memory Utilization");
+        OverviewMemoryChart.Plot.YLabel("MB");
+        SetChartYLimitsWithLegendPadding(OverviewMemoryChart, 0, bufferPool.Max());
+        ShowChartLegend(OverviewMemoryChart);
+        OverviewMemoryChart.Refresh();
+    }
+
+    private void UpdateOverviewFileIoChart(List<FileIoTrendPoint> data)
+    {
+        ClearChart(OverviewFileIoChart);
+        _overviewFileIoHover?.Clear();
+        ApplyTheme(OverviewFileIoChart);
+
+        if (data.Count == 0) { RefreshEmptyChart(OverviewFileIoChart, "File I/O Latency", "ms"); return; }
+
+        // Aggregate across all databases/files per collection time
+        var grouped = data
+            .GroupBy(d => d.CollectionTime)
+            .OrderBy(g => g.Key)
+            .Select(g => new { Time = g.Key, ReadMs = g.Average(x => x.AvgReadLatencyMs), WriteMs = g.Average(x => x.AvgWriteLatencyMs) })
+            .ToList();
+
+        var times = grouped.Select(d => d.Time.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var readMs = grouped.Select(d => d.ReadMs).ToArray();
+        var writeMs = grouped.Select(d => d.WriteMs).ToArray();
+
+        var readPlot = OverviewFileIoChart.Plot.Add.Scatter(times, readMs);
+        readPlot.LegendText = "Read ms";
+        readPlot.Color = ScottPlot.Color.FromHex("#81C784");
+        _overviewFileIoHover?.Add(readPlot, "Read ms");
+
+        var writePlot = OverviewFileIoChart.Plot.Add.Scatter(times, writeMs);
+        writePlot.LegendText = "Write ms";
+        writePlot.Color = ScottPlot.Color.FromHex("#FFB74D");
+        _overviewFileIoHover?.Add(writePlot, "Write ms");
+
+        OverviewFileIoChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewFileIoChart);
+        OverviewFileIoChart.Plot.Title("File I/O Latency");
+        OverviewFileIoChart.Plot.YLabel("Latency (ms)");
+        var maxVal = Math.Max(readMs.DefaultIfEmpty(0).Max(), writeMs.DefaultIfEmpty(0).Max());
+        SetChartYLimitsWithLegendPadding(OverviewFileIoChart, 0, maxVal);
+        ShowChartLegend(OverviewFileIoChart);
+        OverviewFileIoChart.Refresh();
+    }
+
+    private async System.Threading.Tasks.Task UpdateOverviewWaitStatsChartAsync(
+        List<string> topWaits, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(OverviewWaitStatsChart);
+        _overviewWaitStatsHover?.Clear();
+        ApplyTheme(OverviewWaitStatsChart);
+
+        if (topWaits.Count == 0) { RefreshEmptyChart(OverviewWaitStatsChart, "Wait Statistics", "ms/sec"); return; }
+
+        var colors = new[] { "#4FC3F7", "#81C784", "#FFB74D", "#CE93D8", "#E57373" };
+        for (int i = 0; i < Math.Min(topWaits.Count, 5); i++)
+        {
+            var trend = await _dataService.GetWaitStatsTrendAsync(_serverId, topWaits[i], hoursBack, fromDate, toDate);
+            if (trend.Count < 2) continue;
+
+            var times = trend.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var values = trend.Select(d => d.WaitTimeMsPerSecond).ToArray();
+
+            var plot = OverviewWaitStatsChart.Plot.Add.Scatter(times, values);
+            plot.LegendText = topWaits[i];
+            plot.Color = ScottPlot.Color.FromHex(colors[i]);
+            _overviewWaitStatsHover?.Add(plot, topWaits[i]);
+        }
+
+        OverviewWaitStatsChart.Plot.Axes.DateTimeTicksBottom();
+        ReapplyAxisColors(OverviewWaitStatsChart);
+        OverviewWaitStatsChart.Plot.Title("Wait Statistics");
+        OverviewWaitStatsChart.Plot.YLabel("Wait Time (ms/sec)");
+        ShowChartLegend(OverviewWaitStatsChart);
+        OverviewWaitStatsChart.Refresh();
+    }
+
     private async System.Threading.Tasks.Task RefreshCpuAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         try
@@ -1055,10 +1284,12 @@ public partial class ServerTab : UserControl
                     case 2: // Blocked Process Reports
                         var bpr = await _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate);
                         _blockedProcessFilterMgr!.UpdateData(bpr);
+                        await LoadBlockingSlicerAsync();
                         break;
                     case 3: // Deadlocks
                         var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate);
                         _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
+                        await LoadDeadlockSlicerAsync();
                         break;
                 }
                 /* Always keep alert badge current when Blocking tab is visible */
@@ -1089,6 +1320,9 @@ public partial class ServerTab : UserControl
             UpdateCurrentWaitsDurationChart(currentWaitsDurationTask.Result, hoursBack, fromDate, toDate);
             UpdateCurrentWaitsBlockedChart(currentWaitsBlockedTask.Result, hoursBack, fromDate, toDate);
 
+            await LoadBlockingSlicerAsync();
+            await LoadDeadlockSlicerAsync();
+
             /* Notify parent of alert counts for tab badge */
             var blockingCount = blockedProcessTask.Result.Count;
             var deadlockCount = deadlockTask.Result.Count;
@@ -1104,6 +1338,143 @@ public partial class ServerTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshBlockingAsync failed: {ex.Message}");
+        }
+    }
+
+    // ── Blocking Slicer ──
+
+    private string _blockingSlicerMetric = "Events";
+    private List<Models.TimeSliceBucket>? _blockingSlicerData;
+
+    private async System.Threading.Tasks.Task LoadBlockingSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetBlockingSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _blockingSlicerData = data;
+            _blockingSlicerMetric = "Events";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadBlockingSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private async void OnBlockingSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+
+            var bpr = await _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromServer, toServer);
+            _blockedProcessFilterMgr!.UpdateData(bpr);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnBlockingSlicerChanged failed: {ex.Message}");
+        }
+    }
+
+    private void BlockedProcessReportGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        if (_blockingSlicerData == null || _blockingSlicerData.Count == 0) return;
+
+        var col = e.Column.SortMemberPath ?? "";
+        if (string.IsNullOrEmpty(col))
+        {
+            if (e.Column is DataGridBoundColumn bc && bc.Binding is System.Windows.Data.Binding b)
+                col = b.Path.Path;
+        }
+        var (metric, label) = col switch
+        {
+            "WaitTimeMs" => ("TotalCpu", "Total Wait (sec)"),
+            "BlockingSpid" => ("TotalElapsed", "Distinct Blockers"),
+            "BlockedSpid" => ("TotalReads", "Distinct Blocked"),
+            "DatabaseName" => ("TotalLogicalReads", "Distinct Databases"),
+            _ => ("Events", "Blocking Events"),
+        };
+
+        if (metric == _blockingSlicerMetric) return;
+        _blockingSlicerMetric = metric;
+
+        foreach (var bucket in _blockingSlicerData)
+        {
+            bucket.Value = metric switch
+            {
+                "TotalCpu" => bucket.TotalCpu,
+                "TotalElapsed" => bucket.TotalElapsed,
+                "TotalReads" => bucket.TotalReads,
+                "TotalLogicalReads" => bucket.TotalLogicalReads,
+                _ => bucket.SessionCount,
+            };
+        }
+
+        BlockingSlicer.UpdateMetric(label);
+    }
+
+    // ── Deadlock Slicer ──
+
+    private List<Models.TimeSliceBucket>? _deadlockSlicerData;
+
+    private async System.Threading.Tasks.Task LoadDeadlockSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetDeadlockSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _deadlockSlicerData = data;
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadDeadlockSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private async void OnDeadlockSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+
+            var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromServer, toServer);
+            _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnDeadlockSlicerChanged failed: {ex.Message}");
         }
     }
 
@@ -2121,6 +2492,147 @@ public partial class ServerTab : UserControl
         QueryStoreDurationTrendChart.Refresh();
     }
 
+    // ── Grid → Slicer Overlay (#683) ──
+
+    private (DateTime? fromDate, DateTime? toDate) GetCurrentViewDates()
+    {
+        if (IsCustomRange)
+        {
+            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+            if (fromLocal.HasValue && toLocal.HasValue)
+                return (ServerTimeHelper.LocalToServerTime(fromLocal.Value),
+                        ServerTimeHelper.LocalToServerTime(toLocal.Value));
+        }
+        return (null, null);
+    }
+
+    /// <summary>
+    /// Computes per-interval deltas from cumulative history values.
+    /// Picks the metric field based on the current slicer sort metric.
+    /// </summary>
+    private static List<(DateTime TimeUtc, double Value)> ComputeQueryOverlayPoints(
+        List<QueryStatsHistoryRow> history, string slicerMetric)
+    {
+        Func<QueryStatsHistoryRow, long> selector = slicerMetric switch
+        {
+            "TotalCpu" or "AvgCpu" => h => h.DeltaCpuUs,
+            "TotalReads" or "AvgReads" => h => h.DeltaLogicalReads,
+            "TotalWrites" => h => h.DeltaLogicalWrites,
+            "TotalPhysReads" => h => h.DeltaPhysicalReads,
+            _ => h => h.DeltaElapsedUs, // TotalElapsed, AvgElapsed, default
+        };
+        bool isMicroseconds = slicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
+
+        var points = new List<(DateTime TimeUtc, double Value)>();
+        for (int i = 1; i < history.Count; i++)
+        {
+            var delta = selector(history[i]) - selector(history[i - 1]);
+            if (delta > 0)
+                points.Add((history[i].CollectionTime, isMicroseconds ? delta / 1000.0 : delta));
+        }
+        return points;
+    }
+
+    private static List<(DateTime TimeUtc, double Value)> ComputeProcOverlayPoints(
+        List<ProcedureStatsHistoryRow> history, string slicerMetric)
+    {
+        Func<ProcedureStatsHistoryRow, long> selector = slicerMetric switch
+        {
+            "TotalCpu" or "AvgCpu" => h => h.DeltaCpuUs,
+            "TotalReads" or "AvgReads" => h => h.DeltaLogicalReads,
+            "TotalWrites" => h => h.DeltaLogicalWrites,
+            "TotalPhysReads" => h => h.DeltaPhysicalReads,
+            _ => h => h.DeltaElapsedUs,
+        };
+        bool isMicroseconds = slicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
+
+        var points = new List<(DateTime TimeUtc, double Value)>();
+        for (int i = 1; i < history.Count; i++)
+        {
+            var delta = selector(history[i]) - selector(history[i - 1]);
+            if (delta > 0)
+                points.Add((history[i].CollectionTime, isMicroseconds ? delta / 1000.0 : delta));
+        }
+        return points;
+    }
+
+    private async void QueryStatsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (QueryStatsGrid.SelectedItem is not QueryStatsRow row || string.IsNullOrEmpty(row.QueryHash))
+        {
+            if (!_isRefreshing) QueryStatsSlicer.ClearOverlay();
+            return;
+        }
+
+        try
+        {
+            var hoursBack = GetHoursBack();
+            var (fromDate, toDate) = GetCurrentViewDates();
+            var history = await _dataService.GetQueryStatsHistoryAsync(_serverId, row.DatabaseName, row.QueryHash, hoursBack, fromDate, toDate);
+
+            var points = ComputeQueryOverlayPoints(history, _queryStatsSlicerMetric);
+            QueryStatsSlicer.SetOverlay(points, row.QueryHash);
+        }
+        catch { QueryStatsSlicer.ClearOverlay(); }
+    }
+
+    private async void ProcedureStatsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ProcedureStatsGrid.SelectedItem is not ProcedureStatsRow row || string.IsNullOrEmpty(row.ObjectName))
+        {
+            if (!_isRefreshing) ProcStatsSlicer.ClearOverlay();
+            return;
+        }
+
+        try
+        {
+            var hoursBack = GetHoursBack();
+            var (fromDate, toDate) = GetCurrentViewDates();
+            var history = await _dataService.GetProcedureStatsHistoryAsync(_serverId, row.DatabaseName, row.SchemaName, row.ObjectName, hoursBack, fromDate, toDate);
+
+            var points = ComputeProcOverlayPoints(history, _procStatsSlicerMetric);
+            var label = row.ObjectName.Length > 30 ? row.ObjectName[..30] + "..." : row.ObjectName;
+            ProcStatsSlicer.SetOverlay(points, label);
+        }
+        catch { ProcStatsSlicer.ClearOverlay(); }
+    }
+
+    private async void QueryStoreGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (QueryStoreGrid.SelectedItem is not QueryStoreRow row)
+        {
+            if (!_isRefreshing) QueryStoreSlicer.ClearOverlay();
+            return;
+        }
+
+        try
+        {
+            var hoursBack = GetHoursBack();
+            var (fromDate, toDate) = GetCurrentViewDates();
+            var history = await _dataService.GetQueryStoreHistoryAsync(_serverId, row.DatabaseName, row.QueryId, row.PlanId, hoursBack, fromDate, toDate);
+
+            // Query Store values are already per-interval averages, not cumulative
+            Func<QueryStoreHistoryRow, double> selector = _queryStoreSlicerMetric switch
+            {
+                "TotalCpu" or "AvgCpu" => h => h.TotalCpuMs,
+                "TotalReads" or "AvgReads" => h => h.AvgLogicalReads * h.ExecutionCount,
+                _ => h => h.TotalDurationMs,
+            };
+
+            var points = history
+                .Where(h => selector(h) > 0)
+                .Select(h => (h.CollectionTime, selector(h)))
+                .ToList();
+
+            var qsLabel = !string.IsNullOrWhiteSpace(row.ModuleName)
+                ? row.ModuleName
+                : $"Query {row.QueryId} / Plan {row.PlanId}";
+            QueryStoreSlicer.SetOverlay(points, qsLabel);
+        }
+        catch { QueryStoreSlicer.ClearOverlay(); }
+    }
+
     private void UpdateExecutionCountTrendChart(List<QueryTrendPoint> data)
     {
         ClearChart(ExecutionCountTrendChart);
@@ -2288,13 +2800,151 @@ public partial class ServerTab : UserControl
         if (menuItem.Tag is not (string waitType, DateTime time)) return;
 
         // ±15 minute window around the clicked point (already in server local time from chart)
-        var fromDate = time.AddMinutes(-15);
-        var toDate = time.AddMinutes(15);
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
 
         var window = new Windows.WaitDrillDownWindow(
             _dataService, _serverId, waitType, 1, fromDate, toDate);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
+    }
+
+    // ── Generic Chart Drill-Down (#682) ──
+
+    private void AddChartDrillDownMenuItem(
+        ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu,
+        Helpers.ChartHoverHelper? hover, string label, Action<DateTime> handler)
+    {
+        contextMenu.Items.Insert(0, new Separator());
+        var item = new MenuItem { Header = label };
+        contextMenu.Items.Insert(0, item);
+
+        contextMenu.Opened += (s, _) =>
+        {
+            var pos = System.Windows.Input.Mouse.GetPosition(chart);
+            var nearest = hover?.GetNearestSeries(pos);
+            if (nearest.HasValue)
+            {
+                item.Tag = nearest.Value.Time;
+                item.IsEnabled = true;
+            }
+            else
+            {
+                item.Tag = null;
+                item.IsEnabled = false;
+            }
+        };
+
+        item.Click += (s, _) =>
+        {
+            if (item.Tag is DateTime time)
+                handler(time);
+        };
+    }
+
+    private async void OnCpuDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
+
+        // Populate custom date pickers so user can explore other tabs
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        // Navigate to Queries > Active Queries with ±15 min window
+        MainTabControl.SelectedIndex = 2; // Queries
+        QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
+    }
+
+    private async void OnMemoryDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        MainTabControl.SelectedIndex = 2; // Queries
+        QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
+    }
+
+    private async void OnTempDbDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        // Navigate to Active Queries — TempDB spills are visible there
+        MainTabControl.SelectedIndex = 2; // Queries
+        QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
+    }
+
+    private async void OnBlockingDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        MainTabControl.SelectedIndex = 8; // Blocking
+        BlockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
+        var bpr = await _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromDate, toDate);
+        _blockedProcessFilterMgr!.UpdateData(bpr);
+    }
+
+    private async void OnDeadlockDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-30);
+        var toDate = time.AddMinutes(30);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        MainTabControl.SelectedIndex = 8; // Blocking
+        BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
+        var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromDate, toDate);
+        _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
+    }
+
+    /// <summary>
+    /// Sets the time range combo to Custom and populates the date/time pickers
+    /// so the user can navigate other tabs at the same time window.
+    /// </summary>
+    private void SetDrillDownTimeRange(DateTime fromServer, DateTime toServer)
+    {
+        // Convert server time to local time for the pickers
+        var fromLocal = ServerTimeHelper.ToLocalTime(fromServer);
+        var toLocal = ServerTimeHelper.ToLocalTime(toServer);
+
+        // Switch to Custom without triggering a refresh
+        _isRefreshing = true;
+        try
+        {
+            TimeRangeCombo.SelectedIndex = 5; // Custom
+            FromDatePicker.SelectedDate = fromLocal.Date;
+            FromHourCombo.SelectedIndex = fromLocal.Hour;
+            FromMinuteCombo.SelectedIndex = fromLocal.Minute / 15;
+            ToDatePicker.SelectedDate = toLocal.Date;
+            ToHourCombo.SelectedIndex = toLocal.Hour;
+            ToMinuteCombo.SelectedIndex = toLocal.Minute / 15;
+
+            // Make pickers visible
+            var visibility = Visibility.Visible;
+            FromDatePicker.Visibility = visibility;
+            FromHourCombo.Visibility = visibility;
+            FromMinuteCombo.Visibility = visibility;
+            ToLabel.Visibility = visibility;
+            ToDatePicker.Visibility = visibility;
+            ToHourCombo.Visibility = visibility;
+            ToMinuteCombo.Visibility = visibility;
+        }
+        finally
+        {
+            _isRefreshing = false;
+        }
     }
 
     private async System.Threading.Tasks.Task UpdateWaitStatsChartFromPickerAsync()
@@ -3661,6 +4311,387 @@ public partial class ServerTab : UserControl
         catch { return null; }
     }
 
+    // ── Active Queries Slicer ──
+
+    private async System.Threading.Tasks.Task LoadActiveQueriesSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetActiveQuerySlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _activeQueriesSlicerData = data;
+            _activeQueriesSlicerMetric = "Sessions";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadActiveQueriesSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private string _activeQueriesSlicerMetric = "Sessions";
+    private List<Models.TimeSliceBucket>? _activeQueriesSlicerData;
+
+    private void QuerySnapshotsGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        if (_activeQueriesSlicerData == null || _activeQueriesSlicerData.Count == 0) return;
+
+        var col = e.Column.SortMemberPath ?? "";
+        if (string.IsNullOrEmpty(col))
+        {
+            // Fall back to binding path
+            if (e.Column is DataGridBoundColumn bc && bc.Binding is System.Windows.Data.Binding b)
+                col = b.Path.Path;
+        }
+        var (metric, label) = col switch
+        {
+            "CpuTimeMs" => ("TotalCpu", "Total CPU (ms)"),
+            "TotalElapsedTimeMs" => ("TotalElapsed", "Total Elapsed (ms)"),
+            "Reads" => ("TotalReads", "Total Reads"),
+            "LogicalReads" => ("TotalLogicalReads", "Total Logical Reads"),
+            "Writes" => ("TotalWrites", "Total Writes"),
+            _ => ("Sessions", "Sessions"),
+        };
+
+        if (metric == _activeQueriesSlicerMetric) return;
+        _activeQueriesSlicerMetric = metric;
+
+        foreach (var bucket in _activeQueriesSlicerData)
+        {
+            bucket.Value = metric switch
+            {
+                "TotalCpu" => bucket.TotalCpu,
+                "TotalElapsed" => bucket.TotalElapsed,
+                "TotalReads" => bucket.TotalReads,
+                "TotalLogicalReads" => bucket.TotalLogicalReads,
+                "TotalWrites" => bucket.TotalWrites,
+                _ => bucket.SessionCount,
+            };
+        }
+
+        ActiveQueriesSlicer.UpdateMetric(label);
+    }
+
+    private async void OnActiveQueriesSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            // Slicer sends UTC dates; GetTimeRange expects server time for fromDate/toDate
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+
+            var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromServer, toServer);
+            _querySnapshotsFilterMgr!.UpdateData(snapshots);
+            LiveSnapshotIndicator.Text = "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnActiveQueriesSlicerChanged failed: {ex.Message}");
+        }
+    }
+
+    // ── Query Stats Slicer ──
+
+    private string _queryStatsSlicerMetric = "TotalCpu";
+    private List<Models.TimeSliceBucket>? _queryStatsSlicerData;
+
+    private async System.Threading.Tasks.Task LoadQueryStatsSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetQueryStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _queryStatsSlicerData = data;
+            _queryStatsSlicerMetric = "TotalCpu";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadQueryStatsSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private async void OnQueryStatsSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+            var queryStats = await _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes);
+            _queryStatsFilterMgr!.UpdateData(queryStats);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnQueryStatsSlicerChanged failed: {ex.Message}");
+        }
+    }
+
+    private void QueryStatsGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        if (_queryStatsSlicerData == null || _queryStatsSlicerData.Count == 0) return;
+
+        var col = e.Column.SortMemberPath ?? "";
+        if (string.IsNullOrEmpty(col) && e.Column is DataGridBoundColumn bc && bc.Binding is System.Windows.Data.Binding b)
+            col = b.Path.Path;
+
+        var (metric, label) = col switch
+        {
+            "TotalCpuMs" => ("TotalCpu", "Total CPU (ms)"),
+            "AvgCpuMs" => ("AvgCpu", "Avg CPU (ms)"),
+            "TotalElapsedMs" => ("TotalElapsed", "Total Duration (ms)"),
+            "AvgElapsedMs" => ("AvgElapsed", "Avg Duration (ms)"),
+            "TotalLogicalReads" => ("TotalReads", "Total Reads"),
+            "AvgReads" => ("AvgReads", "Avg Reads"),
+            "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
+            "TotalPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
+            _ => ("TotalCpu", "Total CPU (ms)"),
+        };
+
+        if (metric == _queryStatsSlicerMetric) return;
+        _queryStatsSlicerMetric = metric;
+
+        foreach (var bucket in _queryStatsSlicerData)
+        {
+            var n = bucket.SessionCount > 0 ? bucket.SessionCount : 1;
+            bucket.Value = metric switch
+            {
+                "TotalCpu" => bucket.TotalCpu,
+                "AvgCpu" => bucket.TotalCpu / n,
+                "TotalElapsed" => bucket.TotalElapsed,
+                "AvgElapsed" => bucket.TotalElapsed / n,
+                "TotalReads" => bucket.TotalReads,
+                "AvgReads" => bucket.TotalReads / n,
+                "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalLogicalReads,
+                _ => bucket.TotalCpu,
+            };
+        }
+
+        QueryStatsSlicer.UpdateMetric(label);
+
+        // Re-compute overlay with new metric if a row is selected
+        if (QueryStatsGrid.SelectedItem != null)
+            QueryStatsGrid_SelectionChanged(QueryStatsGrid, null!);
+    }
+
+    // ── Query Store Slicer ──
+
+    private string _queryStoreSlicerMetric = "TotalCpu";
+    private List<Models.TimeSliceBucket>? _queryStoreSlicerData;
+
+    private async System.Threading.Tasks.Task LoadQueryStoreSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetQueryStoreSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _queryStoreSlicerData = data;
+            _queryStoreSlicerMetric = "TotalCpu";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadQueryStoreSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private async void OnQueryStoreSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+            var qsData = await _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, fromServer, toServer);
+            _queryStoreFilterMgr!.UpdateData(qsData);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnQueryStoreSlicerChanged failed: {ex.Message}");
+        }
+    }
+
+    private void QueryStoreGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        if (_queryStoreSlicerData == null || _queryStoreSlicerData.Count == 0) return;
+
+        var col = e.Column.SortMemberPath ?? "";
+        if (string.IsNullOrEmpty(col) && e.Column is DataGridBoundColumn bc && bc.Binding is System.Windows.Data.Binding b)
+            col = b.Path.Path;
+
+        var (metric, label) = col switch
+        {
+            "TotalCpuMs" => ("TotalCpu", "Total CPU (ms)"),
+            "AvgCpuTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
+            "TotalDurationMs" => ("TotalElapsed", "Total Duration (ms)"),
+            "AvgDurationMs" => ("AvgElapsed", "Avg Duration (ms)"),
+            "AvgLogicalReads" => ("TotalReads", "Avg Reads"),
+            "AvgLogicalWrites" => ("TotalWrites", "Avg Writes"),
+            "AvgPhysicalReads" => ("TotalReads", "Avg Physical Reads"),
+            "TotalExecutions" => ("Sessions", "Executions"),
+            _ => ("TotalCpu", "Total CPU (ms)"),
+        };
+
+        if (metric == _queryStoreSlicerMetric) return;
+        _queryStoreSlicerMetric = metric;
+
+        foreach (var bucket in _queryStoreSlicerData)
+        {
+            var n = bucket.SessionCount > 0 ? bucket.SessionCount : 1;
+            bucket.Value = metric switch
+            {
+                "TotalCpu" => bucket.TotalCpu,
+                "AvgCpu" => bucket.TotalCpu / n,
+                "TotalElapsed" => bucket.TotalElapsed,
+                "AvgElapsed" => bucket.TotalElapsed / n,
+                "TotalReads" => bucket.TotalReads,
+                "TotalWrites" => bucket.TotalWrites,
+                "Sessions" => bucket.SessionCount,
+                _ => bucket.TotalCpu,
+            };
+        }
+
+        QueryStoreSlicer.UpdateMetric(label);
+
+        if (QueryStoreGrid.SelectedItem != null)
+            QueryStoreGrid_SelectionChanged(QueryStoreGrid, null!);
+    }
+
+    // ── Procedure Stats Slicer ──
+
+    private string _procStatsSlicerMetric = "TotalCpu";
+    private List<Models.TimeSliceBucket>? _procStatsSlicerData;
+
+    private async System.Threading.Tasks.Task LoadProcStatsSlicerAsync()
+    {
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+
+            var data = await _dataService.GetProcStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            _procStatsSlicerData = data;
+            _procStatsSlicerMetric = "TotalCpu";
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            if (data.Count > 0)
+                ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadProcStatsSlicerAsync failed: {ex.Message}");
+        }
+    }
+
+    private async void OnProcStatsSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
+    {
+        try
+        {
+            var fromServer = ServerTimeHelper.ToServerTime(e.StartUtc);
+            var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
+            var procStats = await _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes);
+            _procStatsFilterMgr!.UpdateData(procStats);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] OnProcStatsSlicerChanged failed: {ex.Message}");
+        }
+    }
+
+    private void ProcedureStatsGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        if (_procStatsSlicerData == null || _procStatsSlicerData.Count == 0) return;
+
+        var col = e.Column.SortMemberPath ?? "";
+        if (string.IsNullOrEmpty(col) && e.Column is DataGridBoundColumn bc && bc.Binding is System.Windows.Data.Binding b)
+            col = b.Path.Path;
+
+        var (metric, label) = col switch
+        {
+            "TotalCpuMs" => ("TotalCpu", "Total CPU (ms)"),
+            "AvgCpuMs" => ("AvgCpu", "Avg CPU (ms)"),
+            "TotalElapsedMs" => ("TotalElapsed", "Total Duration (ms)"),
+            "AvgElapsedMs" => ("AvgElapsed", "Avg Duration (ms)"),
+            "TotalLogicalReads" or "AvgReads" => ("TotalReads", "Total Reads"),
+            "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
+            "TotalPhysicalReads" => ("TotalReads", "Total Physical Reads"),
+            _ => ("TotalCpu", "Total CPU (ms)"),
+        };
+
+        if (metric == _procStatsSlicerMetric) return;
+        _procStatsSlicerMetric = metric;
+
+        foreach (var bucket in _procStatsSlicerData)
+        {
+            var n = bucket.SessionCount > 0 ? bucket.SessionCount : 1;
+            bucket.Value = metric switch
+            {
+                "TotalCpu" => bucket.TotalCpu,
+                "AvgCpu" => bucket.TotalCpu / n,
+                "TotalElapsed" => bucket.TotalElapsed,
+                "AvgElapsed" => bucket.TotalElapsed / n,
+                "TotalReads" => bucket.TotalReads,
+                "TotalWrites" => bucket.TotalWrites,
+                _ => bucket.TotalCpu,
+            };
+        }
+
+        ProcStatsSlicer.UpdateMetric(label);
+
+        if (ProcedureStatsGrid.SelectedItem != null)
+            ProcedureStatsGrid_SelectionChanged(ProcedureStatsGrid, null!);
+    }
+
     private async void LiveSnapshot_Click(object sender, RoutedEventArgs e)
     {
         LiveSnapshotButton.IsEnabled = false;
@@ -3854,7 +4885,7 @@ public partial class ServerTab : UserControl
 
     private void OpenLogFile_Click(object sender, RoutedEventArgs e)
     {
-        var logDir = System.IO.Path.Combine(AppContext.BaseDirectory, "logs");
+        var logDir = System.IO.Path.Combine(App.DataDirectory, "logs");
         var logFile = System.IO.Path.Combine(logDir, $"lite_{DateTime.Now:yyyyMMdd}.log");
 
         if (File.Exists(logFile))
@@ -3980,8 +5011,11 @@ public partial class ServerTab : UserControl
         return null;
     }
 
-    private static void SetInitialSort(DataGrid grid, string bindingPath, ListSortDirection direction)
+    private static void SetDefaultSortIfNone(DataGrid grid, string bindingPath, ListSortDirection direction)
     {
+        if (grid.Items.SortDescriptions.Count > 0) return;
+
+        grid.Items.SortDescriptions.Add(new SortDescription(bindingPath, direction));
         foreach (var column in grid.Columns)
         {
             if (column is DataGridBoundColumn bc &&

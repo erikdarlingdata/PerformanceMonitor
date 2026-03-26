@@ -620,10 +620,7 @@ END;";
 
             result.EndTime = DateTime.Now;
 
-            /*Allow query_snapshots to fail - those views get created eventually*/
-            bool onlyQuerySnapshotsFailed = result.FilesFailed == 1 &&
-                result.Errors.Any(e => e.FileName.Contains("query_snapshots", StringComparison.OrdinalIgnoreCase));
-            result.Success = result.FilesFailed == 0 || onlyQuerySnapshotsFailed;
+            result.Success = result.FilesFailed == 0;
 
             return result;
         }

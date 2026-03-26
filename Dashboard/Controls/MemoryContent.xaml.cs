@@ -30,6 +30,30 @@ namespace PerformanceMonitorDashboard.Controls
     /// </summary>
     public partial class MemoryContent : UserControl
     {
+        public event Action<string, DateTime>? ChartDrillDownRequested;
+
+        private void AddDrillDown(ScottPlot.WPF.WpfPlot chart, ContextMenu menu,
+            Func<Helpers.ChartHoverHelper?> hoverGetter, string label, string chartType)
+        {
+            menu.Items.Insert(0, new Separator());
+            var item = new MenuItem { Header = label };
+            menu.Items.Insert(0, item);
+
+            menu.Opened += (s, _) =>
+            {
+                var pos = System.Windows.Input.Mouse.GetPosition(chart);
+                var nearest = hoverGetter()?.GetNearestSeries(pos);
+                item.Tag = nearest?.Time;
+                item.IsEnabled = nearest.HasValue;
+            };
+
+            item.Click += (s, _) =>
+            {
+                if (item.Tag is DateTime time)
+                    ChartDrillDownRequested?.Invoke(chartType, time);
+            };
+        }
+
         private DatabaseService? _databaseService;
 
         // Memory Stats state
@@ -121,20 +145,25 @@ namespace PerformanceMonitorDashboard.Controls
         private void SetupChartContextMenus()
         {
             // Memory Stats Overview chart
-            TabHelpers.SetupChartContextMenu(MemoryStatsOverviewChart, "Memory_Stats_Overview", "collect.memory_stats");
+            var memOverviewMenu = TabHelpers.SetupChartContextMenu(MemoryStatsOverviewChart, "Memory_Stats_Overview", "collect.memory_stats");
+            AddDrillDown(MemoryStatsOverviewChart, memOverviewMenu, () => _memoryStatsOverviewHover, "Show Active Queries at This Time", "Memory");
 
             // Memory Grant charts
-            TabHelpers.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", "collect.memory_grant_stats");
-            TabHelpers.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity", "collect.memory_grant_stats");
+            var grantSizingMenu = TabHelpers.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing", "collect.memory_grant_stats");
+            AddDrillDown(MemoryGrantSizingChart, grantSizingMenu, () => _memoryGrantSizingHover, "Show Active Queries at This Time", "MemoryGrant");
+            var grantActivityMenu = TabHelpers.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity", "collect.memory_grant_stats");
+            AddDrillDown(MemoryGrantActivityChart, grantActivityMenu, () => _memoryGrantActivityHover, "Show Active Queries at This Time", "MemoryGrant");
 
             // Memory Clerks chart
-            TabHelpers.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks", "collect.memory_clerks_stats");
+            var clerksMenu = TabHelpers.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks", "collect.memory_clerks_stats");
+            AddDrillDown(MemoryClerksChart, clerksMenu, () => _memoryClerksHover, "Show Active Queries at This Time", "MemoryClerks");
 
             // Plan Cache chart
             TabHelpers.SetupChartContextMenu(PlanCacheChart, "Plan_Cache", "collect.plan_cache_stats");
 
             // Memory Pressure Events chart
-            TabHelpers.SetupChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events", "collect.memory_pressure_events");
+            var pressureMenu = TabHelpers.SetupChartContextMenu(MemoryPressureEventsChart, "Memory_Pressure_Events", "collect.memory_pressure_events");
+            AddDrillDown(MemoryPressureEventsChart, pressureMenu, () => _memoryPressureEventsHover, "Show Active Queries at This Time", "MemoryPressure");
         }
 
         /// <summary>

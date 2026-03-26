@@ -26,8 +26,6 @@ namespace PerformanceMonitorDashboard
 
         protected override void OnStartup(StartupEventArgs e)
         {
-            VelopackApp.Build().Run();
-
             NativeMethods.SetAppUserModelId("DarlingData.PerformanceMonitor.Dashboard");
 
             // Check for existing instance
@@ -62,6 +60,10 @@ namespace PerformanceMonitorDashboard
             Logger.Info($"OS: {Environment.OSVersion}");
             Logger.Info($".NET Runtime: {Environment.Version}");
             Logger.Info($"Log Directory: {Logger.GetLogDirectory()}");
+
+            // Create and show main window (StartupUri removed for Velopack custom Main)
+            var mainWindow = new MainWindow();
+            mainWindow.Show();
         }
 
         protected override void OnExit(ExitEventArgs e)

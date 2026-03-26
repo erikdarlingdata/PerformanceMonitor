@@ -1258,4 +1258,15 @@
     <!-- Apply DarkToolTip as the default for all tooltips -->
     <Style TargetType="ToolTip" BasedOn="{StaticResource DarkToolTip}"/>
 
+    <!-- Time Range Slicer -->
+    <SolidColorBrush x:Key="SlicerBackgroundBrush" Color="#F0F2F5"/>
+    <SolidColorBrush x:Key="SlicerChartLineBrush" Color="#2196F3"/>
+    <SolidColorBrush x:Key="SlicerChartFillBrush" Color="#332196F3"/>
+    <SolidColorBrush x:Key="SlicerOverlayBrush" Color="#55FFFFFF"/>
+    <SolidColorBrush x:Key="SlicerSelectedBrush" Color="#11000000"/>
+    <SolidColorBrush x:Key="SlicerHandleBrush" Color="#4A5568"/>
+    <SolidColorBrush x:Key="SlicerBorderBrush" Color="#CBD5E0"/>
+    <SolidColorBrush x:Key="SlicerLabelBrush" Color="#718096"/>
+    <SolidColorBrush x:Key="SlicerToggleBrush" Color="#4A5568"/>
+
 </ResourceDictionary>

@@ -61,7 +61,7 @@ namespace PerformanceMonitorDashboard
                 if (updateInfo != null)
                 {
                     _pendingUpdate = updateInfo;
-                    UpdateStatusText.Text = $"Update available: v{updateInfo.TargetFullRelease.Version} — click to download and install";
+                    UpdateStatusText.Text = $"Update available: v{updateInfo.TargetFullRelease.Version} — click to install";
                     UpdateStatusText.Cursor = System.Windows.Input.Cursors.Hand;
                     UpdateStatusText.MouseLeftButtonUp -= UpdateStatusText_Click;
                     UpdateStatusText.MouseLeftButtonUp += VelopackDownload_Click;
@@ -100,10 +100,29 @@ namespace PerformanceMonitorDashboard
             }
         }
 
+        private bool _updateDownloaded;
+
         private async void VelopackDownload_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             if (_velopackMgr == null || _pendingUpdate == null) return;
 
+            // Step 3: restart with confirmation
+            if (_updateDownloaded)
+            {
+                var result = MessageBox.Show(this,
+                    "The application will close and restart with the new version. Continue?",
+                    "Update Ready",
+                    MessageBoxButton.OKCancel,
+                    MessageBoxImage.Question);
+
+                if (result == MessageBoxResult.OK)
+                {
+                    _velopackMgr.ApplyUpdatesAndRestart(_pendingUpdate.TargetFullRelease);
+                }
+                return;
+            }
+
+            // Step 2: download
             try
             {
                 UpdateStatusText.MouseLeftButtonUp -= VelopackDownload_Click;
@@ -113,13 +132,11 @@ namespace PerformanceMonitorDashboard
 
                 await _velopackMgr.DownloadUpdatesAsync(_pendingUpdate);
 
-                UpdateStatusText.Text = "Update downloaded. Click to restart and apply.";
+                _updateDownloaded = true;
+                UpdateStatusText.Text = "Update downloaded.";
                 UpdateStatusText.Cursor = System.Windows.Input.Cursors.Hand;
                 UpdateStatusText.TextDecorations = System.Windows.TextDecorations.Underline;
-                UpdateStatusText.MouseLeftButtonUp += (_, _) =>
-                {
-                    _velopackMgr.ApplyUpdatesAndRestart(_pendingUpdate.TargetFullRelease);
-                };
+                UpdateStatusText.MouseLeftButtonUp += VelopackDownload_Click;
             }
             catch (Exception ex)
             {

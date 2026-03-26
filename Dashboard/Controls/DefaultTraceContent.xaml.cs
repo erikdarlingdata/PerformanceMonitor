@@ -43,6 +43,13 @@ namespace PerformanceMonitorDashboard.Controls
         public void Initialize(DatabaseService databaseService)
         {
             _databaseService = databaseService;
+            DefaultTraceSlicer.RangeChanged += OnDefaultTraceSlicerChanged;
+        }
+
+        public void RefreshTimeDisplay()
+        {
+            DefaultTraceEventsDataGrid.Items.Refresh();
+            DefaultTraceSlicer.Redraw();
         }
 
         public void SetTimeRange(int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
@@ -104,11 +111,43 @@ namespace PerformanceMonitorDashboard.Controls
                 DefaultTraceEventsDataGrid.ItemsSource = data;
                 DefaultTraceEventsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 UpdateFilterButtonStyles(DefaultTraceEventsDataGrid, _defaultTraceFilters);
+                _ = LoadDefaultTraceSlicerAsync();
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading default trace events: {ex.Message}");
             }
+        }
+
+        private async Task LoadDefaultTraceSlicerAsync()
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetDefaultTraceSlicerDataAsync(
+                    _defaultTraceEventsHoursBack, _defaultTraceEventsFromDate, _defaultTraceEventsToDate);
+                var serverNow = Helpers.ServerTimeHelper.ServerNow;
+                var start = _defaultTraceEventsFromDate ?? serverNow.AddHours(-_defaultTraceEventsHoursBack);
+                var end = _defaultTraceEventsToDate ?? serverNow;
+                if (data.Count > 0)
+                    DefaultTraceSlicer.LoadData(data, "Events", start, end);
+            }
+            catch { }
+        }
+
+        private async void OnDefaultTraceSlicerChanged(object? sender, SlicerRangeEventArgs e)
+        {
+            if (_databaseService == null) return;
+            try
+            {
+                var data = await _databaseService.GetDefaultTraceEventsAsync(0, e.Start, e.End, _defaultTraceEventsFilter);
+                _defaultTraceUnfilteredData = data;
+                _defaultTraceFilters.Clear();
+                DefaultTraceEventsDataGrid.ItemsSource = data;
+                DefaultTraceEventsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                UpdateFilterButtonStyles(DefaultTraceEventsDataGrid, _defaultTraceFilters);
+            }
+            catch { }
         }
 
         #endregion

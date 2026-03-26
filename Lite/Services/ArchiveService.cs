@@ -247,6 +247,28 @@ COPY (
                 }
             }
 
+            /* imported_YYYYMM_tablename (imported from previous install) */
+            if (month == null)
+            {
+                m = Regex.Match(name, @"^imported_(\d{6})_(.+)$");
+                if (m.Success)
+                {
+                    month = m.Groups[1].Value;
+                    table = m.Groups[2].Value;
+                }
+            }
+
+            /* imported_YYYYMMDD_HHMM_tablename (imported per-cycle files) */
+            if (month == null)
+            {
+                m = Regex.Match(name, @"^imported_(\d{8})_\d{4}_(.+)$");
+                if (m.Success)
+                {
+                    month = m.Groups[1].Value[..6];
+                    table = m.Groups[2].Value;
+                }
+            }
+
             /* YYYYMM_tablename (already monthly — our target format) */
             if (month == null)
             {

@@ -95,7 +95,7 @@ SELECT
                 SUBSTRING(
                     st.text,
                     CHARINDEX(N''CREATE TRIGGER'', st.text) + 15,
-                    CHARINDEX(N'' ON '', st.text + N'' ON '') - CHARINDEX(N''CREATE TRIGGER'', st.text) - 15
+                    CHARINDEX(N'' ON '', st.text + N'' ON '', CHARINDEX(N''CREATE TRIGGER'', st.text) + 15) - CHARINDEX(N''CREATE TRIGGER'', st.text) - 15
                 ), N''['', N''''), N'']'', N'''')))
             ELSE N''trigger_'' + CONVERT(nvarchar(20), s.object_id)
         END

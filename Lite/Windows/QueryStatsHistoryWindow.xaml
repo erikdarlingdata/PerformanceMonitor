@@ -4,6 +4,8 @@
         xmlns:scottplot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
         Title="Query Stats History" Width="1400" Height="800"
         WindowStartupLocation="CenterOwner"
+        TextOptions.TextFormattingMode="Display"
+        UseLayoutRounding="True"
         Background="{DynamicResource BackgroundBrush}">
 
     <Window.Resources>
