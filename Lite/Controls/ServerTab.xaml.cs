@@ -249,8 +249,10 @@ public partial class ServerTab : UserControl
         Helpers.ContextMenuHelper.SetupChartContextMenu(ProcDurationTrendChart, "Procedure_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(QueryStoreDurationTrendChart, "QueryStore_Duration_Trends");
         Helpers.ContextMenuHelper.SetupChartContextMenu(ExecutionCountTrendChart, "Execution_Count_Trends");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage");
+        var cpuMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(CpuChart, "CPU_Usage");
+        AddChartDrillDownMenuItem(CpuChart, cpuMenu, _cpuHover, "Show Active Queries at This Time", OnCpuDrillDown);
+        var memoryMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryChart, "Memory_Usage");
+        AddChartDrillDownMenuItem(MemoryChart, memoryMenu, _memoryHover, "Show Memory Grants at This Time", OnMemoryDrillDown);
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryClerksChart, "Memory_Clerks");
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantSizingChart, "Memory_Grant_Sizing");
         Helpers.ContextMenuHelper.SetupChartContextMenu(MemoryGrantActivityChart, "Memory_Grant_Activity");
@@ -258,11 +260,14 @@ public partial class ServerTab : UserControl
         Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteChart, "File_IO_Write_Latency");
         Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoReadThroughputChart, "File_IO_Read_Throughput");
         Helpers.ContextMenuHelper.SetupChartContextMenu(FileIoWriteThroughputChart, "File_IO_Write_Throughput");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbChart, "TempDB_Stats");
+        var tempDbMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbChart, "TempDB_Stats");
+        AddChartDrillDownMenuItem(TempDbChart, tempDbMenu, _tempDbHover, "Show Active Queries at This Time", OnTempDbDrillDown);
         Helpers.ContextMenuHelper.SetupChartContextMenu(TempDbFileIoChart, "TempDB_File_IO");
         Helpers.ContextMenuHelper.SetupChartContextMenu(LockWaitTrendChart, "Lock_Wait_Trends");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(BlockingTrendChart, "Blocking_Trends");
-        Helpers.ContextMenuHelper.SetupChartContextMenu(DeadlockTrendChart, "Deadlock_Trends");
+        var blockingMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(BlockingTrendChart, "Blocking_Trends");
+        AddChartDrillDownMenuItem(BlockingTrendChart, blockingMenu, _blockingTrendHover, "Show Blocking at This Time", OnBlockingDrillDown);
+        var deadlockMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(DeadlockTrendChart, "Deadlock_Trends");
+        AddChartDrillDownMenuItem(DeadlockTrendChart, deadlockMenu, _deadlockTrendHover, "Show Deadlocks at This Time", OnDeadlockDrillDown);
         Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsDurationChart, "Current_Waits_Duration");
         Helpers.ContextMenuHelper.SetupChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked");
         Helpers.ContextMenuHelper.SetupChartContextMenu(PerfmonChart, "Perfmon_Counters");
@@ -2627,6 +2632,143 @@ public partial class ServerTab : UserControl
             _dataService, _serverId, waitType, 1, fromDate, toDate);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
+    }
+
+    // ── Generic Chart Drill-Down (#682) ──
+
+    private void AddChartDrillDownMenuItem(
+        ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu,
+        Helpers.ChartHoverHelper? hover, string label, Action<DateTime> handler)
+    {
+        contextMenu.Items.Insert(0, new Separator());
+        var item = new MenuItem { Header = label };
+        contextMenu.Items.Insert(0, item);
+
+        contextMenu.Opened += (s, _) =>
+        {
+            var pos = System.Windows.Input.Mouse.GetPosition(chart);
+            var nearest = hover?.GetNearestSeries(pos);
+            if (nearest.HasValue)
+            {
+                item.Tag = nearest.Value.Time;
+                item.IsEnabled = true;
+            }
+            else
+            {
+                item.Tag = null;
+                item.IsEnabled = false;
+            }
+        };
+
+        item.Click += (s, _) =>
+        {
+            if (item.Tag is DateTime time)
+                handler(time);
+        };
+    }
+
+    private async void OnCpuDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-15);
+        var toDate = time.AddMinutes(15);
+
+        // Populate custom date pickers so user can explore other tabs
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        // Navigate to Queries > Active Queries with ±15 min window
+        MainTabControl.SelectedIndex = 1; // Queries
+        QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
+    }
+
+    private async void OnMemoryDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-15);
+        var toDate = time.AddMinutes(15);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        MainTabControl.SelectedIndex = 4; // Memory
+        MemorySubTabControl.SelectedIndex = 2; // Memory Grants
+        // Refresh the memory tab with the drill-down range
+        await RefreshMemoryAsync(0, fromDate, toDate);
+    }
+
+    private async void OnTempDbDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-15);
+        var toDate = time.AddMinutes(15);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        // Navigate to Active Queries — TempDB spills are visible there
+        MainTabControl.SelectedIndex = 1; // Queries
+        QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
+    }
+
+    private async void OnBlockingDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-15);
+        var toDate = time.AddMinutes(15);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        MainTabControl.SelectedIndex = 7; // Blocking
+        BlockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
+        var bpr = await _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromDate, toDate);
+        _blockedProcessFilterMgr!.UpdateData(bpr);
+    }
+
+    private async void OnDeadlockDrillDown(DateTime time)
+    {
+        var fromDate = time.AddMinutes(-15);
+        var toDate = time.AddMinutes(15);
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        MainTabControl.SelectedIndex = 7; // Blocking
+        BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
+        var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromDate, toDate);
+        _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
+    }
+
+    /// <summary>
+    /// Sets the time range combo to Custom and populates the date/time pickers
+    /// so the user can navigate other tabs at the same time window.
+    /// </summary>
+    private void SetDrillDownTimeRange(DateTime fromServer, DateTime toServer)
+    {
+        // Convert server time to local time for the pickers
+        var fromLocal = ServerTimeHelper.ToLocalTime(fromServer);
+        var toLocal = ServerTimeHelper.ToLocalTime(toServer);
+
+        // Switch to Custom without triggering a refresh
+        _isRefreshing = true;
+        try
+        {
+            TimeRangeCombo.SelectedIndex = 5; // Custom
+            FromDatePicker.SelectedDate = fromLocal.Date;
+            FromHourCombo.SelectedIndex = fromLocal.Hour;
+            FromMinuteCombo.SelectedIndex = fromLocal.Minute / 15;
+            ToDatePicker.SelectedDate = toLocal.Date;
+            ToHourCombo.SelectedIndex = toLocal.Hour;
+            ToMinuteCombo.SelectedIndex = toLocal.Minute / 15;
+
+            // Make pickers visible
+            var visibility = Visibility.Visible;
+            FromDatePicker.Visibility = visibility;
+            FromHourCombo.Visibility = visibility;
+            FromMinuteCombo.Visibility = visibility;
+            ToLabel.Visibility = visibility;
+            ToDatePicker.Visibility = visibility;
+            ToHourCombo.Visibility = visibility;
+            ToMinuteCombo.Visibility = visibility;
+        }
+        finally
+        {
+            _isRefreshing = false;
+        }
     }
 
     private async System.Threading.Tasks.Task UpdateWaitStatsChartFromPickerAsync()
