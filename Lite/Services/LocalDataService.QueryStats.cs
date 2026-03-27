@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
@@ -716,6 +717,142 @@ ORDER BY collection_time";
         }
         return items;
     }
+
+    private static readonly double[] HeatmapBucketThresholds = { 0, 1, 10, 100, 1000, 10000, 100000, 1000000 };
+
+    private static readonly Dictionary<HeatmapMetric, string[]> BucketLabelsMap = new()
+    {
+        [HeatmapMetric.Duration] = new[] { "0-1ms", "1-10ms", "10-100ms", "100ms-1s", "1-10s", "10-100s", ">100s" },
+        [HeatmapMetric.Cpu] = new[] { "0-1ms", "1-10ms", "10-100ms", "100ms-1s", "1-10s", "10-100s", ">100s" },
+        [HeatmapMetric.LogicalReads] = new[] { "0-1", "1-10", "10-100", "100-1K", "1K-10K", "10K-100K", ">100K" },
+        [HeatmapMetric.LogicalWrites] = new[] { "0-1", "1-10", "10-100", "100-1K", "1K-10K", "10K-100K", ">100K" },
+        [HeatmapMetric.ExecutionCount] = new[] { "0-1", "1-10", "10-100", "100-1K", "1K-10K", "10K-100K", ">100K" }
+    };
+
+    private static string GetMetricColumn(HeatmapMetric metric) => metric switch
+    {
+        HeatmapMetric.Duration => "(delta_elapsed_time / 1000.0) / NULLIF(delta_execution_count, 0)",
+        HeatmapMetric.Cpu => "(delta_worker_time / 1000.0) / NULLIF(delta_execution_count, 0)",
+        HeatmapMetric.LogicalReads => "CAST(delta_logical_reads AS DOUBLE) / NULLIF(delta_execution_count, 0)",
+        HeatmapMetric.LogicalWrites => "CAST(delta_logical_writes AS DOUBLE) / NULLIF(delta_execution_count, 0)",
+        HeatmapMetric.ExecutionCount => "CAST(delta_execution_count AS DOUBLE)",
+        _ => "(delta_elapsed_time / 1000.0) / NULLIF(delta_execution_count, 0)"
+    };
+
+    public async Task<HeatmapResult> GetQueryHeatmapAsync(int serverId, HeatmapMetric metric, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var metricExpr = GetMetricColumn(metric);
+
+        AppLogger.Info("Heatmap", $"GetQueryHeatmapAsync: serverId={serverId}, metric={metric}, hoursBack={hoursBack}, start={startTime:O}, end={endTime:O}");
+
+        command.CommandText = $@"
+WITH per_query AS (
+    SELECT
+        time_bucket(INTERVAL '5 minutes', collection_time) AS time_bin,
+        {metricExpr} AS metric_value,
+        query_hash,
+        LEFT(query_text, 120) AS query_preview,
+        delta_execution_count
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   delta_execution_count > 0
+    AND   {metricExpr} IS NOT NULL
+)
+SELECT
+    time_bin,
+    CASE
+        WHEN metric_value < 1 THEN 0
+        WHEN metric_value < 10 THEN 1
+        WHEN metric_value < 100 THEN 2
+        WHEN metric_value < 1000 THEN 3
+        WHEN metric_value < 10000 THEN 4
+        WHEN metric_value < 100000 THEN 5
+        ELSE 6
+    END AS bucket_index,
+    COUNT(*) AS query_count,
+    ARG_MAX(query_hash, delta_execution_count) AS top_query_hash,
+    ARG_MAX(query_preview, delta_execution_count) AS top_query_text
+FROM per_query
+GROUP BY time_bin, bucket_index
+ORDER BY time_bin, bucket_index";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var rawCells = new List<HeatmapCell>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            rawCells.Add(new HeatmapCell
+            {
+                TimeBucket = reader.GetDateTime(0),
+                BucketIndex = (int)ToDouble(reader.GetValue(1)),
+                Count = (long)ToDouble(reader.GetValue(2)),
+                TopQueryHash = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                TopQueryText = reader.IsDBNull(4) ? "" : reader.GetString(4)
+            });
+        }
+
+        if (rawCells.Count == 0)
+            return new HeatmapResult();
+
+        var times = rawCells.Select(c => c.TimeBucket).Distinct().OrderBy(t => t).ToArray();
+        var timeIndex = new Dictionary<DateTime, int>();
+        for (int i = 0; i < times.Length; i++) timeIndex[times[i]] = i;
+
+        int numBuckets = 7;
+        var intensities = new double[numBuckets, times.Length];
+        var cellDetails = new HeatmapCell[numBuckets, times.Length];
+
+        foreach (var cell in rawCells)
+        {
+            if (!timeIndex.TryGetValue(cell.TimeBucket, out int col)) continue;
+            int row = Math.Clamp(cell.BucketIndex, 0, numBuckets - 1);
+            intensities[row, col] = cell.Count;
+            cellDetails[row, col] = cell;
+        }
+
+        return new HeatmapResult
+        {
+            Intensities = intensities,
+            TimeBuckets = times,
+            BucketLabels = BucketLabelsMap[metric],
+            CellDetails = cellDetails
+        };
+    }
+}
+
+public enum HeatmapMetric
+{
+    Duration,
+    Cpu,
+    LogicalReads,
+    LogicalWrites,
+    ExecutionCount
+}
+
+public class HeatmapCell
+{
+    public DateTime TimeBucket { get; set; }
+    public int BucketIndex { get; set; }
+    public long Count { get; set; }
+    public string TopQueryHash { get; set; } = "";
+    public string TopQueryText { get; set; } = "";
+}
+
+public class HeatmapResult
+{
+    public double[,] Intensities { get; set; } = new double[0, 0];
+    public DateTime[] TimeBuckets { get; set; } = Array.Empty<DateTime>();
+    public string[] BucketLabels { get; set; } = Array.Empty<string>();
+    public HeatmapCell[,] CellDetails { get; set; } = new HeatmapCell[0, 0];
 }
 
 public class QueryTrendPoint

@@ -72,6 +72,12 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _currentWaitsDurationHover;
     private Helpers.ChartHoverHelper? _currentWaitsBlockedHover;
 
+    /* Query heatmap */
+    private HeatmapResult? _lastHeatmapResult;
+    private ScottPlot.Plottables.Heatmap? _heatmapPlottable;
+    private System.Windows.Controls.Primitives.Popup? _heatmapPopup;
+    private TextBlock? _heatmapPopupText;
+
     /* Memory clerks picker */
     private List<SelectableItem> _memoryClerkItems = new();
     private bool _isUpdatingMemoryClerkSelection;
@@ -224,6 +230,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(CurrentWaitsBlockedChart);
         ApplyTheme(PerfmonChart);
         ApplyTheme(CollectorDurationChart);
+        ApplyTheme(QueryHeatmapChart);
 
         /* Chart hover tooltips */
         _overviewCpuHover = new Helpers.ChartHoverHelper(OverviewCpuChart, "%");
@@ -253,6 +260,63 @@ public partial class ServerTab : UserControl
         _memoryGrantActivityHover = new Helpers.ChartHoverHelper(MemoryGrantActivityChart, "");
         _currentWaitsDurationHover = new Helpers.ChartHoverHelper(CurrentWaitsDurationChart, "ms");
         _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
+
+        /* Query heatmap hover popup */
+        _heatmapPopupText = new TextBlock
+        {
+            Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE0, 0xE0, 0xE0)),
+            FontSize = 13,
+            MaxWidth = 450,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        _heatmapPopup = new System.Windows.Controls.Primitives.Popup
+        {
+            PlacementTarget = QueryHeatmapChart,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Relative,
+            IsHitTestVisible = false,
+            AllowsTransparency = true,
+            Child = new Border
+            {
+                Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x33, 0x33, 0x33)),
+                BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x55, 0x55, 0x55)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(3),
+                Padding = new Thickness(8, 4, 8, 4),
+                Child = _heatmapPopupText
+            }
+        };
+        /* Heatmap mouse events wired up in XAML */
+        var heatmapMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(QueryHeatmapChart, "Query_Heatmap");
+        var heatmapDrillDown = new MenuItem { Header = "Show Active Queries at This Time" };
+        heatmapMenu.Items.Insert(0, heatmapDrillDown);
+        heatmapMenu.Items.Insert(1, new Separator());
+        heatmapMenu.Opened += (s, _) =>
+        {
+            if (_lastHeatmapResult == null || _heatmapPlottable == null || _lastHeatmapResult.TimeBuckets.Length == 0)
+            {
+                heatmapDrillDown.IsEnabled = false;
+                return;
+            }
+            var mpos = System.Windows.Input.Mouse.GetPosition(QueryHeatmapChart);
+            var mdpi = VisualTreeHelper.GetDpi(QueryHeatmapChart);
+            var mpixel = new ScottPlot.Pixel((float)(mpos.X * mdpi.DpiScaleX), (float)(mpos.Y * mdpi.DpiScaleY));
+            var mcoords = QueryHeatmapChart.Plot.GetCoordinates(mpixel);
+            var (mCol, _) = _heatmapPlottable.GetIndexes(mcoords);
+            if (mCol >= 0 && mCol < _lastHeatmapResult.TimeBuckets.Length)
+            {
+                heatmapDrillDown.Tag = _lastHeatmapResult.TimeBuckets[mCol];
+                heatmapDrillDown.IsEnabled = true;
+            }
+            else
+            {
+                heatmapDrillDown.IsEnabled = false;
+            }
+        };
+        heatmapDrillDown.Click += (s, _) =>
+        {
+            if (heatmapDrillDown.Tag is DateTime bucketTime)
+                OnHeatmapDrillDown(bucketTime);
+        };
 
         /* Chart context menus (right-click save/export) */
         var waitStatsMenu = Helpers.ContextMenuHelper.SetupChartContextMenu(WaitStatsChart, "Wait_Stats");
@@ -955,6 +1019,12 @@ public partial class ServerTab : UserControl
                         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
                         _ = LoadQueryStoreSlicerAsync();
                         break;
+                    case 5: // Query Heatmap
+                        var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
+                        var hmData = await _dataService.GetQueryHeatmapAsync(_serverId, hmMetric, hoursBack, fromDate, toDate);
+                        AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Heatmap: {hmData.TimeBuckets.Length} time buckets, {hmData.Intensities.GetLength(0)}x{hmData.Intensities.GetLength(1)} grid");
+                        UpdateQueryHeatmapChart(hmData);
+                        break;
                 }
                 return;
             }
@@ -968,10 +1038,16 @@ public partial class ServerTab : UserControl
             var procDurationTrendTask = SafeQueryAsync(() => _dataService.GetProcedureDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var queryStoreDurationTrendTask = SafeQueryAsync(() => _dataService.GetQueryStoreDurationTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var executionCountTrendTask = SafeQueryAsync(() => _dataService.GetExecutionCountTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var heatmapTask = Task.Run(async () =>
+            {
+                try { return await _dataService.GetQueryHeatmapAsync(_serverId, (HeatmapMetric)Dispatcher.Invoke(() => HeatmapMetricCombo.SelectedIndex), hoursBack, fromDate, toDate); }
+                catch { return new HeatmapResult(); }
+            });
 
             await System.Threading.Tasks.Task.WhenAll(
                 snapshotsTask, queryStatsTask, procStatsTask, queryStoreTask,
-                queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask);
+                queryDurationTrendTask, procDurationTrendTask, queryStoreDurationTrendTask, executionCountTrendTask,
+                heatmapTask);
 
             _querySnapshotsFilterMgr!.UpdateData(snapshotsTask.Result);
             LiveSnapshotIndicator.Text = "";
@@ -992,6 +1068,7 @@ public partial class ServerTab : UserControl
             UpdateProcDurationTrendChart(procDurationTrendTask.Result);
             UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result);
             UpdateExecutionCountTrendChart(executionCountTrendTask.Result);
+            UpdateQueryHeatmapChart(heatmapTask.Result);
         }
         catch (Exception ex)
         {
@@ -2657,6 +2734,193 @@ public partial class ServerTab : UserControl
         ExecutionCountTrendChart.Refresh();
     }
 
+    /* ========== Query Heatmap ========== */
+
+    private void UpdateQueryHeatmapChart(HeatmapResult result)
+    {
+        AppLogger.Info("ServerTab", $"[{_server.DisplayName}] UpdateQueryHeatmapChart called: TimeBuckets={result.TimeBuckets.Length}, Grid={result.Intensities.GetLength(0)}x{result.Intensities.GetLength(1)}, BucketLabels={result.BucketLabels.Length}");
+        ClearChart(QueryHeatmapChart);
+        ApplyTheme(QueryHeatmapChart);
+
+        _lastHeatmapResult = result;
+
+        if (result.TimeBuckets.Length == 0 || result.BucketLabels.Length == 0)
+        {
+            RefreshEmptyChart(QueryHeatmapChart, "Query Heatmap", "");
+            return;
+        }
+
+        int numRows = result.Intensities.GetLength(0);
+        int numCols = result.Intensities.GetLength(1);
+
+        // Log1p scaling; NaN for empty cells so they render as background.
+        var scaled = new double[numRows, numCols];
+        for (int r = 0; r < numRows; r++)
+        {
+            for (int c = 0; c < numCols; c++)
+            {
+                scaled[r, c] = result.Intensities[r, c] > 0
+                    ? Math.Log(1 + result.Intensities[r, c])
+                    : double.NaN;
+            }
+        }
+
+        var heatmap = QueryHeatmapChart.Plot.Add.Heatmap(scaled);
+        _heatmapPlottable = heatmap;
+        heatmap.FlipVertically = true; // row 0 ("0-1ms") at bottom, row 6 (">100s") at top
+        heatmap.Colormap = new ScottPlot.Colormaps.Viridis();
+        heatmap.NaNCellColor = QueryHeatmapChart.Plot.DataBackground.Color;
+
+        // Let ScottPlot use default extent (0..numCols, 0..numRows).
+        // No custom Position — avoids cell-centering offset issues.
+        // Use manual tick labels for both axes instead.
+        ReapplyAxisColors(QueryHeatmapChart);
+
+        // X-axis: time labels at column positions
+        var xTicks = new ScottPlot.TickGenerators.NumericManual();
+        int xStep = Math.Max(1, numCols / 12); // ~12 labels max
+        for (int i = 0; i < numCols; i += xStep)
+        {
+            var t = result.TimeBuckets[i].AddMinutes(UtcOffsetMinutes);
+            xTicks.AddMajor(i, t.ToString("M/d\nh:mm tt"));
+        }
+        QueryHeatmapChart.Plot.Axes.Bottom.TickGenerator = xTicks;
+        QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Left.TickLabelStyle.ForeColor;
+
+        // Y-axis: bucket labels
+        var yTicks = new ScottPlot.TickGenerators.NumericManual();
+        for (int i = 0; i < result.BucketLabels.Length; i++)
+        {
+            yTicks.AddMajor(i, result.BucketLabels[i]);
+        }
+        QueryHeatmapChart.Plot.Axes.Left.TickGenerator = yTicks;
+
+        // Axis limits match default heatmap extent
+        QueryHeatmapChart.Plot.Axes.SetLimitsX(-0.5, numCols - 0.5);
+        QueryHeatmapChart.Plot.Axes.SetLimitsY(-0.5, numRows - 0.5);
+
+        // Colorbar with real query counts (undo log1p for tick labels)
+        var colorBar = new ScottPlot.Panels.ColorBar(heatmap, ScottPlot.Edge.Right);
+        colorBar.Label = "Query Count";
+        colorBar.LabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+        colorBar.Axis.TickLabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+        double maxRaw = 0;
+        for (int r = 0; r < numRows; r++)
+            for (int c = 0; c < numCols; c++)
+                if (result.Intensities[r, c] > maxRaw) maxRaw = result.Intensities[r, c];
+        var cbTicks = new ScottPlot.TickGenerators.NumericManual();
+        cbTicks.AddMajor(0, "0");
+        int[] niceValues = { 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
+        foreach (var n in niceValues)
+        {
+            if (n > maxRaw) break;
+            cbTicks.AddMajor(Math.Log(1 + n), n.ToString("N0"));
+        }
+        cbTicks.AddMajor(Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0"));
+        colorBar.Axis.TickGenerator = cbTicks;
+        QueryHeatmapChart.Plot.Axes.AddPanel(colorBar);
+
+        var metricName = ((ComboBoxItem)HeatmapMetricCombo.SelectedItem).Content?.ToString() ?? "Duration (ms)";
+        QueryHeatmapChart.Plot.Title($"Query Distribution by {metricName}");
+        QueryHeatmapChart.Plot.Axes.Title.Label.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+
+        QueryHeatmapChart.Refresh();
+    }
+
+    private DateTime _lastHeatmapHoverUpdate;
+
+    private void HeatmapChart_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_heatmapPopup != null) _heatmapPopup.IsOpen = false;
+    }
+
+    private void HeatmapChart_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_heatmapPopup == null || _heatmapPopupText == null || _heatmapPlottable == null) return;
+        if (_lastHeatmapResult == null || _lastHeatmapResult.TimeBuckets.Length == 0) return;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastHeatmapHoverUpdate).TotalMilliseconds < 50) return;
+        _lastHeatmapHoverUpdate = now;
+
+        var pos = e.GetPosition(QueryHeatmapChart);
+        var dpi = VisualTreeHelper.GetDpi(QueryHeatmapChart);
+        var pixel = new ScottPlot.Pixel(
+            (float)(pos.X * dpi.DpiScaleX),
+            (float)(pos.Y * dpi.DpiScaleY));
+        var coords = QueryHeatmapChart.Plot.GetCoordinates(pixel);
+
+        int numRows = _lastHeatmapResult.Intensities.GetLength(0);
+        int numCols = _lastHeatmapResult.Intensities.GetLength(1);
+
+        // Default heatmap extent (no custom Position): cols = 0..numCols, rows = 0..numRows.
+        // GetIndexes returns bitmap indices. With FlipVertically=true, flip row for data index.
+        var (col, rowIdx) = _heatmapPlottable.GetIndexes(coords);
+        int row = (numRows - 1) - rowIdx;
+
+        if (row < 0 || row >= numRows || col < 0 || col >= numCols)
+        {
+            _heatmapPopup.IsOpen = false;
+            return;
+        }
+
+        long count = (long)_lastHeatmapResult.Intensities[row, col];
+        if (count == 0)
+        {
+            _heatmapPopup.IsOpen = false;
+            return;
+        }
+
+        var cell = _lastHeatmapResult.CellDetails[row, col];
+        var time = ServerTimeHelper.ConvertForDisplay(
+            _lastHeatmapResult.TimeBuckets[col].AddMinutes(UtcOffsetMinutes),
+            ServerTimeHelper.CurrentDisplayMode);
+        var bucketLabel = row < _lastHeatmapResult.BucketLabels.Length
+            ? _lastHeatmapResult.BucketLabels[row]
+            : "?";
+
+        var tipText = $"{time:HH:mm:ss}  |  {bucketLabel}  |  {count:N0} queries";
+        if (cell != null && !string.IsNullOrEmpty(cell.TopQueryText))
+        {
+            // Single line, collapse whitespace, truncate
+            var flat = System.Text.RegularExpressions.Regex.Replace(cell.TopQueryText, @"\s+", " ").Trim();
+            if (flat.Length > 60) flat = flat[..60] + "...";
+            tipText += $"\n{flat}";
+        }
+        _heatmapPopupText.Text = tipText;
+
+        _heatmapPopup.HorizontalOffset = pos.X + 15;
+        _heatmapPopup.VerticalOffset = pos.Y + 15;
+        _heatmapPopup.IsOpen = true;
+    }
+
+    private async void HeatmapMetric_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        try
+        {
+            var hoursBack = GetHoursBack();
+            DateTime? fromDate = null, toDate = null;
+            if (IsCustomRange)
+            {
+                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+                if (fromLocal.HasValue && toLocal.HasValue)
+                {
+                    fromDate = ServerTimeHelper.LocalToServerTime(fromLocal.Value);
+                    toDate = ServerTimeHelper.LocalToServerTime(toLocal.Value);
+                }
+            }
+            var metric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
+            var result = await _dataService.GetQueryHeatmapAsync(_serverId, metric, hoursBack, fromDate, toDate);
+            UpdateQueryHeatmapChart(result);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] HeatmapMetric_SelectionChanged failed: {ex.Message}");
+        }
+    }
+
     /* ========== Wait Stats Picker ========== */
 
     private static readonly string[] PoisonWaits = { "THREADPOOL", "RESOURCE_SEMAPHORE", "RESOURCE_SEMAPHORE_QUERY_COMPILE" };
@@ -2907,6 +3171,22 @@ public partial class ServerTab : UserControl
         BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
         var dlr = await _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromDate, toDate);
         _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(dlr));
+    }
+
+    private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)
+    {
+        // The time bucket is in UTC — convert to server time for the drill-down
+        var serverTime = bucketTimeUtc.AddMinutes(UtcOffsetMinutes);
+        var fromDate = serverTime.AddMinutes(-5);
+        var toDate = serverTime.AddMinutes(10); // 5-min bucket + 5-min padding
+
+        SetDrillDownTimeRange(fromDate, toDate);
+
+        MainTabControl.SelectedIndex = 2; // Queries
+        QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+        var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
     }
 
     /// <summary>

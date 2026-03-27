@@ -719,6 +719,27 @@
                             </DataGrid>
                             </Grid>
                         </TabItem>
+                        <TabItem Header="Query Heatmap">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,4,0,4">
+                                    <TextBlock Text="Metric:" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
+                                    <ComboBox x:Name="HeatmapMetricCombo" SelectedIndex="0" SelectionChanged="HeatmapMetric_SelectionChanged" FontSize="11" Padding="4,2">
+                                        <ComboBoxItem Content="Duration (ms)"/>
+                                        <ComboBoxItem Content="CPU (ms)"/>
+                                        <ComboBoxItem Content="Logical Reads"/>
+                                        <ComboBoxItem Content="Logical Writes"/>
+                                        <ComboBoxItem Content="Execution Count"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <ScottPlot:WpfPlot Grid.Row="1" x:Name="QueryHeatmapChart"
+                                                    MouseMove="HeatmapChart_MouseMove"
+                                                    MouseLeave="HeatmapChart_MouseLeave"/>
+                            </Grid>
+                        </TabItem>
                     </TabControl>
                 </Grid>
             </TabItem>
