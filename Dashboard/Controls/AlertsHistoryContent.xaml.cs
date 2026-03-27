@@ -14,6 +14,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
@@ -28,6 +29,8 @@ namespace PerformanceMonitorDashboard.Controls
         public MuteRuleService? MuteRuleService { get; set; }
 
         private List<AlertHistoryDisplayItem> _allAlerts = new();
+        private DateTime? _lastRefreshed;
+        private readonly DispatcherTimer _staleDataTimer;
 
         /* Column filter state */
         private readonly Dictionary<string, ColumnFilterState> _columnFilters = new();
@@ -37,6 +40,9 @@ namespace PerformanceMonitorDashboard.Controls
         public AlertsHistoryContent()
         {
             InitializeComponent();
+            _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+            _staleDataTimer.Tick += StaleDataTimer_Tick;
+            _staleDataTimer.Start();
         }
 
         /// <summary>
@@ -78,6 +84,7 @@ namespace PerformanceMonitorDashboard.Controls
                 DetailText = e.DetailText
             }).ToList();
 
+            _lastRefreshed = DateTime.UtcNow;
             ApplyFilters();
         }
 
@@ -112,6 +119,7 @@ namespace PerformanceMonitorDashboard.Controls
             AlertsDataGrid.ItemsSource = list;
             NoAlertsMessage.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             AlertCountIndicator.Text = list.Count > 0 ? $"{list.Count} alert(s)" : "";
+            UpdateStaleDataIndicator();
 
             /* Populate server filter if needed */
             PopulateServerFilter();
@@ -184,6 +192,28 @@ namespace PerformanceMonitorDashboard.Controls
             return entry.AlertSent ? "Delivered" : "Shown";
         }
 
+        #region Stale Data Indicator
+
+        private void StaleDataTimer_Tick(object? sender, EventArgs e)
+        {
+            UpdateStaleDataIndicator();
+        }
+
+        private void UpdateStaleDataIndicator()
+        {
+            if (_lastRefreshed.HasValue)
+            {
+                var elapsed = DateTime.UtcNow - _lastRefreshed.Value;
+                LastRefreshedIndicator.Text = elapsed.TotalSeconds < 5
+                    ? "Refreshed just now"
+                    : elapsed.TotalMinutes < 1
+                        ? $"Refreshed {(int)elapsed.TotalSeconds}s ago"
+                        : $"Refreshed {(int)elapsed.TotalMinutes}m ago";
+            }
+        }
+
+        #endregion
+
         #region Event Handlers
 
         private void TimeRangeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -223,7 +253,9 @@ namespace PerformanceMonitorDashboard.Controls
                 .Select(s => (s.AlertTime, s.ServerName, s.MetricName))
                 .ToList();
 
+            Logger.Info($"[AlertDismiss] Action=DismissSelected, Requested={selected.Count}");
             service.HideAlerts(keys);
+            Logger.Info($"[AlertDismiss] Action=DismissSelected, Result=Complete, Hidden={selected.Count}");
             LoadAlerts();
             AlertsDismissed?.Invoke(this, EventArgs.Empty);
         }
@@ -252,7 +284,9 @@ namespace PerformanceMonitorDashboard.Controls
                 serverName = serverItem.Content?.ToString();
             }
 
+            Logger.Info($"[AlertDismiss] Action=DismissAll, HoursBack={hoursBack}, Server={serverName ?? "all"}");
             service.HideAllAlerts(hoursBack > 0 ? hoursBack : 8760, serverName);
+            Logger.Info($"[AlertDismiss] Action=DismissAll, Result=Complete");
             LoadAlerts();
             AlertsDismissed?.Invoke(this, EventArgs.Empty);
         }

@@ -94,6 +94,10 @@
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
             <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+            <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
+                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <TextBlock x:Name="ArchivalWarning" Text="" Margin="8,0,0,0" VerticalAlignment="Center"
+                       FontSize="11" Foreground="#FFCC6600" FontWeight="SemiBold" Visibility="Collapsed"/>
         </StackPanel>
 
         <!-- DataGrid -->

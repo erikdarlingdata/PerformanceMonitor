@@ -15,6 +15,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Models;
@@ -28,12 +29,16 @@ public partial class AlertsHistoryTab : UserControl
     private DataGridFilterManager<AlertHistoryRow>? _filterManager;
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
+    private DateTime? _lastRefreshed;
+    private readonly DispatcherTimer _staleDataTimer;
 
     public MuteRuleService? MuteRuleService { get; set; }
 
     public AlertsHistoryTab()
     {
         InitializeComponent();
+        _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+        _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
 
     /// <summary>
@@ -43,6 +48,7 @@ public partial class AlertsHistoryTab : UserControl
     {
         _dataService = dataService;
         _filterManager = new DataGridFilterManager<AlertHistoryRow>(AlertsDataGrid);
+        _staleDataTimer.Start();
     }
 
     /// <summary>
@@ -73,6 +79,9 @@ public partial class AlertsHistoryTab : UserControl
             NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             AlertCountIndicator.Text = displayCount > 0 ? $"{displayCount} alert(s)" : "";
             AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
+
+            _lastRefreshed = DateTime.UtcNow;
+            UpdateStaleDataIndicator();
 
             PopulateServerFilter(alerts);
         }
@@ -193,6 +202,39 @@ public partial class AlertsHistoryTab : UserControl
     {
         if (_filterPopup != null)
             _filterPopup.IsOpen = false;
+    }
+
+    #endregion
+
+    #region Stale Data Indicator
+
+    private void StaleDataTimer_Tick(object? sender, EventArgs e)
+    {
+        UpdateStaleDataIndicator();
+    }
+
+    private void UpdateStaleDataIndicator()
+    {
+        if (_lastRefreshed.HasValue)
+        {
+            var elapsed = DateTime.UtcNow - _lastRefreshed.Value;
+            LastRefreshedIndicator.Text = elapsed.TotalSeconds < 5
+                ? "Refreshed just now"
+                : elapsed.TotalMinutes < 1
+                    ? $"Refreshed {(int)elapsed.TotalSeconds}s ago"
+                    : $"Refreshed {(int)elapsed.TotalMinutes}m ago";
+        }
+
+        // Show archival warning if ArchiveService is currently running
+        if (ArchiveService.IsArchiving)
+        {
+            ArchivalWarning.Text = "⚠ Archival in progress";
+            ArchivalWarning.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ArchivalWarning.Visibility = Visibility.Collapsed;
+        }
     }
 
     #endregion
