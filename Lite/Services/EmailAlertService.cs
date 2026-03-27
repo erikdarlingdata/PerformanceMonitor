@@ -26,6 +26,7 @@ public class EmailAlertService
 {
     private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
     private readonly DuckDbInitializer? _duckDb;
+    private readonly WebhookAlertService _webhookAlertService = new();
 
     /* Failure tracking for louder logging */
     private int _consecutiveSmtpFailures;
@@ -108,6 +109,13 @@ public class EmailAlertService
                         }
                     }
                 }
+            }
+
+            /* Send webhook notifications (Teams / Slack) alongside email */
+            if (!muted)
+            {
+                await _webhookAlertService.TrySendWebhookAlertsAsync(
+                    metricName, serverName, currentValue, thresholdValue, serverId, context);
             }
 
             /* Always log the alert to DuckDB, regardless of email status */

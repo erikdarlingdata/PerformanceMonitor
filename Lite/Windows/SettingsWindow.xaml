@@ -28,6 +28,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -267,6 +268,8 @@
                 <TextBlock Text="Create rules to suppress specific recurring alerts while still logging them."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                <CheckBox x:Name="LogAlertDismissalsCheckBox" Content="Log alert dismiss and mute actions"
+                          Margin="20,8,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
             </StackPanel>
         </Border>
 
@@ -332,52 +335,155 @@
             </StackPanel>
         </Border>
 
-        <!-- Collector Schedule Grid -->
-        <Grid Grid.Row="6">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-            </Grid.RowDefinitions>
+        <!-- Webhooks (Teams / Slack) -->
+        <Border Grid.Row="6" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
+            <StackPanel>
+                <!-- Microsoft Teams -->
+                <TextBlock Text="Microsoft Teams Notifications" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBlock Text="Send alert notifications to a Teams channel via incoming webhook. Color-coded accent bars indicate alert severity."
+                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                <CheckBox x:Name="TeamsWebhookEnabledCheckBox" Content="Enable Teams notifications" Margin="0,8,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}" Checked="TeamsWebhookEnabledCheckBox_Changed" Unchecked="TeamsWebhookEnabledCheckBox_Changed"/>
+                <Grid Margin="20,6,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="110"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Webhook URL:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="TeamsWebhookUrlBox" Margin="0,0,0,4"
+                             ToolTip="Paste your Teams Incoming Webhook or Power Automate Workflows URL here"/>
 
-            <Grid Grid.Row="0" Margin="0,0,0,8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="Collector Schedules" FontSize="14" FontWeight="SemiBold"
-                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <TextBlock Text="Preset:" Foreground="{DynamicResource ForegroundBrush}" FontSize="12"
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="TeamsProxyAddressBox" Margin="0,0,0,4"
+                             ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
+
+                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                        <Button x:Name="TestTeamsButton" Content="Send Test Notification" Click="TestTeamsButton_Click"/>
+                        <TextBlock x:Name="TeamsStatusText" FontSize="11" FontStyle="Italic"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                    </StackPanel>
+                </Grid>
+                <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                    <Run Text="Setup: Create an Incoming Webhook connector or a Power Automate Workflows webhook for your Teams channel. "/>
+                    <Hyperlink NavigateUri="https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook"
+                               RequestNavigate="Hyperlink_RequestNavigate">
+                        Teams Webhooks Documentation
+                    </Hyperlink>
+                </TextBlock>
+
+                <!-- Slack -->
+                <TextBlock Text="Slack Notifications" FontSize="14" FontWeight="SemiBold"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>
+                <TextBlock Text="Send alert notifications to a Slack channel via incoming webhook. Color-coded sidebar indicates alert severity."
+                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                <CheckBox x:Name="SlackWebhookEnabledCheckBox" Content="Enable Slack notifications" Margin="0,8,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}" Checked="SlackWebhookEnabledCheckBox_Changed" Unchecked="SlackWebhookEnabledCheckBox_Changed"/>
+                <Grid Margin="20,6,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="110"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Webhook URL:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="SlackWebhookUrlBox" Margin="0,0,0,4"
+                             ToolTip="Paste your Slack Incoming Webhook URL here"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="SlackProxyAddressBox" Margin="0,0,0,4"
+                             ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
+
+                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                        <Button x:Name="TestSlackButton" Content="Send Test Notification" Click="TestSlackButton_Click"/>
+                        <TextBlock x:Name="SlackStatusText" FontSize="11" FontStyle="Italic"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                    </StackPanel>
+                </Grid>
+                <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                    <Run Text="Setup: Create an Incoming Webhook app in your Slack workspace settings. "/>
+                    <Hyperlink NavigateUri="https://api.slack.com/messaging/webhooks"
+                               RequestNavigate="Hyperlink_RequestNavigate">
+                        Slack Webhooks Documentation
+                    </Hyperlink>
+                </TextBlock>
+
+                <!-- Severity Color Reference -->
+                <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>
+                <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
+                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Server Unreachable)
+                </TextBlock>
+                <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
+                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, TempDB, Jobs)
+                </TextBlock>
+                <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
+                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)
+                </TextBlock>
+                <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
+                    <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" /> — Resolved (Server Restored)
+                </TextBlock>
+                <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                    <Run Foreground="#2eaef1" FontWeight="Bold" Text="&#x25A0; Blue" /> — Info
+                </TextBlock>
+            </StackPanel>
+        </Border>
+
+        <!-- Collector Schedules (Per-Server) -->
+        <Border Grid.Row="7" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Text="Collector Schedules" FontSize="14" FontWeight="SemiBold"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <TextBlock Grid.Row="1" Text="Each server can have its own collection schedule, or inherit the default."
+                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"/>
+
+                <DataGrid Grid.Row="2" x:Name="ServerScheduleGrid"
+                          AutoGenerateColumns="False" IsReadOnly="True"
+                          CanUserAddRows="False" CanUserDeleteRows="False"
+                          SelectionMode="Single"
+                          Background="Transparent" BorderThickness="0"
+                          HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                          MinHeight="80" MaxHeight="200"
+                          MouseDoubleClick="ServerScheduleGrid_DoubleClick">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="*"/>
+                        <DataGridTextColumn Header="Preset" Binding="{Binding Preset}" Width="110"/>
+                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="Edit Selected..." x:Name="EditServerScheduleButton" Click="EditServerSchedule_Click" Margin="0,0,8,0"/>
+                    <Button Content="Edit Default..." x:Name="EditDefaultScheduleButton" Click="EditDefaultSchedule_Click" Margin="0,0,16,0"/>
+                    <TextBlock Text="Default preset:" Foreground="{DynamicResource ForegroundBrush}" FontSize="12"
                                VerticalAlignment="Center" Margin="0,0,8,0"/>
-                    <ComboBox x:Name="PresetComboBox" Width="140" SelectionChanged="PresetComboBox_SelectionChanged">
-                        <ComboBoxItem Content="Custom" IsEnabled="False"/>
-                        <ComboBoxItem Content="Low-Impact"/>
-                        <ComboBoxItem Content="Balanced"/>
-                        <ComboBoxItem Content="Aggressive"/>
-                    </ComboBox>
+                    <TextBlock x:Name="DefaultPresetText" FontSize="12" FontWeight="SemiBold"
+                               Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <Button Content="Apply Default to All" Click="ApplyDefaultToAll_Click"/>
                 </StackPanel>
             </Grid>
-
-            <DataGrid Grid.Row="1" x:Name="ScheduleGrid"
-                      AutoGenerateColumns="False" IsReadOnly="False"
-                      CanUserAddRows="False" CanUserDeleteRows="False"
-                      SelectionMode="Single"
-                      Background="Transparent" BorderThickness="0"
-                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                      ContextMenu="{StaticResource DataGridContextMenu}">
-                <DataGrid.Columns>
-                    <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}" Width="65"/>
-                    <DataGridTextColumn Header="Collector" Binding="{Binding Name}" Width="160" IsReadOnly="True"/>
-                    <DataGridTextColumn Header="Frequency (min)" Binding="{Binding FrequencyMinutes, UpdateSourceTrigger=LostFocus}" Width="110"/>
-                    <DataGridTextColumn Header="Retention (days)" Binding="{Binding RetentionDays, UpdateSourceTrigger=LostFocus}" Width="110"/>
-                    <DataGridTextColumn Header="Schedule" Binding="{Binding FrequencyDisplay}" Width="140" IsReadOnly="True"/>
-                    <DataGridTextColumn Header="Last Run" Binding="{Binding LastRunTime, StringFormat=HH:mm:ss}" Width="90" IsReadOnly="True"/>
-                </DataGrid.Columns>
-            </DataGrid>
-        </Grid>
+        </Border>
 
         <!-- Buttons -->
-        <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button Content="Save" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
             <Button Content="Close" Click="CloseButton_Click"/>
         </StackPanel>

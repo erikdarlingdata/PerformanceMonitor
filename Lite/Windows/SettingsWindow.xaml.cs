@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -15,6 +17,8 @@ using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Navigation;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
@@ -23,23 +27,26 @@ namespace PerformanceMonitorLite.Windows;
 public partial class SettingsWindow : Window
 {
     private readonly ScheduleManager _scheduleManager;
+    private readonly ServerManager _serverManager;
     private readonly CollectionBackgroundService? _backgroundService;
     private readonly McpHostService? _mcpService;
     private readonly MuteRuleService? _muteRuleService;
 
     public SettingsWindow(
         ScheduleManager scheduleManager,
+        ServerManager serverManager,
         CollectionBackgroundService? backgroundService = null,
         McpHostService? mcpService = null,
         MuteRuleService? muteRuleService = null)
     {
         InitializeComponent();
         _scheduleManager = scheduleManager;
+        _serverManager = serverManager;
         _backgroundService = backgroundService;
         _mcpService = mcpService;
         _muteRuleService = muteRuleService;
 
-        LoadSchedules();
+        LoadServerScheduleSummary();
         UpdateCollectionStatus();
         LoadMcpSettings();
         UpdateMcpStatus();
@@ -50,64 +57,94 @@ public partial class SettingsWindow : Window
         LoadTimeDisplayMode();
         LoadAlertSettings();
         LoadSmtpSettings();
+        LoadWebhookSettings();
     }
 
-    private bool _suppressPresetChange;
-
-    private void LoadSchedules()
+    private void LoadServerScheduleSummary()
     {
-        ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
-        DetectActivePreset();
-    }
-
-    private void DetectActivePreset()
-    {
-        _suppressPresetChange = true;
-        try
+        var servers = _serverManager.GetAllServers();
+        var rows = servers.Select(s => new ServerScheduleRow
         {
-            string active = _scheduleManager.GetActivePreset();
-            for (int i = 0; i < PresetComboBox.Items.Count; i++)
-            {
-                if (PresetComboBox.Items[i] is ComboBoxItem item &&
-                    string.Equals(item.Content?.ToString(), active, StringComparison.OrdinalIgnoreCase))
-                {
-                    PresetComboBox.SelectedIndex = i;
-                    return;
-                }
-            }
-            PresetComboBox.SelectedIndex = 0;
+            ServerId = s.Id,
+            ServerName = s.DisplayName,
+            Preset = _scheduleManager.GetActivePresetForServer(s.Id),
+            Status = _scheduleManager.HasServerOverride(s.Id) ? "Customized" : "Default"
+        }).ToList();
+
+        ServerScheduleGrid.ItemsSource = rows;
+        DefaultPresetText.Text = _scheduleManager.GetActivePreset();
+    }
+
+    private void EditServerSchedule_Click(object sender, RoutedEventArgs e)
+    {
+        OpenServerScheduleEditor();
+    }
+
+    private void ServerScheduleGrid_DoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        OpenServerScheduleEditor();
+    }
+
+    private void OpenServerScheduleEditor()
+    {
+        if (ServerScheduleGrid.SelectedItem is not ServerScheduleRow row) return;
+
+        var server = _serverManager.GetAllServers().FirstOrDefault(s => s.Id == row.ServerId);
+        if (server == null) return;
+
+        var editor = new CollectorScheduleEditorWindow(_scheduleManager, _serverManager, server.Id, server.DisplayName) { Owner = this };
+        editor.ShowDialog();
+
+        if (editor.Saved)
+        {
+            LoadServerScheduleSummary();
         }
-        finally
+    }
+
+    private void EditDefaultSchedule_Click(object sender, RoutedEventArgs e)
+    {
+        var editor = new CollectorScheduleEditorWindow(_scheduleManager, _serverManager) { Owner = this };
+        editor.ShowDialog();
+
+        if (editor.Saved)
         {
-            _suppressPresetChange = false;
+            LoadServerScheduleSummary();
         }
     }
 
-    private void PresetComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void ApplyDefaultToAll_Click(object sender, RoutedEventArgs e)
     {
-        if (_suppressPresetChange) return;
-        if (PresetComboBox.SelectedItem is not ComboBoxItem selected) return;
+        var servers = _serverManager.GetAllServers();
+        var customCount = servers.Count(s => _scheduleManager.HasServerOverride(s.Id));
 
-        string presetName = selected.Content?.ToString() ?? "";
-        if (presetName == "Custom") return;
-
-        var result = MessageBox.Show(
-            $"Apply the \"{presetName}\" preset?\n\nThis will change all collector frequencies. Enabled/disabled state and retention settings are not affected.",
-            "Apply Collection Preset",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question
-        );
-
-        if (result != MessageBoxResult.Yes)
+        if (customCount == 0)
         {
-            DetectActivePreset();
+            MessageBox.Show("All servers are already using the default schedule.", "Apply Default", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        _scheduleManager.ApplyPreset(presetName);
-        ScheduleGrid.ItemsSource = null;
-        ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
-        DetectActivePreset();
+        var result = MessageBox.Show(
+            $"Remove custom schedules from {customCount} server(s) and revert them to the default schedule?\n\nThis cannot be undone.",
+            "Apply Default to All",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (result != MessageBoxResult.Yes) return;
+
+        foreach (var server in servers)
+        {
+            _scheduleManager.RemoveServerOverride(server.Id);
+        }
+
+        LoadServerScheduleSummary();
+    }
+
+    private class ServerScheduleRow
+    {
+        public string ServerId { get; set; } = "";
+        public string ServerName { get; set; } = "";
+        public string Preset { get; set; } = "";
+        public string Status { get; set; } = "";
     }
 
     private void UpdateCollectionStatus()
@@ -169,7 +206,6 @@ public partial class SettingsWindow : Window
 
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
-        _scheduleManager.SaveSchedules();
         var (mcpChanged, mcpValid) = await SaveMcpSettingsAsync();
         SaveDefaultTimeRange();
         SaveConnectionTimeout();
@@ -178,6 +214,7 @@ public partial class SettingsWindow : Window
         SaveTimeDisplayMode();
         bool alertsValid = SaveAlertSettings();
         SaveSmtpSettings();
+        SaveWebhookSettings();
 
         _saved = true;
         if (mcpChanged) McpSettingsChanged = true;
@@ -566,6 +603,7 @@ public partial class SettingsWindow : Window
             "7 days" => 2,
             _ => 3
         };
+        LogAlertDismissalsCheckBox.IsChecked = App.LogAlertDismissals;
         UpdateAlertControlStates();
     }
 
@@ -616,6 +654,7 @@ public partial class SettingsWindow : Window
         else
             validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.");
         App.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
+        App.LogAlertDismissals = LogAlertDismissalsCheckBox.IsChecked == true;
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -659,6 +698,7 @@ public partial class SettingsWindow : Window
             root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
             root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
             root["mute_rule_default_expiration"] = App.MuteRuleDefaultExpiration;
+            root["log_alert_dismissals"] = App.LogAlertDismissals;
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
@@ -916,6 +956,159 @@ public partial class SettingsWindow : Window
             TestEmailButton.Content = "Send Test Email";
             TestEmailButton.IsEnabled = true;
         }
+    }
+
+    // ============================================
+    // Webhooks (Teams / Slack)
+    // ============================================
+
+    private void LoadWebhookSettings()
+    {
+        TeamsWebhookEnabledCheckBox.IsChecked = App.TeamsWebhookEnabled;
+        TeamsWebhookUrlBox.Text = App.TeamsWebhookUrl;
+        TeamsProxyAddressBox.Text = App.TeamsProxyAddress;
+        SlackWebhookEnabledCheckBox.IsChecked = App.SlackWebhookEnabled;
+        SlackWebhookUrlBox.Text = App.SlackWebhookUrl;
+        SlackProxyAddressBox.Text = App.SlackProxyAddress;
+        UpdateTeamsControlStates();
+        UpdateSlackControlStates();
+    }
+
+    private void SaveWebhookSettings()
+    {
+        App.TeamsWebhookEnabled = TeamsWebhookEnabledCheckBox.IsChecked == true;
+        App.TeamsWebhookUrl = TeamsWebhookUrlBox.Text?.Trim() ?? "";
+        App.TeamsProxyAddress = TeamsProxyAddressBox.Text?.Trim() ?? "";
+        App.SlackWebhookEnabled = SlackWebhookEnabledCheckBox.IsChecked == true;
+        App.SlackWebhookUrl = SlackWebhookUrlBox.Text?.Trim() ?? "";
+        App.SlackProxyAddress = SlackProxyAddressBox.Text?.Trim() ?? "";
+
+        var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
+        try
+        {
+            JsonNode? root;
+            if (File.Exists(settingsPath))
+            {
+                var json = File.ReadAllText(settingsPath);
+                root = JsonNode.Parse(json) ?? new JsonObject();
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["teams_webhook_enabled"] = App.TeamsWebhookEnabled;
+            root["teams_webhook_url"] = App.TeamsWebhookUrl;
+            root["teams_proxy_address"] = App.TeamsProxyAddress;
+            root["slack_webhook_enabled"] = App.SlackWebhookEnabled;
+            root["slack_webhook_url"] = App.SlackWebhookUrl;
+            root["slack_proxy_address"] = App.SlackProxyAddress;
+
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(settingsPath, root.ToJsonString(options));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings", $"Failed to save webhook settings: {ex.Message}");
+        }
+    }
+
+    private void TeamsWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        UpdateTeamsControlStates();
+    }
+
+    private void SlackWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        UpdateSlackControlStates();
+    }
+
+    private void UpdateTeamsControlStates()
+    {
+        bool enabled = TeamsWebhookEnabledCheckBox.IsChecked == true;
+        TeamsWebhookUrlBox.IsEnabled = enabled;
+        TeamsProxyAddressBox.IsEnabled = enabled;
+        TestTeamsButton.IsEnabled = enabled;
+    }
+
+    private void UpdateSlackControlStates()
+    {
+        bool enabled = SlackWebhookEnabledCheckBox.IsChecked == true;
+        SlackWebhookUrlBox.IsEnabled = enabled;
+        SlackProxyAddressBox.IsEnabled = enabled;
+        TestSlackButton.IsEnabled = enabled;
+    }
+
+    private async void TestTeamsButton_Click(object sender, RoutedEventArgs e)
+    {
+        TestTeamsButton.IsEnabled = false;
+        TestTeamsButton.Content = "Sending...";
+
+        try
+        {
+            var url = TeamsWebhookUrlBox.Text?.Trim() ?? "";
+            var proxy = TeamsProxyAddressBox.Text?.Trim();
+            var error = await WebhookAlertService.SendTestTeamsAsync(url, proxy);
+
+            if (error == null)
+            {
+                MessageBox.Show("Teams test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show($"Failed to send Teams test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to send Teams test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            TestTeamsButton.Content = "Send Test Notification";
+            TestTeamsButton.IsEnabled = true;
+        }
+    }
+
+    private async void TestSlackButton_Click(object sender, RoutedEventArgs e)
+    {
+        TestSlackButton.IsEnabled = false;
+        TestSlackButton.Content = "Sending...";
+
+        try
+        {
+            var url = SlackWebhookUrlBox.Text?.Trim() ?? "";
+            var proxy = SlackProxyAddressBox.Text?.Trim();
+            var error = await WebhookAlertService.SendTestSlackAsync(url, proxy);
+
+            if (error == null)
+            {
+                MessageBox.Show("Slack test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show($"Failed to send Slack test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to send Slack test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            TestSlackButton.Content = "Send Test Notification";
+            TestSlackButton.IsEnabled = true;
+        }
+    }
+
+    private void Hyperlink_RequestNavigate(object sender, RequestNavigateEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = e.Uri.AbsoluteUri, UseShellExecute = true });
+        }
+        catch { }
+        e.Handled = true;
     }
 
     private void CopyCell_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyCell(sender);

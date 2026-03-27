@@ -123,12 +123,17 @@ namespace PerformanceMonitorDashboard
             }
         };
 
-        public CollectorScheduleWindow(DatabaseService databaseService)
+        public CollectorScheduleWindow(DatabaseService databaseService, string? serverDisplayName = null)
         {
             InitializeComponent();
             _databaseService = databaseService;
             Loaded += CollectorScheduleWindow_Loaded;
             Closing += CollectorScheduleWindow_Closing;
+
+            if (!string.IsNullOrEmpty(serverDisplayName))
+            {
+                Title = $"Collector Schedules - {serverDisplayName}";
+            }
         }
 
         private void CollectorScheduleWindow_Closing(object? sender, CancelEventArgs e)

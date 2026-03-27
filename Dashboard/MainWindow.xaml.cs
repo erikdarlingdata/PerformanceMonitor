@@ -103,6 +103,7 @@ namespace PerformanceMonitorDashboard
 
             _credentialService = new CredentialService();
             _emailAlertService = new EmailAlertService(_preferencesService);
+            _ = new WebhookAlertService(_preferencesService);
 
             _alertCheckTimer = new DispatcherTimer();
             _alertCheckTimer.Tick += AlertCheckTimer_Tick;

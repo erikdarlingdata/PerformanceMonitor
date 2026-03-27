@@ -19,6 +19,7 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>
 /// Manages collector schedules and determines when each collector should run.
+/// Supports per-server schedule overrides (v2 config format).
 /// </summary>
 public class ScheduleManager
 {
@@ -63,82 +64,96 @@ public class ScheduleManager
 
     private readonly string _schedulePath;
     private readonly ILogger<ScheduleManager>? _logger;
-    private List<CollectorSchedule> _schedules;
     private readonly object _lock = new();
+
+    private List<CollectorSchedule> _defaultSchedule;
+    private Dictionary<string, ServerScheduleOverride> _serverOverrides;
+
+    /// <summary>
+    /// Per-server runtime state: serverId → (collectorName → lastRunTime).
+    /// Kept separate from config because runtime state is not persisted to JSON.
+    /// </summary>
+    private readonly Dictionary<string, Dictionary<string, DateTime>> _serverRunState = new();
 
     public ScheduleManager(string configDirectory, ILogger<ScheduleManager>? logger = null)
     {
         _schedulePath = Path.Combine(configDirectory, "collection_schedule.json");
         _logger = logger;
-        _schedules = new List<CollectorSchedule>();
+        _defaultSchedule = new List<CollectorSchedule>();
+        _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
 
         LoadSchedules();
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    //  Existing public API — operates on the default schedule.
+    //  These methods are unchanged from v1 so existing callers keep working.
+    // ──────────────────────────────────────────────────────────────────
+
     /// <summary>
-    /// Gets all configured collector schedules.
+    /// Gets all configured collector schedules (default schedule).
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetAllSchedules()
     {
         lock (_lock)
         {
-            return _schedules.ToList();
+            return _defaultSchedule.ToList();
         }
     }
 
     /// <summary>
-    /// Gets only enabled and scheduled collectors.
+    /// Gets only enabled and scheduled collectors (default schedule).
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetEnabledSchedules()
     {
         lock (_lock)
         {
-            return _schedules.Where(s => s.Enabled && s.IsScheduled).ToList();
+            return _defaultSchedule.Where(s => s.Enabled && s.IsScheduled).ToList();
         }
     }
 
     /// <summary>
-    /// Gets collectors that are due to run.
+    /// Gets collectors that are due to run (default schedule, global run state).
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectors()
     {
         lock (_lock)
         {
-            return _schedules.Where(s => s.IsDue).ToList();
+            return _defaultSchedule.Where(s => s.IsDue).ToList();
         }
     }
 
     /// <summary>
-    /// Gets on-load only collectors (frequency = 0).
+    /// Gets on-load only collectors (frequency = 0) from the default schedule.
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetOnLoadCollectors()
     {
         lock (_lock)
         {
-            return _schedules.Where(s => s.Enabled && !s.IsScheduled).ToList();
+            return _defaultSchedule.Where(s => s.Enabled && !s.IsScheduled).ToList();
         }
     }
 
     /// <summary>
-    /// Gets a specific collector schedule by name.
+    /// Gets a specific collector schedule by name (default schedule).
     /// </summary>
     public CollectorSchedule? GetSchedule(string collectorName)
     {
         lock (_lock)
         {
-            return _schedules.FirstOrDefault(s =>
+            return _defaultSchedule.FirstOrDefault(s =>
                 s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
         }
     }
 
     /// <summary>
-    /// Marks a collector as having been run.
+    /// Marks a collector as having been run (default schedule, global run state).
     /// </summary>
     public void MarkCollectorRun(string collectorName, DateTime runTime)
     {
         lock (_lock)
         {
-            var schedule = _schedules.FirstOrDefault(s =>
+            var schedule = _defaultSchedule.FirstOrDefault(s =>
                 s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
 
             if (schedule != null)
@@ -157,13 +172,13 @@ public class ScheduleManager
     }
 
     /// <summary>
-    /// Updates a collector's schedule settings.
+    /// Updates a collector's schedule settings (default schedule).
     /// </summary>
     public void UpdateSchedule(string collectorName, bool? enabled = null, int? frequencyMinutes = null, int? retentionDays = null)
     {
         lock (_lock)
         {
-            var schedule = _schedules.FirstOrDefault(s =>
+            var schedule = _defaultSchedule.FirstOrDefault(s =>
                 s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
 
             if (schedule == null)
@@ -194,33 +209,18 @@ public class ScheduleManager
     }
 
     /// <summary>
-    /// Detects which preset matches the current intervals, or returns "Custom".
+    /// Detects which preset matches the current default schedule intervals, or returns "Custom".
     /// </summary>
     public string GetActivePreset()
     {
         lock (_lock)
         {
-            foreach (var (presetName, intervals) in s_presets)
-            {
-                bool matches = true;
-                foreach (var (collector, freq) in intervals)
-                {
-                    var schedule = _schedules.FirstOrDefault(s =>
-                        s.Name.Equals(collector, StringComparison.OrdinalIgnoreCase));
-                    if (schedule != null && schedule.FrequencyMinutes != freq)
-                    {
-                        matches = false;
-                        break;
-                    }
-                }
-                if (matches) return presetName;
-            }
-            return "Custom";
+            return DetectPreset(_defaultSchedule);
         }
     }
 
     /// <summary>
-    /// Applies a named preset, changing all scheduled collector frequencies.
+    /// Applies a named preset to the default schedule.
     /// Does not modify enabled/disabled state or on-load (frequency=0) collectors.
     /// </summary>
     public void ApplyPreset(string presetName)
@@ -232,31 +232,287 @@ public class ScheduleManager
 
         lock (_lock)
         {
-            foreach (var (collector, freq) in intervals)
-            {
-                var schedule = _schedules.FirstOrDefault(s =>
-                    s.Name.Equals(collector, StringComparison.OrdinalIgnoreCase));
-                if (schedule != null)
-                {
-                    schedule.FrequencyMinutes = freq;
-                }
-            }
-
+            ApplyPresetToList(_defaultSchedule, intervals);
             SaveSchedules();
 
-            _logger?.LogInformation("Applied collection preset '{Preset}'", presetName);
+            _logger?.LogInformation("Applied collection preset '{Preset}' to default schedule", presetName);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  New per-server API (v2)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the default schedule list.
+    /// </summary>
+    public IReadOnlyList<CollectorSchedule> GetDefaultSchedule()
+    {
+        lock (_lock)
+        {
+            return _defaultSchedule.ToList();
         }
     }
 
     /// <summary>
-    /// Loads schedules from the JSON config file.
+    /// Returns the schedule for a specific server.
+    /// If the server has an override, returns those collectors; otherwise returns a copy of the default.
+    /// </summary>
+    public IReadOnlyList<CollectorSchedule> GetSchedulesForServer(string serverId)
+    {
+        lock (_lock)
+        {
+            if (_serverOverrides.TryGetValue(serverId, out var over))
+            {
+                return over.Collectors.ToList();
+            }
+
+            return CloneScheduleList(_defaultSchedule);
+        }
+    }
+
+    /// <summary>
+    /// Gets collectors that are due to run for a specific server, using per-server run state.
+    /// </summary>
+    public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId)
+    {
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+
+            _serverRunState.TryGetValue(serverId, out var runState);
+
+            var due = new List<CollectorSchedule>();
+            foreach (var s in schedules)
+            {
+                if (!s.Enabled || !s.IsScheduled)
+                    continue;
+
+                if (runState == null || !runState.TryGetValue(s.Name, out var lastRun))
+                {
+                    due.Add(s); // never run — due immediately
+                    continue;
+                }
+
+                var elapsed = DateTime.UtcNow - lastRun;
+                if (elapsed.TotalMinutes >= s.FrequencyMinutes)
+                {
+                    due.Add(s);
+                }
+            }
+
+            return due;
+        }
+    }
+
+    /// <summary>
+    /// Gets on-load only collectors for a specific server.
+    /// </summary>
+    public IReadOnlyList<CollectorSchedule> GetOnLoadCollectorsForServer(string serverId)
+    {
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+
+            return schedules.Where(s => s.Enabled && !s.IsScheduled).ToList();
+        }
+    }
+
+    /// <summary>
+    /// Gets a specific collector schedule by name for a server.
+    /// </summary>
+    public CollectorSchedule? GetScheduleForServer(string serverId, string collectorName)
+    {
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+
+            return schedules.FirstOrDefault(s =>
+                s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    /// <summary>
+    /// Records a collector run for a specific server.
+    /// </summary>
+    public void MarkCollectorRunForServer(string serverId, string collectorName, DateTime runTime)
+    {
+        lock (_lock)
+        {
+            if (!_serverRunState.TryGetValue(serverId, out var runState))
+            {
+                runState = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+                _serverRunState[serverId] = runState;
+            }
+
+            runState[collectorName] = runTime;
+
+            _logger?.LogDebug("Marked collector '{Name}' as run for server {ServerId} at {Time}",
+                collectorName, serverId, runTime);
+        }
+    }
+
+    /// <summary>
+    /// Creates or updates a per-server schedule override.
+    /// </summary>
+    public void SetScheduleForServer(string serverId, List<CollectorSchedule> schedules)
+    {
+        lock (_lock)
+        {
+            _serverOverrides[serverId] = new ServerScheduleOverride { Collectors = schedules };
+            SaveSchedules();
+
+            _logger?.LogInformation("Set schedule override for server {ServerId} ({Count} collectors)",
+                serverId, schedules.Count);
+        }
+    }
+
+    /// <summary>
+    /// Removes a server's schedule override, reverting it to the default.
+    /// </summary>
+    public void RemoveServerOverride(string serverId)
+    {
+        lock (_lock)
+        {
+            if (_serverOverrides.Remove(serverId))
+            {
+                SaveSchedules();
+                _logger?.LogInformation("Removed schedule override for server {ServerId}", serverId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true if the server has a custom schedule override.
+    /// </summary>
+    public bool HasServerOverride(string serverId)
+    {
+        lock (_lock)
+        {
+            return _serverOverrides.ContainsKey(serverId);
+        }
+    }
+
+    /// <summary>
+    /// Applies a preset to a single server's schedule.
+    /// Creates an override if one doesn't exist (copies default first).
+    /// </summary>
+    public void ApplyPresetForServer(string serverId, string presetName)
+    {
+        if (!s_presets.TryGetValue(presetName, out var intervals))
+        {
+            throw new ArgumentException($"Unknown preset: {presetName}");
+        }
+
+        lock (_lock)
+        {
+            if (!_serverOverrides.TryGetValue(serverId, out var over))
+            {
+                over = new ServerScheduleOverride { Collectors = CloneScheduleList(_defaultSchedule) };
+                _serverOverrides[serverId] = over;
+            }
+
+            ApplyPresetToList(over.Collectors, intervals);
+            SaveSchedules();
+
+            _logger?.LogInformation("Applied preset '{Preset}' to server {ServerId}", presetName, serverId);
+        }
+    }
+
+    /// <summary>
+    /// Applies a preset to the default schedule (alias for ApplyPreset).
+    /// </summary>
+    public void ApplyPresetToDefault(string presetName)
+    {
+        ApplyPreset(presetName);
+    }
+
+    /// <summary>
+    /// Detects which preset matches a server's active schedule.
+    /// </summary>
+    public string GetActivePresetForServer(string serverId)
+    {
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+
+            return DetectPreset(schedules);
+        }
+    }
+
+    /// <summary>
+    /// Removes orphaned overrides for servers that no longer exist.
+    /// </summary>
+    public void CleanupRemovedServers(IEnumerable<string> activeServerIds)
+    {
+        lock (_lock)
+        {
+            var activeSet = new HashSet<string>(activeServerIds);
+            var orphaned = _serverOverrides.Keys.Where(id => !activeSet.Contains(id)).ToList();
+
+            if (orphaned.Count == 0)
+                return;
+
+            foreach (var id in orphaned)
+            {
+                _serverOverrides.Remove(id);
+                _serverRunState.Remove(id);
+            }
+
+            SaveSchedules();
+
+            _logger?.LogInformation("Cleaned up {Count} orphaned server schedule override(s)", orphaned.Count);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  Persistence
+    // ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Saves schedules to the JSON config file (v2 format).
+    /// </summary>
+    public void SaveSchedules()
+    {
+        lock (_lock)
+        {
+            try
+            {
+                var config = new ScheduleConfigV2
+                {
+                    Version = 2,
+                    DefaultSchedule = _defaultSchedule,
+                    ServerOverrides = _serverOverrides
+                };
+                string json = JsonSerializer.Serialize(config, s_jsonOptions);
+                File.WriteAllText(_schedulePath, json);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to save collection_schedule.json");
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Loads schedules from the JSON config file, handling v1→v2 migration.
     /// </summary>
     private void LoadSchedules()
     {
         if (!File.Exists(_schedulePath))
         {
             _logger?.LogInformation("Schedule file not found, using defaults");
-            _schedules = GetDefaultSchedules();
+            _defaultSchedule = GetDefaultSchedules();
+            _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
             SaveSchedules();
             return;
         }
@@ -264,16 +520,35 @@ public class ScheduleManager
         try
         {
             string json = File.ReadAllText(_schedulePath);
-            var config = JsonSerializer.Deserialize<ScheduleConfig>(json);
-            _schedules = config?.Collectors ?? GetDefaultSchedules();
 
-            /* Create backup of valid config */
-            try { File.Copy(_schedulePath, _schedulePath + ".bak", overwrite: true); }
-            catch { /* best effort */ }
+            if (TryLoadV2(json))
+            {
+                /* Create backup of valid config */
+                try { File.Copy(_schedulePath, _schedulePath + ".bak", overwrite: true); }
+                catch { /* best effort */ }
 
-            _logger?.LogInformation("Loaded {Count} collector schedules from configuration", _schedules.Count);
+                _logger?.LogInformation(
+                    "Loaded v2 schedule config: {DefaultCount} default collectors, {OverrideCount} server override(s)",
+                    _defaultSchedule.Count, _serverOverrides.Count);
+            }
+            else
+            {
+                /* v1 format — migrate */
+                var v1Config = JsonSerializer.Deserialize<ScheduleConfigV1>(json);
+                _defaultSchedule = v1Config?.Collectors ?? GetDefaultSchedules();
+                _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
 
-            /* Add any new default collectors that are missing from the saved config */
+                /* Backup the v1 file before overwriting */
+                try { File.Copy(_schedulePath, _schedulePath + ".v1.bak", overwrite: true); }
+                catch { /* best effort */ }
+
+                SaveSchedules();
+
+                _logger?.LogInformation(
+                    "Migrated v1 schedule config to v2: {Count} collectors moved to default_schedule",
+                    _defaultSchedule.Count);
+            }
+
             MergeNewDefaults();
         }
         catch (Exception ex)
@@ -287,50 +562,62 @@ public class ScheduleManager
                 try
                 {
                     string bakJson = File.ReadAllText(bakPath);
-                    var bakConfig = JsonSerializer.Deserialize<ScheduleConfig>(bakJson);
-                    _schedules = bakConfig?.Collectors ?? GetDefaultSchedules();
-                    _logger?.LogInformation("Restored schedules from backup file");
+                    if (TryLoadV2(bakJson))
+                    {
+                        _logger?.LogInformation("Restored schedules from backup file");
+                        return;
+                    }
+
+                    var bakConfig = JsonSerializer.Deserialize<ScheduleConfigV1>(bakJson);
+                    _defaultSchedule = bakConfig?.Collectors ?? GetDefaultSchedules();
+                    _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
+                    _logger?.LogInformation("Restored v1 schedules from backup file");
                     return;
                 }
                 catch { /* backup also corrupt, fall through to defaults */ }
             }
 
-            _schedules = GetDefaultSchedules();
+            _defaultSchedule = GetDefaultSchedules();
+            _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
             SaveSchedules();
         }
     }
 
     /// <summary>
-    /// Merges any new default collectors that are missing from the loaded config,
-    /// and removes any obsolete/renamed collectors that no longer have a dispatch case.
-    /// This handles the case where new collectors are added to the code but the user
-    /// has an existing config file from an older version.
+    /// Attempts to load JSON as v2 format. Returns true if successful.
+    /// </summary>
+    private bool TryLoadV2(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("version", out var versionProp) || versionProp.GetInt32() < 2)
+            return false;
+
+        var config = JsonSerializer.Deserialize<ScheduleConfigV2>(json);
+        if (config == null)
+            return false;
+
+        _defaultSchedule = config.DefaultSchedule ?? GetDefaultSchedules();
+        _serverOverrides = config.ServerOverrides ?? new Dictionary<string, ServerScheduleOverride>();
+        return true;
+    }
+
+    /// <summary>
+    /// Merges any new default collectors into the default schedule and all server overrides.
+    /// Also removes obsolete collectors that no longer have a dispatch case.
     /// </summary>
     private void MergeNewDefaults()
     {
         var defaults = GetDefaultSchedules();
         var defaultNames = new HashSet<string>(defaults.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
-        var loadedNames = new HashSet<string>(_schedules.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
         var changed = false;
 
-        /* Remove obsolete collectors that are no longer in the defaults
-           (e.g., blocking_snapshot was renamed to blocked_process_report) */
-        var removed = _schedules.RemoveAll(s => !defaultNames.Contains(s.Name));
-        if (removed > 0)
-        {
-            _logger?.LogInformation("Removed {Count} obsolete collector(s) from schedule", removed);
-            changed = true;
-        }
+        /* Merge into default schedule */
+        changed |= MergeIntoList(_defaultSchedule, defaults, defaultNames);
 
-        /* Add any new default collectors that are missing */
-        foreach (var defaultSchedule in defaults)
+        /* Merge into each server override */
+        foreach (var over in _serverOverrides.Values)
         {
-            if (!loadedNames.Contains(defaultSchedule.Name))
-            {
-                _schedules.Add(defaultSchedule);
-                _logger?.LogInformation("Added missing collector '{Name}' from defaults", defaultSchedule.Name);
-                changed = true;
-            }
+            changed |= MergeIntoList(over.Collectors, defaults, defaultNames);
         }
 
         if (changed)
@@ -340,24 +627,100 @@ public class ScheduleManager
     }
 
     /// <summary>
-    /// Saves schedules to the JSON config file.
+    /// Merges new defaults into a collector list. Removes obsolete, adds missing.
+    /// Returns true if any changes were made.
     /// </summary>
-    public void SaveSchedules()
+    private bool MergeIntoList(List<CollectorSchedule> list, List<CollectorSchedule> defaults, HashSet<string> defaultNames)
     {
-        lock (_lock)
+        var loadedNames = new HashSet<string>(list.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
+        var changed = false;
+
+        /* Remove obsolete collectors */
+        var removed = list.RemoveAll(s => !defaultNames.Contains(s.Name));
+        if (removed > 0)
         {
-            try
+            _logger?.LogInformation("Removed {Count} obsolete collector(s) from schedule", removed);
+            changed = true;
+        }
+
+        /* Add missing collectors */
+        foreach (var defaultSchedule in defaults)
+        {
+            if (!loadedNames.Contains(defaultSchedule.Name))
             {
-                var config = new ScheduleConfig { Collectors = _schedules };
-                string json = JsonSerializer.Serialize(config, s_jsonOptions);
-                File.WriteAllText(_schedulePath, json);
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError(ex, "Failed to save collection_schedule.json");
-                throw;
+                list.Add(CloneSchedule(defaultSchedule));
+                _logger?.LogInformation("Added missing collector '{Name}' from defaults", defaultSchedule.Name);
+                changed = true;
             }
         }
+
+        return changed;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  Helpers
+    // ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Detects which preset matches a list of collector schedules.
+    /// </summary>
+    private static string DetectPreset(List<CollectorSchedule> schedules)
+    {
+        foreach (var (presetName, intervals) in s_presets)
+        {
+            bool matches = true;
+            foreach (var (collector, freq) in intervals)
+            {
+                var schedule = schedules.FirstOrDefault(s =>
+                    s.Name.Equals(collector, StringComparison.OrdinalIgnoreCase));
+                if (schedule != null && schedule.FrequencyMinutes != freq)
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return presetName;
+        }
+        return "Custom";
+    }
+
+    /// <summary>
+    /// Applies preset intervals to a collector list. Does not touch enabled/disabled or on-load collectors.
+    /// </summary>
+    private static void ApplyPresetToList(List<CollectorSchedule> schedules, Dictionary<string, int> intervals)
+    {
+        foreach (var (collector, freq) in intervals)
+        {
+            var schedule = schedules.FirstOrDefault(s =>
+                s.Name.Equals(collector, StringComparison.OrdinalIgnoreCase));
+            if (schedule != null)
+            {
+                schedule.FrequencyMinutes = freq;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Deep-clones a schedule list (for creating overrides from defaults).
+    /// </summary>
+    private static List<CollectorSchedule> CloneScheduleList(List<CollectorSchedule> source)
+    {
+        return source.Select(CloneSchedule).ToList();
+    }
+
+    /// <summary>
+    /// Deep-clones a single CollectorSchedule (config properties only, not runtime state).
+    /// </summary>
+    private static CollectorSchedule CloneSchedule(CollectorSchedule s)
+    {
+        return new CollectorSchedule
+        {
+            Name = s.Name,
+            Enabled = s.Enabled,
+            FrequencyMinutes = s.FrequencyMinutes,
+            RetentionDays = s.RetentionDays,
+            Description = s.Description
+        };
     }
 
     /// <summary>
@@ -393,12 +756,31 @@ public class ScheduleManager
         };
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    //  JSON config models
+    // ──────────────────────────────────────────────────────────────────
+
     /// <summary>
-    /// JSON wrapper for schedules list.
+    /// v1 JSON format: { "collectors": [...] }
     /// </summary>
-    private class ScheduleConfig
+    private class ScheduleConfigV1
     {
         [JsonPropertyName("collectors")]
         public List<CollectorSchedule> Collectors { get; set; } = new();
+    }
+
+    /// <summary>
+    /// v2 JSON format: { "version": 2, "default_schedule": [...], "server_overrides": { "guid": { "collectors": [...] } } }
+    /// </summary>
+    private class ScheduleConfigV2
+    {
+        [JsonPropertyName("version")]
+        public int Version { get; set; } = 2;
+
+        [JsonPropertyName("default_schedule")]
+        public List<CollectorSchedule> DefaultSchedule { get; set; } = new();
+
+        [JsonPropertyName("server_overrides")]
+        public Dictionary<string, ServerScheduleOverride> ServerOverrides { get; set; } = new();
     }
 }

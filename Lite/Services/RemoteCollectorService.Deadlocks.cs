@@ -32,7 +32,7 @@ public partial class RemoteCollectorService
     public async Task EnsureDeadlockXeSessionAsync(ServerConnection server, int engineEdition = 0, CancellationToken cancellationToken = default)
     {
         /* Skip if the deadlock collector is disabled */
-        var schedule = _scheduleManager.GetSchedule("deadlocks");
+        var schedule = _scheduleManager.GetScheduleForServer(server.Id, "deadlocks");
         if (schedule == null || !schedule.Enabled)
         {
             return;

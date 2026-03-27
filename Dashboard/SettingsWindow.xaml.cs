@@ -13,6 +13,7 @@ using System.Net;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Navigation;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Interfaces;
 using PerformanceMonitorDashboard.Services;
@@ -186,6 +187,7 @@ namespace PerformanceMonitorDashboard
                 "7 days" => 2,
                 _ => 3
             };
+            LogAlertDismissalsCheckBox.IsChecked = prefs.LogAlertDismissals;
 
             UpdateNotificationCheckboxStates();
 
@@ -205,6 +207,16 @@ namespace PerformanceMonitorDashboard
             }
 
             UpdateSmtpControlStates();
+
+            // Webhook settings (Teams / Slack)
+            TeamsWebhookEnabledCheckBox.IsChecked = prefs.TeamsWebhookEnabled;
+            TeamsWebhookUrlTextBox.Text = prefs.TeamsWebhookUrl;
+            TeamsProxyAddressTextBox.Text = prefs.TeamsProxyAddress;
+            SlackWebhookEnabledCheckBox.IsChecked = prefs.SlackWebhookEnabled;
+            SlackWebhookUrlTextBox.Text = prefs.SlackWebhookUrl;
+            SlackProxyAddressTextBox.Text = prefs.SlackProxyAddress;
+            UpdateTeamsControlStates();
+            UpdateSlackControlStates();
 
         }
 
@@ -670,6 +682,7 @@ namespace PerformanceMonitorDashboard
 
             prefs.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
             MuteRuleDialog.DefaultExpiration = prefs.MuteRuleDefaultExpiration;
+            prefs.LogAlertDismissals = LogAlertDismissalsCheckBox.IsChecked == true;
 
             // Save SMTP email settings
             prefs.SmtpEnabled = SmtpEnabledCheckBox.IsChecked == true;
@@ -689,6 +702,14 @@ namespace PerformanceMonitorDashboard
             {
                 EmailAlertService.SaveSmtpPassword(SmtpPasswordBox.Password, prefs.SmtpUsername);
             }
+
+            // Save webhook settings (Teams / Slack)
+            prefs.TeamsWebhookEnabled = TeamsWebhookEnabledCheckBox.IsChecked == true;
+            prefs.TeamsWebhookUrl = TeamsWebhookUrlTextBox.Text?.Trim() ?? "";
+            prefs.TeamsProxyAddress = TeamsProxyAddressTextBox.Text?.Trim() ?? "";
+            prefs.SlackWebhookEnabled = SlackWebhookEnabledCheckBox.IsChecked == true;
+            prefs.SlackWebhookUrl = SlackWebhookUrlTextBox.Text?.Trim() ?? "";
+            prefs.SlackProxyAddress = SlackProxyAddressTextBox.Text?.Trim() ?? "";
 
             // Save MCP server settings
             bool mcpWasEnabled = prefs.McpEnabled;
@@ -789,6 +810,118 @@ namespace PerformanceMonitorDashboard
                     "SMTP configuration has issues:\n\n" + string.Join("\n", errors),
                     "SMTP Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
+        }
+
+        // ============================================
+        // Webhooks Tab (Teams / Slack)
+        // ============================================
+
+        private void TeamsWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_isLoading) return;
+            UpdateTeamsControlStates();
+        }
+
+        private void SlackWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_isLoading) return;
+            UpdateSlackControlStates();
+        }
+
+        private void UpdateTeamsControlStates()
+        {
+            bool enabled = TeamsWebhookEnabledCheckBox.IsChecked == true;
+            TeamsWebhookUrlTextBox.IsEnabled = enabled;
+            TeamsProxyAddressTextBox.IsEnabled = enabled;
+            TestTeamsButton.IsEnabled = enabled;
+        }
+
+        private void UpdateSlackControlStates()
+        {
+            bool enabled = SlackWebhookEnabledCheckBox.IsChecked == true;
+            SlackWebhookUrlTextBox.IsEnabled = enabled;
+            SlackProxyAddressTextBox.IsEnabled = enabled;
+            TestSlackButton.IsEnabled = enabled;
+        }
+
+        private async void TestTeamsButton_Click(object sender, RoutedEventArgs e)
+        {
+            TestTeamsButton.IsEnabled = false;
+            TestTeamsButton.Content = "Sending...";
+            TestTeamsStatusText.Text = "";
+
+            try
+            {
+                var url = TeamsWebhookUrlTextBox.Text?.Trim() ?? "";
+                var proxy = TeamsProxyAddressTextBox.Text?.Trim();
+                var error = await WebhookAlertService.SendTestTeamsAsync(url, proxy);
+
+                if (error == null)
+                {
+                    TestTeamsStatusText.Text = "Test notification sent!";
+                    MessageBox.Show("Teams test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    TestTeamsStatusText.Text = $"Failed: {error}";
+                    MessageBox.Show($"Failed to send Teams test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                TestTeamsStatusText.Text = $"Error: {ex.Message}";
+                MessageBox.Show($"Failed to send Teams test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                TestTeamsButton.Content = "Send Test Notification";
+                TestTeamsButton.IsEnabled = true;
+            }
+        }
+
+        private async void TestSlackButton_Click(object sender, RoutedEventArgs e)
+        {
+            TestSlackButton.IsEnabled = false;
+            TestSlackButton.Content = "Sending...";
+            TestSlackStatusText.Text = "";
+
+            try
+            {
+                var url = SlackWebhookUrlTextBox.Text?.Trim() ?? "";
+                var proxy = SlackProxyAddressTextBox.Text?.Trim();
+                var error = await WebhookAlertService.SendTestSlackAsync(url, proxy);
+
+                if (error == null)
+                {
+                    TestSlackStatusText.Text = "Test notification sent!";
+                    MessageBox.Show("Slack test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    TestSlackStatusText.Text = $"Failed: {error}";
+                    MessageBox.Show($"Failed to send Slack test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                TestSlackStatusText.Text = $"Error: {ex.Message}";
+                MessageBox.Show($"Failed to send Slack test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                TestSlackButton.Content = "Send Test Notification";
+                TestSlackButton.IsEnabled = true;
+            }
+        }
+
+        private void Hyperlink_RequestNavigate(object sender, RequestNavigateEventArgs e)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = e.Uri.AbsoluteUri, UseShellExecute = true });
+            }
+            catch { }
+            e.Handled = true;
         }
 
         private async void TestEmailButton_Click(object sender, RoutedEventArgs e)

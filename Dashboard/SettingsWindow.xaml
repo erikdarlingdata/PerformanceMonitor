@@ -2,9 +2,10 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Settings"
-        Height="550" Width="550"
+        Height="600" Width="680"
+        MinHeight="500" MinWidth="600"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip"
         Background="{DynamicResource BackgroundBrush}">
     <Grid Margin="15">
         <Grid.RowDefinitions>
@@ -300,6 +301,8 @@
                                     Padding="12,4" Margin="0,0,0,4"/>
                             <TextBlock Text="Create rules to suppress specific recurring alerts while still logging them."
                                        FontSize="11" FontStyle="Italic" Foreground="Gray" TextWrapping="Wrap"/>
+                            <CheckBox x:Name="LogAlertDismissalsCheckBox" Content="Log alert dismiss and mute actions"
+                                      Margin="0,8,0,0"/>
                         </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
@@ -363,6 +366,123 @@
                                            FontStyle="Italic" Foreground="Gray" VerticalAlignment="Center" Margin="10,0,0,0" FontSize="11"/>
                             </StackPanel>
                         </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- Webhooks Tab -->
+            <TabItem Header="Webhooks">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="15">
+                    <StackPanel>
+                        <!-- Microsoft Teams Section -->
+                        <TextBlock Text="Microsoft Teams" FontWeight="Bold" FontSize="13" Margin="0,0,0,5"/>
+                        <TextBlock Text="Send alert notifications to a Microsoft Teams channel via incoming webhook. Color-coded accent bars indicate alert severity."
+                                   TextWrapping="Wrap" Margin="0,0,0,10" FontStyle="Italic" Foreground="Gray"/>
+
+                        <CheckBox x:Name="TeamsWebhookEnabledCheckBox"
+                                  Content="Enable Teams notifications"
+                                  Margin="0,0,0,10"
+                                  Checked="TeamsWebhookEnabledCheckBox_Changed"
+                                  Unchecked="TeamsWebhookEnabledCheckBox_Changed"/>
+
+                        <Grid Margin="20,0,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="110"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Webhook URL:" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TeamsWebhookUrlTextBox" Margin="0,0,0,6"
+                                     ToolTip="Paste your Teams Incoming Webhook or Power Automate Workflows URL here"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                            <TextBox Grid.Row="1" Grid.Column="1" x:Name="TeamsProxyAddressTextBox" Margin="0,0,0,6"
+                                     ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
+
+                            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                                <Button x:Name="TestTeamsButton" Content="Send Test Notification" Padding="10,3"
+                                        Click="TestTeamsButton_Click"/>
+                                <TextBlock x:Name="TestTeamsStatusText" FontStyle="Italic" Foreground="Gray"
+                                           VerticalAlignment="Center" Margin="10,0,0,0" FontSize="11"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <TextBlock Margin="20,10,0,0" TextWrapping="Wrap" FontSize="11" Foreground="Gray">
+                            <Run Text="Setup: Create an Incoming Webhook connector or a Power Automate Workflows webhook for your Teams channel. "/>
+                            <Hyperlink NavigateUri="https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook"
+                                       RequestNavigate="Hyperlink_RequestNavigate">
+                                Teams Webhooks Documentation
+                            </Hyperlink>
+                        </TextBlock>
+
+                        <!-- Slack Section -->
+                        <TextBlock Text="Slack" FontWeight="Bold" FontSize="13" Margin="0,25,0,5"/>
+                        <TextBlock Text="Send alert notifications to a Slack channel via incoming webhook. Color-coded sidebar indicates alert severity."
+                                   TextWrapping="Wrap" Margin="0,0,0,10" FontStyle="Italic" Foreground="Gray"/>
+
+                        <CheckBox x:Name="SlackWebhookEnabledCheckBox"
+                                  Content="Enable Slack notifications"
+                                  Margin="0,0,0,10"
+                                  Checked="SlackWebhookEnabledCheckBox_Changed"
+                                  Unchecked="SlackWebhookEnabledCheckBox_Changed"/>
+
+                        <Grid Margin="20,0,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="110"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Webhook URL:" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" x:Name="SlackWebhookUrlTextBox" Margin="0,0,0,6"
+                                     ToolTip="Paste your Slack Incoming Webhook URL here"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                            <TextBox Grid.Row="1" Grid.Column="1" x:Name="SlackProxyAddressTextBox" Margin="0,0,0,6"
+                                     ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
+
+                            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                                <Button x:Name="TestSlackButton" Content="Send Test Notification" Padding="10,3"
+                                        Click="TestSlackButton_Click"/>
+                                <TextBlock x:Name="TestSlackStatusText" FontStyle="Italic" Foreground="Gray"
+                                           VerticalAlignment="Center" Margin="10,0,0,0" FontSize="11"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <TextBlock Margin="20,10,0,0" TextWrapping="Wrap" FontSize="11" Foreground="Gray">
+                            <Run Text="Setup: Create an Incoming Webhook app in your Slack workspace settings. "/>
+                            <Hyperlink NavigateUri="https://api.slack.com/messaging/webhooks"
+                                       RequestNavigate="Hyperlink_RequestNavigate">
+                                Slack Webhooks Documentation
+                            </Hyperlink>
+                        </TextBlock>
+
+                        <!-- Severity Color Reference -->
+                        <TextBlock Text="Alert Severity Colors" FontWeight="Bold" FontSize="12" Margin="0,25,0,6"/>
+                        <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="Gray" Margin="0,0,0,2">
+                            <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Server Unreachable)
+                        </TextBlock>
+                        <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="Gray" Margin="0,0,0,2">
+                            <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, TempDB, Jobs)
+                        </TextBlock>
+                        <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="Gray" Margin="0,0,0,2">
+                            <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)
+                        </TextBlock>
+                        <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="Gray" Margin="0,0,0,2">
+                            <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" /> — Resolved (Server Restored)
+                        </TextBlock>
+                        <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="Gray">
+                            <Run Foreground="#2eaef1" FontWeight="Bold" Text="&#x25A0; Blue" /> — Info
+                        </TextBlock>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

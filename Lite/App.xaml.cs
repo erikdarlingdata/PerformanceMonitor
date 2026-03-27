@@ -77,6 +77,7 @@ public partial class App : Application
     public static int AlertCooldownMinutes { get; set; } = 5;  // Tray notification cooldown between repeated alerts
     public static int EmailCooldownMinutes { get; set; } = 15; // Email cooldown between repeated alerts
     public static string MuteRuleDefaultExpiration { get; set; } = "24 hours"; // Default expiration for new mute rules
+    public static bool LogAlertDismissals { get; set; } = true; // Log alert dismiss/mute actions to file
 
     /* Connection settings */
     public static int ConnectionTimeoutSeconds { get; set; } = 5;
@@ -101,6 +102,16 @@ public partial class App : Application
 
     /* Update check settings */
     public static bool CheckForUpdatesOnStartup { get; set; } = true;
+
+    /* Teams webhook settings */
+    public static bool TeamsWebhookEnabled { get; set; } = false;
+    public static string TeamsWebhookUrl { get; set; } = "";
+    public static string TeamsProxyAddress { get; set; } = "";
+
+    /* Slack webhook settings */
+    public static bool SlackWebhookEnabled { get; set; } = false;
+    public static string SlackWebhookUrl { get; set; } = "";
+    public static string SlackProxyAddress { get; set; } = "";
 
     /* SMTP email alert settings */
     public static bool SmtpEnabled { get; set; } = false;
@@ -284,6 +295,7 @@ public partial class App : Application
                 if (exp is "1 hour" or "24 hours" or "7 days" or "Never")
                     MuteRuleDefaultExpiration = exp;
             }
+            if (root.TryGetProperty("log_alert_dismissals", out v)) LogAlertDismissals = v.GetBoolean();
 
             /* Connection settings */
             if (root.TryGetProperty("connection_timeout_seconds", out v))
@@ -323,6 +335,16 @@ public partial class App : Application
 
             /* Update check settings */
             if (root.TryGetProperty("check_for_updates_on_startup", out v)) CheckForUpdatesOnStartup = v.GetBoolean();
+
+            /* Teams webhook settings */
+            if (root.TryGetProperty("teams_webhook_enabled", out v)) TeamsWebhookEnabled = v.GetBoolean();
+            if (root.TryGetProperty("teams_webhook_url", out v)) TeamsWebhookUrl = v.GetString() ?? "";
+            if (root.TryGetProperty("teams_proxy_address", out v)) TeamsProxyAddress = v.GetString() ?? "";
+
+            /* Slack webhook settings */
+            if (root.TryGetProperty("slack_webhook_enabled", out v)) SlackWebhookEnabled = v.GetBoolean();
+            if (root.TryGetProperty("slack_webhook_url", out v)) SlackWebhookUrl = v.GetString() ?? "";
+            if (root.TryGetProperty("slack_proxy_address", out v)) SlackProxyAddress = v.GetString() ?? "";
 
             /* SMTP settings */
             if (root.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.GetBoolean();
