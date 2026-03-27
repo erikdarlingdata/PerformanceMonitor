@@ -345,7 +345,7 @@ SELECT
     sp.product_level,
     sp.product_update_level,
     sp.engine_edition,
-    sp.cpu_count,
+    COALESCE(sp.vcore_count, sp.cpu_count) AS cpu_count,
     sp.physical_memory_mb,
     sp.socket_count,
     sp.cores_per_socket,
@@ -476,7 +476,7 @@ mem_latest AS (
     LIMIT 1
 ),
 server_info AS (
-    SELECT cpu_count
+    SELECT COALESCE(vcore_count, cpu_count) AS cpu_count
     FROM v_server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC

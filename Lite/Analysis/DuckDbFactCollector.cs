@@ -1363,8 +1363,8 @@ ORDER BY trace_flag";
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-SELECT cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket,
-       is_hadr_enabled, edition, product_version
+SELECT COALESCE(vcore_count, cpu_count) AS cpu_count, hyperthread_ratio, physical_memory_mb,
+       socket_count, cores_per_socket, is_hadr_enabled, edition, product_version
 FROM server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC

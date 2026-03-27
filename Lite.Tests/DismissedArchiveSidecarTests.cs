@@ -269,7 +269,7 @@ AND    NOT EXISTS (
     }
 
     [Fact]
-    public async Task SchemaVersion_IsUpdatedTo23()
+    public async Task SchemaVersion_IsUpdatedTo24()
     {
         using var connection = await InitializeDatabaseAsync();
 
@@ -277,6 +277,6 @@ AND    NOT EXISTS (
         cmd.CommandText = "SELECT MAX(version) FROM schema_version";
         var version = Convert.ToInt32(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
 
-        Assert.Equal(23, version);
+        Assert.Equal(DuckDbInitializer.CurrentSchemaVersion, version);
     }
 }

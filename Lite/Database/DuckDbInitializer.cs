@@ -86,7 +86,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 23;
+    internal const int CurrentSchemaVersion = 24;
 
     private readonly string _archivePath;
 
@@ -611,6 +611,20 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Migration to v23 failed");
+                throw;
+            }
+        }
+
+        if (fromVersion < 24)
+        {
+            _logger?.LogInformation("Running migration to v24: adding vcore_count column to server_properties for Azure SQL DB vCore tracking");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE server_properties ADD COLUMN IF NOT EXISTS vcore_count INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Migration to v24 failed");
                 throw;
             }
         }

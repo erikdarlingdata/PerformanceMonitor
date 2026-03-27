@@ -1525,7 +1525,8 @@ VALUES ($1, $2, $3, $4, $5, true, true, false)";
     /// </summary>
     internal async Task SeedServerPropertiesAsync(int cpuCount, int htRatio,
         long physicalMemMb, int socketCount = 2, int coresPerSocket = 0,
-        bool hadrEnabled = false, string edition = "Standard Edition")
+        bool hadrEnabled = false, string edition = "Standard Edition",
+        int engineEdition = 2, string? serviceObjective = null, int? vcoreCount = null)
     {
         if (coresPerSocket == 0) coresPerSocket = cpuCount / (socketCount * 2); // assume HT
 
@@ -1539,9 +1540,10 @@ INSERT INTO server_properties
     (collection_id, collection_time, server_id, server_name,
      edition, product_version, product_level, engine_edition,
      cpu_count, hyperthread_ratio, physical_memory_mb,
-     socket_count, cores_per_socket, is_hadr_enabled)
-VALUES ($1, $2, $3, $4, $5, '16.0.4150.1', 'RTM', 2,
-        $6, $7, $8, $9, $10, $11)";
+     socket_count, cores_per_socket, is_hadr_enabled,
+     service_objective, vcore_count)
+VALUES ($1, $2, $3, $4, $5, '16.0.4150.1', 'RTM', $12,
+        $6, $7, $8, $9, $10, $11, $13, $14)";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
         cmd.Parameters.Add(new DuckDBParameter { Value = TestPeriodEnd });
@@ -1554,6 +1556,9 @@ VALUES ($1, $2, $3, $4, $5, '16.0.4150.1', 'RTM', 2,
         cmd.Parameters.Add(new DuckDBParameter { Value = socketCount });
         cmd.Parameters.Add(new DuckDBParameter { Value = coresPerSocket });
         cmd.Parameters.Add(new DuckDBParameter { Value = hadrEnabled });
+        cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)serviceObjective ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)vcoreCount ?? DBNull.Value });
 
         await cmd.ExecuteNonQueryAsync();
     }
@@ -2032,6 +2037,28 @@ VALUES ($1, $2, $3, $4, $5, true, $6, 120, 100, 130, 200, false, 120.0)";
 
         // Alternating 5% and 85% — high CV, should NOT trigger
         await SeedCpuUtilizationAlternatingAsync(low: 5, high: 85);
+    }
+
+    /// <summary>
+    /// Scenario 11: Azure SQL DB vCore tier.
+    /// sys.dm_os_sys_info reports 20 cores (compute node total), but the database
+    /// is provisioned as HS_Gen5_14 (14 vCores). FinOps should use 14, not 20.
+    ///
+    /// Expected: CPU right-sizing uses vcore_count (14) instead of cpu_count (20).
+    /// </summary>
+    public async Task SeedAzureSqlDbVcoreAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+
+        // Azure SQL DB: node has 20 cores, but this DB has HS_Gen5_14 (14 vCores)
+        // CPU at 8% avg — overprovisioned relative to 14 vCores
+        await SeedCpuUtilizationAsync(8, 2);
+        await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 40_960, targetMb: 57_344);
+        await SeedServerPropertiesAsync(cpuCount: 20, htRatio: 1, physicalMemMb: 65_536,
+            edition: "SQL Azure", engineEdition: 5,
+            serviceObjective: "HS_Gen5_14", vcoreCount: 14);
+        await SeedFileSizeAsync(totalDataSizeMb: 51_200);
     }
 
     // ============================================

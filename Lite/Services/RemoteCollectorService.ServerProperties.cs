@@ -96,6 +96,15 @@ OPTION(RECOMPILE);";
             bool? isClustered = reader.IsDBNull(12) ? null : reader.GetBoolean(12);
             var serviceObjective = reader.IsDBNull(13) ? null : reader.GetString(13);
 
+            /* For Azure SQL DB, sys.dm_os_sys_info.cpu_count returns the compute node's
+               total cores, not the per-database vCore allocation. Parse the actual vCore
+               count from the service_objective string (e.g. "HS_Gen5_14" → 14). */
+            int? vcoreCount = null;
+            if (isAzureSqlDb && !string.IsNullOrEmpty(serviceObjective))
+            {
+                vcoreCount = ParseVcoreFromServiceObjective(serviceObjective);
+            }
+
             sqlSw.Stop();
 
             var duckSw = Stopwatch.StartNew();
@@ -125,6 +134,7 @@ OPTION(RECOMPILE);";
                        .AppendValue(isClustered)
                        .AppendValue((string?)null) // enterprise_features — not collected in Lite (requires cross-database cursor)
                        .AppendValue(serviceObjective)
+                       .AppendValue(vcoreCount)
                        .EndRow();
                     rowsCollected++;
                 }
@@ -142,5 +152,22 @@ OPTION(RECOMPILE);";
 
         _logger?.LogDebug("Collected {RowCount} server properties row(s) for server '{Server}'", rowsCollected, server.DisplayName);
         return rowsCollected;
+    }
+
+    /// <summary>
+    /// Parses the vCore count from an Azure SQL DB service objective string.
+    /// vCore tiers follow the pattern {Tier}_{Gen}_{VcoreCount}
+    /// (e.g. "HS_Gen5_14", "GP_Gen5_6", "BC_Gen5_8", "GP_S_Gen5_2").
+    /// DTU tiers (e.g. "P1", "S0") and elastic pools return null.
+    /// </summary>
+    internal static int? ParseVcoreFromServiceObjective(string serviceObjective)
+    {
+        var parts = serviceObjective.Split('_');
+        if (parts.Length >= 3 && int.TryParse(parts[^1], out var vcores) && vcores > 0)
+        {
+            return vcores;
+        }
+
+        return null;
     }
 }

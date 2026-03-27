@@ -642,7 +642,8 @@ CREATE TABLE IF NOT EXISTS server_properties (
     is_hadr_enabled BOOLEAN,
     is_clustered BOOLEAN,
     enterprise_features VARCHAR,
-    service_objective VARCHAR
+    service_objective VARCHAR,
+    vcore_count INTEGER
 )";
 
     public const string CreateServerPropertiesIndex = @"
