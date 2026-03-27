@@ -366,12 +366,12 @@
                                             <TextBlock Text="Start Time" FontWeight="Bold"/>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="120">
+                                    <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="120" SortMemberPath="CurrentDurationSeconds">
                                         <DataGridTextColumn.Header>
                                             <TextBlock Text="Current Duration" FontWeight="Bold"/>
                                         </DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120">
+                                    <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="120" SortMemberPath="AvgDurationSeconds">
                                         <DataGridTextColumn.Header>
                                             <TextBlock Text="Avg Duration" FontWeight="Bold"/>
                                         </DataGridTextColumn.Header>

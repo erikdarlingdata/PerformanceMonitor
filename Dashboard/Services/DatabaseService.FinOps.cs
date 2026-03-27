@@ -2674,6 +2674,11 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
         public string IndexWrites { get; set; } = "";
         public string OriginalIndexDefinition { get; set; } = "";
         public string Script { get; set; } = "";
+
+        public decimal IndexSizeGbSort => NumericSortHelper.Parse(IndexSizeGb);
+        public decimal IndexRowsSort => NumericSortHelper.Parse(IndexRows);
+        public decimal IndexReadsSort => NumericSortHelper.Parse(IndexReads);
+        public decimal IndexWritesSort => NumericSortHelper.Parse(IndexWrites);
     }
 
     public class FinOpsProvisioningTrend
@@ -2768,6 +2773,25 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
         public string LatchWaitCount { get; set; } = "";
         public string DailyLatchWaitsSaved { get; set; } = "";
         public string AvgLatchWaitMs { get; set; } = "";
+
+        public decimal TotalIndexesSort => NumericSortHelper.Parse(TotalIndexes);
+        public decimal RemovableIndexesSort => NumericSortHelper.Parse(RemovableIndexes);
+        public decimal MergeableIndexesSort => NumericSortHelper.Parse(MergeableIndexes);
+        public decimal CompressableIndexesSort => NumericSortHelper.Parse(CompressableIndexes);
+        public decimal PercentRemovableSort => NumericSortHelper.Parse(PercentRemovable);
+        public decimal CurrentSizeGbSort => NumericSortHelper.Parse(CurrentSizeGb);
+        public decimal SizeAfterCleanupGbSort => NumericSortHelper.Parse(SizeAfterCleanupGb);
+        public decimal SpaceSavedGbSort => NumericSortHelper.Parse(SpaceSavedGb);
+        public decimal SpaceReductionPercentSort => NumericSortHelper.Parse(SpaceReductionPercent);
+        public decimal TotalRowsSort => NumericSortHelper.Parse(TotalRows);
+        public decimal WritesSort => NumericSortHelper.Parse(Writes);
+        public decimal DailyWriteOpsSavedSort => NumericSortHelper.Parse(DailyWriteOpsSaved);
+        public decimal LockWaitCountSort => NumericSortHelper.Parse(LockWaitCount);
+        public decimal DailyLockWaitsSavedSort => NumericSortHelper.Parse(DailyLockWaitsSaved);
+        public decimal AvgLockWaitMsSort => NumericSortHelper.Parse(AvgLockWaitMs);
+        public decimal LatchWaitCountSort => NumericSortHelper.Parse(LatchWaitCount);
+        public decimal DailyLatchWaitsSavedSort => NumericSortHelper.Parse(DailyLatchWaitsSaved);
+        public decimal AvgLatchWaitMsSort => NumericSortHelper.Parse(AvgLatchWaitMs);
     }
 
     public class FinOpsRecommendation
@@ -2807,5 +2831,16 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
             >= 60 => "#F39C12",
             _ => "#27AE60"
         };
+    }
+
+    internal static class NumericSortHelper
+    {
+        internal static decimal Parse(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return -1m;
+            var cleaned = s.Replace(",", "").Replace("%", "").Trim();
+            return decimal.TryParse(cleaned, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : -1m;
+        }
     }
 }

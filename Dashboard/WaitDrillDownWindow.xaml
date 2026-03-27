@@ -80,7 +80,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding Duration}" Width="100">
+                <DataGridTextColumn Binding="{Binding Duration}" Width="100" SortMemberPath="DurationSort">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Duration" Click="Filter_Click" Margin="0,0,4,0"/>
@@ -184,7 +184,7 @@
                         </StackPanel>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding TranLogWrites}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                <DataGridTextColumn Binding="{Binding TranLogWrites}" ElementStyle="{StaticResource NumericCell}" Width="100" SortMemberPath="TranLogWritesSort">
                     <DataGridTextColumn.Header>
                         <StackPanel Orientation="Horizontal">
                             <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TranLogWrites" Click="Filter_Click" Margin="0,0,4,0"/>

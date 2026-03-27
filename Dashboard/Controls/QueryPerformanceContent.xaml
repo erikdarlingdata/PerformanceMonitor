@@ -106,7 +106,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding Duration}" Width="100">
+                    <DataGridTextColumn Binding="{Binding Duration}" Width="100" SortMemberPath="DurationSort">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Duration" Click="ActiveQueriesFilter_Click" Margin="0,0,4,0"/>
@@ -210,7 +210,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding TranLogWrites}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                    <DataGridTextColumn Binding="{Binding TranLogWrites}" ElementStyle="{StaticResource NumericCell}" Width="100" SortMemberPath="TranLogWritesSort">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TranLogWrites" Click="ActiveQueriesFilter_Click" Margin="0,0,4,0"/>
@@ -382,7 +382,7 @@
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding ElapsedTimeFormatted}" Width="120">
+                        <DataGridTextColumn Binding="{Binding ElapsedTimeFormatted}" Width="120" SortMemberPath="TotalElapsedTimeMs">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ElapsedTimeFormatted" Click="CurrentActiveFilter_Click" Margin="0,0,4,0"/>

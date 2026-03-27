@@ -104,7 +104,7 @@
                         <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" MinWidth="90" Width="Auto"/>
                         <DataGridTextColumn Header="Finding" Binding="{Binding Finding}" MinWidth="250" Width="Auto"/>
                         <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" MinWidth="400" Width="*"/>
-                        <DataGridTextColumn Header="Est. Savings ($/mo)" Binding="{Binding EstMonthlySavingsDisplay}" MinWidth="110" Width="Auto">
+                        <DataGridTextColumn Header="Est. Savings ($/mo)" Binding="{Binding EstMonthlySavingsDisplay}" MinWidth="110" Width="Auto" SortMemberPath="EstMonthlySavings">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="HorizontalAlignment" Value="Right"/>
@@ -1113,7 +1113,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding SpaceSavedGb}" Width="110">
+                            <DataGridTextColumn Binding="{Binding SpaceSavedGb}" Width="110" SortMemberPath="SpaceSavedGbSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SpaceSavedGb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1122,7 +1122,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding SpaceReductionPercent}" Width="95">
+                            <DataGridTextColumn Binding="{Binding SpaceReductionPercent}" Width="95" SortMemberPath="SpaceReductionPercentSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SpaceReductionPercent" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1131,7 +1131,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding RemovableIndexes}" Width="90">
+                            <DataGridTextColumn Binding="{Binding RemovableIndexes}" Width="90" SortMemberPath="RemovableIndexesSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RemovableIndexes" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1140,7 +1140,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding CurrentSizeGb}" Width="115">
+                            <DataGridTextColumn Binding="{Binding CurrentSizeGb}" Width="115" SortMemberPath="CurrentSizeGbSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentSizeGb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1149,7 +1149,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding SizeAfterCleanupGb}" Width="125">
+                            <DataGridTextColumn Binding="{Binding SizeAfterCleanupGb}" Width="125" SortMemberPath="SizeAfterCleanupGbSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeAfterCleanupGb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1159,7 +1159,7 @@
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <!-- Index counts -->
-                            <DataGridTextColumn Binding="{Binding TotalIndexes}" Width="100">
+                            <DataGridTextColumn Binding="{Binding TotalIndexes}" Width="100" SortMemberPath="TotalIndexesSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalIndexes" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1168,7 +1168,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding MergeableIndexes}" Width="90">
+                            <DataGridTextColumn Binding="{Binding MergeableIndexes}" Width="90" SortMemberPath="MergeableIndexesSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MergeableIndexes" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1177,7 +1177,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding CompressableIndexes}" Width="100">
+                            <DataGridTextColumn Binding="{Binding CompressableIndexes}" Width="100" SortMemberPath="CompressableIndexesSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CompressableIndexes" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1186,7 +1186,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding PercentRemovable}" Width="95">
+                            <DataGridTextColumn Binding="{Binding PercentRemovable}" Width="95" SortMemberPath="PercentRemovableSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PercentRemovable" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1266,7 +1266,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding TotalRows}" Width="100">
+                            <DataGridTextColumn Binding="{Binding TotalRows}" Width="100" SortMemberPath="TotalRowsSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRows" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1283,7 +1283,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding Writes}" Width="90">
+                            <DataGridTextColumn Binding="{Binding Writes}" Width="90" SortMemberPath="WritesSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Writes" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1292,7 +1292,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding DailyWriteOpsSaved}" Width="130">
+                            <DataGridTextColumn Binding="{Binding DailyWriteOpsSaved}" Width="130" SortMemberPath="DailyWriteOpsSavedSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyWriteOpsSaved" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1301,7 +1301,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LockWaitCount}" Width="95">
+                            <DataGridTextColumn Binding="{Binding LockWaitCount}" Width="95" SortMemberPath="LockWaitCountSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LockWaitCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1310,7 +1310,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding DailyLockWaitsSaved}" Width="150">
+                            <DataGridTextColumn Binding="{Binding DailyLockWaitsSaved}" Width="150" SortMemberPath="DailyLockWaitsSavedSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyLockWaitsSaved" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1319,7 +1319,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding AvgLockWaitMs}" Width="120">
+                            <DataGridTextColumn Binding="{Binding AvgLockWaitMs}" Width="120" SortMemberPath="AvgLockWaitMsSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgLockWaitMs" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1328,7 +1328,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LatchWaitCount}" Width="95">
+                            <DataGridTextColumn Binding="{Binding LatchWaitCount}" Width="95" SortMemberPath="LatchWaitCountSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LatchWaitCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1337,7 +1337,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding DailyLatchWaitsSaved}" Width="155">
+                            <DataGridTextColumn Binding="{Binding DailyLatchWaitsSaved}" Width="155" SortMemberPath="DailyLatchWaitsSavedSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyLatchWaitsSaved" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1346,7 +1346,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding AvgLatchWaitMs}" Width="130">
+                            <DataGridTextColumn Binding="{Binding AvgLatchWaitMs}" Width="130" SortMemberPath="AvgLatchWaitMsSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgLatchWaitMs" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1440,7 +1440,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IndexSizeGb}" Width="80">
+                            <DataGridTextColumn Binding="{Binding IndexSizeGb}" Width="80" SortMemberPath="IndexSizeGbSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexSizeGb" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1449,7 +1449,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IndexRows}" Width="90">
+                            <DataGridTextColumn Binding="{Binding IndexRows}" Width="90" SortMemberPath="IndexRowsSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexRows" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1458,7 +1458,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IndexReads}" Width="90">
+                            <DataGridTextColumn Binding="{Binding IndexReads}" Width="90" SortMemberPath="IndexReadsSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexReads" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1467,7 +1467,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IndexWrites}" Width="90">
+                            <DataGridTextColumn Binding="{Binding IndexWrites}" Width="90" SortMemberPath="IndexWritesSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexWrites" Click="FilterButton_Click" Margin="0,0,4,0"/>

@@ -1,4 +1,4 @@
-﻿<UserControl x:Class="PerformanceMonitorLite.Controls.ServerTab"
+<UserControl x:Class="PerformanceMonitorLite.Controls.ServerTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
@@ -1149,7 +1149,7 @@
                                     <DataGridTextColumn Binding="{Binding WaitResource}" Width="200">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitResource" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Resource" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding WaitTimeFormatted}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding WaitTimeFormatted}" Width="80" SortMemberPath="WaitTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding IsolationLevel}" Width="120">
@@ -1285,7 +1285,7 @@
                             <DataGridTextColumn Binding="{Binding P95DurationFormatted}" Width="110" SortMemberPath="P95DurationSeconds">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="P95DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="P95 Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding PercentOfAverageFormatted}" Width="100">
+                            <DataGridTextColumn Binding="{Binding PercentOfAverageFormatted}" Width="100" SortMemberPath="PercentOfAverage">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PercentOfAverageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="% of Average" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding RunningLongDisplay}" Width="90">

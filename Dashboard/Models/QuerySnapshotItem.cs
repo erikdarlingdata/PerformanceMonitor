@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 
 namespace PerformanceMonitorDashboard.Models
 {
@@ -48,5 +49,37 @@ namespace PerformanceMonitorDashboard.Models
 
         // Chain mode — set by WaitDrillDownWindow when showing head blockers
         public string ChainBlockingPath { get; set; } = "";
+
+        /// <summary>
+        /// Parses sp_WhoIsActive duration format ("dd hh:mm:ss.mmm" or "hh:mm:ss.mmm") to total milliseconds for numeric sorting.
+        /// </summary>
+        public double DurationSort
+        {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(Duration)) return -1;
+                var s = Duration.Trim();
+                int days = 0;
+                int spaceIdx = s.IndexOf(' ');
+                if (spaceIdx > 0 && int.TryParse(s.AsSpan(0, spaceIdx), out var d))
+                {
+                    days = d;
+                    s = s.Substring(spaceIdx + 1);
+                }
+                if (TimeSpan.TryParse(s, CultureInfo.InvariantCulture, out var ts))
+                    return ts.TotalMilliseconds + days * 86_400_000.0;
+                return -1;
+            }
+        }
+
+        public decimal TranLogWritesSort
+        {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(TranLogWrites)) return -1m;
+                var cleaned = TranLogWrites.Replace(",", "").Trim();
+                return decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : -1m;
+            }
+        }
     }
 }
