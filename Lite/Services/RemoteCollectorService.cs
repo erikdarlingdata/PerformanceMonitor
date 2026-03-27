@@ -810,6 +810,7 @@ WHERE server_id = $3";
                 case "server_config":     /* sys.configurations not available */
                 case "trace_flags":       /* DBCC TRACESTATUS not available */
                 case "running_jobs":      /* msdb.dbo.sysjobs not available */
+                case "tempdb_stats":      /* cross-database tempdb access not available */
                     return false;
             }
         }
