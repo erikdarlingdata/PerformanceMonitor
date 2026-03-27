@@ -865,6 +865,35 @@ public partial class MainWindow : Window
         window.ShowDialog();
     }
 
+    private void ViewLogButton_Click(object sender, RoutedEventArgs e)
+    {
+        var logFile = AppLogger.GetCurrentLogFile();
+        try
+        {
+            if (System.IO.File.Exists(logFile))
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = logFile,
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = AppLogger.GetLogDirectory(),
+                    UseShellExecute = true
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not open log file: {ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void ImportSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFolderDialog

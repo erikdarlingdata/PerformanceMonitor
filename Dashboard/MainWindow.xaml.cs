@@ -1092,6 +1092,35 @@ namespace PerformanceMonitorDashboard
             dialog.ShowDialog();
         }
 
+        private void ViewLogButton_Click(object sender, RoutedEventArgs e)
+        {
+            var logFile = Logger.GetCurrentLogFile();
+            try
+            {
+                if (System.IO.File.Exists(logFile))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = logFile,
+                        UseShellExecute = true
+                    });
+                }
+                else
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = Logger.GetLogDirectory(),
+                        UseShellExecute = true
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Could not open log file: {ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         /// <summary>
         /// Exposes the AlertStateService for coordination with LandingPage.
         /// </summary>

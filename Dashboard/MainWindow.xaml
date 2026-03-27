@@ -217,6 +217,15 @@
                             Height="28"
                             Margin="0,0,0,12"/>
                     <Separator/>
+                    <Button Click="ViewLogButton_Click"
+                            Height="28"
+                            Margin="0,8,0,6"
+                            ToolTip="Open the current application log file">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock Text="View Log" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
                     <Button x:Name="SettingsButton"
                             Click="Settings_Click"
                             Height="28"

@@ -32,6 +32,10 @@
                 <MenuItem Header="Mute Similar Alerts..." Click="MuteSimilarAlerts_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F507;"/></MenuItem.Icon>
                 </MenuItem>
+                <Separator/>
+                <MenuItem Header="Dismiss Selected" Click="DismissSelected_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x2717;"/></MenuItem.Icon>
+                </MenuItem>
             </ContextMenu>
 
             <Style x:Key="DefaultRowStyle" TargetType="DataGridRow">

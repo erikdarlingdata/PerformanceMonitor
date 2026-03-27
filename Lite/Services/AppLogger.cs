@@ -137,4 +137,9 @@ public static class AppLogger
         Flush();
         s_flushTimer.Dispose();
     }
+
+    public static string GetLogDirectory() => s_logDirectory;
+
+    public static string GetCurrentLogFile() =>
+        Path.Combine(s_logDirectory, $"lite_{DateTime.Now:yyyyMMdd}.log");
 }
