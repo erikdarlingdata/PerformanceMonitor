@@ -37,7 +37,7 @@ public class WebhookAlertService
     /// Sends webhook alerts to all configured channels (Teams and/or Slack).
     /// Respects the email cooldown setting for throttling. Never throws.
     /// </summary>
-    public async Task TrySendWebhookAlertsAsync(
+    public async Task<bool> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -51,7 +51,7 @@ public class WebhookAlertService
             if (_cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
                 DateTime.UtcNow - lastSent < TimeSpan.FromMinutes(App.EmailCooldownMinutes))
             {
-                return;
+                return false;
             }
 
             bool sent = false;
@@ -70,10 +70,13 @@ public class WebhookAlertService
             {
                 _cooldowns[cooldownKey] = DateTime.UtcNow;
             }
+
+            return sent;
         }
         catch (Exception ex)
         {
             AppLogger.Error("Webhook", $"TrySendWebhookAlertsAsync outer error: {ex.Message}");
+            return false;
         }
     }
 

@@ -78,7 +78,7 @@ namespace PerformanceMonitorDashboard.Models
 
         public ServerConnection Server => _server;
         public string ServerId => _server.Id;
-        public string DisplayName => _server.DisplayName;
+        public string DisplayName => _server.DisplayNameWithIntent;
         public string ServerName => _server.ServerName;
 
         public bool IsLoading

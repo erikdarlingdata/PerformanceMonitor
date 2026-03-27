@@ -112,10 +112,18 @@ public class EmailAlertService
             }
 
             /* Send webhook notifications (Teams / Slack) alongside email */
+            bool webhookSent = false;
             if (!muted)
             {
-                await _webhookAlertService.TrySendWebhookAlertsAsync(
+                webhookSent = await _webhookAlertService.TrySendWebhookAlertsAsync(
                     metricName, serverName, currentValue, thresholdValue, serverId, context);
+            }
+
+            /* Reflect webhook delivery in notification type */
+            if (webhookSent)
+            {
+                notificationType = notificationType == "email" ? "email+webhook" : "webhook";
+                sent = true;
             }
 
             /* Always log the alert to DuckDB, regardless of email status */

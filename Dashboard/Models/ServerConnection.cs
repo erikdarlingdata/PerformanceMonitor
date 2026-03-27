@@ -63,10 +63,24 @@ namespace PerformanceMonitorDashboard.Models
         public bool TrustServerCertificate { get; set; } = false;
 
         /// <summary>
+        /// When true, sets ApplicationIntent=ReadOnly on the connection string.
+        /// Required for connecting to AG listener read-only replicas and
+        /// Azure SQL Business Critical / Managed Instance built-in read replicas.
+        /// </summary>
+        public bool ReadOnlyIntent { get; set; } = false;
+
+        /// <summary>
         /// Monthly cost of this server in USD, used for FinOps cost attribution.
         /// Set to 0 to hide cost columns. All FinOps costs are proportional to this budget.
         /// </summary>
         public decimal MonthlyCostUsd { get; set; } = 0m;
+
+        /// <summary>
+        /// Display name with "(Read-Only)" suffix when ReadOnlyIntent is enabled.
+        /// Used for alerts, tray notifications, tab headers, and dialog messages.
+        /// </summary>
+        [JsonIgnore]
+        public string DisplayNameWithIntent => ReadOnlyIntent ? $"{DisplayName} (Read-Only)" : DisplayName;
 
         /// <summary>
         /// Display-only property for showing authentication type in UI.
@@ -105,6 +119,7 @@ namespace PerformanceMonitorDashboard.Models
                         "Strict" => SqlConnectionEncryptOption.Strict,
                         _ => SqlConnectionEncryptOption.Mandatory
                     },
+                    ApplicationIntent = ReadOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
                     Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive
                 };
 
@@ -135,7 +150,8 @@ namespace PerformanceMonitorDashboard.Models
                 username,
                 password,
                 EncryptMode,
-                TrustServerCertificate
+                TrustServerCertificate,
+                ReadOnlyIntent
             ).ConnectionString;
         }
 

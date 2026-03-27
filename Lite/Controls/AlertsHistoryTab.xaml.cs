@@ -218,7 +218,9 @@ public partial class AlertsHistoryTab : UserControl
 
     private void AlertsDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        DismissSelectedButton.IsEnabled = AlertsDataGrid.SelectedItems.Count > 0;
+        var selected = AlertsDataGrid.SelectedItems.OfType<AlertHistoryRow>().ToList();
+        var liveCount = selected.Count(a => !a.IsArchived);
+        DismissSelectedButton.IsEnabled = liveCount > 0;
     }
 
     private async void DismissSelected_Click(object sender, RoutedEventArgs e)
@@ -231,12 +233,36 @@ public partial class AlertsHistoryTab : UserControl
 
         if (selected.Count == 0) return;
 
+        var liveAlerts = selected.Where(a => !a.IsArchived).ToList();
+        var archivedCount = selected.Count - liveAlerts.Count;
+
+        if (liveAlerts.Count == 0)
+        {
+            MessageBox.Show(
+                "The selected alert(s) have been archived and cannot be dismissed.",
+                "Cannot Dismiss",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        if (archivedCount > 0)
+        {
+            var confirmResult = MessageBox.Show(
+                $"{archivedCount} of {selected.Count} selected alert(s) have been archived and cannot be dismissed.\n\n" +
+                $"Dismiss the remaining {liveAlerts.Count} alert(s)?",
+                "Partial Dismiss",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (confirmResult != MessageBoxResult.Yes) return;
+        }
+
         try
         {
-            var affected = await _dataService.DismissAlertsAsync(selected);
-            if (affected < selected.Count && App.LogAlertDismissals)
+            var affected = await _dataService.DismissAlertsAsync(liveAlerts);
+            if (affected < liveAlerts.Count && App.LogAlertDismissals)
             {
-                AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {selected.Count} alert(s) were updated — remaining alerts may have been archived to parquet");
+                AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {liveAlerts.Count} live alert(s) were updated");
             }
             await LoadAlertsAsync();
         }
@@ -250,11 +276,29 @@ public partial class AlertsHistoryTab : UserControl
     {
         if (_dataService == null) return;
 
-        var displayCount = AlertsDataGrid.ItemsSource is System.Collections.ICollection coll ? coll.Count : 0;
-        if (displayCount == 0) return;
+        var allAlerts = (AlertsDataGrid.ItemsSource as IEnumerable<AlertHistoryRow>)?.ToList();
+        if (allAlerts == null || allAlerts.Count == 0) return;
+
+        var liveCount = allAlerts.Count(a => !a.IsArchived);
+        var archivedCount = allAlerts.Count - liveCount;
+
+        if (liveCount == 0)
+        {
+            MessageBox.Show(
+                "All visible alerts have been archived and cannot be dismissed.",
+                "Cannot Dismiss",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var message = $"Dismiss {liveCount} alert(s)?";
+        if (archivedCount > 0)
+            message += $"\n\n{archivedCount} archived alert(s) will remain visible.";
+        message += "\n\nDismissed alerts are hidden from this view but remain in the database.";
 
         var result = MessageBox.Show(
-            $"Dismiss all {displayCount} visible alert(s)?\n\nDismissed alerts are hidden from this view but remain in the database.",
+            message,
             "Dismiss All Alerts",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -266,9 +310,9 @@ public partial class AlertsHistoryTab : UserControl
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
             var affected = await _dataService.DismissAllVisibleAlertsAsync(hoursBack, serverId);
-            if (affected < displayCount && App.LogAlertDismissals)
+            if (affected < liveCount && App.LogAlertDismissals)
             {
-                AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {displayCount} displayed alert(s) were updated — remaining alerts may have been archived to parquet");
+                AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {liveCount} live alert(s) were updated");
             }
             await LoadAlertsAsync();
         }

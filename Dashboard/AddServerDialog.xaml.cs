@@ -52,6 +52,7 @@ namespace PerformanceMonitorDashboard
                 _ => 0 // Optional
             };
             TrustServerCertificateCheckBox.IsChecked = existingServer.TrustServerCertificate;
+            ReadOnlyIntentCheckBox.IsChecked = existingServer.ReadOnlyIntent;
 
             if (existingServer.AuthenticationType == AuthenticationTypes.EntraMFA)
             {
@@ -125,7 +126,10 @@ namespace PerformanceMonitorDashboard
                 ApplicationName = "PerformanceMonitorDashboard",
                 ConnectTimeout = 10,
                 TrustServerCertificate = TrustServerCertificateCheckBox.IsChecked == true,
-                Encrypt = ParseEncryptOption(GetSelectedEncryptMode())
+                Encrypt = ParseEncryptOption(GetSelectedEncryptMode()),
+                ApplicationIntent = ReadOnlyIntentCheckBox.IsChecked == true
+                    ? ApplicationIntent.ReadOnly
+                    : ApplicationIntent.ReadWrite
             };
 
             if (WindowsAuthRadio.IsChecked == true)
@@ -329,6 +333,7 @@ namespace PerformanceMonitorDashboard
                 ServerConnection.IsFavorite = IsFavoriteCheckBox.IsChecked == true;
                 ServerConnection.EncryptMode = GetSelectedEncryptMode();
                 ServerConnection.TrustServerCertificate = TrustServerCertificateCheckBox.IsChecked == true;
+                ServerConnection.ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
                 if (decimal.TryParse(MonthlyCostTextBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
                     ServerConnection.MonthlyCostUsd = editCost;
             }
@@ -349,6 +354,7 @@ namespace PerformanceMonitorDashboard
                     LastConnected = DateTime.Now,
                     EncryptMode = GetSelectedEncryptMode(),
                     TrustServerCertificate = TrustServerCertificateCheckBox.IsChecked == true,
+                    ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true,
                     MonthlyCostUsd = monthlyCost
                 };
             }

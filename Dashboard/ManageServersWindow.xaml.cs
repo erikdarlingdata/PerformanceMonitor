@@ -54,7 +54,7 @@ namespace PerformanceMonitorDashboard
                     ServersModified = true;
 
                     MessageBox.Show(
-                        $"Server '{dialog.ServerConnection.DisplayName}' added successfully!",
+                        $"Server '{dialog.ServerConnection.DisplayNameWithIntent}' added successfully!",
                         "Server Added",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information
@@ -93,7 +93,7 @@ namespace PerformanceMonitorDashboard
                         ServersModified = true;
 
                         MessageBox.Show(
-                            $"Server '{dialog.ServerConnection.DisplayName}' updated successfully!",
+                            $"Server '{dialog.ServerConnection.DisplayNameWithIntent}' updated successfully!",
                             "Server Updated",
                             MessageBoxButton.OK,
                             MessageBoxImage.Information
@@ -145,7 +145,7 @@ namespace PerformanceMonitorDashboard
         {
             if (ServersDataGrid.SelectedItem is ServerConnection server)
             {
-                var dialog = new RemoveServerDialog(server.DisplayName);
+                var dialog = new RemoveServerDialog(server.DisplayNameWithIntent);
                 dialog.Owner = this;
 
                 if (dialog.ShowDialog() == true)
@@ -159,7 +159,7 @@ namespace PerformanceMonitorDashboard
                         catch (Exception ex)
                         {
                             MessageBox.Show(
-                                $"Could not drop the PerformanceMonitor database on '{server.DisplayName}':\n\n{ex.Message}\n\nThe server will still be removed from the Dashboard.",
+                                $"Could not drop the PerformanceMonitor database on '{server.DisplayNameWithIntent}':\n\n{ex.Message}\n\nThe server will still be removed from the Dashboard.",
                                 "Database Drop Failed",
                                 MessageBoxButton.OK,
                                 MessageBoxImage.Warning
@@ -172,7 +172,7 @@ namespace PerformanceMonitorDashboard
                     ServersModified = true;
 
                     MessageBox.Show(
-                        $"Server '{server.DisplayName}' removed successfully!",
+                        $"Server '{server.DisplayNameWithIntent}' removed successfully!",
                         "Server Removed",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information

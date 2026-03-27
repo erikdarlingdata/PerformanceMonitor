@@ -703,9 +703,9 @@ public class DuckDbInitializer
                     if (table == "config_alert_log")
                     {
                         viewSql = $@"CREATE OR REPLACE VIEW v_{table} AS
-SELECT * FROM {table}
+SELECT *, 'live' AS source FROM {table}
 UNION ALL BY NAME
-SELECT * FROM read_parquet('{globPath}', union_by_name=true) p
+SELECT *, 'archive' AS source FROM read_parquet('{globPath}', union_by_name=true) p
 WHERE NOT EXISTS (
     SELECT 1 FROM dismissed_archive_alerts d
     WHERE d.alert_time = p.alert_time
@@ -720,7 +720,10 @@ WHERE NOT EXISTS (
                 }
                 else
                 {
-                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                    if (table == "config_alert_log")
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {table}";
+                    else
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
                 }
 
                 using var cmd = connection.CreateCommand();
@@ -734,7 +737,10 @@ WHERE NOT EXISTS (
                 try
                 {
                     using var fallbackCmd = connection.CreateCommand();
-                    fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                    if (table == "config_alert_log")
+                        fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {table}";
+                    else
+                        fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
                     await fallbackCmd.ExecuteNonQueryAsync();
                 }
                 catch (Exception fallbackEx)

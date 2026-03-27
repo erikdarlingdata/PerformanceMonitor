@@ -79,9 +79,6 @@ namespace PerformanceMonitorDashboard.Services
             try
             {
                 var prefs = _preferencesService.GetPreferences();
-                string? sendError = null;
-                bool sent = false;
-                string notificationType = "tray";
 
                 /* Attempt email delivery if SMTP is fully configured */
                 if (prefs.SmtpEnabled &&
@@ -95,7 +92,8 @@ namespace PerformanceMonitorDashboard.Services
 
                     if (!withinCooldown)
                     {
-                        notificationType = "email";
+                        bool sent = false;
+                        string? sendError = null;
                         var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
                         var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
                             metricName, serverName, currentValue, thresholdValue, prefs.EmailCooldownMinutes, context);
@@ -130,18 +128,21 @@ namespace PerformanceMonitorDashboard.Services
                                 Logger.Error($"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
                             }
                         }
+
+                        RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, sent, "email", sendError);
                     }
                 }
-
-                /* Log the alert attempt */
-                RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, sent, notificationType, sendError);
 
                 /* Send webhook notifications (Teams / Slack) — independent of email */
                 var webhookService = WebhookAlertService.Current;
                 if (webhookService != null)
                 {
-                    await webhookService.TrySendWebhookAlertsAsync(
+                    var webhookSent = await webhookService.TrySendWebhookAlertsAsync(
                         metricName, serverName, currentValue, thresholdValue, serverId, context);
+                    if (webhookSent)
+                    {
+                        RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, true, "webhook");
+                    }
                 }
             }
             catch (Exception ex)

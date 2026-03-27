@@ -23,9 +23,10 @@ public sealed class McpDiscoveryTools
             var lines = new List<string> { $"Monitored servers ({servers.Count}):\n" };
             foreach (var s in servers)
             {
+                var roTag = s.ReadOnlyIntent ? " [Read-Only]" : "";
                 var display = string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName
-                    ? s.ServerName
-                    : $"{s.DisplayName} ({s.ServerName})";
+                    ? $"{s.ServerName}{roTag}"
+                    : $"{s.DisplayName} ({s.ServerName}){roTag}";
 
                 var status = serverManager.GetConnectionStatus(s.Id);
                 var statusText = status.IsOnline switch

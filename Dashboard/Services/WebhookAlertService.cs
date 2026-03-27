@@ -46,7 +46,7 @@ namespace PerformanceMonitorDashboard.Services
         /// Sends webhook alerts to all configured channels (Teams and/or Slack).
         /// Respects the email cooldown setting for throttling. Never throws.
         /// </summary>
-        public async Task TrySendWebhookAlertsAsync(
+        public async Task<bool> TrySendWebhookAlertsAsync(
             string metricName,
             string serverName,
             string currentValue,
@@ -62,7 +62,7 @@ namespace PerformanceMonitorDashboard.Services
                 if (_cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
                     DateTime.UtcNow - lastSent < TimeSpan.FromMinutes(prefs.EmailCooldownMinutes))
                 {
-                    return;
+                    return false;
                 }
 
                 bool sent = false;
@@ -81,10 +81,13 @@ namespace PerformanceMonitorDashboard.Services
                 {
                     _cooldowns[cooldownKey] = DateTime.UtcNow;
                 }
+
+                return sent;
             }
             catch (Exception ex)
             {
                 Logger.Error($"TrySendWebhookAlertsAsync outer error: {ex.Message}");
+                return false;
             }
         }
 

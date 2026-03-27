@@ -54,7 +54,7 @@ namespace PerformanceMonitorDashboard.Models
 
         // Convenience properties for binding
         public string Id => Server.Id;
-        public string DisplayName => Server.DisplayName;
+        public string DisplayName => Server.DisplayNameWithIntent;
         public string ServerName => Server.ServerName;
 
         /// <summary>

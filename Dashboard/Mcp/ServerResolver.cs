@@ -71,9 +71,12 @@ internal static class ServerResolver
         }
 
         var lines = servers.Select(s =>
-            string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName
-                ? s.ServerName
-                : $"{s.DisplayName} ({s.ServerName})");
+        {
+            var roTag = s.ReadOnlyIntent ? " [Read-Only]" : "";
+            return string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName
+                ? $"{s.ServerName}{roTag}"
+                : $"{s.DisplayName} ({s.ServerName}){roTag}";
+        });
 
         return string.Join("\n", lines);
     }
