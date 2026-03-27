@@ -103,6 +103,7 @@ LIMIT $2";
     /// <summary>
     /// Dismisses specific alerts by marking them as dismissed in DuckDB.
     /// Identifies rows by (alert_time, server_id, metric_name) composite key.
+    /// If an alert only exists in archived parquet, inserts into dismissed_archive_alerts instead.
     /// </summary>
     public async Task<int> DismissAlertsAsync(List<AlertHistoryRow> alerts)
     {
@@ -113,6 +114,7 @@ LIMIT $2";
 
         using var connection = await OpenConnectionAsync();
         int totalAffected = 0;
+        int archivedDismissed = 0;
 
         foreach (var alert in alerts)
         {
@@ -130,17 +132,37 @@ AND    dismissed = FALSE";
             var affected = await command.ExecuteNonQueryAsync();
             totalAffected += affected;
 
-            if (affected == 0 && App.LogAlertDismissals)
-                AppLogger.Warn("AlertDismiss", $"No rows updated for alert: time={alert.AlertTime:O}, server_id={alert.ServerId}, metric={alert.MetricName} — may be archived to parquet");
+            if (affected == 0)
+            {
+                using var sidecarCmd = connection.CreateCommand();
+                sidecarCmd.CommandText = @"
+INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)
+SELECT $1, $2, $3
+WHERE NOT EXISTS (
+    SELECT 1 FROM dismissed_archive_alerts
+    WHERE  alert_time = $1
+    AND    server_id  = $2
+    AND    metric_name = $3
+)";
+                sidecarCmd.Parameters.Add(new DuckDBParameter { Value = alert.AlertTime });
+                sidecarCmd.Parameters.Add(new DuckDBParameter { Value = alert.ServerId });
+                sidecarCmd.Parameters.Add(new DuckDBParameter { Value = alert.MetricName });
+                var sidecarAffected = await sidecarCmd.ExecuteNonQueryAsync();
+                archivedDismissed += sidecarAffected;
+
+                if (App.LogAlertDismissals)
+                    AppLogger.Info("AlertDismiss", $"Archived alert dismissed via sidecar: time={alert.AlertTime:O}, server_id={alert.ServerId}, metric={alert.MetricName}");
+            }
         }
 
         if (App.LogAlertDismissals)
-            AppLogger.Info("AlertDismiss", $"Dismiss complete: {totalAffected} row(s) updated out of {alerts.Count} selected");
-        return totalAffected;
+            AppLogger.Info("AlertDismiss", $"Dismiss complete: {totalAffected} live + {archivedDismissed} archived out of {alerts.Count} selected");
+        return totalAffected + archivedDismissed;
     }
 
     /// <summary>
     /// Dismisses all visible (non-dismissed) alerts matching the current filter criteria.
+    /// Updates the live table, then inserts any remaining archived alerts into the sidecar table.
     /// </summary>
     public async Task<int> DismissAllVisibleAlertsAsync(int hoursBack, int? serverId = null)
     {
@@ -173,10 +195,62 @@ AND    dismissed = FALSE";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
         }
 
-        var affected = await command.ExecuteNonQueryAsync();
+        var liveAffected = await command.ExecuteNonQueryAsync();
+
+        // Dismiss any remaining archived alerts that matched the filter
+        using var sidecarCmd = connection.CreateCommand();
+        if (serverId.HasValue)
+        {
+            sidecarCmd.CommandText = @"
+INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)
+SELECT v.alert_time, v.server_id, v.metric_name
+FROM   v_config_alert_log v
+WHERE  v.alert_time >= $1
+AND    v.server_id = $2
+AND    v.dismissed = FALSE
+AND    NOT EXISTS (
+    SELECT 1 FROM config_alert_log l
+    WHERE  l.alert_time = v.alert_time
+    AND    l.server_id  = v.server_id
+    AND    l.metric_name = v.metric_name
+)
+AND    NOT EXISTS (
+    SELECT 1 FROM dismissed_archive_alerts d
+    WHERE  d.alert_time = v.alert_time
+    AND    d.server_id  = v.server_id
+    AND    d.metric_name = v.metric_name
+)";
+            sidecarCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            sidecarCmd.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
+        }
+        else
+        {
+            sidecarCmd.CommandText = @"
+INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)
+SELECT v.alert_time, v.server_id, v.metric_name
+FROM   v_config_alert_log v
+WHERE  v.alert_time >= $1
+AND    v.dismissed = FALSE
+AND    NOT EXISTS (
+    SELECT 1 FROM config_alert_log l
+    WHERE  l.alert_time = v.alert_time
+    AND    l.server_id  = v.server_id
+    AND    l.metric_name = v.metric_name
+)
+AND    NOT EXISTS (
+    SELECT 1 FROM dismissed_archive_alerts d
+    WHERE  d.alert_time = v.alert_time
+    AND    d.server_id  = v.server_id
+    AND    d.metric_name = v.metric_name
+)";
+            sidecarCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        }
+
+        var archivedAffected = await sidecarCmd.ExecuteNonQueryAsync();
+
         if (App.LogAlertDismissals)
-            AppLogger.Info("AlertDismiss", $"Dismiss all complete: {affected} row(s) updated (cutoff={cutoff:O})");
-        return affected;
+            AppLogger.Info("AlertDismiss", $"Dismiss all complete: {liveAffected} live + {archivedAffected} archived (cutoff={cutoff:O})");
+        return liveAffected + archivedAffected;
     }
 }
 

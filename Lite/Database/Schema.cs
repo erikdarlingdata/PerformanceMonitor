@@ -699,6 +699,18 @@ CREATE TABLE IF NOT EXISTS config_mute_rules (
     job_name_pattern VARCHAR
 )";
 
+    public const string CreateDismissedArchiveAlertsTable = @"
+CREATE TABLE IF NOT EXISTS dismissed_archive_alerts (
+    alert_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    metric_name VARCHAR NOT NULL,
+    dismissed_at TIMESTAMP NOT NULL DEFAULT current_timestamp
+)";
+
+    public const string CreateDismissedArchiveAlertsIndex = @"
+CREATE INDEX IF NOT EXISTS idx_dismissed_archive_alerts
+ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
+
     /// <summary>
     /// Returns all table creation statements in order.
     /// </summary>
@@ -732,6 +744,7 @@ CREATE TABLE IF NOT EXISTS config_mute_rules (
         yield return CreateSessionStatsTable;
         yield return CreateAlertLogTable;
         yield return CreateMuteRulesTable;
+        yield return CreateDismissedArchiveAlertsTable;
     }
 
     /// <summary>
@@ -761,5 +774,6 @@ CREATE TABLE IF NOT EXISTS config_mute_rules (
         yield return CreateDatabaseSizeStatsIndex;
         yield return CreateServerPropertiesIndex;
         yield return CreateSessionStatsIndex;
+        yield return CreateDismissedArchiveAlertsIndex;
     }
 }
