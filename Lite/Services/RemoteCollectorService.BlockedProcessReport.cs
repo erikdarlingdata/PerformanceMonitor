@@ -32,7 +32,7 @@ public partial class RemoteCollectorService
     public async Task EnsureBlockedProcessXeSessionAsync(ServerConnection server, int engineEdition = 0, CancellationToken cancellationToken = default)
     {
         /* Skip if the blocked_process_report collector is disabled */
-        var schedule = _scheduleManager.GetSchedule("blocked_process_report");
+        var schedule = _scheduleManager.GetScheduleForServer(server.Id, "blocked_process_report");
         if (schedule == null || !schedule.Enabled)
         {
             return;

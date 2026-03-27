@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -15,6 +16,7 @@ using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
@@ -23,23 +25,26 @@ namespace PerformanceMonitorLite.Windows;
 public partial class SettingsWindow : Window
 {
     private readonly ScheduleManager _scheduleManager;
+    private readonly ServerManager _serverManager;
     private readonly CollectionBackgroundService? _backgroundService;
     private readonly McpHostService? _mcpService;
     private readonly MuteRuleService? _muteRuleService;
 
     public SettingsWindow(
         ScheduleManager scheduleManager,
+        ServerManager serverManager,
         CollectionBackgroundService? backgroundService = null,
         McpHostService? mcpService = null,
         MuteRuleService? muteRuleService = null)
     {
         InitializeComponent();
         _scheduleManager = scheduleManager;
+        _serverManager = serverManager;
         _backgroundService = backgroundService;
         _mcpService = mcpService;
         _muteRuleService = muteRuleService;
 
-        LoadSchedules();
+        LoadServerScheduleSummary();
         UpdateCollectionStatus();
         LoadMcpSettings();
         UpdateMcpStatus();
@@ -52,62 +57,91 @@ public partial class SettingsWindow : Window
         LoadSmtpSettings();
     }
 
-    private bool _suppressPresetChange;
-
-    private void LoadSchedules()
+    private void LoadServerScheduleSummary()
     {
-        ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
-        DetectActivePreset();
+        var servers = _serverManager.GetAllServers();
+        var rows = servers.Select(s => new ServerScheduleRow
+        {
+            ServerId = s.Id,
+            ServerName = s.DisplayName,
+            Preset = _scheduleManager.GetActivePresetForServer(s.Id),
+            Status = _scheduleManager.HasServerOverride(s.Id) ? "Customized" : "Default"
+        }).ToList();
+
+        ServerScheduleGrid.ItemsSource = rows;
+        DefaultPresetText.Text = _scheduleManager.GetActivePreset();
     }
 
-    private void DetectActivePreset()
+    private void EditServerSchedule_Click(object sender, RoutedEventArgs e)
     {
-        _suppressPresetChange = true;
-        try
+        OpenServerScheduleEditor();
+    }
+
+    private void ServerScheduleGrid_DoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        OpenServerScheduleEditor();
+    }
+
+    private void OpenServerScheduleEditor()
+    {
+        if (ServerScheduleGrid.SelectedItem is not ServerScheduleRow row) return;
+
+        var server = _serverManager.GetAllServers().FirstOrDefault(s => s.Id == row.ServerId);
+        if (server == null) return;
+
+        var editor = new CollectorScheduleEditorWindow(_scheduleManager, _serverManager, server.Id, server.DisplayName) { Owner = this };
+        editor.ShowDialog();
+
+        if (editor.Saved)
         {
-            string active = _scheduleManager.GetActivePreset();
-            for (int i = 0; i < PresetComboBox.Items.Count; i++)
-            {
-                if (PresetComboBox.Items[i] is ComboBoxItem item &&
-                    string.Equals(item.Content?.ToString(), active, StringComparison.OrdinalIgnoreCase))
-                {
-                    PresetComboBox.SelectedIndex = i;
-                    return;
-                }
-            }
-            PresetComboBox.SelectedIndex = 0;
-        }
-        finally
-        {
-            _suppressPresetChange = false;
+            LoadServerScheduleSummary();
         }
     }
 
-    private void PresetComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void EditDefaultSchedule_Click(object sender, RoutedEventArgs e)
     {
-        if (_suppressPresetChange) return;
-        if (PresetComboBox.SelectedItem is not ComboBoxItem selected) return;
+        var editor = new CollectorScheduleEditorWindow(_scheduleManager, _serverManager) { Owner = this };
+        editor.ShowDialog();
 
-        string presetName = selected.Content?.ToString() ?? "";
-        if (presetName == "Custom") return;
-
-        var result = MessageBox.Show(
-            $"Apply the \"{presetName}\" preset?\n\nThis will change all collector frequencies. Enabled/disabled state and retention settings are not affected.",
-            "Apply Collection Preset",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question
-        );
-
-        if (result != MessageBoxResult.Yes)
+        if (editor.Saved)
         {
-            DetectActivePreset();
+            LoadServerScheduleSummary();
+        }
+    }
+
+    private void ApplyDefaultToAll_Click(object sender, RoutedEventArgs e)
+    {
+        var servers = _serverManager.GetAllServers();
+        var customCount = servers.Count(s => _scheduleManager.HasServerOverride(s.Id));
+
+        if (customCount == 0)
+        {
+            MessageBox.Show("All servers are already using the default schedule.", "Apply Default", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        _scheduleManager.ApplyPreset(presetName);
-        ScheduleGrid.ItemsSource = null;
-        ScheduleGrid.ItemsSource = _scheduleManager.GetAllSchedules();
-        DetectActivePreset();
+        var result = MessageBox.Show(
+            $"Remove custom schedules from {customCount} server(s) and revert them to the default schedule?\n\nThis cannot be undone.",
+            "Apply Default to All",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (result != MessageBoxResult.Yes) return;
+
+        foreach (var server in servers)
+        {
+            _scheduleManager.RemoveServerOverride(server.Id);
+        }
+
+        LoadServerScheduleSummary();
+    }
+
+    private class ServerScheduleRow
+    {
+        public string ServerId { get; set; } = "";
+        public string ServerName { get; set; } = "";
+        public string Preset { get; set; } = "";
+        public string Status { get; set; } = "";
     }
 
     private void UpdateCollectionStatus()
@@ -169,7 +203,6 @@ public partial class SettingsWindow : Window
 
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
-        _scheduleManager.SaveSchedules();
         var (mcpChanged, mcpValid) = await SaveMcpSettingsAsync();
         SaveDefaultTimeRange();
         SaveConnectionTimeout();

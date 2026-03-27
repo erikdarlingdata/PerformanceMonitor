@@ -1665,7 +1665,7 @@ namespace PerformanceMonitorDashboard
 
         private void EditSchedules_Click(object sender, RoutedEventArgs e)
         {
-            var scheduleWindow = new CollectorScheduleWindow(_databaseService);
+            var scheduleWindow = new CollectorScheduleWindow(_databaseService, _serverConnection.DisplayName);
             scheduleWindow.Owner = Window.GetWindow(this);
             scheduleWindow.ShowDialog();
         }

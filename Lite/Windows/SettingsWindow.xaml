@@ -332,49 +332,47 @@
             </StackPanel>
         </Border>
 
-        <!-- Collector Schedule Grid -->
-        <Grid Grid.Row="6">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-            </Grid.RowDefinitions>
+        <!-- Collector Schedules (Per-Server) -->
+        <Border Grid.Row="6" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
-            <Grid Grid.Row="0" Margin="0,0,0,8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="Collector Schedules" FontSize="14" FontWeight="SemiBold"
-                           Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <TextBlock Text="Preset:" Foreground="{DynamicResource ForegroundBrush}" FontSize="12"
+                <TextBlock Grid.Row="0" Text="Collector Schedules" FontSize="14" FontWeight="SemiBold"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <TextBlock Grid.Row="1" Text="Each server can have its own collection schedule, or inherit the default."
+                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"/>
+
+                <DataGrid Grid.Row="2" x:Name="ServerScheduleGrid"
+                          AutoGenerateColumns="False" IsReadOnly="True"
+                          CanUserAddRows="False" CanUserDeleteRows="False"
+                          SelectionMode="Single"
+                          Background="Transparent" BorderThickness="0"
+                          HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                          MinHeight="80" MaxHeight="200"
+                          MouseDoubleClick="ServerScheduleGrid_DoubleClick">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="*"/>
+                        <DataGridTextColumn Header="Preset" Binding="{Binding Preset}" Width="110"/>
+                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="Edit Selected..." x:Name="EditServerScheduleButton" Click="EditServerSchedule_Click" Margin="0,0,8,0"/>
+                    <Button Content="Edit Default..." x:Name="EditDefaultScheduleButton" Click="EditDefaultSchedule_Click" Margin="0,0,16,0"/>
+                    <TextBlock Text="Default preset:" Foreground="{DynamicResource ForegroundBrush}" FontSize="12"
                                VerticalAlignment="Center" Margin="0,0,8,0"/>
-                    <ComboBox x:Name="PresetComboBox" Width="140" SelectionChanged="PresetComboBox_SelectionChanged">
-                        <ComboBoxItem Content="Custom" IsEnabled="False"/>
-                        <ComboBoxItem Content="Low-Impact"/>
-                        <ComboBoxItem Content="Balanced"/>
-                        <ComboBoxItem Content="Aggressive"/>
-                    </ComboBox>
+                    <TextBlock x:Name="DefaultPresetText" FontSize="12" FontWeight="SemiBold"
+                               Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <Button Content="Apply Default to All" Click="ApplyDefaultToAll_Click"/>
                 </StackPanel>
             </Grid>
-
-            <DataGrid Grid.Row="1" x:Name="ScheduleGrid"
-                      AutoGenerateColumns="False" IsReadOnly="False"
-                      CanUserAddRows="False" CanUserDeleteRows="False"
-                      SelectionMode="Single"
-                      Background="Transparent" BorderThickness="0"
-                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                      ContextMenu="{StaticResource DataGridContextMenu}">
-                <DataGrid.Columns>
-                    <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}" Width="65"/>
-                    <DataGridTextColumn Header="Collector" Binding="{Binding Name}" Width="160" IsReadOnly="True"/>
-                    <DataGridTextColumn Header="Frequency (min)" Binding="{Binding FrequencyMinutes, UpdateSourceTrigger=LostFocus}" Width="110"/>
-                    <DataGridTextColumn Header="Retention (days)" Binding="{Binding RetentionDays, UpdateSourceTrigger=LostFocus}" Width="110"/>
-                    <DataGridTextColumn Header="Schedule" Binding="{Binding FrequencyDisplay}" Width="140" IsReadOnly="True"/>
-                    <DataGridTextColumn Header="Last Run" Binding="{Binding LastRunTime, StringFormat=HH:mm:ss}" Width="90" IsReadOnly="True"/>
-                </DataGrid.Columns>
-            </DataGrid>
-        </Grid>
+        </Border>
 
         <!-- Buttons -->
         <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">

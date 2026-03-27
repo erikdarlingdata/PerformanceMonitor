@@ -557,7 +557,7 @@ public partial class MainWindow : Window
         {
             if (_collectorService != null)
             {
-                var onLoadCollectors = _scheduleManager.GetOnLoadCollectors();
+                var onLoadCollectors = _scheduleManager.GetOnLoadCollectorsForServer(server.Id);
                 foreach (var collector in onLoadCollectors)
                 {
                     try
@@ -848,7 +848,7 @@ public partial class MainWindow : Window
 
     private async void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
-        var window = new SettingsWindow(_scheduleManager, _backgroundService, _mcpService, _muteRuleService) { Owner = this };
+        var window = new SettingsWindow(_scheduleManager, _serverManager, _backgroundService, _mcpService, _muteRuleService) { Owner = this };
         window.ShowDialog();
         UpdateStatusBar();
 
