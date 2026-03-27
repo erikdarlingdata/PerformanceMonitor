@@ -53,6 +53,10 @@
                         <Setter Property="Opacity" Value="0.5"/>
                         <Setter Property="FontStyle" Value="Italic"/>
                     </DataTrigger>
+                    <DataTrigger Binding="{Binding IsArchived}" Value="True">
+                        <Setter Property="Foreground" Value="#FF888888"/>
+                        <Setter Property="ToolTip" Value="This alert has been archived and cannot be dismissed."/>
+                    </DataTrigger>
                 </Style.Triggers>
             </Style>
         </ResourceDictionary>

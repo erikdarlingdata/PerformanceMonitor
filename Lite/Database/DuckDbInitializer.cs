@@ -685,11 +685,17 @@ public class DuckDbInitializer
                 if (hasParquetFiles)
                 {
                     var globPath = parquetGlob.Replace("\\", "/");
-                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
+                    if (table == "config_alert_log")
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {table} UNION ALL BY NAME SELECT *, 'archive' AS source FROM read_parquet('{globPath}', union_by_name=true)";
+                    else
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table} UNION ALL BY NAME SELECT * FROM read_parquet('{globPath}', union_by_name=true)";
                 }
                 else
                 {
-                    viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                    if (table == "config_alert_log")
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {table}";
+                    else
+                        viewSql = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
                 }
 
                 using var cmd = connection.CreateCommand();
@@ -703,7 +709,10 @@ public class DuckDbInitializer
                 try
                 {
                     using var fallbackCmd = connection.CreateCommand();
-                    fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
+                    if (table == "config_alert_log")
+                        fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT *, 'live' AS source FROM {table}";
+                    else
+                        fallbackCmd.CommandText = $"CREATE OR REPLACE VIEW v_{table} AS SELECT * FROM {table}";
                     await fallbackCmd.ExecuteNonQueryAsync();
                 }
                 catch (Exception fallbackEx)

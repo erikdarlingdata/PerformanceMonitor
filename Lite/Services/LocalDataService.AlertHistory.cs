@@ -39,7 +39,8 @@ SELECT
     notification_type,
     send_error,
     muted,
-    detail_text
+    detail_text,
+    source
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   server_id = $2
@@ -64,7 +65,8 @@ SELECT
     notification_type,
     send_error,
     muted,
-    detail_text
+    detail_text,
+    source
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   dismissed = FALSE
@@ -90,7 +92,8 @@ LIMIT $2";
                 NotificationType = reader.GetString(7),
                 SendError = reader.IsDBNull(8) ? null : reader.GetString(8),
                 Muted = !reader.IsDBNull(9) && reader.GetBoolean(9),
-                DetailText = reader.IsDBNull(10) ? null : reader.GetString(10)
+                DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
+                Source = reader.IsDBNull(11) ? "live" : reader.GetString(11)
             });
         }
 
@@ -190,6 +193,9 @@ public class AlertHistoryRow
     public string? SendError { get; set; }
     public bool Muted { get; set; }
     public string? DetailText { get; set; }
+    public string Source { get; set; } = "live";
+
+    public bool IsArchived => string.Equals(Source, "archive", StringComparison.OrdinalIgnoreCase);
 
     public string TimeLocal => AlertTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
     public string CurrentValueDisplay => FormatValue(MetricName, CurrentValue);
