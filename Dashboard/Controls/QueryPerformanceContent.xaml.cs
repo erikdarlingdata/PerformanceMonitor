@@ -2602,6 +2602,7 @@ namespace PerformanceMonitorDashboard.Controls
             colorBar.LabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
             colorBar.Axis.TickLabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
             QueryHeatmapChart.Plot.Axes.AddPanel(colorBar);
+            _legendPanels[QueryHeatmapChart] = colorBar;
 
             var metricName = ((ComboBoxItem)HeatmapMetricCombo.SelectedItem).Content?.ToString() ?? "Duration (ms)";
             QueryHeatmapChart.Plot.Title($"Query Distribution by {metricName}");

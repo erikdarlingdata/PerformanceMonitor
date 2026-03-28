@@ -41,7 +41,7 @@ public partial class ServerTab : UserControl
     private readonly CredentialService _credentialService;
     private readonly DispatcherTimer _refreshTimer;
     private bool _isRefreshing;
-    private readonly Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.Panels.LegendPanel?> _legendPanels = new();
+    private readonly Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
     private List<SelectableItem> _waitTypeItems = new();
     private List<SelectableItem> _perfmonCounterItems = new();
     private Helpers.ChartHoverHelper? _waitStatsHover;
@@ -2819,6 +2819,7 @@ public partial class ServerTab : UserControl
         cbTicks.AddMajor(Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0"));
         colorBar.Axis.TickGenerator = cbTicks;
         QueryHeatmapChart.Plot.Axes.AddPanel(colorBar);
+        _legendPanels[QueryHeatmapChart] = colorBar;
 
         var metricName = ((ComboBoxItem)HeatmapMetricCombo.SelectedItem).Content?.ToString() ?? "Duration (ms)";
         QueryHeatmapChart.Plot.Title($"Query Distribution by {metricName}");
