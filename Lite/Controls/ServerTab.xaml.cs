@@ -3179,18 +3179,23 @@ public partial class ServerTab : UserControl
 
     private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)
     {
-        // The time bucket is in UTC — convert to server time for the drill-down
         var serverTime = bucketTimeUtc.AddMinutes(UtcOffsetMinutes);
         var fromDate = serverTime.AddMinutes(-5);
-        var toDate = serverTime.AddMinutes(10); // 5-min bucket + 5-min padding
+        var toDate = serverTime.AddMinutes(10);
+
+        AppLogger.Info("DrillDown", $"OnHeatmapDrillDown: bucketTimeUtc={bucketTimeUtc:O}, UtcOffsetMinutes={UtcOffsetMinutes}, serverTime={serverTime:O}, fromDate={fromDate:O}, toDate={toDate:O}");
 
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 2; // Queries
         QueriesSubTabControl.SelectedIndex = 1; // Active Queries
+
+        AppLogger.Info("DrillDown", $"Calling GetLatestQuerySnapshotsAsync with fromDate={fromDate:O}, toDate={toDate:O}");
         var snapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate);
+        AppLogger.Info("DrillDown", $"Got {snapshots.Count} snapshots");
+
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate.AddMinutes(-UtcOffsetMinutes), "HH:mm")} \u2192 {ServerTimeHelper.FormatServerTime(toDate.AddMinutes(-UtcOffsetMinutes), "HH:mm")}";
+        LiveSnapshotIndicator.Text = $"Drill-down: {fromDate:HH:mm} \u2192 {toDate:HH:mm} (server time)";
         _ = LoadActiveQueriesSlicerAsync();
     }
 
@@ -3200,21 +3205,21 @@ public partial class ServerTab : UserControl
     /// </summary>
     private void SetDrillDownTimeRange(DateTime fromServer, DateTime toServer)
     {
-        // Convert server time to local time for the pickers
-        var fromLocal = ServerTimeHelper.ToLocalTime(fromServer);
-        var toLocal = ServerTimeHelper.ToLocalTime(toServer);
+        // Display in the current time mode (server time, local time, or UTC)
+        var fromDisplay = ServerTimeHelper.ConvertForDisplay(fromServer, ServerTimeHelper.CurrentDisplayMode);
+        var toDisplay = ServerTimeHelper.ConvertForDisplay(toServer, ServerTimeHelper.CurrentDisplayMode);
 
         // Switch to Custom without triggering a refresh
         _isRefreshing = true;
         try
         {
             TimeRangeCombo.SelectedIndex = 5; // Custom
-            FromDatePicker.SelectedDate = fromLocal.Date;
-            FromHourCombo.SelectedIndex = fromLocal.Hour;
-            FromMinuteCombo.SelectedIndex = fromLocal.Minute / 15;
-            ToDatePicker.SelectedDate = toLocal.Date;
-            ToHourCombo.SelectedIndex = toLocal.Hour;
-            ToMinuteCombo.SelectedIndex = toLocal.Minute / 15;
+            FromDatePicker.SelectedDate = fromDisplay.Date;
+            FromHourCombo.SelectedIndex = fromDisplay.Hour;
+            FromMinuteCombo.SelectedIndex = fromDisplay.Minute / 15;
+            ToDatePicker.SelectedDate = toDisplay.Date;
+            ToHourCombo.SelectedIndex = toDisplay.Hour;
+            ToMinuteCombo.SelectedIndex = toDisplay.Minute / 15;
 
             // Make pickers visible
             var visibility = Visibility.Visible;
@@ -4615,10 +4620,19 @@ public partial class ServerTab : UserControl
                 }
             }
 
-            var data = await _dataService.GetActiveQuerySlicerDataAsync(_serverId, hoursBack, fromDate, toDate);
+            // For narrow time ranges (drill-downs), pad the query by ±1 hour
+            // so hourly slicer buckets overlap the display range
+            DateTime? queryFrom = fromDate, queryTo = toDate;
+            if (fromDate.HasValue && toDate.HasValue && (toDate.Value - fromDate.Value).TotalHours < 2)
+            {
+                queryFrom = fromDate.Value.AddHours(-1);
+                queryTo = toDate.Value.AddHours(1);
+            }
+
+            var data = await _dataService.GetActiveQuerySlicerDataAsync(_serverId, hoursBack, queryFrom, queryTo);
             _activeQueriesSlicerData = data;
             _activeQueriesSlicerMetric = "Sessions";
-            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, queryFrom, queryTo);
             if (data.Count > 0)
                 ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
         }

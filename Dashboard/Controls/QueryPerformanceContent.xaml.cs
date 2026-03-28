@@ -57,6 +57,9 @@ namespace PerformanceMonitorDashboard.Controls
         /// <summary>Raised when actual plan execution finishes (success or failure).</summary>
         public event Action? ActualPlanFinished;
 
+        /// <summary>Raised when a drill-down needs the parent to set custom time pickers. Args: (fromUtc, toUtc)</summary>
+        public event Action<DateTime, DateTime>? DrillDownTimeRangeRequested;
+
         private CancellationTokenSource? _actualPlanCts;
 
         /// <summary>Cancels the in-flight actual plan execution, if any.</summary>
@@ -219,10 +222,16 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 if (heatmapDrillDown.Tag is DateTime bucketTime)
                 {
-                    var fromDate = bucketTime.AddMinutes(-5);
-                    var toDate = bucketTime.AddMinutes(10);
+                    // bucketTime is already server time (SQL Server stores collection_time in server local time)
+                    var serverFrom = bucketTime.AddMinutes(-5);
+                    var serverTo = bucketTime.AddMinutes(10);
+                    DrillDownTimeRangeRequested?.Invoke(serverFrom, serverTo);
+
+                    // Query also uses server time (same as collection_time in SQL Server)
+                    var queryFrom = serverFrom;
+                    var queryTo = serverTo;
                     SubTabControl.SelectedIndex = 1; // Active Queries
-                    await RefreshActiveQueriesWithRangeAsync(fromDate, toDate);
+                    await RefreshActiveQueriesWithRangeAsync(queryFrom, queryTo);
                 }
             };
         }
@@ -324,9 +333,19 @@ namespace PerformanceMonitorDashboard.Controls
             if (_databaseService == null) return;
             try
             {
+                // For narrow time ranges (drill-downs), pad the query by ±1 hour
+                // so hourly slicer buckets overlap the display range
+                var queryFrom = _activeQueriesFromDate;
+                var queryTo = _activeQueriesToDate;
+                if (queryFrom.HasValue && queryTo.HasValue && (queryTo.Value - queryFrom.Value).TotalHours < 2)
+                {
+                    queryFrom = queryFrom.Value.AddHours(-1);
+                    queryTo = queryTo.Value.AddHours(1);
+                }
+
                 var data = await _databaseService.GetActiveQuerySlicerDataAsync(
-                    _activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
-                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_activeQueriesHoursBack, _activeQueriesFromDate, _activeQueriesToDate);
+                    _activeQueriesHoursBack, queryFrom, queryTo);
+                var (slicerStart, slicerEnd) = GetSlicerTimeRange(_activeQueriesHoursBack, queryFrom, queryTo);
                 if (data.Count > 0)
                     ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
             }

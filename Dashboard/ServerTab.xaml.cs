@@ -152,6 +152,10 @@ namespace PerformanceMonitorDashboard
             {
                 HidePlanLoading();
             };
+            PerformanceTab.DrillDownTimeRangeRequested += (from, to) =>
+            {
+                SetDrillDownGlobalRange(from, to);
+            };
             SystemEventsContent.Initialize(_databaseService);
             ResourceMetricsContent.Initialize(_databaseService);
             ResourceMetricsContent.ChartDrillDownRequested += OnChildChartDrillDown;
@@ -318,11 +322,11 @@ namespace PerformanceMonitorDashboard
 
         private void SetPickersFromDateTime(DateTime serverTime, DatePicker datePicker, ComboBox hourCombo, ComboBox minuteCombo)
         {
-            // Convert server time to local time for display in UI pickers
-            var localTime = Helpers.ServerTimeHelper.ToLocalTime(serverTime);
-            datePicker.SelectedDate = localTime.Date;
-            hourCombo.SelectedIndex = localTime.Hour;
-            minuteCombo.SelectedIndex = localTime.Minute / 15; // Round down to nearest 15-min interval
+            // Display in the current time mode (server time, local time, or UTC)
+            var displayTime = Helpers.ServerTimeHelper.ConvertForDisplay(serverTime, Helpers.ServerTimeHelper.CurrentDisplayMode);
+            datePicker.SelectedDate = displayTime.Date;
+            hourCombo.SelectedIndex = displayTime.Hour;
+            minuteCombo.SelectedIndex = displayTime.Minute / 15;
         }
 
         private void SetupAutoRefresh()
