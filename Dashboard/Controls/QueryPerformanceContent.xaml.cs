@@ -2680,9 +2680,16 @@ namespace PerformanceMonitorDashboard.Controls
         {
             if (_databaseService == null) return;
             _isDrillDownActive = true;
+
+            // Update active queries state so slicer loads matching data
+            _activeQueriesHoursBack = 0;
+            _activeQueriesFromDate = from;
+            _activeQueriesToDate = to;
+
             var snapshots = await _databaseService.GetQuerySnapshotsAsync(0, from, to);
             SetItemsSourcePreservingSort(ActiveQueriesDataGrid, snapshots);
             ActiveQueriesNoDataMessage.Visibility = snapshots.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            LoadActiveQueriesSlicerAsync().ConfigureAwait(false);
         }
 
         #endregion
