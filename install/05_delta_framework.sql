@@ -1202,38 +1202,43 @@ BEGIN
 
     END TRY
     BEGIN CATCH
+        DECLARE
+            @error_message nvarchar(4000) = ERROR_MESSAGE();
+
         /*
         Only rollback if we started the transaction
         Otherwise let the caller handle it
         */
-        IF  @trancount_at_entry = 0 
+        IF  @trancount_at_entry = 0
         AND @@TRANCOUNT > 0
         BEGIN
             ROLLBACK TRANSACTION;
         END;
 
-        DECLARE
-            @error_message nvarchar(4000) = ERROR_MESSAGE();
-        
         /*
-        Log the error
+        Log the error only if the transaction is not doomed
+        When called inside a caller's transaction that is doomed (XACT_STATE = -1),
+        we cannot write to the log — the caller must rollback first
         */
-        INSERT INTO
-            config.collection_log
-        (
-            collector_name,
-            collection_status,
-            duration_ms,
-            error_message
-        )
-        VALUES
-        (
-            N'calculate_deltas_' + @table_name,
-            N'ERROR',
-            DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
-            @error_message
-        );
-        
+        IF XACT_STATE() <> -1
+        BEGIN
+            INSERT INTO
+                config.collection_log
+            (
+                collector_name,
+                collection_status,
+                duration_ms,
+                error_message
+            )
+            VALUES
+            (
+                N'calculate_deltas_' + @table_name,
+                N'ERROR',
+                DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
+                @error_message
+            );
+        END;
+
         RAISERROR(N'Error calculating deltas for %s: %s', 16, 1, @table_name, @error_message);
     END CATCH;
 END;

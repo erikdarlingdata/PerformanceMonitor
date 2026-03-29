@@ -1206,8 +1206,14 @@ BEGIN
     BEGIN CATCH
         SET @error_message = ERROR_MESSAGE();
 
+        IF @@TRANCOUNT > 0
+        BEGIN
+            ROLLBACK;
+        END;
+
         /*
         Log errors to collection log
+        Must happen after rollback to avoid doomed transaction writes
         */
         INSERT INTO
             config.collection_log
@@ -1228,11 +1234,6 @@ BEGIN
             DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
             @error_message
         );
-
-        IF @@TRANCOUNT > 0
-        BEGIN
-            ROLLBACK;
-        END;
 
         THROW;
     END CATCH;
