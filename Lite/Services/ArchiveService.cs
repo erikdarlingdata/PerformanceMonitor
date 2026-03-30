@@ -309,6 +309,14 @@ COPY (
         using var con = new DuckDBConnection("DataSource=:memory:");
         con.Open();
 
+        /* Cap memory to avoid multi-GB spikes decompressing large parquet archives.
+           DuckDB will spill excess to its temp directory automatically. */
+        using (var pragma = con.CreateCommand())
+        {
+            pragma.CommandText = "SET memory_limit = '2GB'; SET preserve_insertion_order = false;";
+            pragma.ExecuteNonQuery();
+        }
+
         var totalMerged = 0;
         var totalRemoved = 0;
 
