@@ -15,6 +15,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PerformanceMonitorInstaller
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Installer.Tests", "Installer.Tests\Installer.Tests.csproj", "{9B2800D2-8F32-450E-A169-86B381EA5560}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Installer.Core", "Installer.Core\Installer.Core.csproj", "{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -45,6 +47,10 @@ Global
 		{9B2800D2-8F32-450E-A169-86B381EA5560}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{9B2800D2-8F32-450E-A169-86B381EA5560}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{9B2800D2-8F32-450E-A169-86B381EA5560}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

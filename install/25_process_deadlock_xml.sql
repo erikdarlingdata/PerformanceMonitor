@@ -210,6 +210,17 @@ BEGIN
                 @debug = @debug;
 
             /*
+            If sp_BlitzLock failed internally it may have doomed our transaction
+            Check XACT_STATE and surface the real error before it gets swallowed
+            */
+            IF XACT_STATE() = -1
+            BEGIN
+                ROLLBACK TRANSACTION;
+                RAISERROR(N'sp_BlitzLock failed and doomed the transaction - check sp_BlitzLock version and compatibility', 16, 1);
+                RETURN;
+            END;
+
+            /*
             Verify sp_BlitzLock produced parsed results before marking rows as processed
             If no results were inserted, leave rows unprocessed so they are retried next run
             Uses local-time dates because sp_BlitzLock stores event_date in local time

@@ -8,119 +8,18 @@
 
 using System;
 using System.Collections.Generic;
-using System.Data;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Reflection;
-using Microsoft.Data.SqlClient;
+using Installer.Core;
+using Installer.Core.Models;
 
 namespace PerformanceMonitorInstaller
 {
-    partial class Program
+    class Program
     {
-        /// <summary>
-        /// Complete uninstall SQL: stops traces, deletes all 3 Agent jobs,
-        /// drops both XE sessions, and drops the database.
-        /// </summary>
-        private const string UninstallSql = @"
-/*
-Remove SQL Agent jobs
-*/
-USE msdb;
-
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Collection')
-BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Collection', @delete_unused_schedule = 1;
-    PRINT 'Deleted job: PerformanceMonitor - Collection';
-END;
-
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Data Retention')
-BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Data Retention', @delete_unused_schedule = 1;
-    PRINT 'Deleted job: PerformanceMonitor - Data Retention';
-END;
-
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'PerformanceMonitor - Hung Job Monitor')
-BEGIN
-    EXECUTE msdb.dbo.sp_delete_job @job_name = N'PerformanceMonitor - Hung Job Monitor', @delete_unused_schedule = 1;
-    PRINT 'Deleted job: PerformanceMonitor - Hung Job Monitor';
-END;
-
-/*
-Drop Extended Events sessions
-*/
-USE master;
-
-IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'PerformanceMonitor_BlockedProcess')
-BEGIN
-    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'PerformanceMonitor_BlockedProcess')
-        ALTER EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER STATE = STOP;
-    DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;
-    PRINT 'Dropped XE session: PerformanceMonitor_BlockedProcess';
-END;
-
-IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'PerformanceMonitor_Deadlock')
-BEGIN
-    IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'PerformanceMonitor_Deadlock')
-        ALTER EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER STATE = STOP;
-    DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;
-    PRINT 'Dropped XE session: PerformanceMonitor_Deadlock';
-END;
-
-/*
-Drop the database
-*/
-IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'PerformanceMonitor')
-BEGIN
-    ALTER DATABASE PerformanceMonitor SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-    DROP DATABASE PerformanceMonitor;
-    PRINT 'PerformanceMonitor database dropped';
-END
-ELSE
-BEGIN
-    PRINT 'PerformanceMonitor database does not exist';
-END;";
-
-        /*
-        Pre-compiled regex patterns for performance
-        */
-        private static readonly Regex GoBatchPattern = GoBatchRegExp();
-
-        private static readonly Regex SqlFileNamePattern = new Regex(
-            @"^\d{2}[a-z]?_.*\.sql$",
-            RegexOptions.Compiled);
-
-        private static readonly Regex SqlCmdDirectivePattern = new Regex(
-            @"^:r\s+.*$",
-            RegexOptions.Compiled | RegexOptions.Multiline);
-
-        /*
-        SQL command timeout constants (in seconds)
-        */
-        private const int ShortTimeoutSeconds = 60;       // Quick operations (cleanup, queries)
-        private const int MediumTimeoutSeconds = 120;     // Dependency installation
-        private const int LongTimeoutSeconds = 300;       // SQL file execution (5 minutes)
-        private const int UpgradeTimeoutSeconds = 3600;   // Upgrade data migrations (1 hour, large tables)
-
-        /*
-        Exit codes for granular error reporting
-        */
-        private static class ExitCodes
-        {
-            public const int Success = 0;
-            public const int InvalidArguments = 1;
-            public const int ConnectionFailed = 2;
-            public const int CriticalFileFailed = 3;
-            public const int PartialInstallation = 4;
-            public const int VersionCheckFailed = 5;
-            public const int SqlFilesNotFound = 6;
-            public const int UninstallFailed = 7;
-            public const int UpgradesFailed = 8;
-        }
-
         static async Task<int> Main(string[] args)
         {
             var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "Unknown";
@@ -179,6 +78,7 @@ END;";
                 Console.WriteLine("  5  Version check failed");
                 Console.WriteLine("  6  SQL files not found");
                 Console.WriteLine("  7  Uninstall failed");
+                Console.WriteLine("  8  Upgrade failed");
                 return 0;
             }
 
@@ -202,19 +102,18 @@ END;";
 
             /*Parse encryption option (default: Mandatory)*/
             var encryptArg = args.FirstOrDefault(a => a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase));
-            SqlConnectionEncryptOption encryptOption = SqlConnectionEncryptOption.Mandatory;
+            string encryptionLevel = "Mandatory";
             if (encryptArg != null)
             {
                 string encryptValue = encryptArg.Substring("--encrypt=".Length).ToLowerInvariant();
-                encryptOption = encryptValue switch
+                encryptionLevel = encryptValue switch
                 {
-                    "optional" => SqlConnectionEncryptOption.Optional,
-                    "strict" => SqlConnectionEncryptOption.Strict,
-                    _ => SqlConnectionEncryptOption.Mandatory
+                    "optional" => "Optional",
+                    "strict" => "Strict",
+                    _ => "Mandatory"
                 };
             }
 
-            /*Filter out option flags to get positional arguments*/
             /*Filter out option flags and --entra <email> to get positional arguments*/
             var filteredArgsList = args
                 .Where(a => !a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase))
@@ -256,7 +155,7 @@ END;";
                     {
                         Console.WriteLine("Error: Email address is required for Entra ID authentication.");
                         Console.WriteLine("Usage: PerformanceMonitorInstaller.exe <server> --entra <email>");
-                        return ExitCodes.InvalidArguments;
+                        return (int)InstallationResultCode.InvalidArguments;
                     }
 
                     Console.WriteLine($"Server: {serverName}");
@@ -288,7 +187,7 @@ END;";
                     {
                         Console.WriteLine("Error: Password is required for SQL Server Authentication.");
                         Console.WriteLine("Provide password as third argument or set PM_SQL_PASSWORD environment variable.");
-                        return ExitCodes.InvalidArguments;
+                        return (int)InstallationResultCode.InvalidArguments;
                     }
 
                     Console.WriteLine($"Server: {serverName}");
@@ -313,9 +212,9 @@ END;";
                     Console.WriteLine("Options:");
                     Console.WriteLine("  --reinstall          Drop existing database and perform clean install");
                     Console.WriteLine("  --reset-schedule     Reset collection schedule to recommended defaults");
-                    Console.WriteLine("  --encrypt=<level>    Connection encryption: optional (default), mandatory, strict");
+                    Console.WriteLine("  --encrypt=<level>    Connection encryption: mandatory (default), optional, strict");
                     Console.WriteLine("  --trust-cert         Trust server certificate without validation (default: require valid cert)");
-                    return ExitCodes.InvalidArguments;
+                    return (int)InstallationResultCode.InvalidArguments;
                 }
             }
             else
@@ -329,7 +228,7 @@ END;";
                 {
                     Console.WriteLine("Error: Server name is required.");
                     WaitForExit();
-                    return ExitCodes.InvalidArguments;
+                    return (int)InstallationResultCode.InvalidArguments;
                 }
 
                 Console.WriteLine("Authentication type:");
@@ -354,7 +253,7 @@ END;";
                     {
                         Console.WriteLine("Error: Email address is required for Entra ID authentication.");
                         WaitForExit();
-                        return ExitCodes.InvalidArguments;
+                        return (int)InstallationResultCode.InvalidArguments;
                     }
 
                     Console.WriteLine("A browser window will open for interactive authentication...");
@@ -369,7 +268,7 @@ END;";
                     {
                         Console.WriteLine("Error: Login is required for SQL Server Authentication.");
                         WaitForExit();
-                        return ExitCodes.InvalidArguments;
+                        return (int)InstallationResultCode.InvalidArguments;
                     }
 
                     Console.Write("Password: ");
@@ -380,36 +279,22 @@ END;";
                     {
                         Console.WriteLine("Error: Password is required for SQL Server Authentication.");
                         WaitForExit();
-                        return ExitCodes.InvalidArguments;
+                        return (int)InstallationResultCode.InvalidArguments;
                     }
                 }
             }
 
             /*
-            Build connection string
+            Build connection string using Installer.Core
             */
-            var builder = new SqlConnectionStringBuilder
-            {
-                DataSource = serverName,
-                InitialCatalog = "master",
-                Encrypt = encryptOption,
-                TrustServerCertificate = trustCert
-            };
-
-            if (useEntraAuth)
-            {
-                builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
-                builder.UserID = username;
-            }
-            else if (useWindowsAuth)
-            {
-                builder.IntegratedSecurity = true;
-            }
-            else
-            {
-                builder.UserID = username;
-                builder.Password = password;
-            }
+            string connectionString = InstallationService.BuildConnectionString(
+                serverName!,
+                useWindowsAuth,
+                username,
+                password,
+                encryptionLevel,
+                trustCert,
+                useEntraAuth);
 
             /*
             Test connection and get SQL Server version
@@ -419,68 +304,35 @@ END;";
 
             Console.WriteLine();
             Console.WriteLine("Testing connection...");
-            try
+
+            var serverInfo = await InstallationService.TestConnectionAsync(connectionString).ConfigureAwait(false);
+
+            if (!serverInfo.IsConnected)
             {
-                using (var connection = new SqlConnection(builder.ConnectionString))
-                {
-                    await connection.OpenAsync().ConfigureAwait(false);
-                    WriteSuccess("Connection successful!");
-
-                    /*Capture SQL Server version for summary report*/
-                    using (var versionCmd = new SqlCommand(@"
-                        SELECT
-                            @@VERSION,
-                            SERVERPROPERTY('Edition'),
-                            CONVERT(int, SERVERPROPERTY('EngineEdition')),
-                            SERVERPROPERTY('ProductMajorVersion');", connection))
-                    {
-                        using (var reader = await versionCmd.ExecuteReaderAsync().ConfigureAwait(false))
-                        {
-                            if (await reader.ReadAsync().ConfigureAwait(false))
-                            {
-                                sqlServerVersion = reader.GetString(0);
-                                sqlServerEdition = reader.GetString(1);
-
-                                var engineEdition = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
-                                var majorVersion = reader.IsDBNull(3) ? 0 : int.TryParse(reader.GetValue(3).ToString(), out var v) ? v : 0;
-
-                                /*Check minimum SQL Server version — 2016+ required for on-prem (Standard/Enterprise).
-                                  Azure MI (EngineEdition 8) is always current, skip the check.*/
-                                if (engineEdition is not 8 && majorVersion > 0 && majorVersion < 13)
-                                {
-                                    string versionName = majorVersion switch
-                                    {
-                                        11 => "SQL Server 2012",
-                                        12 => "SQL Server 2014",
-                                        _ => $"SQL Server (version {majorVersion})"
-                                    };
-                                    Console.WriteLine();
-                                    Console.WriteLine($"ERROR: {versionName} is not supported.");
-                                    Console.WriteLine("Performance Monitor requires SQL Server 2016 (13.x) or later.");
-                                    if (!automatedMode)
-                                    {
-                                        WaitForExit();
-                                    }
-                                    return ExitCodes.VersionCheckFailed;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                WriteError($"Connection failed: {ex.Message}");
-                Console.WriteLine($"Exception type: {ex.GetType().Name}");
-                if (ex.InnerException != null)
-                {
-                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
-                }
+                WriteError($"Connection failed: {serverInfo.ErrorMessage}");
                 if (!automatedMode)
                 {
                     WaitForExit();
                 }
-                return ExitCodes.ConnectionFailed;
+                return (int)InstallationResultCode.ConnectionFailed;
+            }
+
+            WriteSuccess("Connection successful!");
+            sqlServerVersion = serverInfo.SqlServerVersion;
+            sqlServerEdition = serverInfo.SqlServerEdition;
+
+            /*Check minimum SQL Server version -- 2016+ required for on-prem (Standard/Enterprise).
+              Azure MI (EngineEdition 8) is always current, skip the check.*/
+            if (serverInfo.ProductMajorVersion > 0 && !serverInfo.IsSupportedVersion)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"ERROR: {serverInfo.ProductMajorVersionName} is not supported.");
+                Console.WriteLine("Performance Monitor requires SQL Server 2016 (13.x) or later.");
+                if (!automatedMode)
+                {
+                    WaitForExit();
+                }
+                return (int)InstallationResultCode.VersionCheckFailed;
             }
 
             /*
@@ -488,14 +340,15 @@ END;";
             */
             if (uninstallMode)
             {
-                return await PerformUninstallAsync(builder.ConnectionString, automatedMode);
+                return await PerformUninstallAsync(connectionString, automatedMode);
             }
 
             /*
-            Find SQL files to execute (do this once before the installation loop)
+            Find SQL files using ScriptProvider.FromDirectory()
             Search current directory and up to 5 parent directories
             Prefer install/ subfolder if it exists (new structure)
             */
+            ScriptProvider? scriptProvider = null;
             string? sqlDirectory = null;
             string? monitorRootDirectory = null;
             string currentDirectory = Directory.GetCurrentDirectory();
@@ -508,7 +361,7 @@ END;";
                 if (Directory.Exists(installFolder))
                 {
                     var installFiles = Directory.GetFiles(installFolder, "*.sql")
-                        .Where(f => SqlFileNamePattern.IsMatch(Path.GetFileName(f)))
+                        .Where(f => Patterns.SqlFilePattern().IsMatch(Path.GetFileName(f)))
                         .ToList();
 
                     if (installFiles.Count > 0)
@@ -521,7 +374,7 @@ END;";
 
                 /*Fall back to old structure (SQL files in root)*/
                 var files = Directory.GetFiles(searchDir.FullName, "*.sql")
-                    .Where(f => SqlFileNamePattern.IsMatch(Path.GetFileName(f)))
+                    .Where(f => Patterns.SqlFilePattern().IsMatch(Path.GetFileName(f)))
                     .ToList();
 
                 if (files.Count > 0)
@@ -534,7 +387,7 @@ END;";
                 searchDir = searchDir.Parent;
             }
 
-            if (sqlDirectory == null)
+            if (sqlDirectory == null || monitorRootDirectory == null)
             {
                 Console.WriteLine($"Error: No SQL installation files found.");
                 Console.WriteLine($"Searched in: {currentDirectory}");
@@ -546,24 +399,11 @@ END;";
                 {
                     WaitForExit();
                 }
-                return ExitCodes.SqlFilesNotFound;
+                return (int)InstallationResultCode.SqlFilesNotFound;
             }
 
-            var sqlFiles = Directory.GetFiles(sqlDirectory, "*.sql")
-                .Where(f =>
-                {
-                    string fileName = Path.GetFileName(f);
-                    if (!SqlFileNamePattern.IsMatch(fileName))
-                        return false;
-                    /*Exclude uninstall, test, and troubleshooting scripts from main install*/
-                    if (fileName.StartsWith("00_", StringComparison.Ordinal) ||
-                        fileName.StartsWith("97_", StringComparison.Ordinal) ||
-                        fileName.StartsWith("99_", StringComparison.Ordinal))
-                        return false;
-                    return true;
-                })
-                .OrderBy(f => Path.GetFileName(f))
-                .ToList();
+            scriptProvider = ScriptProvider.FromDirectory(monitorRootDirectory);
+            var sqlFiles = scriptProvider.GetInstallFiles();
 
             Console.WriteLine();
             Console.WriteLine($"Found {sqlFiles.Count} SQL files in: {sqlDirectory}");
@@ -571,6 +411,31 @@ END;";
             {
                 Console.WriteLine($"Using new folder structure (install/ subfolder)");
             }
+
+            /*
+            Create progress reporter that routes to console helpers
+            */
+            var progress = new Progress<InstallationProgress>(p =>
+            {
+                switch (p.Status)
+                {
+                    case "Success":
+                        WriteSuccess(p.Message);
+                        break;
+                    case "Error":
+                        WriteError(p.Message);
+                        break;
+                    case "Warning":
+                        WriteWarning(p.Message);
+                        break;
+                    case "Debug":
+                        /*Suppress debug messages in CLI output*/
+                        break;
+                    default:
+                        Console.WriteLine(p.Message);
+                        break;
+                }
+            });
 
             /*
             Main installation loop - allows retry on failure
@@ -627,36 +492,7 @@ END;";
                 Console.WriteLine("Performing clean install...");
                 try
                 {
-                    using (var connection = new SqlConnection(builder.ConnectionString))
-                    {
-                        await connection.OpenAsync().ConfigureAwait(false);
-
-                        /*
-                        Stop any existing traces before dropping database
-                        Traces are server-level and persist after database drops
-                        Use existing procedure if database exists
-                        */
-                        try
-                        {
-                            using (var command = new SqlCommand("EXECUTE PerformanceMonitor.collect.trace_management_collector @action = 'STOP';", connection))
-                            {
-                                command.CommandTimeout = ShortTimeoutSeconds;
-                                await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-                                Console.WriteLine("✓ Stopped existing traces");
-                            }
-                        }
-                        catch (SqlException)
-                        {
-                            /*Database or procedure doesn't exist - no traces to clean*/
-                        }
-
-                        using (var command = new SqlCommand(UninstallSql, connection))
-                        {
-                            command.CommandTimeout = ShortTimeoutSeconds;
-                            await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-                        }
-                    }
-
+                    await InstallationService.CleanInstallAsync(connectionString).ConfigureAwait(false);
                     WriteSuccess("Clean install completed (jobs and database removed)");
                 }
                 catch (Exception ex)
@@ -673,9 +509,9 @@ END;";
                 string? currentVersion = null;
                 try
                 {
-                    currentVersion = await GetInstalledVersion(builder.ConnectionString);
+                    currentVersion = await InstallationService.GetInstalledVersionAsync(connectionString).ConfigureAwait(false);
                 }
-                catch (InvalidOperationException ex)
+                catch (Exception ex)
                 {
                     Console.WriteLine();
                     Console.WriteLine("================================================================================");
@@ -699,41 +535,32 @@ END;";
                     {
                         WaitForExit();
                     }
-                    return ExitCodes.VersionCheckFailed;
+                    return (int)InstallationResultCode.VersionCheckFailed;
                 }
 
-                if (currentVersion != null && monitorRootDirectory != null)
+                if (currentVersion != null)
                 {
                     Console.WriteLine();
                     Console.WriteLine($"Existing installation detected: v{currentVersion}");
                     Console.WriteLine("Checking for applicable upgrades...");
 
-                    var upgrades = GetApplicableUpgrades(monitorRootDirectory, currentVersion, version);
+                    var (upgSuccessCount, upgFailureCount, upgradeCount) =
+                        await InstallationService.ExecuteAllUpgradesAsync(
+                            scriptProvider,
+                            connectionString,
+                            currentVersion,
+                            version,
+                            progress).ConfigureAwait(false);
 
-                    if (upgrades.Count > 0)
+                    upgradeSuccessCount = upgSuccessCount;
+                    upgradeFailureCount = upgFailureCount;
+
+                    if (upgradeCount > 0)
                     {
-                        Console.WriteLine($"Found {upgrades.Count} upgrade(s) to apply.");
-                        Console.WriteLine();
-                        Console.WriteLine("================================================================================" );
-                        Console.WriteLine("Applying upgrades...");
-                        Console.WriteLine("================================================================================");
-
-                        using (var connection = new SqlConnection(builder.ConnectionString))
-                        {
-                            await connection.OpenAsync().ConfigureAwait(false);
-
-                            foreach (var upgradeFolder in upgrades)
-                            {
-                                var (upgradeSuccess, upgradeFail) = await ExecuteUpgrade(upgradeFolder, connection);
-                                upgradeSuccessCount += upgradeSuccess;
-                                upgradeFailureCount += upgradeFail;
-                            }
-                        }
-
                         Console.WriteLine();
                         Console.WriteLine($"Upgrades complete: {upgradeSuccessCount} succeeded, {upgradeFailureCount} failed");
 
-                        /*Abort if any upgrade scripts failed — proceeding would reinstall over a partially-upgraded database*/
+                        /*Abort if any upgrade scripts failed -- proceeding would reinstall over a partially-upgraded database*/
                         if (upgradeFailureCount > 0)
                         {
                             Console.WriteLine();
@@ -745,7 +572,7 @@ END;";
                             {
                                 WaitForExit();
                             }
-                            return ExitCodes.UpgradesFailed;
+                            return (int)InstallationResultCode.UpgradesFailed;
                         }
                     }
                     else
@@ -770,114 +597,128 @@ END;";
             Console.WriteLine();
 
             /*
-            Open a single connection for all SQL file execution
-            Connection pooling handles the underlying socket reuse
+            Execute installation using Installer.Core
+            Use DependencyInstaller for community dependencies before validation
             */
-            bool communityDepsInstalled = false;
+            using var dependencyInstaller = new DependencyInstaller();
 
-            using (var connection = new SqlConnection(builder.ConnectionString))
-            {
-                await connection.OpenAsync().ConfigureAwait(false);
-
-                foreach (var sqlFile in sqlFiles)
+            var installResult = await InstallationService.ExecuteInstallationAsync(
+                connectionString,
+                scriptProvider,
+                cleanInstall: false, /* Clean install was already handled above if requested */
+                resetSchedule: resetSchedule,
+                progress: new Progress<InstallationProgress>(p =>
                 {
-                    string fileName = Path.GetFileName(sqlFile);
-
-                    /*Install community dependencies before validation runs
-                      Collectors in 98_validate need sp_WhoIsActive, sp_HealthParser, etc.*/
-                    if (!communityDepsInstalled &&
-                        fileName.StartsWith("98_", StringComparison.Ordinal))
+                    switch (p.Status)
                     {
-                        communityDepsInstalled = true;
-                        try
-                        {
-                            await InstallDependenciesAsync(builder.ConnectionString);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Warning: Dependency installation encountered errors: {ex.Message}");
-                            Console.WriteLine("Continuing with installation...");
-                        }
+                        case "Success":
+                            if (p.Message.EndsWith(" - Success", StringComparison.Ordinal))
+                            {
+                                /*File success: replicate the original "Executing <file>... Success" format*/
+                                string fileName = p.Message.Replace(" - Success", "", StringComparison.Ordinal);
+                                /*The "Executing..." was already printed by the Info message*/
+                                WriteSuccess("Success");
+                            }
+                            else
+                            {
+                                WriteSuccess(p.Message);
+                            }
+                            break;
+                        case "Error":
+                            if (p.Message.Contains(" - FAILED:", StringComparison.Ordinal))
+                            {
+                                WriteError("FAILED");
+                                string errorMsg = p.Message.Substring(p.Message.IndexOf(" - FAILED: ", StringComparison.Ordinal) + 11);
+                                Console.WriteLine($"  Error: {errorMsg}");
+                            }
+                            else if (p.Message == "Critical installation file failed. Aborting installation.")
+                            {
+                                Console.WriteLine();
+                                Console.WriteLine(p.Message);
+                            }
+                            else
+                            {
+                                WriteError(p.Message);
+                            }
+                            break;
+                        case "Warning":
+                            WriteWarning(p.Message);
+                            break;
+                        case "Info":
+                            if (p.Message.StartsWith("Executing ", StringComparison.Ordinal) && p.Message.EndsWith("...", StringComparison.Ordinal))
+                            {
+                                /*Replicate "Executing <file>... " format (no newline yet)*/
+                                Console.Write(p.Message.Replace("Executing ", "Executing ", StringComparison.Ordinal) + " ");
+                            }
+                            else if (p.Message == "Resetting schedule to recommended defaults...")
+                            {
+                                Console.Write("(resetting schedule) ");
+                            }
+                            else if (p.Message != "Starting installation...")
+                            {
+                                Console.WriteLine(p.Message);
+                            }
+                            break;
+                        case "Debug":
+                            /*Suppress debug messages in CLI output*/
+                            break;
+                        default:
+                            Console.WriteLine(p.Message);
+                            break;
                     }
-
-                    Console.Write($"Executing {fileName}... ");
+                }),
+                preValidationAction: async () =>
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("================================================================================");
+                    Console.WriteLine("Installing community dependencies...");
+                    Console.WriteLine("================================================================================");
+                    Console.WriteLine();
 
                     try
                     {
-                        string sqlContent = await File.ReadAllTextAsync(sqlFile);
-
-                        /*
-                        Reset schedule to defaults if requested — truncate before the
-                        INSERT...WHERE NOT EXISTS re-populates with current recommended values
-                        */
-                        if (resetSchedule && fileName.StartsWith("04_", StringComparison.Ordinal))
-                        {
-                            sqlContent = "TRUNCATE TABLE [PerformanceMonitor].[config].[collection_schedule];\nGO\n" + sqlContent;
-                            Console.Write("(resetting schedule) ");
-                        }
-
-                        /*
-                        Remove SQLCMD directives (:r includes) as we're executing files directly
-                        */
-                        sqlContent = SqlCmdDirectivePattern.Replace(sqlContent, "");
-
-                        /*
-                        Split by GO statements using pre-compiled regex
-                        Match GO only when it's a whole word on its own line
-                        */
-                        string[] batches = GoBatchPattern.Split(sqlContent);
-
-                        int batchNumber = 0;
-                        foreach (string batch in batches)
-                        {
-                            string trimmedBatch = batch.Trim();
-
-                            /*Skip empty batches*/
-                            if (string.IsNullOrWhiteSpace(trimmedBatch))
-                                continue;
-
-                            batchNumber++;
-
-                            using (var command = new SqlCommand(trimmedBatch, connection))
+                        await dependencyInstaller.InstallDependenciesAsync(
+                            connectionString,
+                            new Progress<InstallationProgress>(dp =>
                             {
-                                command.CommandTimeout = LongTimeoutSeconds;
-                                try
+                                switch (dp.Status)
                                 {
-                                    await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+                                    case "Success":
+                                        WriteSuccess(dp.Message);
+                                        break;
+                                    case "Error":
+                                        WriteError(dp.Message);
+                                        break;
+                                    case "Warning":
+                                        WriteWarning(dp.Message);
+                                        break;
+                                    case "Debug":
+                                        break;
+                                    default:
+                                        Console.WriteLine(dp.Message);
+                                        break;
                                 }
-                                catch (SqlException ex)
-                                {
-                                    /*Add batch info to error message*/
-                                    string batchPreview = trimmedBatch.Length > 500 ?
-                                        trimmedBatch.Substring(0, 500) + $"... [truncated, total length: {trimmedBatch.Length}]" :
-                                        trimmedBatch;
-                                    throw new InvalidOperationException($"Batch {batchNumber} failed:\n{batchPreview}\n\nOriginal error: {ex.Message}", ex);
-                                }
-                            }
-                        }
-
-                        WriteSuccess("Success");
-                        installSuccessCount++;
+                            })).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
-                        WriteError("FAILED");
-                        Console.WriteLine($"  Error: {ex.Message}");
-                        installFailureCount++;
-                        installationErrors.Add((fileName, ex.Message));
-
-                        if (fileName.StartsWith("01_", StringComparison.Ordinal) || fileName.StartsWith("02_", StringComparison.Ordinal) || fileName.StartsWith("03_", StringComparison.Ordinal))
-                        {
-                            Console.WriteLine();
-                            Console.WriteLine("Critical installation file failed. Aborting installation.");
-                            if (!automatedMode)
-                            {
-                                WaitForExit();
-                            }
-                            return ExitCodes.CriticalFileFailed;
-                        }
+                        Console.WriteLine($"Warning: Dependency installation encountered errors: {ex.Message}");
+                        Console.WriteLine("Continuing with installation...");
                     }
+                }).ConfigureAwait(false);
+
+            installSuccessCount = installResult.FilesSucceeded;
+            installFailureCount = installResult.FilesFailed;
+            installationErrors.AddRange(installResult.Errors);
+
+            /*Check for critical file failure*/
+            if (installResult.FilesFailed > 0 && installResult.Errors.Any(e => Patterns.IsCriticalFile(e.FileName)))
+            {
+                if (!automatedMode)
+                {
+                    WaitForExit();
                 }
+                return (int)InstallationResultCode.CriticalScriptFailed;
             }
 
             Console.WriteLine();
@@ -890,22 +731,6 @@ END;";
             }
             Console.WriteLine($"Installation: {installSuccessCount} succeeded, {installFailureCount} failed");
             Console.WriteLine();
-
-            /*
-            Install community dependencies if not already done (no 98_ files in batch)
-            */
-            if (!communityDepsInstalled && installFailureCount <= 1)
-            {
-                try
-                {
-                    await InstallDependenciesAsync(builder.ConnectionString);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Warning: Dependency installation encountered errors: {ex.Message}");
-                    Console.WriteLine("Continuing with validation...");
-                }
-            }
 
             /*
             Run initial collection and retry failed views
@@ -921,198 +746,27 @@ END;";
 
                 try
                 {
-                    using (var connection = new SqlConnection(builder.ConnectionString))
+                    Console.Write("Executing master collector... ");
+                    var (collectorsSucceeded, collectorsFailed) = await InstallationService.RunValidationAsync(
+                        connectionString,
+                        new Progress<InstallationProgress>(vp =>
+                        {
+                            /*Suppress most messages; the method writes detailed results*/
+                            if (vp.Status == "Error" && !vp.Message.StartsWith("  ", StringComparison.Ordinal))
+                            {
+                                WriteError(vp.Message);
+                            }
+                        })).ConfigureAwait(false);
+
+                    WriteSuccess("Success");
+                    Console.WriteLine();
+                    Console.Write("Verifying data collection... ");
+                    Console.WriteLine($"✓ {collectorsSucceeded} collectors ran successfully");
+
+                    if (collectorsFailed > 0)
                     {
-                        await connection.OpenAsync().ConfigureAwait(false);
-
-                        /*Capture timestamp before running so we only check errors from this run.
-                          Use SYSDATETIME() (local) because collection_time is stored in server local time.*/
-                        DateTime validationStart;
-                        using (var command = new SqlCommand("SELECT SYSDATETIME();", connection))
-                        {
-                            validationStart = (DateTime)(await command.ExecuteScalarAsync().ConfigureAwait(false))!;
-                        }
-
-                        /*Run master collector once with @force_run_all to collect everything immediately*/
-                        Console.Write("Executing master collector... ");
-                        using (var command = new SqlCommand("EXECUTE PerformanceMonitor.collect.scheduled_master_collector @force_run_all = 1, @debug = 0;", connection))
-                        {
-                            command.CommandTimeout = LongTimeoutSeconds;
-                            await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-                        }
-                        WriteSuccess("Success");
-
-                        /*
-                        Verify data was collected — only from this validation run, not historical errors
-                        */
                         Console.WriteLine();
-                        Console.Write("Verifying data collection... ");
-
-                        /* Check successful collections from this run */
-                        int collectedCount = 0;
-                        using (var command = new SqlCommand(@"
-                            SELECT
-                                COUNT(DISTINCT collector_name)
-                            FROM PerformanceMonitor.config.collection_log
-                            WHERE collection_status = 'SUCCESS'
-                            AND   collection_time >= @validation_start;", connection))
-                        {
-                            command.Parameters.AddWithValue("@validation_start", validationStart);
-                            collectedCount = (int)(await command.ExecuteScalarAsync().ConfigureAwait(false) ?? 0);
-                        }
-
-                        /* Total log entries from this run */
-                        int totalLogEntries = 0;
-                        using (var command = new SqlCommand(@"
-                            SELECT COUNT(*)
-                            FROM PerformanceMonitor.config.collection_log
-                            WHERE collection_time >= @validation_start;", connection))
-                        {
-                            command.Parameters.AddWithValue("@validation_start", validationStart);
-                            totalLogEntries = (int)(await command.ExecuteScalarAsync().ConfigureAwait(false) ?? 0);
-                        }
-
-                        Console.WriteLine($"✓ {collectedCount} collectors ran successfully (total log entries: {totalLogEntries})");
-
-                        /* Show failed collectors from this run */
-                        int errorCount = 0;
-                        using (var command = new SqlCommand(@"
-                            SELECT COUNT(*)
-                            FROM PerformanceMonitor.config.collection_log
-                            WHERE collection_status = 'ERROR'
-                            AND   collection_time >= @validation_start;", connection))
-                        {
-                            command.Parameters.AddWithValue("@validation_start", validationStart);
-                            errorCount = (int)(await command.ExecuteScalarAsync().ConfigureAwait(false) ?? 0);
-                        }
-
-                        if (errorCount > 0)
-                        {
-                            Console.WriteLine();
-                            Console.WriteLine($"⚠ {errorCount} collector(s) encountered errors:");
-                            using (var command = new SqlCommand(@"
-                                SELECT
-                                    collector_name,
-                                    error_message
-                                FROM PerformanceMonitor.config.collection_log
-                                WHERE collection_status = 'ERROR'
-                                AND   collection_time >= @validation_start
-                                ORDER BY collection_time DESC;", connection))
-                            {
-                                command.Parameters.AddWithValue("@validation_start", validationStart);
-                                using (var reader = await command.ExecuteReaderAsync().ConfigureAwait(false))
-                                {
-                                    while (await reader.ReadAsync().ConfigureAwait(false))
-                                    {
-                                        string name = reader["collector_name"]?.ToString() ?? "";
-                                        string error = reader["error_message"] == DBNull.Value ? "(no error message)" : reader["error_message"]?.ToString() ?? "";
-                                        Console.WriteLine($"  ✗ {name}");
-                                        Console.WriteLine($"    {error}");
-                                    }
-                                }
-                            }
-                        }
-
-                        /* Show recent log entries for debugging */
-                        if (totalLogEntries > 0 && errorCount == 0)
-                        {
-                            Console.WriteLine();
-                            Console.WriteLine("Sample collection log entries:");
-                            using (var command = new SqlCommand(@"
-                                SELECT TOP 5
-                                    collector_name,
-                                    collection_status,
-                                    rows_collected,
-                                    error_message
-                                FROM PerformanceMonitor.config.collection_log
-                                WHERE collection_status = 'SUCCESS'
-                                AND   collection_time >= @validation_start
-                                ORDER BY collection_time DESC;", connection))
-                            {
-                                command.Parameters.AddWithValue("@validation_start", validationStart);
-                                using (var reader = await command.ExecuteReaderAsync().ConfigureAwait(false))
-                                {
-                                    while (await reader.ReadAsync().ConfigureAwait(false))
-                                    {
-                                        string status = reader["collection_status"]?.ToString() ?? "";
-                                        string name = reader["collector_name"]?.ToString() ?? "";
-                                        int rows = (int)reader["rows_collected"];
-                                        string error = reader["error_message"] == DBNull.Value ? "" : $" - {reader["error_message"]}";
-                                        Console.WriteLine($"  {status,10}: {name,-35} ({rows,4} rows){error}");
-                                    }
-                                }
-                            }
-                        }
-
-                        /*
-                        Check if sp_WhoIsActive created query_snapshots table
-                        The collector creates daily tables like query_snapshots_20260102
-                        */
-                        if (installFailureCount > 0)
-                        {
-                            Console.WriteLine();
-                            Console.Write("Checking for query_snapshots table... ");
-
-                            bool tableExists = false;
-                            using (var command = new SqlCommand(@"
-                                SELECT TOP (1) 1
-                                FROM sys.tables AS t
-                                WHERE t.name LIKE 'query_snapshots_%'
-                                AND t.schema_id = SCHEMA_ID('collect');", connection))
-                            {
-                                var result = await command.ExecuteScalarAsync().ConfigureAwait(false);
-                                tableExists = result != null && result != DBNull.Value;
-                            }
-
-                            if (tableExists)
-                            {
-                                Console.WriteLine("✓ Found");
-                                Console.Write("Retrying query plan views... ");
-
-                                try
-                                {
-                                    string viewFile = Path.Combine(sqlDirectory, "46_create_query_plan_views.sql");
-                                    if (File.Exists(viewFile))
-                                    {
-                                        string sqlContent = await File.ReadAllTextAsync(viewFile);
-                                        sqlContent = SqlCmdDirectivePattern.Replace(sqlContent, "");
-
-                                        string[] batches = GoBatchPattern.Split(sqlContent);
-
-                                        foreach (string batch in batches)
-                                        {
-                                            string trimmedBatch = batch.Trim();
-                                            if (string.IsNullOrWhiteSpace(trimmedBatch)) continue;
-
-                                            using (var command = new SqlCommand(trimmedBatch, connection))
-                                            {
-                                                command.CommandTimeout = ShortTimeoutSeconds;
-                                                await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-                                            }
-                                        }
-
-                                        WriteSuccess("Success");
-                                        installFailureCount = 0; /* Reset failure count */
-                                    }
-                                }
-                                catch (SqlException)
-                                {
-                                    Console.WriteLine("✗ Skipped (sp_WhoIsActive not installed or incompatible schema)");
-                                    /*This is expected if sp_WhoIsActive isn't installed - keep installFailureCount = 1 but don't error*/
-                                }
-                                catch (IOException)
-                                {
-                                    Console.WriteLine("✗ Skipped (could not read view file)");
-                                }
-                            }
-                            else
-                            {
-                                Console.WriteLine("✗ Not created (sp_WhoIsActive installation may have failed)");
-                                Console.WriteLine();
-                                Console.WriteLine("NOTE: The query_snapshots table creation depends on sp_WhoIsActive");
-                                Console.WriteLine("      The view will be created automatically on next collection if available");
-                            }
-                        }
+                        Console.WriteLine($"⚠ {collectorsFailed} collector(s) encountered errors");
                     }
                 }
                 catch (Exception ex)
@@ -1139,15 +793,15 @@ END;";
             */
             try
             {
-                await LogInstallationHistory(
-                    builder.ConnectionString,
+                await InstallationService.LogInstallationHistoryAsync(
+                    connectionString,
                     version,
                     infoVersion,
                     installationStartTime,
                     totalSuccessCount,
                     totalFailureCount,
                     installationSuccessful
-                );
+                ).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1200,17 +854,27 @@ END;";
             */
             try
             {
-                string reportPath = GenerateSummaryReport(
+                var summaryResult = new InstallationResult
+                {
+                    Success = installationSuccessful,
+                    FilesSucceeded = totalSuccessCount,
+                    FilesFailed = totalFailureCount,
+                    StartTime = installationStartTime,
+                    EndTime = DateTime.Now
+                };
+                foreach (var (fileName, errorMessage) in installationErrors)
+                {
+                    summaryResult.Errors.Add((fileName, errorMessage));
+                }
+
+                string reportPath = InstallationService.GenerateSummaryReport(
                     serverName!,
                     sqlServerVersion,
                     sqlServerEdition,
                     infoVersion,
-                    installationStartTime,
-                    totalSuccessCount,
-                    totalFailureCount,
-                    installationSuccessful,
-                    installationErrors
-                );
+                    summaryResult,
+                    outputDirectory: Directory.GetCurrentDirectory());
+
                 Console.WriteLine();
                 Console.WriteLine($"Installation report saved to: {reportPath}");
             }
@@ -1231,7 +895,9 @@ END;";
                 Console.WriteLine();
             }
 
-            return installationSuccessful ? ExitCodes.Success : ExitCodes.PartialInstallation;
+            return installationSuccessful
+                ? (int)InstallationResultCode.Success
+                : (int)InstallationResultCode.PartialInstallation;
         }
 
         /*
@@ -1245,11 +911,6 @@ END;";
             string? response = Console.ReadLine();
             return response?.Trim().Equals("Y", StringComparison.OrdinalIgnoreCase) ?? false;
         }
-
-        /*
-        Log installation history to database
-        Tracks version, duration, success/failure, and upgrade detection
-        */
 
         /// <summary>
         /// Performs a complete uninstall: stops traces, removes jobs, XE sessions, and database.
@@ -1276,7 +937,7 @@ END;";
                 {
                     Console.WriteLine("Uninstall cancelled.");
                     WaitForExit();
-                    return ExitCodes.Success;
+                    return (int)InstallationResultCode.Success;
                 }
             }
 
@@ -1285,28 +946,31 @@ END;";
 
             try
             {
-                using var connection = new SqlConnection(connectionString);
-                await connection.OpenAsync().ConfigureAwait(false);
-
-                /*Stop traces first (procedure lives in the database)*/
-                try
-                {
-                    using var traceCmd = new SqlCommand(
-                        "EXECUTE PerformanceMonitor.collect.trace_management_collector @action = 'STOP';",
-                        connection);
-                    traceCmd.CommandTimeout = ShortTimeoutSeconds;
-                    await traceCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
-                    Console.WriteLine("✓ Stopped server-side traces");
-                }
-                catch (SqlException)
-                {
-                    Console.WriteLine("  No traces to stop (database or procedure not found)");
-                }
-
-                /*Remove jobs, XE sessions, and database*/
-                using var command = new SqlCommand(UninstallSql, connection);
-                command.CommandTimeout = ShortTimeoutSeconds;
-                await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+                await InstallationService.ExecuteUninstallAsync(
+                    connectionString,
+                    new Progress<InstallationProgress>(p =>
+                    {
+                        switch (p.Status)
+                        {
+                            case "Success":
+                                WriteSuccess(p.Message);
+                                break;
+                            case "Error":
+                                WriteError(p.Message);
+                                break;
+                            case "Warning":
+                                WriteWarning(p.Message);
+                                break;
+                            case "Info":
+                                Console.WriteLine(p.Message);
+                                break;
+                            case "Debug":
+                                break;
+                            default:
+                                Console.WriteLine(p.Message);
+                                break;
+                        }
+                    })).ConfigureAwait(false);
 
                 Console.WriteLine();
                 WriteSuccess("Uninstall completed successfully");
@@ -1321,367 +985,14 @@ END;";
                 {
                     WaitForExit();
                 }
-                return ExitCodes.UninstallFailed;
+                return (int)InstallationResultCode.UninstallFailed;
             }
 
             if (!automatedMode)
             {
                 WaitForExit();
             }
-            return ExitCodes.Success;
-        }
-
-        /*
-        Get currently installed version from database
-        Returns null if not installed (database or table doesn't exist)
-        Throws exception for unexpected errors (permissions, network, etc.)
-        */
-        private static async Task<string?> GetInstalledVersion(string connectionString)
-        {
-            try
-            {
-                using (var connection = new SqlConnection(connectionString))
-                {
-                    await connection.OpenAsync().ConfigureAwait(false);
-
-                    /*Check if PerformanceMonitor database exists*/
-                    using var dbCheckCmd = new SqlCommand(@"
-                        SELECT database_id
-                        FROM sys.databases
-                        WHERE name = N'PerformanceMonitor';", connection);
-
-                    var dbExists = await dbCheckCmd.ExecuteScalarAsync().ConfigureAwait(false);
-                    if (dbExists == null || dbExists == DBNull.Value)
-                    {
-                        return null; /*Database doesn't exist - clean install needed*/
-                    }
-
-                    /*Check if installation_history table exists*/
-                    using var tableCheckCmd = new SqlCommand(@"
-                        USE PerformanceMonitor;
-                        SELECT OBJECT_ID(N'config.installation_history', N'U');", connection);
-
-                    var tableExists = await tableCheckCmd.ExecuteScalarAsync().ConfigureAwait(false);
-                    if (tableExists == null || tableExists == DBNull.Value)
-                    {
-                        return null; /*Table doesn't exist - old version or corrupted install*/
-                    }
-
-                    /*Get most recent successful installation version*/
-                    using var versionCmd = new SqlCommand(@"
-                        SELECT TOP 1 installer_version
-                        FROM PerformanceMonitor.config.installation_history
-                        WHERE installation_status = 'SUCCESS'
-                        ORDER BY installation_date DESC;", connection);
-
-                    var version = await versionCmd.ExecuteScalarAsync().ConfigureAwait(false);
-                    if (version != null && version != DBNull.Value)
-                    {
-                        return version.ToString();
-                    }
-
-                    /*
-                    Fallback: database and history table exist but no SUCCESS rows.
-                    This can happen if a prior GUI install didn't write history (#538/#539).
-                    Return "1.0.0" so all idempotent upgrade scripts are attempted
-                    rather than treating this as a fresh install (which would drop the database).
-                    */
-                    Console.WriteLine("Warning: PerformanceMonitor database exists but installation_history has no records.");
-                    Console.WriteLine("Treating as v1.0.0 to apply all available upgrades.");
-                    return "1.0.0";
-                }
-            }
-            catch (SqlException ex)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to check installed version. SQL Error {ex.Number}: {ex.Message}", ex);
-            }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to check installed version: {ex.Message}", ex);
-            }
-        }
-
-        /*
-        Find upgrade folders that need to be applied
-        Returns list of upgrade folder paths in order
-        Filters by version: only applies upgrades where FromVersion >= currentVersion and ToVersion <= targetVersion
-        */
-        private static List<string> GetApplicableUpgrades(
-            string monitorRootDirectory,
-            string? currentVersion,
-            string targetVersion)
-        {
-            var upgradeFolders = new List<string>();
-            string upgradesDirectory = Path.Combine(monitorRootDirectory, "upgrades");
-
-            if (!Directory.Exists(upgradesDirectory))
-            {
-                return upgradeFolders; /*No upgrades folder - return empty list*/
-            }
-
-            /*If there's no current version, it's a clean install - no upgrades needed*/
-            if (currentVersion == null)
-            {
-                return upgradeFolders;
-            }
-
-            /*Parse current version - if invalid, skip upgrades
-              Normalize to 3-part (Major.Minor.Build) to avoid Revision mismatch:
-              folder names use 3-part "1.3.0" but DB stores 4-part "1.3.0.0"
-              Version(1,3,0).Revision=-1 which breaks >= comparison with Version(1,3,0,0)*/
-            if (!Version.TryParse(currentVersion, out var currentRaw))
-            {
-                return upgradeFolders;
-            }
-            var current = new Version(currentRaw.Major, currentRaw.Minor, currentRaw.Build);
-
-            /*Parse target version - if invalid, skip upgrades*/
-            if (!Version.TryParse(targetVersion, out var targetRaw))
-            {
-                return upgradeFolders;
-            }
-            var target = new Version(targetRaw.Major, targetRaw.Minor, targetRaw.Build);
-
-            /*
-            Find all upgrade folders matching pattern: {from}-to-{to}
-            Parse versions and filter to only applicable upgrades
-            */
-            var applicableUpgrades = Directory.GetDirectories(upgradesDirectory)
-                .Select(d => new
-                {
-                    Path = d,
-                    FolderName = Path.GetFileName(d)
-                })
-                .Where(x => x.FolderName.Contains("-to-", StringComparison.Ordinal))
-                .Select(x =>
-                {
-                    var parts = x.FolderName.Split("-to-");
-                    return new
-                    {
-                        x.Path,
-                        FromVersion = Version.TryParse(parts[0], out var from) ? from : null,
-                        ToVersion = parts.Length > 1 && Version.TryParse(parts[1], out var to) ? to : null
-                    };
-                })
-                .Where(x => x.FromVersion != null && x.ToVersion != null)
-                .Where(x => x.FromVersion >= current)   /*Don't re-apply old upgrades*/
-                .Where(x => x.ToVersion <= target)      /*Don't apply future upgrades*/
-                .OrderBy(x => x.FromVersion)
-                .ToList();
-
-            foreach (var upgrade in applicableUpgrades)
-            {
-                string upgradeFile = Path.Combine(upgrade.Path, "upgrade.txt");
-                if (File.Exists(upgradeFile))
-                {
-                    upgradeFolders.Add(upgrade.Path);
-                }
-            }
-
-            return upgradeFolders;
-        }
-
-        /*
-        Execute an upgrade folder
-        Returns (successCount, failureCount)
-        */
-        private static async Task<(int successCount, int failureCount)> ExecuteUpgrade(
-            string upgradeFolder,
-            SqlConnection connection)
-        {
-            int successCount = 0;
-            int failureCount = 0;
-
-            string upgradeName = Path.GetFileName(upgradeFolder);
-            string upgradeFile = Path.Combine(upgradeFolder, "upgrade.txt");
-
-            Console.WriteLine();
-            Console.WriteLine($"Applying upgrade: {upgradeName}");
-            Console.WriteLine("--------------------------------------------------------------------------------");
-
-            /*Read the upgrade.txt file to get ordered list of SQL files*/
-            var sqlFileNames = (await File.ReadAllLinesAsync(upgradeFile).ConfigureAwait(false))
-                .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith('#'))
-                .Select(line => line.Trim())
-                .ToList();
-
-            foreach (var fileName in sqlFileNames)
-            {
-                string filePath = Path.Combine(upgradeFolder, fileName);
-
-                if (!File.Exists(filePath))
-                {
-                    Console.WriteLine($"  {fileName}... ? WARNING: File not found");
-                    failureCount++;
-                    continue;
-                }
-
-                Console.Write($"  {fileName}... ");
-
-                try
-                {
-                    string sql = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-                    string[] batches = GoBatchPattern.Split(sql);
-
-                    int batchNumber = 0;
-                    foreach (var batch in batches)
-                    {
-                        batchNumber++;
-                        string trimmedBatch = batch.Trim();
-
-                        if (string.IsNullOrWhiteSpace(trimmedBatch))
-                            continue;
-
-                        using (var cmd = new SqlCommand(trimmedBatch, connection))
-                        {
-                            cmd.CommandTimeout = UpgradeTimeoutSeconds;
-                            try
-                            {
-                                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
-                            }
-                            catch (SqlException ex)
-                            {
-                                /*Add batch info to error message*/
-                                string batchPreview = trimmedBatch.Length > 500 ?
-                                    trimmedBatch.Substring(0, 500) + $"... [truncated, total length: {trimmedBatch.Length}]" :
-                                    trimmedBatch;
-                                throw new InvalidOperationException($"Batch {batchNumber} failed:\n{batchPreview}\n\nOriginal error: {ex.Message}", ex);
-                            }
-                        }
-                    }
-
-                    WriteSuccess("Success");
-                    successCount++;
-                }
-                catch (Exception ex)
-                {
-                    WriteError("FAILED");
-                    Console.WriteLine($"    Error: {ex.Message}");
-                    failureCount++;
-                }
-            }
-
-            return (successCount, failureCount);
-        }
-
-        private static async Task LogInstallationHistory(
-            string connectionString,
-            string assemblyVersion,
-            string infoVersion,
-            DateTime startTime,
-            int filesExecuted,
-            int filesFailed,
-            bool isSuccess)
-        {
-            try
-            {
-                using (var connection = new SqlConnection(connectionString))
-                {
-                    await connection.OpenAsync().ConfigureAwait(false);
-
-                    /*Check if this is an upgrade by checking for existing installation*/
-                    string? previousVersion = null;
-                    string installationType = "INSTALL";
-
-                    try
-                    {
-                        using (var checkCmd = new SqlCommand(@"
-                            SELECT TOP 1 installer_version
-                            FROM PerformanceMonitor.config.installation_history
-                            WHERE installation_status = 'SUCCESS'
-                            ORDER BY installation_date DESC;", connection))
-                        {
-                            var result = await checkCmd.ExecuteScalarAsync().ConfigureAwait(false);
-                            if (result != null && result != DBNull.Value)
-                            {
-                                previousVersion = result.ToString();
-                                bool isSameVersion = Version.TryParse(previousVersion, out var prevVer)
-                                    && Version.TryParse(assemblyVersion, out var currVer)
-                                    && prevVer == currVer;
-                                installationType = isSameVersion ? "REINSTALL" : "UPGRADE";
-                            }
-                        }
-                    }
-                    catch (SqlException)
-                    {
-                        /*Table might not exist yet on first install - that's ok*/
-                    }
-
-                    /*Get SQL Server version info*/
-                    string sqlVersion = "";
-                    string sqlEdition = "";
-
-                    using (var versionCmd = new SqlCommand("SELECT @@VERSION, SERVERPROPERTY('Edition');", connection))
-                    {
-                        using (var reader = await versionCmd.ExecuteReaderAsync().ConfigureAwait(false))
-                        {
-                            if (await reader.ReadAsync().ConfigureAwait(false))
-                            {
-                                sqlVersion = reader.GetString(0);
-                                sqlEdition = reader.GetString(1);
-                            }
-                        }
-                    }
-
-                    /*Calculate duration*/
-                    long durationMs = (long)(DateTime.Now - startTime).TotalMilliseconds;
-
-                    /*Determine installation status*/
-                    string status = isSuccess ? "SUCCESS" : (filesFailed > 0 ? "PARTIAL" : "FAILED");
-
-                    /*Insert installation record*/
-                    var insertSql = @"
-                        INSERT INTO PerformanceMonitor.config.installation_history
-                        (
-                            installer_version,
-                            installer_info_version,
-                            sql_server_version,
-                            sql_server_edition,
-                            installation_type,
-                            previous_version,
-                            installation_status,
-                            files_executed,
-                            files_failed,
-                            installation_duration_ms
-                        )
-                        VALUES
-                        (
-                            @installer_version,
-                            @installer_info_version,
-                            @sql_server_version,
-                            @sql_server_edition,
-                            @installation_type,
-                            @previous_version,
-                            @installation_status,
-                            @files_executed,
-                            @files_failed,
-                            @installation_duration_ms
-                        );";
-
-                    using (var insertCmd = new SqlCommand(insertSql, connection))
-                    {
-                        insertCmd.Parameters.Add(new SqlParameter("@installer_version", SqlDbType.NVarChar, 50) { Value = assemblyVersion });
-                        insertCmd.Parameters.Add(new SqlParameter("@installer_info_version", SqlDbType.NVarChar, 100) { Value = (object?)infoVersion ?? DBNull.Value });
-                        insertCmd.Parameters.Add(new SqlParameter("@sql_server_version", SqlDbType.NVarChar, 500) { Value = sqlVersion });
-                        insertCmd.Parameters.Add(new SqlParameter("@sql_server_edition", SqlDbType.NVarChar, 128) { Value = sqlEdition });
-                        insertCmd.Parameters.Add(new SqlParameter("@installation_type", SqlDbType.VarChar, 20) { Value = installationType });
-                        insertCmd.Parameters.Add(new SqlParameter("@previous_version", SqlDbType.NVarChar, 50) { Value = (object?)previousVersion ?? DBNull.Value });
-                        insertCmd.Parameters.Add(new SqlParameter("@installation_status", SqlDbType.VarChar, 20) { Value = status });
-                        insertCmd.Parameters.Add(new SqlParameter("@files_executed", SqlDbType.Int) { Value = filesExecuted });
-                        insertCmd.Parameters.Add(new SqlParameter("@files_failed", SqlDbType.Int) { Value = filesFailed });
-                        insertCmd.Parameters.Add(new SqlParameter("@installation_duration_ms", SqlDbType.BigInt) { Value = durationMs });
-
-                        await insertCmd.ExecuteNonQueryAsync().ConfigureAwait(false);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                /*Don't fail installation if logging fails*/
-                Console.WriteLine($"Warning: Failed to log installation history: {ex.Message}");
-            }
+            return (int)InstallationResultCode.Success;
         }
 
         /*
@@ -1756,33 +1067,6 @@ END;";
         }
 
         /*
-        Download content from URL with retry logic for transient failures
-        Uses exponential backoff: 2s, 4s, 8s between retries
-        */
-        private static async Task<string> DownloadWithRetryAsync(
-            HttpClient client,
-            string url,
-            int maxRetries = 3)
-        {
-            for (int attempt = 1; attempt <= maxRetries; attempt++)
-            {
-                try
-                {
-                    return await client.GetStringAsync(url).ConfigureAwait(false);
-                }
-                catch (HttpRequestException) when (attempt < maxRetries)
-                {
-                    int delaySeconds = (int)Math.Pow(2, attempt); /*2s, 4s, 8s*/
-                    Console.WriteLine($"network error, retrying in {delaySeconds}s ({attempt}/{maxRetries})...");
-                    Console.Write($"Installing ... ");
-                    await Task.Delay(delaySeconds * 1000).ConfigureAwait(false);
-                }
-            }
-            /*Final attempt - let exception propagate if it fails*/
-            return await client.GetStringAsync(url).ConfigureAwait(false);
-        }
-
-        /*
         Wait for user input before exiting (prevents window from closing)
         Used for fatal errors where retry doesn't make sense
         */
@@ -1819,237 +1103,6 @@ END;";
             } while (key.Key != ConsoleKey.Enter);
 
             return password;
-        }
-
-        /*
-        Install community dependencies (sp_WhoIsActive, DarlingData, First Responder Kit)
-        Downloads and installs latest versions in PerformanceMonitor database
-        */
-        private static async Task InstallDependenciesAsync(string connectionString)
-        {
-            Console.WriteLine();
-            Console.WriteLine("================================================================================");
-            Console.WriteLine("Installing community dependencies...");
-            Console.WriteLine("================================================================================");
-            Console.WriteLine();
-
-            var dependencies = new List<(string Name, string Url, string Description)>
-            {
-                (
-                    "sp_WhoIsActive",
-                    "https://raw.githubusercontent.com/amachanic/sp_whoisactive/refs/heads/master/sp_WhoIsActive.sql",
-                    "Query activity monitoring by Adam Machanic (GPLv3)"
-                ),
-                (
-                    "DarlingData",
-                    "https://raw.githubusercontent.com/erikdarlingdata/DarlingData/main/Install-All/DarlingData.sql",
-                    "sp_HealthParser, sp_HumanEventsBlockViewer, and others by Erik Darling (MIT)"
-                ),
-                (
-                    "First Responder Kit",
-                    "https://raw.githubusercontent.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/refs/heads/main/Install-All-Scripts.sql",
-                    "sp_BlitzLock and other diagnostic tools by Brent Ozar Unlimited (MIT)"
-                )
-            };
-
-            using var httpClient = new HttpClient();
-            httpClient.Timeout = TimeSpan.FromSeconds(30);
-
-            int successCount = 0;
-            int failureCount = 0;
-
-            foreach (var (name, url, description) in dependencies)
-            {
-                Console.Write($"Installing {name}... ");
-
-                try
-                {
-                    /*Download the script with retry for transient failures*/
-                    string sql = await DownloadWithRetryAsync(httpClient, url).ConfigureAwait(false);
-
-                    if (string.IsNullOrWhiteSpace(sql))
-                    {
-                        Console.WriteLine("✗ FAILED (empty response)");
-                        failureCount++;
-                        continue;
-                    }
-
-                    /*Execute in PerformanceMonitor database*/
-                    using var connection = new SqlConnection(connectionString);
-                    await connection.OpenAsync().ConfigureAwait(false);
-
-                    /*Switch to PerformanceMonitor database*/
-                    using (var useDbCommand = new SqlCommand("USE PerformanceMonitor;", connection))
-                    {
-                        await useDbCommand.ExecuteNonQueryAsync().ConfigureAwait(false);
-                    }
-
-                    /*
-                    Split by GO statements using pre-compiled regex
-                    */
-                    string[] batches = GoBatchPattern.Split(sql);
-
-                    foreach (string batch in batches)
-                    {
-                        string trimmedBatch = batch.Trim();
-
-                        if (string.IsNullOrWhiteSpace(trimmedBatch))
-                            continue;
-
-                        using var command = new SqlCommand(trimmedBatch, connection);
-                        command.CommandTimeout = MediumTimeoutSeconds;
-                        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
-                    }
-
-                    WriteSuccess("Success");
-                    Console.WriteLine($"  {description}");
-                    successCount++;
-                }
-                catch (HttpRequestException ex)
-                {
-                    Console.WriteLine($"✗ Download failed: {ex.Message}");
-                    failureCount++;
-                }
-                catch (SqlException ex)
-                {
-                    Console.WriteLine($"✗ SQL execution failed: {ex.Message}");
-                    failureCount++;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"✗ Failed: {ex.Message}");
-                    failureCount++;
-                }
-            }
-
-            Console.WriteLine();
-            Console.WriteLine($"Dependencies installed: {successCount}/{dependencies.Count}");
-
-            if (failureCount > 0)
-            {
-                Console.WriteLine($"Note: {failureCount} dependencies failed to install. The system will work but some");
-                Console.WriteLine("      collectors may not function optimally. Check network connectivity and try again.");
-            }
-        }
-
-        /*
-        Generate installation summary report file
-        Creates a text file with installation details for documentation and troubleshooting
-        */
-        private static string GenerateSummaryReport(
-            string serverName,
-            string sqlServerVersion,
-            string sqlServerEdition,
-            string installerVersion,
-            DateTime startTime,
-            int filesSucceeded,
-            int filesFailed,
-            bool overallSuccess,
-            List<(string FileName, string ErrorMessage)> errors)
-        {
-            var endTime = DateTime.Now;
-            var duration = endTime - startTime;
-
-            /*
-            Generate unique filename with timestamp
-            */
-            string timestamp = startTime.ToString("yyyyMMdd_HHmmss");
-            string fileName = $"PerformanceMonitor_Install_{SanitizeFilename(serverName)}_{timestamp}.txt";
-            string reportPath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
-
-            var sb = new System.Text.StringBuilder();
-
-            /*
-            Header
-            */
-            sb.AppendLine("================================================================================");
-            sb.AppendLine("Performance Monitor Installation Report");
-            sb.AppendLine("================================================================================");
-            sb.AppendLine();
-
-            /*
-            Installation summary
-            */
-            sb.AppendLine("INSTALLATION SUMMARY");
-            sb.AppendLine("--------------------------------------------------------------------------------");
-            sb.AppendLine($"Status:              {(overallSuccess ? "SUCCESS" : "FAILED")}");
-            sb.AppendLine($"Start Time:          {startTime:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine($"End Time:            {endTime:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine($"Duration:            {duration.TotalSeconds:F1} seconds");
-            sb.AppendLine($"Files Executed:      {filesSucceeded}");
-            sb.AppendLine($"Files Failed:        {filesFailed}");
-            sb.AppendLine();
-
-            /*
-            Server information
-            */
-            sb.AppendLine("SERVER INFORMATION");
-            sb.AppendLine("--------------------------------------------------------------------------------");
-            sb.AppendLine($"Server Name:         {serverName}");
-            sb.AppendLine($"SQL Server Edition:  {sqlServerEdition}");
-            sb.AppendLine();
-
-            /*
-            Extract version info from @@VERSION (first line only)
-            */
-            if (!string.IsNullOrEmpty(sqlServerVersion))
-            {
-                string[] versionLines = sqlServerVersion.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                if (versionLines.Length > 0)
-                {
-                    sb.AppendLine($"SQL Server Version:");
-                    foreach (var line in versionLines)
-                    {
-                        sb.AppendLine($"  {line.Trim()}");
-                    }
-                }
-            }
-            sb.AppendLine();
-
-            /*
-            Installer information
-            */
-            sb.AppendLine("INSTALLER INFORMATION");
-            sb.AppendLine("--------------------------------------------------------------------------------");
-            sb.AppendLine($"Installer Version:   {installerVersion}");
-            sb.AppendLine($"Working Directory:   {Directory.GetCurrentDirectory()}");
-            sb.AppendLine($"Machine Name:        {Environment.MachineName}");
-            sb.AppendLine($"User Name:           {Environment.UserName}");
-            sb.AppendLine();
-
-            /*
-            Errors section (if any)
-            */
-            if (errors.Count > 0)
-            {
-                sb.AppendLine("ERRORS");
-                sb.AppendLine("--------------------------------------------------------------------------------");
-                foreach (var (file, error) in errors)
-                {
-                    sb.AppendLine($"File: {file}");
-                    /*
-                    Truncate very long error messages
-                    */
-                    string errorMsg = error.Length > 500 ? error.Substring(0, 500) + "..." : error;
-                    sb.AppendLine($"Error: {errorMsg}");
-                    sb.AppendLine();
-                }
-            }
-
-            /*
-            Footer
-            */
-            sb.AppendLine("================================================================================");
-            sb.AppendLine("Generated by Performance Monitor Installer");
-            sb.AppendLine($"Copyright (c) {DateTime.Now.Year} Darling Data, LLC");
-            sb.AppendLine("================================================================================");
-
-            /*
-            Write file
-            */
-            File.WriteAllText(reportPath, sb.ToString());
-
-            return reportPath;
         }
 
         private static void WriteSuccess(string message)
@@ -2115,8 +1168,5 @@ END;";
                 /* Best effort — don't block installation if GitHub is unreachable */
             }
         }
-
-        [GeneratedRegex(@"^\s*GO\s*(?:--[^\r\n]*)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline)]
-        private static partial Regex GoBatchRegExp();
     }
 }

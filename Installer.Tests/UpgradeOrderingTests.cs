@@ -1,5 +1,6 @@
+using Installer.Core;
+using Installer.Core.Models;
 using Installer.Tests.Helpers;
-using PerformanceMonitorInstallerGui.Services;
 
 namespace Installer.Tests;
 
@@ -17,7 +18,7 @@ public class UpgradeOrderingTests
             .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
             .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "1.3.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("1.3.0", "2.2.0");
 
         Assert.Equal(3, upgrades.Count);
         Assert.Equal("1.3.0-to-2.0.0", upgrades[0].FolderName);
@@ -33,7 +34,7 @@ public class UpgradeOrderingTests
             .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
             .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.0.0", "2.2.0");
 
         Assert.Equal(2, upgrades.Count);
         Assert.Equal("2.0.0-to-2.1.0", upgrades[0].FolderName);
@@ -47,7 +48,7 @@ public class UpgradeOrderingTests
             .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
             .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.2.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.2.0", "2.2.0");
 
         Assert.Empty(upgrades);
     }
@@ -59,7 +60,7 @@ public class UpgradeOrderingTests
         using var dir = new TempDirectoryBuilder()
             .WithUpgrade("2.1.0", "2.2.0", "01_compress.sql");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.1.0.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.1.0.0", "2.2.0");
 
         Assert.Single(upgrades);
         Assert.Equal("2.1.0-to-2.2.0", upgrades[0].FolderName);
@@ -73,7 +74,7 @@ public class UpgradeOrderingTests
             .WithMalformedUpgradeFolder("not-a-version")
             .WithMalformedUpgradeFolder("foo-to-bar");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.0.0", "2.2.0");
 
         Assert.Single(upgrades);
         Assert.Equal("2.0.0-to-2.1.0", upgrades[0].FolderName);
@@ -86,7 +87,7 @@ public class UpgradeOrderingTests
             .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql")
             .WithUpgradeNoManifest("2.1.0", "2.2.0");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.0.0", "2.2.0");
 
         Assert.Single(upgrades);
         Assert.Equal("2.0.0-to-2.1.0", upgrades[0].FolderName);
@@ -98,7 +99,7 @@ public class UpgradeOrderingTests
         using var dir = new TempDirectoryBuilder();
         // Don't create any upgrade folders
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.0.0", "2.2.0");
 
         Assert.Empty(upgrades);
     }
@@ -109,7 +110,7 @@ public class UpgradeOrderingTests
         using var dir = new TempDirectoryBuilder()
             .WithUpgrade("2.0.0", "2.1.0", "01_columns.sql");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, null, "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades(null, "2.2.0");
 
         Assert.Empty(upgrades);
     }
@@ -123,7 +124,7 @@ public class UpgradeOrderingTests
             .WithUpgrade("1.3.0", "2.0.0", "01_a.sql")
             .WithUpgrade("2.0.0", "2.1.0", "01_b.sql");
 
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "1.3.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("1.3.0", "2.2.0");
 
         Assert.Equal(3, upgrades.Count);
         Assert.Equal(new Version(1, 3, 0), upgrades[0].FromVersion);
@@ -140,7 +141,7 @@ public class UpgradeOrderingTests
             .WithUpgrade("2.2.0", "2.3.0", "01_c.sql");
 
         // Target is 2.2.0, so 2.2.0-to-2.3.0 should NOT be included
-        var upgrades = InstallationService.GetApplicableUpgrades(dir.RootPath, "2.0.0", "2.2.0");
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.0.0", "2.2.0");
 
         Assert.Equal(2, upgrades.Count);
         Assert.DoesNotContain(upgrades, u => u.FolderName == "2.2.0-to-2.3.0");

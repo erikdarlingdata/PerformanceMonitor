@@ -1,6 +1,7 @@
+using Installer.Core;
+using Installer.Core.Models;
 using Installer.Tests.Helpers;
 using Microsoft.Data.SqlClient;
-using PerformanceMonitorInstallerGui.Services;
 
 namespace Installer.Tests;
 
@@ -55,7 +56,7 @@ public class AdversarialTests : IAsyncLifetime
 
         // Run upgrades — should fail
         var (_, failureCount, _) = await InstallationService.ExecuteAllUpgradesAsync(
-            dir.RootPath,
+            ScriptProvider.FromDirectory(dir.RootPath),
             TestDatabaseHelper.GetTestDbConnectionString(),
             "2.0.0",
             "2.1.0",
@@ -188,10 +189,10 @@ public class AdversarialTests : IAsyncLifetime
         File.WriteAllText(Path.Combine(dir.InstallPath, "05_procs.sql"),
             "CREATE TABLE dbo.definitely_should_not_exist (id int);");
 
-        var files = dir.GetFilteredInstallFiles();
+        var provider = ScriptProvider.FromDirectory(dir.RootPath);
         var result = await InstallationService.ExecuteInstallationAsync(
             TestDatabaseHelper.GetTestDbConnectionString(),
-            files,
+            provider,
             cleanInstall: false,
             cancellationToken: TestContext.Current.CancellationToken
             );
@@ -234,7 +235,7 @@ public class AdversarialTests : IAsyncLifetime
         try
         {
             await InstallationService.ExecuteAllUpgradesAsync(
-                dir.RootPath,
+                ScriptProvider.FromDirectory(dir.RootPath),
                 TestDatabaseHelper.GetTestDbConnectionString(),
                 "2.0.0",
                 "2.1.0",
@@ -278,10 +279,10 @@ public class AdversarialTests : IAsyncLifetime
         File.WriteAllText(Path.Combine(dir.InstallPath, "05_should_still_run.sql"),
             "CREATE TABLE dbo.proof_it_continued (id int);");
 
-        var files = dir.GetFilteredInstallFiles();
+        var provider = ScriptProvider.FromDirectory(dir.RootPath);
         var result = await InstallationService.ExecuteInstallationAsync(
             TestDatabaseHelper.GetTestDbConnectionString(),
-            files,
+            provider,
             cleanInstall: false,
             cancellationToken: TestContext.Current.CancellationToken
             );
@@ -315,10 +316,10 @@ public class AdversarialTests : IAsyncLifetime
         File.WriteAllText(Path.Combine(dir.InstallPath, "04_corrupt.sql"),
             "THIS IS NOT SQL AT ALL 🔥 §±∞ DROP TABLE BOBBY;; EXEC(((");
 
-        var files = dir.GetFilteredInstallFiles();
+        var provider = ScriptProvider.FromDirectory(dir.RootPath);
         var result = await InstallationService.ExecuteInstallationAsync(
             TestDatabaseHelper.GetTestDbConnectionString(),
-            files,
+            provider,
             cleanInstall: false,
             cancellationToken: TestContext.Current.CancellationToken
             );
@@ -341,10 +342,10 @@ public class AdversarialTests : IAsyncLifetime
 
         File.WriteAllText(Path.Combine(dir.InstallPath, "01_empty.sql"), "");
 
-        var files = dir.GetFilteredInstallFiles();
+        var provider = ScriptProvider.FromDirectory(dir.RootPath);
         var result = await InstallationService.ExecuteInstallationAsync(
             TestDatabaseHelper.GetTestDbConnectionString(),
-            files,
+            provider,
             cleanInstall: false,
             cancellationToken: TestContext.Current.CancellationToken
             );
@@ -463,10 +464,10 @@ IF DB_ID(N'PerformanceMonitor_RestrictedTest') IS NULL
         File.WriteAllText(Path.Combine(dir.InstallPath, "02_create_tables.sql"),
             "CREATE TABLE dbo.should_not_exist (id int);");
 
-        var files = dir.GetFilteredInstallFiles();
+        var provider = ScriptProvider.FromDirectory(dir.RootPath);
         var result = await InstallationService.ExecuteInstallationAsync(
             restrictedConnStr,
-            files,
+            provider,
             cleanInstall: false,
             cancellationToken: TestContext.Current.CancellationToken
             );

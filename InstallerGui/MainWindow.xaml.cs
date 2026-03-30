@@ -15,19 +15,18 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Media;
-using PerformanceMonitorInstallerGui.Services;
+using Installer.Core;
+using Installer.Core.Models;
 using PerformanceMonitorInstallerGui.Utilities;
 
 namespace PerformanceMonitorInstallerGui
 {
     public partial class MainWindow : Window
     {
-        private readonly InstallationService _installationService;
+        private readonly DependencyInstaller _dependencyInstaller;
         private CancellationTokenSource? _cancellationTokenSource;
         private string? _connectionString;
-        private string? _sqlDirectory;
-        private string? _monitorRootDirectory;
-        private List<string>? _sqlFiles;
+        private ScriptProvider? _scriptProvider;
         private ServerInfo? _serverInfo;
         private InstallationResult? _installationResult;
         private string? _installedVersion;
@@ -61,7 +60,7 @@ namespace PerformanceMonitorInstallerGui
             try
             {
                 InitializeComponent();
-                _installationService = new InstallationService();
+                _dependencyInstaller = new DependencyInstaller();
 
                 /*Set window title with version*/
                 Title = $"Performance Monitor Installer v{AppVersion}";
@@ -108,20 +107,18 @@ namespace PerformanceMonitorInstallerGui
         /// </summary>
         private void FindInstallationFiles()
         {
-            var (sqlDirectory, monitorRootDirectory, sqlFiles) = InstallationService.FindInstallationFiles();
+            _scriptProvider = ScriptProvider.AutoDiscover();
+            var scriptFiles = _scriptProvider.GetInstallFiles();
 
-            _sqlDirectory = sqlDirectory;
-            _monitorRootDirectory = monitorRootDirectory;
-            _sqlFiles = sqlFiles;
-
-            if (sqlDirectory != null)
+            if (scriptFiles.Count > 0)
             {
-                LogMessage($"Found {sqlFiles.Count} SQL files in: {sqlDirectory}", "Info");
+                LogMessage($"Found {scriptFiles.Count} SQL installation files", "Info");
             }
             else
             {
                 LogMessage("WARNING: No SQL installation files found.", "Warning");
                 LogMessage("Make sure the installer is in the Monitor directory or a subdirectory.", "Warning");
+                _scriptProvider = null;
                 InstallButton.IsEnabled = false;
 
                 MessageBox.Show(this,
@@ -290,10 +287,9 @@ namespace PerformanceMonitorInstallerGui
                         LogMessage($"Installed version: {_installedVersion}", "Info");
 
                         /*Check for applicable upgrades*/
-                        if (_monitorRootDirectory != null)
+                        if (_scriptProvider != null)
                         {
-                            var upgrades = InstallationService.GetApplicableUpgrades(
-                                _monitorRootDirectory,
+                            var upgrades = _scriptProvider.GetApplicableUpgrades(
                                 _installedVersion,
                                 AppAssemblyVersion);
                             if (upgrades.Count > 0)
@@ -311,7 +307,7 @@ namespace PerformanceMonitorInstallerGui
                         LogMessage("No existing installation detected (clean install)", "Info");
                     }
 
-                    InstallButton.IsEnabled = _sqlFiles != null && _sqlFiles.Count > 0;
+                    InstallButton.IsEnabled = _scriptProvider != null;
                     UninstallButton.IsEnabled = _installedVersion != null;
 
                     /*Show confirmation MessageBox*/
@@ -353,7 +349,7 @@ namespace PerformanceMonitorInstallerGui
         /// </summary>
         private async void Install_Click(object sender, RoutedEventArgs e)
         {
-            if (_connectionString == null || _sqlFiles == null || _sqlDirectory == null)
+            if (_connectionString == null || _scriptProvider == null)
             {
                 MessageBox.Show(this, "Please test the connection first.", "Validation Error",
                     MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -407,10 +403,10 @@ namespace PerformanceMonitorInstallerGui
                 Execute upgrades if applicable (only when not doing clean install)
                 */
                 bool isCleanInstall = CleanInstallCheckBox.IsChecked == true;
-                if (!isCleanInstall && _installedVersion != null && _monitorRootDirectory != null)
+                if (!isCleanInstall && _installedVersion != null && _scriptProvider != null)
                 {
                     var (upgradeSuccess, upgradeFailure, upgradeCount) = await InstallationService.ExecuteAllUpgradesAsync(
-                        _monitorRootDirectory,
+                        _scriptProvider,
                         _connectionString,
                         _installedVersion,
                         AppAssemblyVersion,
@@ -443,13 +439,13 @@ namespace PerformanceMonitorInstallerGui
                 bool resetSchedule = ResetScheduleCheckBox.IsChecked == true;
                 _installationResult = await InstallationService.ExecuteInstallationAsync(
                     _connectionString,
-                    _sqlFiles,
+                    _scriptProvider,
                     isCleanInstall,
                     resetSchedule,
                     progress,
                     preValidationAction: async () =>
                     {
-                        await _installationService.InstallDependenciesAsync(
+                        await _dependencyInstaller.InstallDependenciesAsync(
                             _connectionString,
                             progress,
                             cancellationToken);
@@ -685,7 +681,7 @@ namespace PerformanceMonitorInstallerGui
         /// </summary>
         private async void Troubleshoot_Click(object sender, RoutedEventArgs e)
         {
-            if (_connectionString == null || _sqlDirectory == null)
+            if (_connectionString == null || _scriptProvider == null)
             {
                 return;
             }
@@ -708,7 +704,7 @@ namespace PerformanceMonitorInstallerGui
             {
                 bool success = await InstallationService.RunTroubleshootingAsync(
                     _connectionString,
-                    _sqlDirectory,
+                    _scriptProvider,
                     progress,
                     cancellationToken);
 
@@ -773,7 +769,7 @@ namespace PerformanceMonitorInstallerGui
         protected override void OnClosed(EventArgs e)
         {
             _cancellationTokenSource?.Dispose();
-            _installationService?.Dispose();
+            _dependencyInstaller?.Dispose();
             base.OnClosed(e);
         }
 

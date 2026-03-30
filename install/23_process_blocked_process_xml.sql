@@ -221,6 +221,17 @@ BEGIN
                 @debug = @debug;
 
             /*
+            If sp_HumanEventsBlockViewer failed internally it may have doomed our transaction
+            Check XACT_STATE and surface the real error before it gets swallowed
+            */
+            IF XACT_STATE() = -1
+            BEGIN
+                ROLLBACK TRANSACTION;
+                RAISERROR(N'sp_HumanEventsBlockViewer failed and doomed the transaction - check procedure version and compatibility', 16, 1);
+                RETURN;
+            END;
+
+            /*
             Verify sp_HumanEventsBlockViewer produced parsed results before marking rows as processed
             If no results were inserted, leave rows unprocessed so they are retried next run
             Parsed results use local time (sp_HumanEventsBlockViewer converts UTC to local)

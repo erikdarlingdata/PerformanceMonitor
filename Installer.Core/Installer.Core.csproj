@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Installer.Core</RootNamespace>
+    <AssemblyName>Installer.Core</AssemblyName>
+    <Product>SQL Server Performance Monitor Installer Core</Product>
+    <Version>2.4.1</Version>
+    <AssemblyVersion>2.4.1.0</AssemblyVersion>
+    <FileVersion>2.4.1.0</FileVersion>
+    <InformationalVersion>2.4.1</InformationalVersion>
+    <Company>Darling Data, LLC</Company>
+    <Copyright>Copyright (c) 2026 Darling Data, LLC</Copyright>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <NoWarn>CA1305;CA1845;CA1861;CA2100</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+  </ItemGroup>
+
+  <!-- Embed SQL scripts as assembly resources for Dashboard consumption -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\install\**\*.sql" LinkBase="Resources\install" />
+    <EmbeddedResource Include="..\upgrades\**\*" LinkBase="Resources\upgrades" />
+  </ItemGroup>
+
+</Project>

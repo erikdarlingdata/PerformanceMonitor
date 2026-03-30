@@ -31,6 +31,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Installer.Core\Installer.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="EDD.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
