@@ -36,25 +36,12 @@ echo.
 :: ----------------------------------------
 :: CLI Installer
 :: ----------------------------------------
-echo [2/3] Publishing CLI Installer...
+echo [2/2] Publishing CLI Installer...
 dotnet publish Installer\PerformanceMonitorInstaller.csproj -c Release
 
 if %ERRORLEVEL% neq 0 (
     echo.
     echo ERROR: CLI Installer build failed!
-    exit /b 1
-)
-echo.
-
-:: ----------------------------------------
-:: GUI Installer
-:: ----------------------------------------
-echo [3/3] Publishing GUI Installer...
-dotnet publish InstallerGui\InstallerGui.csproj -c Release -r win-x64 --self-contained
-
-if %ERRORLEVEL% neq 0 (
-    echo.
-    echo ERROR: GUI Installer build failed!
     exit /b 1
 )
 echo.
@@ -70,7 +57,6 @@ mkdir "%INST_DIR%\install"
 mkdir "%INST_DIR%\upgrades"
 
 copy "Installer\bin\Release\net8.0\win-x64\publish\PerformanceMonitorInstaller.exe" "%INST_DIR%\" >nul
-copy "InstallerGui\bin\Release\net8.0\win-x64\publish\InstallerGui.exe" "%INST_DIR%\" >nul 2>&1
 copy "install\*.sql" "%INST_DIR%\install\" >nul
 xcopy "upgrades" "%INST_DIR%\upgrades\" /E /I /Q >nul 2>&1
 if exist README.md copy README.md "%INST_DIR%\" >nul

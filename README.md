@@ -173,7 +173,7 @@ PerformanceMonitorInstaller.exe YourServerName --uninstall
 PerformanceMonitorInstaller.exe YourServerName sa YourPassword --uninstall
 ```
 
-The installer automatically tests the connection, checks the SQL Server version (2016+ required), executes SQL scripts, downloads community dependencies, creates SQL Agent jobs, and runs initial data collection. A GUI installer (`InstallerGui/`) is also available with the same functionality.
+The installer automatically tests the connection, checks the SQL Server version (2016+ required), executes SQL scripts, downloads community dependencies, creates SQL Agent jobs, and runs initial data collection. You can also install directly from the Dashboard's Add Server dialog.
 
 ### CLI Installer Options
 
@@ -599,8 +599,8 @@ Monitor/
 ├── install/          # 58 SQL installation scripts
 ├── upgrades/         # Version-specific upgrade scripts
 ├── Installer/        # CLI installer for Full Edition database (C#)
-├── InstallerGui/     # GUI installer for Full Edition database (WPF)
-├── Dashboard/        # Full Edition dashboard application (WPF)
+├── Installer.Core/   # Shared installation library (CLI + Dashboard)
+├── Dashboard/        # Full Edition dashboard application (WPF, includes installer)
 │
 │   Lite Edition (standalone desktop app, nothing installed on server)
 ├── Lite/             # Lite Edition desktop application (WPF)
@@ -624,9 +624,6 @@ dotnet build Lite/PerformanceMonitorLite.csproj
 
 # CLI Installer (self-contained)
 dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
-
-# GUI Installer
-dotnet publish InstallerGui/InstallerGui.csproj -c Release -r win-x64 --self-contained
 ```
 
 ---

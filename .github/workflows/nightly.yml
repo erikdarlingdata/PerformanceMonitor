@@ -62,7 +62,6 @@ jobs:
           dotnet restore Dashboard/Dashboard.csproj
           dotnet restore Lite/PerformanceMonitorLite.csproj
           dotnet restore Installer/PerformanceMonitorInstaller.csproj
-          dotnet restore InstallerGui/InstallerGui.csproj
           dotnet restore Lite.Tests/Lite.Tests.csproj
 
       - name: Run tests
@@ -76,9 +75,6 @@ jobs:
 
       - name: Publish CLI Installer
         run: dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
-
-      - name: Publish GUI Installer
-        run: dotnet publish InstallerGui/InstallerGui.csproj -c Release
 
       - name: Package artifacts
         shell: pwsh
@@ -95,7 +91,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$instDir/upgrades"
 
           Copy-Item 'Installer/bin/Release/net8.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
-          Copy-Item 'InstallerGui/bin/Release/net8.0-windows/win-x64/publish/PerformanceMonitorInstallerGui.exe' $instDir -ErrorAction SilentlyContinue
           Copy-Item 'install/*.sql' "$instDir/install/"
           if (Test-Path 'install/templates') { Copy-Item 'install/templates' "$instDir/install/templates" -Recurse -ErrorAction SilentlyContinue }
           if (Test-Path 'upgrades') { Copy-Item 'upgrades/*' "$instDir/upgrades/" -Recurse -ErrorAction SilentlyContinue }

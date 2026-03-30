@@ -24,8 +24,8 @@ This repository contains two editions of the SQL Server Performance Monitor:
 |--------|-------------|
 | `install/` | 50+ T-SQL scripts that create the PerformanceMonitor database |
 | `Installer/` | CLI installer for the Full Edition database and collectors |
-| `InstallerGui/` | GUI installer (same functionality as the CLI installer) |
-| `Dashboard/` | WPF dashboard that connects to the installed PerformanceMonitor database |
+| `Installer.Core/` | Shared installation library (used by CLI installer and Dashboard) |
+| `Dashboard/` | WPF dashboard — connects to PerformanceMonitor database, can also install/upgrade via Add Server |
 
 **Lite Edition** — standalone desktop app, nothing installed on the target server:
 
@@ -61,8 +61,6 @@ dotnet build Lite/PerformanceMonitorLite.csproj
 # Build CLI Installer (self-contained)
 dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
 
-# Build GUI Installer
-dotnet publish InstallerGui/InstallerGui.csproj -c Release -r win-x64 --self-contained
 ```
 
 ### Running the Applications

@@ -23,7 +23,6 @@ jobs:
           dotnet restore Dashboard/Dashboard.csproj
           dotnet restore Lite/PerformanceMonitorLite.csproj
           dotnet restore Installer/PerformanceMonitorInstaller.csproj
-          dotnet restore InstallerGui/InstallerGui.csproj
           dotnet restore Lite.Tests/Lite.Tests.csproj
 
       - name: Build all projects
@@ -31,7 +30,6 @@ jobs:
           dotnet build Dashboard/Dashboard.csproj -c Release --no-restore
           dotnet build Lite/PerformanceMonitorLite.csproj -c Release --no-restore
           dotnet build Installer/PerformanceMonitorInstaller.csproj -c Release --no-restore
-          dotnet build InstallerGui/InstallerGui.csproj -c Release --no-restore
           dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
       - name: Run tests
