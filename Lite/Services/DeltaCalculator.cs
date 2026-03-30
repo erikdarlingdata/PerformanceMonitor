@@ -60,6 +60,15 @@ public class DeltaCalculator
     }
 
     /// <summary>
+    /// Removes all cached entries for a server (e.g., when the server tab is closed).
+    /// Next collection will re-seed from database if needed.
+    /// </summary>
+    public void ClearServer(int serverId)
+    {
+        _cache.TryRemove(serverId, out _);
+    }
+
+    /// <summary>
     /// Calculates the delta between the current value and the previous cached value.
     /// First-ever sighting (no baseline): returns currentValue so single-execution queries appear.
     /// Counter reset (value decreased): returns 0 to avoid inflated deltas from plan cache churn.

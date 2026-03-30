@@ -59,6 +59,7 @@ public partial class RemoteCollectorService
     private readonly ScheduleManager _scheduleManager;
     private readonly ILogger<RemoteCollectorService>? _logger;
     private readonly DeltaCalculator _deltaCalculator;
+    public DeltaCalculator DeltaCalculator => _deltaCalculator;
     private static long s_idCounter = DateTime.UtcNow.Ticks;
 
     /// <summary>

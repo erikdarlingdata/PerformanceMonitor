@@ -56,6 +56,14 @@ internal sealed class ChartHoverHelper
 
     public string Unit { get => _unit; set => _unit = value; }
 
+    public void Dispose()
+    {
+        _chart.MouseMove -= OnMouseMove;
+        _chart.MouseLeave -= OnMouseLeave;
+        _popup.IsOpen = false;
+        _scatters.Clear();
+    }
+
     public void Clear() => _scatters.Clear();
 
     public void Add(ScottPlot.Plottables.Scatter scatter, string label) =>

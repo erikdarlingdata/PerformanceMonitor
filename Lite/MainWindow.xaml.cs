@@ -36,6 +36,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _backgroundCts;
     private SystemTrayService? _trayService;
     private readonly Dictionary<string, TabItem> _openServerTabs = new();
+    private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<int> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     private readonly Dictionary<string, bool> _previousConnectionStates = new();
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, DateTime> _lastCpuAlert = new();
@@ -530,15 +531,13 @@ public partial class MainWindow : Window
             Content = serverTab
         };
 
-        /* Subscribe to alert counts for badge updates */
+        /* Subscribe to events — store handlers so we can unsubscribe on tab close */
         var serverId = server.Id;
-        serverTab.AlertCountsChanged += (blockingCount, deadlockCount, latestEventTime) =>
+        Action<int, int, DateTime?> alertHandler = (blockingCount, deadlockCount, latestEventTime) =>
         {
             Dispatcher.Invoke(() => UpdateTabBadge(tabHeader, serverId, blockingCount, deadlockCount, latestEventTime));
         };
-
-        /* Subscribe to "Apply to All" time range propagation */
-        serverTab.ApplyTimeRangeRequested += (selectedIndex) =>
+        Action<int> timeRangeHandler = (selectedIndex) =>
         {
             Dispatcher.Invoke(() =>
             {
@@ -551,9 +550,7 @@ public partial class MainWindow : Window
                 }
             });
         };
-
-        /* Re-collect on-load data (config, trace flags) when refresh button is clicked */
-        serverTab.ManualRefreshRequested += async () =>
+        Func<Task> refreshHandler = async () =>
         {
             if (_collectorService != null)
             {
@@ -571,6 +568,11 @@ public partial class MainWindow : Window
                 }
             }
         };
+
+        serverTab.AlertCountsChanged += alertHandler;
+        serverTab.ApplyTimeRangeRequested += timeRangeHandler;
+        serverTab.ManualRefreshRequested += refreshHandler;
+        _tabEventHandlers[server.Id] = (alertHandler, timeRangeHandler, refreshHandler);
 
         _openServerTabs[server.Id] = tabItem;
         ServerTabControl.Items.Add(tabItem);
@@ -793,7 +795,20 @@ public partial class MainWindow : Window
         {
             if (tab.Content is ServerTab serverTab)
             {
+                /* Unsubscribe event handlers to prevent memory leaks */
+                if (_tabEventHandlers.TryGetValue(serverId, out var handlers))
+                {
+                    serverTab.AlertCountsChanged -= handlers.AlertCounts;
+                    serverTab.ApplyTimeRangeRequested -= handlers.ApplyTimeRange;
+                    serverTab.ManualRefreshRequested -= handlers.ManualRefresh;
+                    _tabEventHandlers.Remove(serverId);
+                }
+
                 serverTab.StopRefresh();
+                serverTab.DisposeChartHelpers();
+
+                /* Clear delta cache for this server to free memory */
+                _collectorService?.DeltaCalculator?.ClearServer(serverTab.ServerId);
             }
 
             ServerTabControl.Items.Remove(tab);

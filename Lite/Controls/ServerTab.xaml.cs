@@ -5243,6 +5243,37 @@ public partial class ServerTab : UserControl
         _refreshTimer.Stop();
     }
 
+    public void DisposeChartHelpers()
+    {
+        _waitStatsHover?.Dispose();
+        _perfmonHover?.Dispose();
+        _overviewCpuHover?.Dispose();
+        _overviewMemoryHover?.Dispose();
+        _overviewFileIoHover?.Dispose();
+        _overviewWaitStatsHover?.Dispose();
+        _cpuHover?.Dispose();
+        _memoryHover?.Dispose();
+        _tempDbHover?.Dispose();
+        _tempDbFileIoHover?.Dispose();
+        _fileIoReadHover?.Dispose();
+        _fileIoWriteHover?.Dispose();
+        _fileIoReadThroughputHover?.Dispose();
+        _fileIoWriteThroughputHover?.Dispose();
+        _collectorDurationHover?.Dispose();
+        _queryDurationTrendHover?.Dispose();
+        _procDurationTrendHover?.Dispose();
+        _queryStoreDurationTrendHover?.Dispose();
+        _executionCountTrendHover?.Dispose();
+        _lockWaitTrendHover?.Dispose();
+        _blockingTrendHover?.Dispose();
+        _deadlockTrendHover?.Dispose();
+        _memoryClerksHover?.Dispose();
+        _memoryGrantSizingHover?.Dispose();
+        _memoryGrantActivityHover?.Dispose();
+        _currentWaitsDurationHover?.Dispose();
+        _currentWaitsBlockedHover?.Dispose();
+    }
+
     /* ========== Column Filtering ========== */
 
     private void InitializeFilterManagers()
