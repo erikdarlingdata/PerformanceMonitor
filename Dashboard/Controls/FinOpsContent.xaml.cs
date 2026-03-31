@@ -630,7 +630,8 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                 }
 
-                _dbSizesFilterMgr!.UpdateData(data);
+                if (_dbSizesFilterMgr == null) return;
+                _dbSizesFilterMgr.UpdateData(data);
                 UpdateDbSizeCountUI();
             }
             catch (Exception ex)
@@ -901,11 +902,22 @@ namespace PerformanceMonitorDashboard.Controls
         // Copy / Export Context Menu Handlers
         // ============================================
 
+        private static DataGrid? FindParentDataGrid(DependencyObject? element)
+        {
+            while (element != null)
+            {
+                if (element is DataGrid dg) return dg;
+                element = VisualTreeHelper.GetParent(element);
+            }
+            return null;
+        }
+
         private void CopyCell_Click(object sender, RoutedEventArgs e)
         {
             if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
             {
-                if (contextMenu.PlacementTarget is DataGrid grid && grid.CurrentCell.Column != null)
+                var grid = FindParentDataGrid(contextMenu.PlacementTarget);
+                if (grid != null && grid.CurrentCell.Column != null)
                 {
                     var cellContent = TabHelpers.GetCellContent(grid, grid.CurrentCell);
                     if (!string.IsNullOrEmpty(cellContent))
@@ -921,7 +933,8 @@ namespace PerformanceMonitorDashboard.Controls
         {
             if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
             {
-                if (contextMenu.PlacementTarget is DataGrid grid && grid.SelectedItem != null)
+                var grid = FindParentDataGrid(contextMenu.PlacementTarget);
+                if (grid != null && grid.SelectedItem != null)
                 {
                     var rowText = TabHelpers.GetRowAsText(grid, grid.SelectedItem);
                     if (!string.IsNullOrEmpty(rowText))
@@ -937,7 +950,8 @@ namespace PerformanceMonitorDashboard.Controls
         {
             if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
             {
-                if (contextMenu.PlacementTarget is DataGrid grid)
+                var grid = FindParentDataGrid(contextMenu.PlacementTarget);
+                if (grid != null)
                 {
                     var sb = new StringBuilder();
 
@@ -975,7 +989,8 @@ namespace PerformanceMonitorDashboard.Controls
         {
             if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
             {
-                if (contextMenu.PlacementTarget is DataGrid grid)
+                var grid = FindParentDataGrid(contextMenu.PlacementTarget);
+                if (grid != null)
                 {
                     var dialog = new SaveFileDialog
                     {

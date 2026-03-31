@@ -7,10 +7,10 @@
     <StartupObject>PerformanceMonitorDashboard.Program</StartupObject>
     <AssemblyName>PerformanceMonitorDashboard</AssemblyName>
     <Product>SQL Server Performance Monitor Dashboard</Product>
-    <Version>2.4.1</Version>
-    <AssemblyVersion>2.4.1.0</AssemblyVersion>
-    <FileVersion>2.4.1.0</FileVersion>
-    <InformationalVersion>2.4.1</InformationalVersion>
+    <Version>2.5.0</Version>
+    <AssemblyVersion>2.5.0.0</AssemblyVersion>
+    <FileVersion>2.5.0.0</FileVersion>
+    <InformationalVersion>2.5.0</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <ApplicationIcon>EDD.ico</ApplicationIcon>
