@@ -38,6 +38,12 @@ namespace PerformanceMonitorDashboard.Services
         public string ConnectionString => _connectionString;
 
         /// <summary>
+        /// Server name extracted from the connection string, for use in log messages.
+        /// </summary>
+        private string ServerLabel =>
+            new SqlConnectionStringBuilder(_connectionString).DataSource ?? "(unknown)";
+
+        /// <summary>
         /// Opens a throttled database connection. The semaphore is released when the connection is disposed.
         /// </summary>
         private async Task<ThrottledConnection> OpenThrottledConnectionAsync()

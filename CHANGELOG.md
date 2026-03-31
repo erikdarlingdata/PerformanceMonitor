@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-03-30
+
+### Important
+
+- **InstallerGui retired**: The standalone GUI installer has been removed. Installation, upgrade, and uninstall are now handled directly from the Dashboard's Add Server dialog, powered by the new Installer.Core shared library. The CLI installer continues to work as before. ([#755])
+
+### Added
+
+- **Dashboard integrated installer** — Add Server dialog now installs, upgrades, and uninstalls PerformanceMonitor directly, replacing the standalone InstallerGui ([#755])
+- **Installer.Core shared library** — shared installation logic used by both the CLI installer and Dashboard ([#755])
+- **Overview tab** for Lite with 2x2 resource chart grid (CPU, Memory, Wait Stats, TempDB) ([#689])
+- **Chart drill-down** on CPU, Memory, TempDB, Blocking, and Deadlock charts in both Dashboard and Lite — right-click any chart point to jump to Active Queries for that time window ([#682])
+- **Grid-to-slicer overlay** for Query Stats, Procedure Stats, and Query Store tabs — click a row to overlay its trend on the slicer chart ([#683])
+- **Query heatmap** tab in both Dashboard and Lite — visual heat map of query activity over time ([#739], [#743])
+- **Webhook notifications** for alerts — configurable webhook endpoint for alert delivery ([#725])
+- **Per-server collector schedule intervals** — customize collection frequency per server ([#703])
+- **Investigate button** in Critical Issues grid — jump directly to relevant tab from an alert ([#684])
+- **Dismiss Selected** context menu and View Log sidebar button for alert management ([#718], [#740])
+- **Alert archival awareness** — dismissed_archive_alerts sidecar table, source column for live vs archived alerts, stale-data indicator, structured telemetry ([#718])
+- **Dashboard read-only connection intent** — connections use `ApplicationIntent=ReadOnly` where supported ([#728])
+- FUNDING.yml for GitHub Sponsors ([#752])
+
+### Changed
+
+- **Installer architecture** refactored: CLI installer is now a thin wrapper over Installer.Core ([#755])
+- **DuckDB memory capped** at 2 GB during parquet compaction to prevent out-of-memory on large archives ([#758])
+- **Text rendering** improved with `TextOptions.TextFormattingMode="Display"` for sharper text ([#710])
+- **installation_history version columns** widened from nvarchar(255) to nvarchar(512) to handle long @@VERSION strings ([#712])
+
+### Fixed
+
+- **Memory leaks in Lite** — delta cache, event handlers, and chart helpers properly disposed ([#758])
+- **Doomed transaction errors** in delta framework and ensure_collection_table — ROLLBACK now occurs before error logging ([#756])
+- **XACT_STATE check** added after third-party stored procedure calls (sp_HumanEventsBlockViewer, sp_BlitzLock) to prevent doomed transaction errors ([#695])
+- **CREATE DATABASE failure** when model database has large default file sizes ([#676])
+- **CPU metrics mixed** for different Azure SQL databases on the same logical server ([#680])
+- **Azure SQL DB vCore** FinOps calculations incorrect for serverless/vCore tiers ([#736])
+- **Webhook alert recording** not persisting correctly ([#726])
+- **Drill-down timezone** misalignment between chart and detail view ([#747], [#750])
+- **Drill-down refresh** losing context on auto-refresh ([#744])
+- **Drill-down target** incorrectly routing Memory to Memory Grants instead of Active Queries ([#706])
+- **Heatmap colorbar stacking** when switching between servers ([#746])
+- **Display mode pickers** not reflecting current state on tab switch ([#751])
+- **Slicer custom range** handling and sub-hour display issues ([#704])
+- **Overlay selection** lost on Dashboard auto-refresh ([#683])
+- **Numeric values** in alert details treated as strings instead of numbers ([#732])
+- **FinOps VM right-sizing** query error — `PERCENTILE_CONT` missing required `OVER()` clause
+- **FinOps Enterprise features** query error on AWS RDS — `database_id` column not present in `sys.dm_db_persisted_sku_features` on RDS
+- **FinOps right-click copy** broken on all Dashboard FinOps grids — context menu walked to row instead of grid
+- **FinOps recommendation error logs** now include server name for easier troubleshooting
+
+### Deprecated
+
+- **InstallerGui** — removed from the solution and build pipeline. Use the Dashboard or CLI installer instead. ([#755])
+
+[#676]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/676
+[#680]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/680
+[#682]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/682
+[#683]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/683
+[#684]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/684
+[#689]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/689
+[#695]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/695
+[#703]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/703
+[#704]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/704
+[#706]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/706
+[#710]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/710
+[#712]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/712
+[#718]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/718
+[#725]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/725
+[#726]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/726
+[#728]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/728
+[#732]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/732
+[#736]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/736
+[#739]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/739
+[#740]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/740
+[#743]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/743
+[#744]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/744
+[#746]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/746
+[#747]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/747
+[#750]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/750
+[#751]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/751
+[#752]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/752
+[#755]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/755
+[#756]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/756
+[#758]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/758
+
 ## [2.4.0] - 2026-03-23
 
 ### Important
