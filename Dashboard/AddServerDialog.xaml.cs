@@ -331,11 +331,8 @@ namespace PerformanceMonitorDashboard
                     MessageBoxImage.Information
                 );
 
-                /* After successful connection in Add mode, check database status */
-                if (!_isEditMode)
-                {
-                    await DetectDatabaseStatusAsync();
-                }
+                /* After successful connection, check database status */
+                await DetectDatabaseStatusAsync();
             }
             else if (mfaCancelled)
             {
