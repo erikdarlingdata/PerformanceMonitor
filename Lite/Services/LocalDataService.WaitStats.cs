@@ -418,6 +418,7 @@ LIMIT 2000";
                 FROM v_query_snapshots AS r
                 WHERE r.server_id = $1
                     AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
+                    AND r.collection_time >= NOW() - INTERVAL '10 MINUTES'
                     AND r.session_id > 50
                     {spServerDiagnosticsFilter}
                     {waitForFilter}
