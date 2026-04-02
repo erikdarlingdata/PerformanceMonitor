@@ -1571,7 +1571,7 @@ ORDER BY CAST(collection_time AS DATE)";
             {
                 using var featCmd = new SqlCommand(@"
 SELECT
-    DB_NAME(database_id) AS database_name,
+    DB_NAME() AS database_name,
     feature_name
 FROM sys.dm_db_persisted_sku_features", sqlConn);
                 featCmd.CommandTimeout = 30;
