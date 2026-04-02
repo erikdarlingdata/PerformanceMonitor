@@ -1121,15 +1121,16 @@ public partial class ServerTab : UserControl
         {
             var cpuTask = SafeQueryAsync(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate));
             var memoryTask = SafeQueryAsync(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var memoryGrantTask = SafeQueryAsync(() => _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var fileIoTask = SafeQueryAsync(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
             // Get top 5 wait types then fetch trends for each
             var waitStats = await SafeQueryAsync(() => _dataService.GetWaitStatsAsync(_serverId, hoursBack, fromDate, toDate));
             var topWaits = waitStats.Take(5).Select(w => w.WaitType).ToList();
-            await System.Threading.Tasks.Task.WhenAll(cpuTask, memoryTask, fileIoTask);
+            await System.Threading.Tasks.Task.WhenAll(cpuTask, memoryTask, memoryGrantTask, fileIoTask);
 
             UpdateOverviewCpuChart(cpuTask.Result);
-            UpdateOverviewMemoryChart(memoryTask.Result);
+            UpdateOverviewMemoryChart(memoryTask.Result, memoryGrantTask.Result);
             UpdateOverviewFileIoChart(fileIoTask.Result);
             await UpdateOverviewWaitStatsChartAsync(topWaits, hoursBack, fromDate, toDate);
         }
@@ -1164,7 +1165,7 @@ public partial class ServerTab : UserControl
         OverviewCpuChart.Refresh();
     }
 
-    private void UpdateOverviewMemoryChart(List<MemoryTrendPoint> data)
+    private void UpdateOverviewMemoryChart(List<MemoryTrendPoint> data, List<MemoryTrendPoint> grantData)
     {
         ClearChart(OverviewMemoryChart);
         _overviewMemoryHover?.Clear();
@@ -1174,7 +1175,10 @@ public partial class ServerTab : UserControl
 
         var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
         var bufferPool = data.Select(d => d.BufferPoolMb).ToArray();
-        var grants = data.Select(d => d.TotalGrantedMb).ToArray();
+
+        /* Use grant data from v_memory_grant_stats, aligned to memory trend timestamps */
+        var grantLookup = grantData.ToDictionary(d => d.CollectionTime, d => d.TotalGrantedMb);
+        var grants = data.Select(d => grantLookup.TryGetValue(d.CollectionTime, out var v) ? v : 0.0).ToArray();
 
         var bpPlot = OverviewMemoryChart.Plot.Add.Scatter(times, bufferPool);
         bpPlot.LegendText = "Buffer Pool";
