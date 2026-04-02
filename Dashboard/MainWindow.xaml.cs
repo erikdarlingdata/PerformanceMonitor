@@ -137,9 +137,10 @@ namespace PerformanceMonitorDashboard
         {
             if (msg == NativeMethods.WM_SHOWMONITOR)
             {
-                // Another instance tried to start - bring this window to front
+                // Another instance tried to start - bring this window to front (#769)
                 Show();
-                WindowState = WindowState.Normal;
+                if (WindowState == WindowState.Minimized)
+                    WindowState = WindowState.Normal;
                 Activate();
                 Topmost = true;  // Temporarily set topmost to ensure visibility
                 Topmost = false;

@@ -22,6 +22,21 @@ public partial class App : Application
     [DllImport("shell32.dll", SetLastError = true)]
     private static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string appId);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindow(string? lpClassName, string lpWindowName);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    private const int SW_RESTORE = 9;
+
     private const string MutexName = "PerformanceMonitorLite_SingleInstance";
     private Mutex? _singleInstanceMutex;
     private bool _ownsMutex;
@@ -167,11 +182,14 @@ public partial class App : Application
 
         if (!_ownsMutex)
         {
-            MessageBox.Show(
-                "Performance Monitor Lite is already running.",
-                "Already Running",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            /* Bring the existing instance's window to the foreground instead of showing an error (#769) */
+            var hWnd = FindWindow(null, "Performance Monitor Lite");
+            if (hWnd != IntPtr.Zero)
+            {
+                if (IsIconic(hWnd))
+                    ShowWindow(hWnd, SW_RESTORE);
+                SetForegroundWindow(hWnd);
+            }
             Shutdown();
             return;
         }
