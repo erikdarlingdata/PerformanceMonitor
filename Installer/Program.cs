@@ -231,6 +231,24 @@ namespace PerformanceMonitorInstaller
                     return (int)InstallationResultCode.InvalidArguments;
                 }
 
+                Console.Write("Trust server certificate? (Y/N, default Y): ");
+                string? trustResponse = Console.ReadLine()?.Trim();
+                trustCert = string.IsNullOrWhiteSpace(trustResponse)
+                    || trustResponse.Equals("Y", StringComparison.OrdinalIgnoreCase);
+
+                Console.WriteLine("Encryption level:");
+                Console.WriteLine("  [O] Optional (default)");
+                Console.WriteLine("  [M] Mandatory");
+                Console.WriteLine("  [S] Strict");
+                Console.Write("Choice (O/M/S, default O): ");
+                string? encryptResponse = Console.ReadLine()?.Trim();
+                encryptionLevel = encryptResponse?.ToUpperInvariant() switch
+                {
+                    "M" => "Mandatory",
+                    "S" => "Strict",
+                    _ => "Optional"
+                };
+
                 Console.WriteLine("Authentication type:");
                 Console.WriteLine("  [W] Windows Authentication (default)");
                 Console.WriteLine("  [S] SQL Server Authentication");
