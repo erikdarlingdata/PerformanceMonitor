@@ -4,6 +4,7 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
+             xmlns:local="clr-namespace:PerformanceMonitorDashboard.Controls"
              mc:Ignorable="d"
              d:DesignHeight="600" d:DesignWidth="1200">
     <UserControl.Resources>
@@ -25,72 +26,9 @@
     </UserControl.Resources>
 
     <TabControl x:Name="SubTabControl" TabStripPlacement="Top" Margin="0,5,0,0">
-        <!-- Server Trends Sub-Tab -->
+        <!-- Server Trends Sub-Tab — Correlated Timeline Lanes -->
         <TabItem Header="Server Trends">
-            <!-- 2x2 Chart Grid -->
-            <Grid Margin="5">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-
-                <!-- CPU Utilization Chart (Top Left) -->
-                <Border Grid.Row="0" Grid.Column="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Text="CPU Utilization (%)" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="ServerUtilTrendsCpuChart" Margin="5"/>
-                        <TextBlock Grid.Row="2" x:Name="CpuSchedulerStatusText"
-                                   Margin="10,0,10,5" FontSize="11"
-                                   HorizontalAlignment="Center"
-                                   Foreground="{DynamicResource ForegroundBrush}"/>
-                    </Grid>
-                </Border>
-
-                <!-- TempDB Chart (Top Right) -->
-                <Border Grid.Row="0" Grid.Column="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Text="TempDB Usage (MB)" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="ServerUtilTrendsTempdbChart" Margin="5"/>
-                    </Grid>
-                </Border>
-
-                <!-- Memory Usage Chart (Bottom Left) -->
-                <Border Grid.Row="1" Grid.Column="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Text="Memory Usage (MB)" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="ServerUtilTrendsMemoryChart" Margin="5"/>
-                    </Grid>
-                </Border>
-
-                <!-- PerfMon Chart (Bottom Right) -->
-                <Border Grid.Row="1" Grid.Column="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="5">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Text="SQL Statistics/sec" FontWeight="Bold" FontSize="14" Margin="10,5" Foreground="{DynamicResource ForegroundBrush}"/>
-                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="ServerUtilTrendsPerfmonChart" Margin="5"/>
-                    </Grid>
-                </Border>
-            </Grid>
+            <local:CorrelatedTimelineLanesControl x:Name="CorrelatedLanes"/>
         </TabItem>
 
         <!-- Wait Stats Detail Sub-Tab -->

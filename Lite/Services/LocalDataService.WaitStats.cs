@@ -151,6 +151,55 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// Gets total wait time trend across all wait types as a single aggregated time-series.
+    /// Used by the correlated timeline lanes for a single-line wait stats overview.
+    /// </summary>
+    public async Task<List<WaitStatsTrendPoint>> GetTotalWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var _q = TimeQuery("GetTotalWaitTrendAsync", "wait_stats total trend");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        SUM(delta_wait_time_ms) AS total_delta_ms,
+        date_diff('second', LAG(collection_time) OVER (ORDER BY collection_time), collection_time) AS interval_seconds
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time
+)
+SELECT
+    collection_time,
+    CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS DOUBLE) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+FROM per_collection
+ORDER BY collection_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<WaitStatsTrendPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new WaitStatsTrendPoint
+            {
+                CollectionTime = reader.GetDateTime(0),
+                WaitTimeMsPerSecond = reader.IsDBNull(1) ? 0 : reader.GetDouble(1)
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Gets the latest poison wait deltas for alert checking.
     /// Returns entries where delta_waiting_tasks > 0 with computed avg ms per wait.
     /// </summary>

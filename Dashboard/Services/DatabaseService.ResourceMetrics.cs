@@ -2223,5 +2223,176 @@ ORDER BY
 
             return items;
         }
+
+        public async Task<List<WaitStatsDataPoint>> GetTotalWaitStatsTrendAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            var items = new List<WaitStatsDataPoint>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query;
+            if (fromDate.HasValue && toDate.HasValue)
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    WITH wait_deltas AS
+                    (
+                        SELECT
+                            collection_time = ws.collection_time,
+                            wait_type = ws.wait_type,
+                            wait_time_ms_delta =
+                                ws.wait_time_ms - LAG(ws.wait_time_ms, 1, ws.wait_time_ms) OVER
+                                (
+                                    PARTITION BY
+                                        ws.wait_type
+                                    ORDER BY
+                                        ws.collection_time
+                                ),
+                            signal_wait_time_ms_delta =
+                                ws.signal_wait_time_ms - LAG(ws.signal_wait_time_ms, 1, ws.signal_wait_time_ms) OVER
+                                (
+                                    PARTITION BY
+                                        ws.wait_type
+                                    ORDER BY
+                                        ws.collection_time
+                                ),
+                            interval_seconds =
+                                DATEDIFF
+                                (
+                                    SECOND,
+                                    LAG(ws.collection_time, 1, ws.collection_time) OVER
+                                    (
+                                        PARTITION BY
+                                            ws.wait_type
+                                        ORDER BY
+                                            ws.collection_time
+                                    ),
+                                    ws.collection_time
+                                )
+                        FROM collect.wait_stats AS ws
+                        WHERE ws.collection_time >= @from_date
+                        AND   ws.collection_time <= @to_date
+                    )
+                    SELECT
+                        wd.collection_time,
+                        wait_type = N'Total',
+                        wait_time_ms_per_second =
+                            SUM
+                            (
+                                CASE
+                                    WHEN wd.interval_seconds > 0
+                                    THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
+                                    ELSE 0
+                                END
+                            ),
+                        signal_wait_time_ms_per_second =
+                            SUM
+                            (
+                                CASE
+                                    WHEN wd.interval_seconds > 0
+                                    THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
+                                    ELSE 0
+                                END
+                            )
+                    FROM wait_deltas AS wd
+                    WHERE wd.wait_time_ms_delta >= 0
+                    GROUP BY
+                        wd.collection_time
+                    ORDER BY
+                        wd.collection_time ASC;";
+            }
+            else
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    WITH wait_deltas AS
+                    (
+                        SELECT
+                            collection_time = ws.collection_time,
+                            wait_type = ws.wait_type,
+                            wait_time_ms_delta =
+                                ws.wait_time_ms - LAG(ws.wait_time_ms, 1, ws.wait_time_ms) OVER
+                                (
+                                    PARTITION BY
+                                        ws.wait_type
+                                    ORDER BY
+                                        ws.collection_time
+                                ),
+                            signal_wait_time_ms_delta =
+                                ws.signal_wait_time_ms - LAG(ws.signal_wait_time_ms, 1, ws.signal_wait_time_ms) OVER
+                                (
+                                    PARTITION BY
+                                        ws.wait_type
+                                    ORDER BY
+                                        ws.collection_time
+                                ),
+                            interval_seconds =
+                                DATEDIFF
+                                (
+                                    SECOND,
+                                    LAG(ws.collection_time, 1, ws.collection_time) OVER
+                                    (
+                                        PARTITION BY
+                                            ws.wait_type
+                                        ORDER BY
+                                            ws.collection_time
+                                    ),
+                                    ws.collection_time
+                                )
+                        FROM collect.wait_stats AS ws
+                        WHERE ws.collection_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())
+                    )
+                    SELECT
+                        wd.collection_time,
+                        wait_type = N'Total',
+                        wait_time_ms_per_second =
+                            SUM
+                            (
+                                CASE
+                                    WHEN wd.interval_seconds > 0
+                                    THEN CAST(CAST(wd.wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
+                                    ELSE 0
+                                END
+                            ),
+                        signal_wait_time_ms_per_second =
+                            SUM
+                            (
+                                CASE
+                                    WHEN wd.interval_seconds > 0
+                                    THEN CAST(CAST(wd.signal_wait_time_ms_delta AS decimal(19, 4)) / wd.interval_seconds AS decimal(18, 4))
+                                    ELSE 0
+                                END
+                            )
+                    FROM wait_deltas AS wd
+                    WHERE wd.wait_time_ms_delta >= 0
+                    GROUP BY
+                        wd.collection_time
+                    ORDER BY
+                        wd.collection_time ASC;";
+            }
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
+            if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+            if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                items.Add(new WaitStatsDataPoint
+                {
+                    CollectionTime = reader.GetDateTime(0),
+                    WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2), CultureInfo.InvariantCulture),
+                    SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3), CultureInfo.InvariantCulture)
+                });
+            }
+
+            return items;
+        }
     }
 }

@@ -1,0 +1,100 @@
+<UserControl x:Class="PerformanceMonitorDashboard.Controls.CorrelatedTimelineLanesControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF">
+
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <!-- 5 lanes, equal height -->
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Lane 1: CPU -->
+        <Grid Grid.Row="0" Margin="0,0,0,2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="100"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="80"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="CPU %" VerticalAlignment="Center"
+                       FontSize="12" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+            <ScottPlot:WpfPlot Grid.Column="1" x:Name="CpuChart"/>
+            <TextBlock Grid.Column="2" x:Name="CpuValueLabel" VerticalAlignment="Center"
+                       HorizontalAlignment="Right" FontSize="11"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+        </Grid>
+
+        <!-- Lane 2: Wait Stats -->
+        <Grid Grid.Row="1" Margin="0,2,0,2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="100"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="80"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Wait ms/sec" VerticalAlignment="Center"
+                       FontSize="12" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+            <ScottPlot:WpfPlot Grid.Column="1" x:Name="WaitStatsChart"/>
+            <TextBlock Grid.Column="2" x:Name="WaitStatsValueLabel" VerticalAlignment="Center"
+                       HorizontalAlignment="Right" FontSize="11"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+        </Grid>
+
+        <!-- Lane 3: Blocking -->
+        <Grid Grid.Row="2" Margin="0,2,0,2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="100"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="80"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                       FontSize="12" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0">
+                <Run Text="Blocking &amp;"/>
+                <LineBreak/>
+                <Run Text="Deadlocking"/>
+            </TextBlock>
+            <ScottPlot:WpfPlot Grid.Column="1" x:Name="BlockingChart"/>
+            <TextBlock Grid.Column="2" x:Name="BlockingValueLabel" VerticalAlignment="Center"
+                       HorizontalAlignment="Right" FontSize="11"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+        </Grid>
+
+        <!-- Lane 4: Memory -->
+        <Grid Grid.Row="3" Margin="0,2,0,2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="100"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="80"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Memory MB" VerticalAlignment="Center"
+                       FontSize="12" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+            <ScottPlot:WpfPlot Grid.Column="1" x:Name="MemoryChart"/>
+            <TextBlock Grid.Column="2" x:Name="MemoryValueLabel" VerticalAlignment="Center"
+                       HorizontalAlignment="Right" FontSize="11"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+        </Grid>
+
+        <!-- Lane 5: File I/O -->
+        <Grid Grid.Row="4" Margin="0,2,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="100"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="80"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="I/O Latency" VerticalAlignment="Center"
+                       FontSize="12" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+            <ScottPlot:WpfPlot Grid.Column="1" x:Name="FileIoChart"/>
+            <TextBlock Grid.Column="2" x:Name="FileIoValueLabel" VerticalAlignment="Center"
+                       HorizontalAlignment="Right" FontSize="11"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
+        </Grid>
+    </Grid>
+</UserControl>

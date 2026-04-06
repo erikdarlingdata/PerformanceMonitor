@@ -564,7 +564,7 @@ ORDER BY bucket";
     }
 
     /// <summary>
-    /// Gets deadlock trend (count of deadlocks per hour bucket).
+    /// Gets deadlock trend (count of deadlocks per minute bucket).
     /// </summary>
     public async Task<List<TrendPoint>> GetDeadlockTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -579,13 +579,13 @@ SELECT
     deadlock_count
 FROM (
     SELECT
-        DATE_TRUNC('hour', deadlock_time) AS bucket,
+        DATE_TRUNC('minute', deadlock_time) AS bucket,
         COUNT(*) AS deadlock_count
     FROM v_deadlocks
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
-    GROUP BY DATE_TRUNC('hour', deadlock_time)
+    GROUP BY DATE_TRUNC('minute', deadlock_time)
 ) sub
 ORDER BY bucket";
 

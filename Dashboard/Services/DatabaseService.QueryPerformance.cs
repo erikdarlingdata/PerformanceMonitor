@@ -3587,6 +3587,68 @@ OPTION(MAXDOP 1, RECOMPILE);";
             return items;
         }
 
+        public async Task<List<BlockedSessionTrendItem>> GetDeadlockTrendAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            var items = new List<BlockedSessionTrendItem>();
+
+            await using var tc = await OpenThrottledConnectionAsync();
+            var connection = tc.Connection;
+
+            string query;
+            if (fromDate.HasValue && toDate.HasValue)
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    SELECT
+                        CollectionTime = DATEADD(MINUTE, DATEDIFF(MINUTE, 0, d.event_date), 0),
+                        DatabaseName = N'',
+                        BlockedCount = COUNT(*)
+                    FROM collect.deadlocks AS d
+                    WHERE d.event_date >= @from_date
+                    AND   d.event_date <= @to_date
+                    GROUP BY
+                        DATEADD(MINUTE, DATEDIFF(MINUTE, 0, d.event_date), 0)
+                    ORDER BY
+                        CollectionTime;";
+            }
+            else
+            {
+                query = @"
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                    SELECT
+                        CollectionTime = DATEADD(MINUTE, DATEDIFF(MINUTE, 0, d.event_date), 0),
+                        DatabaseName = N'',
+                        BlockedCount = COUNT(*)
+                    FROM collect.deadlocks AS d
+                    WHERE d.event_date >= DATEADD(HOUR, @hours_back, SYSDATETIME())
+                    GROUP BY
+                        DATEADD(MINUTE, DATEDIFF(MINUTE, 0, d.event_date), 0)
+                    ORDER BY
+                        CollectionTime;";
+            }
+
+            using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 120;
+            command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
+            if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
+            if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                items.Add(new BlockedSessionTrendItem
+                {
+                    CollectionTime = reader.GetDateTime(0),
+                    DatabaseName = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    BlockedCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture)
+                });
+            }
+
+            return items;
+        }
+
         private static string GetHeatmapMetricExpr(Models.HeatmapMetric metric) => metric switch
         {
             Models.HeatmapMetric.Duration => "(qs.total_elapsed_time_delta / 1000.0) / NULLIF(qs.execution_count_delta, 0)",

@@ -118,10 +118,6 @@ namespace PerformanceMonitorDashboard.Controls
         private Helpers.ChartHoverHelper? _waitStatsHover;
         private Helpers.ChartHoverHelper? _tempdbStatsHover;
         private Helpers.ChartHoverHelper? _tempDbLatencyHover;
-        private Helpers.ChartHoverHelper? _serverTrendsCpuHover;
-        private Helpers.ChartHoverHelper? _serverTrendsTempdbHover;
-        private Helpers.ChartHoverHelper? _serverTrendsMemoryHover;
-        private Helpers.ChartHoverHelper? _serverTrendsPerfmonHover;
         // Filter state dictionaries for each DataGrid
         // Legend panel references for edge-based legends (ScottPlot issue #4717 workaround)
         // Must store and remove these by reference before creating new ones
@@ -148,10 +144,6 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.ApplyThemeToChart(FileIoWriteThroughputChart);
             TabHelpers.ApplyThemeToChart(PerfmonCountersChart);
             TabHelpers.ApplyThemeToChart(WaitStatsDetailChart);
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsCpuChart);
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsTempdbChart);
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsMemoryChart);
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsPerfmonChart);
 
             _sessionStatsHover = new Helpers.ChartHoverHelper(SessionStatsChart, "sessions");
             _latchStatsHover = new Helpers.ChartHoverHelper(LatchStatsChart, "ms/sec");
@@ -164,10 +156,6 @@ namespace PerformanceMonitorDashboard.Controls
             _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsDetailChart, "ms/sec");
             _tempdbStatsHover = new Helpers.ChartHoverHelper(TempdbStatsChart, "MB");
             _tempDbLatencyHover = new Helpers.ChartHoverHelper(TempDbLatencyChart, "ms");
-            _serverTrendsCpuHover = new Helpers.ChartHoverHelper(ServerUtilTrendsCpuChart, "%");
-            _serverTrendsTempdbHover = new Helpers.ChartHoverHelper(ServerUtilTrendsTempdbChart, "MB");
-            _serverTrendsMemoryHover = new Helpers.ChartHoverHelper(ServerUtilTrendsMemoryChart, "MB");
-            _serverTrendsPerfmonHover = new Helpers.ChartHoverHelper(ServerUtilTrendsPerfmonChart, "/sec");
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -188,6 +176,7 @@ namespace PerformanceMonitorDashboard.Controls
                     chart.Refresh();
                 }
             }
+            CorrelatedLanes.ReapplyTheme();
         }
 
         private void SetupChartContextMenus()
@@ -214,16 +203,6 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.SetupChartContextMenu(FileIoWriteThroughputChart, "UserDB_Write_Throughput", "collect.file_io_stats");
             TabHelpers.SetupChartContextMenu(TempDbLatencyChart, "TempDB_Latency", "collect.file_io_stats");
 
-            // Server Utilization Trends charts
-            var cpuTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsCpuChart, "Server_CPU_Trends", "collect.cpu_utilization_stats");
-            AddDrillDown(ServerUtilTrendsCpuChart, cpuTrendsMenu, () => _serverTrendsCpuHover, "Show Active Queries at This Time", "CPU");
-            var tempDbTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsTempdbChart, "Server_TempDB_Trends", "collect.tempdb_stats");
-            AddDrillDown(ServerUtilTrendsTempdbChart, tempDbTrendsMenu, () => _serverTrendsTempdbHover, "Show Active Queries at This Time", "TempDB");
-            var memTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsMemoryChart, "Server_Memory_Trends", "collect.memory_stats");
-            AddDrillDown(ServerUtilTrendsMemoryChart, memTrendsMenu, () => _serverTrendsMemoryHover, "Show Active Queries at This Time", "Memory");
-            var perfmonTrendsMenu = TabHelpers.SetupChartContextMenu(ServerUtilTrendsPerfmonChart, "Server_Perfmon_Trends", "collect.perfmon_stats");
-            AddDrillDown(ServerUtilTrendsPerfmonChart, perfmonTrendsMenu, () => _serverTrendsPerfmonHover, "Show Active Queries at This Time", "Perfmon");
-
             // Perfmon Counters chart
             TabHelpers.SetupChartContextMenu(PerfmonCountersChart, "Perfmon_Counters", "collect.perfmon_stats");
 
@@ -238,6 +217,7 @@ namespace PerformanceMonitorDashboard.Controls
         public void Initialize(DatabaseService databaseService)
         {
             _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
+            CorrelatedLanes.Initialize(databaseService);
         }
 
         /// <summary>
@@ -1047,374 +1027,14 @@ namespace PerformanceMonitorDashboard.Controls
         private async Task RefreshServerTrendsAsync()
         {
             if (_databaseService == null) return;
-
             try
             {
-                var cpuTask = _databaseService.GetCpuSpikesAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-                var tempdbTask = _databaseService.GetTempdbStatsAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-                var memoryTask = _databaseService.GetMemoryStatsAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-                var perfmonTask = _databaseService.GetPerfmonStatsFilteredAsync(
-                    new[] { "Batch Requests/sec", "SQL Compilations/sec", "SQL Re-Compilations/sec", "Optimizer Statistics" },
-                    _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-
-                await Task.WhenAll(cpuTask, tempdbTask, memoryTask, perfmonTask);
-
-                LoadServerTrendsCpuChart(await cpuTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-                LoadServerTrendsTempdbChart(await tempdbTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-                LoadServerTrendsMemoryChart(await memoryTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-                LoadServerTrendsPerfmonChart(await perfmonTask, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
-
-                try
-                {
-                    var pressure = await _databaseService.GetCpuPressureAsync();
-                    UpdateCpuSchedulerStatus(pressure);
-                }
-                catch (Exception pressureEx)
-                {
-                    Logger.Error($"Error loading CPU scheduler pressure: {pressureEx.Message}", pressureEx);
-                }
+                await CorrelatedLanes.RefreshAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error loading server trends: {ex.Message}", ex);
             }
-        }
-
-        private void UpdateCpuSchedulerStatus(CpuPressureItem? pressure)
-        {
-            if (pressure == null)
-            {
-                CpuSchedulerStatusText.Text = "";
-                return;
-            }
-
-            CpuSchedulerStatusText.Inlines.Clear();
-
-            var summary = $"Schedulers: {pressure.TotalSchedulers} | " +
-                          $"Workers: {pressure.TotalWorkers:N0}/{pressure.MaxWorkers:N0} ({pressure.WorkerUtilizationPercent:F1}%) | " +
-                          $"Runnable: {pressure.TotalRunnableTasks} ({pressure.AvgRunnableTasksPerScheduler:F2}/sched) | " +
-                          $"Active: {pressure.TotalActiveRequests} | " +
-                          $"Queued: {pressure.TotalQueuedRequests} | ";
-
-            CpuSchedulerStatusText.Inlines.Add(new Run(summary));
-
-            var levelText = pressure.PressureLevel;
-            var levelRun = new Run(levelText);
-
-            if (levelText.Contains("CRITICAL") || levelText.Contains("HIGH"))
-            {
-                levelRun.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x44, 0x44));
-                levelRun.FontWeight = FontWeights.Bold;
-            }
-            else if (levelText.Contains("MEDIUM"))
-            {
-                levelRun.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0xA5, 0x00));
-                levelRun.FontWeight = FontWeights.Bold;
-            }
-
-            CpuSchedulerStatusText.Inlines.Add(levelRun);
-        }
-
-        private void LoadServerTrendsCpuChart(IEnumerable<CpuSpikeItem> cpuData, int hoursBack, DateTime? fromDate, DateTime? toDate)
-        {
-            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
-            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
-            double xMin = rangeStart.ToOADate();
-            double xMax = rangeEnd.ToOADate();
-
-            if (_legendPanels.TryGetValue(ServerUtilTrendsCpuChart, out var existingCpuPanel) && existingCpuPanel != null)
-            {
-                ServerUtilTrendsCpuChart.Plot.Axes.Remove(existingCpuPanel);
-                _legendPanels[ServerUtilTrendsCpuChart] = null;
-            }
-            ServerUtilTrendsCpuChart.Plot.Clear();
-            _serverTrendsCpuHover?.Clear();
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsCpuChart);
-
-            var dataList = cpuData?.OrderBy(d => d.EventTime).ToList() ?? new List<CpuSpikeItem>();
-            if (dataList.Count > 0)
-            {
-                // SQL CPU series
-                var (sqlXs, sqlYs) = TabHelpers.FillTimeSeriesGaps(
-                    dataList.Select(d => d.EventTime),
-                    dataList.Select(d => (double)d.SqlServerCpu));
-                var sqlScatter = ServerUtilTrendsCpuChart.Plot.Add.Scatter(sqlXs, sqlYs);
-                sqlScatter.LineWidth = 2;
-                sqlScatter.MarkerSize = 5;
-                sqlScatter.Color = TabHelpers.ChartColors[0];
-                sqlScatter.LegendText = "SQL CPU";
-                _serverTrendsCpuHover?.Add(sqlScatter, "SQL CPU");
-
-                // Other CPU series
-                var (otherXs, otherYs) = TabHelpers.FillTimeSeriesGaps(
-                    dataList.Select(d => d.EventTime),
-                    dataList.Select(d => (double)d.OtherProcessCpu));
-                var otherScatter = ServerUtilTrendsCpuChart.Plot.Add.Scatter(otherXs, otherYs);
-                otherScatter.LineWidth = 2;
-                otherScatter.MarkerSize = 5;
-                otherScatter.Color = TabHelpers.ChartColors[2];
-                otherScatter.LegendText = "Other CPU";
-                _serverTrendsCpuHover?.Add(otherScatter, "Other CPU");
-
-                _legendPanels[ServerUtilTrendsCpuChart] = ServerUtilTrendsCpuChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                ServerUtilTrendsCpuChart.Plot.Legend.FontSize = 12;
-            }
-            else
-            {
-                double xCenter = xMin + (xMax - xMin) / 2;
-                var noDataText = ServerUtilTrendsCpuChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-                noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
-                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
-            }
-
-            ServerUtilTrendsCpuChart.Plot.Axes.DateTimeTicksBottom();
-            ServerUtilTrendsCpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsCpuChart);
-            ServerUtilTrendsCpuChart.Plot.YLabel("CPU %");
-            TabHelpers.LockChartVerticalAxis(ServerUtilTrendsCpuChart);
-            ServerUtilTrendsCpuChart.Refresh();
-        }
-
-        private void LoadServerTrendsTempdbChart(IEnumerable<TempdbStatsItem> tempdbData, int hoursBack, DateTime? fromDate, DateTime? toDate)
-        {
-            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
-            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
-            double xMin = rangeStart.ToOADate();
-            double xMax = rangeEnd.ToOADate();
-
-            if (_legendPanels.TryGetValue(ServerUtilTrendsTempdbChart, out var existingTrendsTempdbPanel) && existingTrendsTempdbPanel != null)
-            {
-                ServerUtilTrendsTempdbChart.Plot.Axes.Remove(existingTrendsTempdbPanel);
-                _legendPanels[ServerUtilTrendsTempdbChart] = null;
-            }
-            ServerUtilTrendsTempdbChart.Plot.Clear();
-            _serverTrendsTempdbHover?.Clear();
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsTempdbChart);
-
-            var dataList = tempdbData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<TempdbStatsItem>();
-            if (dataList.Count >= 1)
-            {
-                var userTimePoints = dataList.Select(d => d.CollectionTime);
-                var userValues = dataList.Select(d => (double)(d.UserObjectReservedPageCount * 8 / 1024));
-                var (userXs, userYs) = TabHelpers.FillTimeSeriesGaps(userTimePoints, userValues);
-
-                var versionTimePoints = dataList.Select(d => d.CollectionTime);
-                var versionValues = dataList.Select(d => (double)(d.VersionStoreReservedPageCount * 8 / 1024));
-                var (versionXs, versionYs) = TabHelpers.FillTimeSeriesGaps(versionTimePoints, versionValues);
-
-                var userScatter = ServerUtilTrendsTempdbChart.Plot.Add.Scatter(userXs, userYs);
-                userScatter.LineWidth = 2;
-                userScatter.MarkerSize = 5;
-                userScatter.Color = TabHelpers.ChartColors[1];
-                userScatter.LegendText = "User Objects";
-                _serverTrendsTempdbHover?.Add(userScatter, "User Objects");
-
-                var versionScatter = ServerUtilTrendsTempdbChart.Plot.Add.Scatter(versionXs, versionYs);
-                versionScatter.LineWidth = 2;
-                versionScatter.MarkerSize = 5;
-                versionScatter.Color = TabHelpers.ChartColors[2];
-                versionScatter.LegendText = "Version Store";
-                _serverTrendsTempdbHover?.Add(versionScatter, "Version Store");
-
-                _legendPanels[ServerUtilTrendsTempdbChart] = ServerUtilTrendsTempdbChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                ServerUtilTrendsTempdbChart.Plot.Legend.FontSize = 12;
-            }
-            else
-            {
-                double xCenter = xMin + (xMax - xMin) / 2;
-                var noDataText = ServerUtilTrendsTempdbChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-                noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
-                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
-            }
-
-            ServerUtilTrendsTempdbChart.Plot.Axes.DateTimeTicksBottom();
-            ServerUtilTrendsTempdbChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsTempdbChart);
-            ServerUtilTrendsTempdbChart.Plot.YLabel("MB");
-            TabHelpers.LockChartVerticalAxis(ServerUtilTrendsTempdbChart);
-            ServerUtilTrendsTempdbChart.Refresh();
-        }
-
-        private void LoadServerTrendsMemoryChart(IEnumerable<MemoryStatsItem> memoryData, int hoursBack, DateTime? fromDate, DateTime? toDate)
-        {
-            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
-            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
-            double xMin = rangeStart.ToOADate();
-            double xMax = rangeEnd.ToOADate();
-
-            if (_legendPanels.TryGetValue(ServerUtilTrendsMemoryChart, out var existingMemoryPanel) && existingMemoryPanel != null)
-            {
-                ServerUtilTrendsMemoryChart.Plot.Axes.Remove(existingMemoryPanel);
-                _legendPanels[ServerUtilTrendsMemoryChart] = null;
-            }
-            ServerUtilTrendsMemoryChart.Plot.Clear();
-            _serverTrendsMemoryHover?.Clear();
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsMemoryChart);
-
-            var dataList = memoryData?.OrderBy(d => d.CollectionTime).ToList() ?? new List<MemoryStatsItem>();
-            if (dataList.Count >= 1)
-            {
-                var bufferTimePoints = dataList.Select(d => d.CollectionTime);
-                var bufferValues = dataList.Select(d => (double)d.BufferPoolMb);
-                var (bufferXs, bufferYs) = TabHelpers.FillTimeSeriesGaps(bufferTimePoints, bufferValues);
-
-                var cacheTimePoints = dataList.Select(d => d.CollectionTime);
-                var cacheValues = dataList.Select(d => (double)d.PlanCacheMb);
-                var (cacheXs, cacheYs) = TabHelpers.FillTimeSeriesGaps(cacheTimePoints, cacheValues);
-
-                // DEBUG: Log the last data points to diagnose the "drop to 0" issue
-                if (bufferXs.Length > 0)
-                {
-                    var lastTime = DateTime.FromOADate(bufferXs[^1]);
-                    var lastValue = bufferYs[^1];
-                    Logger.Info($"Memory chart: Last buffer point = {lastTime:yyyy-MM-dd HH:mm:ss}, Value = {lastValue}. Array length = {bufferXs.Length}");
-                    Logger.Info($"Memory chart: rangeStart = {rangeStart:yyyy-MM-dd HH:mm:ss}, rangeEnd = {rangeEnd:yyyy-MM-dd HH:mm:ss}");
-
-                    // Check for any zero values in the array
-                    var zeroIndices = bufferYs.Select((v, i) => new { Value = v, Index = i })
-                        .Where(x => x.Value == 0)
-                        .Select(x => x.Index)
-                        .ToList();
-                    if (zeroIndices.Count > 0)
-                    {
-                        Logger.Warning($"Memory chart: Found {zeroIndices.Count} zero values at indices: {string.Join(", ", zeroIndices.Take(10))}");
-                        foreach (var idx in zeroIndices.Take(5))
-                        {
-                            var zeroTime = DateTime.FromOADate(bufferXs[idx]);
-                            Logger.Warning($"  Zero at index {idx}: Time = {zeroTime:yyyy-MM-dd HH:mm:ss}");
-                        }
-                    }
-
-                    // Log first and last 3 points
-                    Logger.Info($"Memory chart: First 3 points:");
-                    for (int i = 0; i < Math.Min(3, bufferXs.Length); i++)
-                    {
-                        Logger.Info($"  [{i}] Time = {DateTime.FromOADate(bufferXs[i]):HH:mm:ss}, Value = {bufferYs[i]}");
-                    }
-                    Logger.Info($"Memory chart: Last 3 points:");
-                    for (int i = Math.Max(0, bufferXs.Length - 3); i < bufferXs.Length; i++)
-                    {
-                        Logger.Info($"  [{i}] Time = {DateTime.FromOADate(bufferXs[i]):HH:mm:ss}, Value = {bufferYs[i]}");
-                    }
-                }
-
-                var bufferScatter = ServerUtilTrendsMemoryChart.Plot.Add.Scatter(bufferXs, bufferYs);
-                bufferScatter.LineWidth = 2;
-                bufferScatter.MarkerSize = 5;
-                bufferScatter.Color = TabHelpers.ChartColors[4];
-                bufferScatter.LegendText = "Buffer Pool";
-                _serverTrendsMemoryHover?.Add(bufferScatter, "Buffer Pool");
-
-                var cacheScatter = ServerUtilTrendsMemoryChart.Plot.Add.Scatter(cacheXs, cacheYs);
-                cacheScatter.LineWidth = 2;
-                cacheScatter.MarkerSize = 5;
-                cacheScatter.Color = TabHelpers.ChartColors[5];
-                cacheScatter.LegendText = "Plan Cache";
-                _serverTrendsMemoryHover?.Add(cacheScatter, "Plan Cache");
-
-                _legendPanels[ServerUtilTrendsMemoryChart] = ServerUtilTrendsMemoryChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                ServerUtilTrendsMemoryChart.Plot.Legend.FontSize = 12;
-
-                // Limit X-axis to actual data range to prevent ScottPlot from extrapolating beyond data
-                if (bufferXs.Length > 0)
-                {
-                    var oldXMax = xMax;
-                    xMax = Math.Min(xMax, bufferXs[^1]);
-                    Logger.Info($"Memory chart: xMax changed from {DateTime.FromOADate(oldXMax):HH:mm:ss} to {DateTime.FromOADate(xMax):HH:mm:ss}");
-                }
-            }
-            else
-            {
-                double xCenter = xMin + (xMax - xMin) / 2;
-                var noDataText = ServerUtilTrendsMemoryChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-                noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
-                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
-            }
-
-            ServerUtilTrendsMemoryChart.Plot.Axes.DateTimeTicksBottom();
-            ServerUtilTrendsMemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsMemoryChart);
-            ServerUtilTrendsMemoryChart.Plot.YLabel("MB");
-            TabHelpers.LockChartVerticalAxis(ServerUtilTrendsMemoryChart);
-            ServerUtilTrendsMemoryChart.Refresh();
-        }
-
-        private void LoadServerTrendsPerfmonChart(IEnumerable<PerfmonStatsItem> perfmonData, int hoursBack, DateTime? fromDate, DateTime? toDate)
-        {
-            DateTime rangeEnd = toDate ?? Helpers.ServerTimeHelper.ServerNow;
-            DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
-            double xMin = rangeStart.ToOADate();
-            double xMax = rangeEnd.ToOADate();
-
-            if (_legendPanels.TryGetValue(ServerUtilTrendsPerfmonChart, out var existingPerfmonTrendsPanel) && existingPerfmonTrendsPanel != null)
-            {
-                ServerUtilTrendsPerfmonChart.Plot.Axes.Remove(existingPerfmonTrendsPanel);
-                _legendPanels[ServerUtilTrendsPerfmonChart] = null;
-            }
-            ServerUtilTrendsPerfmonChart.Plot.Clear();
-            _serverTrendsPerfmonHover?.Clear();
-            TabHelpers.ApplyThemeToChart(ServerUtilTrendsPerfmonChart);
-
-            var allData = (perfmonData ?? Enumerable.Empty<PerfmonStatsItem>()).ToList();
-
-            // Counters to display
-            var countersToShow = new[] {
-                ("Batch Requests/sec", TabHelpers.ChartColors[0]),
-                ("SQL Compilations/sec", TabHelpers.ChartColors[2]),
-                ("SQL Re-Compilations/sec", TabHelpers.ChartColors[3]),
-                ("Optimizer Statistics", TabHelpers.ChartColors[1])
-            };
-
-            // Get all time points across all counters for gap filling
-            int linesAdded = 0;
-            foreach (var (counterName, color) in countersToShow)
-            {
-                var counterData = allData
-                    .Where(d => d.CounterName == counterName)
-                    .GroupBy(d => d.CollectionTime)
-                    .Select(g => new { Time = g.Key, Value = g.Sum(x => x.CntrValuePerSecond ?? x.CntrValueDelta ?? x.CntrValue) })
-                    .OrderBy(d => d.Time)
-                    .ToList();
-
-                if (counterData.Count >= 1)
-                {
-                    var timePoints = counterData.Select(d => d.Time);
-                    var values = counterData.Select(d => (double)d.Value);
-                    var (xs, ys) = TabHelpers.FillTimeSeriesGaps(timePoints, values);
-
-                    var scatter = ServerUtilTrendsPerfmonChart.Plot.Add.Scatter(xs, ys);
-                    scatter.LineWidth = 2;
-                    scatter.MarkerSize = 5;
-                    scatter.Color = color;
-                    scatter.LegendText = counterName.Replace("/sec", "", StringComparison.Ordinal);
-                    _serverTrendsPerfmonHover?.Add(scatter, counterName);
-                    linesAdded++;
-                }
-            }
-
-            if (linesAdded > 0)
-            {
-                _legendPanels[ServerUtilTrendsPerfmonChart] = ServerUtilTrendsPerfmonChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-                ServerUtilTrendsPerfmonChart.Plot.Legend.FontSize = 12;
-            }
-            else
-            {
-                double xCenter = xMin + (xMax - xMin) / 2;
-                var noDataText = ServerUtilTrendsPerfmonChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-                noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
-                noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
-            }
-
-            ServerUtilTrendsPerfmonChart.Plot.Axes.DateTimeTicksBottom();
-            ServerUtilTrendsPerfmonChart.Plot.Axes.SetLimitsX(xMin, xMax);
-            TabHelpers.SetChartYLimitsWithLegendPadding(ServerUtilTrendsPerfmonChart);
-            ServerUtilTrendsPerfmonChart.Plot.YLabel("Per Second");
-            TabHelpers.LockChartVerticalAxis(ServerUtilTrendsPerfmonChart);
-            ServerUtilTrendsPerfmonChart.Refresh();
         }
 
         #endregion

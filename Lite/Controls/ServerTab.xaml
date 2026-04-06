@@ -129,30 +129,9 @@
         <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{DynamicResource BackgroundBrush}"
                     BorderThickness="0" Padding="0" SelectionChanged="MainTabControl_SelectionChanged">
 
-            <!-- Overview Tab -->
+            <!-- Overview Tab — Correlated Timeline Lanes -->
             <TabItem Header="Overview">
-                <Grid Margin="8">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
-                        <ScottPlot:WpfPlot x:Name="OverviewCpuChart"/>
-                    </Border>
-                    <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
-                        <ScottPlot:WpfPlot x:Name="OverviewMemoryChart"/>
-                    </Border>
-                    <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
-                        <ScottPlot:WpfPlot x:Name="OverviewFileIoChart"/>
-                    </Border>
-                    <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
-                        <ScottPlot:WpfPlot x:Name="OverviewWaitStatsChart"/>
-                    </Border>
-                </Grid>
+                <controls:CorrelatedTimelineLanesControl x:Name="CorrelatedLanes"/>
             </TabItem>
 
             <!-- Wait Stats Tab -->
