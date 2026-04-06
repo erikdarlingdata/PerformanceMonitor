@@ -972,6 +972,22 @@ public static class ShowPlanParser
             if (actionColEl != null)
                 node.ActionColumn = FormatColumnRef(actionColEl);
 
+            // Nonclustered indexes maintained by modification operators (Update/SimpleUpdate/CreateIndex)
+            var opName = physicalOpEl.Name.LocalName;
+            if (opName is "Update" or "SimpleUpdate" or "CreateIndex")
+            {
+                var ncObjects = ScopedDescendants(physicalOpEl, Ns + "Object")
+                    .Where(o => string.Equals(o.Attribute("IndexKind")?.Value, "NonClustered", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                node.NonClusteredIndexCount = ncObjects.Count;
+                foreach (var ncObj in ncObjects)
+                {
+                    var ixName = ncObj.Attribute("Index")?.Value?.Replace("[", "").Replace("]", "");
+                    if (!string.IsNullOrEmpty(ixName))
+                        node.NonClusteredIndexNames.Add(ixName);
+                }
+            }
+
             // SET predicate (UPDATE operator)
             var setPredicateEl = physicalOpEl.Element(Ns + "SetPredicate");
             if (setPredicateEl != null)

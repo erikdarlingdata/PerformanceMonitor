@@ -279,6 +279,27 @@ public partial class PlanViewerControl : UserControl
             iconRow.Children.Add(parBadge);
         }
 
+        // Nonclustered index count badge (modification operators maintaining multiple NC indexes)
+        if (node.NonClusteredIndexCount > 0)
+        {
+            var ncBadge = new Border
+            {
+                Background = new SolidColorBrush(Color.FromRgb(0x6C, 0x75, 0x7D)),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(4, 1, 4, 1),
+                Margin = new Thickness(4, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = $"+{node.NonClusteredIndexCount} NC",
+                    FontSize = 10,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = Brushes.White
+                }
+            };
+            iconRow.Children.Add(ncBadge);
+        }
+
         stack.Children.Add(iconRow);
 
         // Operator name — use full name, let TextTrimming handle overflow
@@ -693,7 +714,7 @@ public partial class PlanViewerControl : UserControl
             || node.SortDistinct || node.StartupExpression
             || node.NLOptimized || node.WithOrderedPrefetch || node.WithUnorderedPrefetch
             || node.WithTies || node.Remoting || node.LocalParallelism
-            || node.SpoolStack || node.DMLRequestSort
+            || node.SpoolStack || node.DMLRequestSort || node.NonClusteredIndexCount > 0
             || !string.IsNullOrEmpty(node.OffsetExpression) || node.TopRows > 0
             || !string.IsNullOrEmpty(node.ConstantScanValues)
             || !string.IsNullOrEmpty(node.UdxUsedColumns);
@@ -742,6 +763,12 @@ public partial class PlanViewerControl : UserControl
                 AddPropertyRow("Primary Node Id", $"{node.PrimaryNodeId}");
             if (node.DMLRequestSort)
                 AddPropertyRow("DML Request Sort", "True");
+            if (node.NonClusteredIndexCount > 0)
+            {
+                AddPropertyRow("NC Indexes Maintained", $"{node.NonClusteredIndexCount}");
+                foreach (var ixName in node.NonClusteredIndexNames)
+                    AddPropertyRow("", ixName, isCode: true);
+            }
             if (!string.IsNullOrEmpty(node.ActionColumn))
                 AddPropertyRow("Action Column", node.ActionColumn, isCode: true);
             if (!string.IsNullOrEmpty(node.SegmentColumn))
@@ -1651,6 +1678,10 @@ public partial class PlanViewerControl : UserControl
             if (!string.IsNullOrEmpty(node.ScanDirection))
                 AddTooltipRow(stack, "Scan Direction", node.ScanDirection);
         }
+
+        // NC index maintenance count
+        if (node.NonClusteredIndexCount > 0)
+            AddTooltipRow(stack, "NC Indexes Maintained", string.Join(", ", node.NonClusteredIndexNames));
 
         // Operator details (key items only in tooltip)
         var hasTooltipDetails = !string.IsNullOrEmpty(node.OrderBy)

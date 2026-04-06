@@ -251,6 +251,10 @@ public class PlanNode
     public List<PlanWarning> Warnings { get; set; } = new();
     public bool HasWarnings => Warnings.Count > 0;
 
+    // Modification operator: nonclustered indexes maintained
+    public int NonClusteredIndexCount { get; set; }
+    public List<string> NonClusteredIndexNames { get; set; } = new();
+
     // Tree structure
     public List<PlanNode> Children { get; set; } = new();
     public PlanNode? Parent { get; set; }
