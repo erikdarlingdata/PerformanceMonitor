@@ -330,15 +330,28 @@ internal sealed class EmbeddedResourceScriptProvider : ScriptProvider
     {
         string upgradesPrefix = $"{_resourcePrefix}.Resources.upgrades.";
 
-        var folderNames = _assembly.GetManifestResourceNames()
+        /*
+        MSBuild mangles embedded resource names: folder "2.2.0-to-2.3.0" becomes
+        "_2._2._0_to_2._3._0" (dots → namespace separators, hyphens → underscores,
+        digit-leading segments → underscore prefix). Extract the mangled name and
+        recover the original for version parsing. Store mangled name in Path for
+        resource lookups; original in FolderName for display/version parsing.
+        */
+        var mangledNames = _assembly.GetManifestResourceNames()
             .Where(r => r.StartsWith(upgradesPrefix, StringComparison.Ordinal))
             .Select(r => r[upgradesPrefix.Length..])
-            .Select(r => r.Split('.')[0])
+            .Select(r => Patterns.EmbeddedUpgradeFolderPattern().Match(r))
+            .Where(m => m.Success)
+            .Select(m => m.Groups[1].Value)
             .Distinct()
             .ToList();
 
-        var allUpgrades = folderNames
-            .Select(f => ParseUpgradeFolderName(f, f))
+        var allUpgrades = mangledNames
+            .Select(mangled =>
+            {
+                string original = UnmangleUpgradeFolderName(mangled);
+                return ParseUpgradeFolderName(original, mangled);
+            })
             .Where(x => x != null)
             .Cast<UpgradeInfo>()
             .ToList();
@@ -348,7 +361,7 @@ internal sealed class EmbeddedResourceScriptProvider : ScriptProvider
         var result = new List<UpgradeInfo>();
         foreach (var upgrade in filtered)
         {
-            string manifestResource = $"{upgradesPrefix}{upgrade.FolderName}.upgrade.txt";
+            string manifestResource = $"{upgradesPrefix}{upgrade.Path}.upgrade.txt";
             if (_assembly.GetManifestResourceNames().Contains(manifestResource))
             {
                 result.Add(upgrade);
@@ -364,7 +377,7 @@ internal sealed class EmbeddedResourceScriptProvider : ScriptProvider
     public override List<string> GetUpgradeManifest(UpgradeInfo upgrade)
     {
         string upgradesPrefix = $"{_resourcePrefix}.Resources.upgrades.";
-        string manifestResource = $"{upgradesPrefix}{upgrade.FolderName}.upgrade.txt";
+        string manifestResource = $"{upgradesPrefix}{upgrade.Path}.upgrade.txt";
         string content = ReadResource(manifestResource);
         return ParseUpgradeManifest(content.Split('\n'));
     }
@@ -372,7 +385,7 @@ internal sealed class EmbeddedResourceScriptProvider : ScriptProvider
     public override string ReadUpgradeScript(UpgradeInfo upgrade, string scriptName)
     {
         string upgradesPrefix = $"{_resourcePrefix}.Resources.upgrades.";
-        string resource = $"{upgradesPrefix}{upgrade.FolderName}.{scriptName}";
+        string resource = $"{upgradesPrefix}{upgrade.Path}.{scriptName}";
         return ReadResource(resource);
     }
 
@@ -383,8 +396,32 @@ internal sealed class EmbeddedResourceScriptProvider : ScriptProvider
     public override bool UpgradeScriptExists(UpgradeInfo upgrade, string scriptName)
     {
         string upgradesPrefix = $"{_resourcePrefix}.Resources.upgrades.";
-        string resource = $"{upgradesPrefix}{upgrade.FolderName}.{scriptName}";
+        string resource = $"{upgradesPrefix}{upgrade.Path}.{scriptName}";
         return _assembly.GetManifestResourceNames().Contains(resource);
+    }
+
+    /// <summary>
+    /// Reverses MSBuild's resource name mangling for upgrade folder names.
+    /// "_2._2._0_to_2._3._0" → "2.2.0-to-2.3.0"
+    /// </summary>
+    private static string UnmangleUpgradeFolderName(string mangled)
+    {
+        /*
+        MSBuild mangling:
+        - dots in folder names become namespace separator dots
+        - hyphens become underscores
+        - segments starting with a digit get an underscore prefix
+        Reverse: remove leading underscores from digit segments,
+        rejoin with dots, then restore the hyphen in "-to-".
+        */
+        var segments = mangled.Split('.');
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (segments[i].Length > 1 && segments[i][0] == '_' && char.IsDigit(segments[i][1]))
+                segments[i] = segments[i][1..];
+        }
+        string result = string.Join(".", segments);
+        return result.Replace("_to_", "-to-");
     }
 
     public override string? ReadTroubleshootingScript()

@@ -71,6 +71,9 @@ namespace PerformanceMonitorDashboard.Models
         private string? _topWaitType;
         private decimal _topWaitDurationSeconds;
 
+        // Installed version
+        private string? _monitorVersion;
+
         public ServerHealthStatus(ServerConnection server)
         {
             _server = server;
@@ -533,13 +536,28 @@ namespace PerformanceMonitorDashboard.Models
             }
         }
 
+        public string? MonitorVersion
+        {
+            get => _monitorVersion;
+            set { _monitorVersion = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionStatusText)); }
+        }
+
         public string ConnectionStatusText
         {
             get
             {
                 if (!_isOnline.HasValue) return "Unknown";
+                if (_isOnline.Value && _monitorVersion != null)
+                    return $"Online — Monitor v{NormalizeVersion(_monitorVersion)}";
                 return _isOnline.Value ? "Online" : "Offline";
             }
+        }
+
+        private static string NormalizeVersion(string version)
+        {
+            if (Version.TryParse(version, out var parsed))
+                return new Version(parsed.Major, parsed.Minor, parsed.Build).ToString();
+            return version;
         }
 
         // Overall health - worst severity across all metrics

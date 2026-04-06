@@ -1,5 +1,21 @@
 # SQL Server Performance Monitor
 
+<p align="center">
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/stargazers"><img src="https://img.shields.io/github/stars/erikdarlingdata/PerformanceMonitor?style=for-the-badge&logo=github&color=gold&logoColor=black" alt="GitHub Stars"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/network/members"><img src="https://img.shields.io/github/forks/erikdarlingdata/PerformanceMonitor?style=for-the-badge&logo=github" alt="GitHub Forks"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/LICENSE"><img src="https://img.shields.io/github/license/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="License: MIT"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest"><img src="https://img.shields.io/github/v/release/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="Latest Release"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/issues"><img src="https://img.shields.io/github/issues/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="Open Issues"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/commits/main"><img src="https://img.shields.io/github/last-commit/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="Last Commit"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/erikdarlingdata/PerformanceMonitor/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
+</p>
+<p align="center">
+  <a href="https://x.com/erikdarlingdata"><img src="https://img.shields.io/badge/Follow_%40ErikDarlingData-black?style=for-the-badge&logo=x&logoColor=white" alt="Follow @ErikDarlingData on X"></a>
+  <a href="https://www.youtube.com/@ErikDarlingData"><img src="https://img.shields.io/badge/YouTube-Subscribe-red?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube Subscribe"></a>
+  <a href="https://www.linkedin.com/in/erik-darling-data/"><img src="https://img.shields.io/badge/LinkedIn-Connect-0077B5?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn Connect"></a>
+  <a href="https://erikdarling.com"><img src="https://img.shields.io/badge/Blog-erikdarling.com-FF6B35?style=for-the-badge&logo=wordpress&logoColor=white" alt="Blog"></a>
+</p>
+
 **Free, open-source monitoring that replaces the tools charging you thousands per server per year.** 30+ collectors, real-time alerts, built-in MCP server for AI analysis. Nothing phones home. Your data stays on your server and your machine.
 
 **Supported:** SQL Server 2016–2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite only)

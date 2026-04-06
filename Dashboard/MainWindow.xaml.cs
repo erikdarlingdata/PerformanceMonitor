@@ -22,6 +22,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitorDashboard.Mcp;
 using PerformanceMonitorDashboard.Models;
+using System.Reflection;
 using PerformanceMonitorDashboard.Controls;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Services;
@@ -136,9 +137,10 @@ namespace PerformanceMonitorDashboard
         {
             if (msg == NativeMethods.WM_SHOWMONITOR)
             {
-                // Another instance tried to start - bring this window to front
+                // Another instance tried to start - bring this window to front (#769)
                 Show();
-                WindowState = WindowState.Normal;
+                if (WindowState == WindowState.Minimized)
+                    WindowState = WindowState.Normal;
                 Activate();
                 Topmost = true;  // Temporarily set topmost to ensure visibility
                 Topmost = false;
@@ -975,6 +977,76 @@ namespace PerformanceMonitorDashboard
                         );
                     }
                 }
+            }
+        }
+
+        private async void CheckServerVersion_Click(object sender, RoutedEventArgs e)
+        {
+            if (ServerListView.SelectedItem is not ServerListItem item) return;
+            var server = item.Server;
+
+            try
+            {
+                string? installedVersion = await _serverManager.GetInstalledVersionAsync(server);
+
+                if (installedVersion == null)
+                {
+                    MessageBox.Show(
+                        $"No PerformanceMonitor installation found on '{server.DisplayNameWithIntent}'.",
+                        "Not Installed",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return;
+                }
+
+                string appVersion = Assembly.GetExecutingAssembly()
+                    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                    ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
+                int plusIndex = appVersion.IndexOf('+');
+                if (plusIndex >= 0) appVersion = appVersion[..plusIndex];
+
+                static string Normalize(string v) =>
+                    Version.TryParse(v, out var p) ? new Version(p.Major, p.Minor, p.Build).ToString() : v;
+
+                string normalizedInstalled = Normalize(installedVersion);
+                string normalizedApp = Normalize(appVersion);
+
+                if (Version.TryParse(normalizedInstalled, out var installed) &&
+                    Version.TryParse(normalizedApp, out var app) &&
+                    installed < app)
+                {
+                    var result = MessageBox.Show(
+                        $"'{server.DisplayNameWithIntent}' has v{normalizedInstalled} installed.\n\nv{normalizedApp} is available. Open the server editor to upgrade?",
+                        "Update Available",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Information);
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        var dialog = new AddServerDialog(server);
+                        if (dialog.ShowDialog() == true)
+                        {
+                            _serverManager.UpdateServer(dialog.ServerConnection, dialog.Username, dialog.Password);
+                            await LoadServerListAsync();
+                        }
+                    }
+                }
+                else
+                {
+                    MessageBox.Show(
+                        $"'{server.DisplayNameWithIntent}' is up to date (v{normalizedInstalled}).",
+                        "No Updates",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"Failed to check version:\n\n{ex.Message}",
+                    "Connection Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
             }
         }
 

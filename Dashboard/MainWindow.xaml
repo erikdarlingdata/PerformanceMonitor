@@ -118,6 +118,12 @@
                                                Foreground="{Binding StatusColor}"
                                                Margin="0,-1,0,0"
                                                Visibility="{Binding HasBeenChecked, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                    <!-- Monitor Version -->
+                                    <TextBlock Text="{Binding MonitorVersionDisplay, Mode=OneWay}"
+                                               FontSize="11"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"
+                                               Margin="0,-1,0,0"
+                                               Visibility="{Binding HasBeenChecked, Converter={StaticResource BoolToVisibilityConverter}}"/>
                                     <!-- Last Checked Timestamp -->
                                     <TextBlock FontSize="12" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,-1,0,0">
                                         <Run Text="{Binding LastCheckedDisplay, Mode=OneWay}"/>
@@ -136,6 +142,9 @@
                             </MenuItem>
                             <MenuItem Header="Edit Server..." Click="EditServer_Click">
                                 <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
+                            </MenuItem>
+                            <MenuItem Header="Check Server Version" Click="CheckServerVersion_Click">
+                                <MenuItem.Icon><TextBlock Text="&#x1F504;"/></MenuItem.Icon>
                             </MenuItem>
                             <Separator/>
                             <MenuItem x:Name="ToggleFavoriteMenuItem" Header="Set as Favorite" Click="ToggleFavorite_Click">

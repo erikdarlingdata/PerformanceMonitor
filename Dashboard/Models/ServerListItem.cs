@@ -48,6 +48,7 @@ namespace PerformanceMonitorDashboard.Models
                     OnPropertyChanged(nameof(StatusDurationDisplay));
                     OnPropertyChanged(nameof(IsOnline));
                     OnPropertyChanged(nameof(HasBeenChecked));
+                    OnPropertyChanged(nameof(MonitorVersionDisplay));
                 }
             }
         }
@@ -102,6 +103,22 @@ namespace PerformanceMonitorDashboard.Models
         /// Whether the server has been checked at least once.
         /// </summary>
         public bool HasBeenChecked => _status.LastChecked.HasValue;
+
+        /// <summary>
+        /// Display text for the installed monitor version (e.g., "Monitor v2.5.0").
+        /// Empty string if not installed or not yet checked.
+        /// </summary>
+        public string MonitorVersionDisplay
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(_status.InstalledMonitorVersion))
+                    return string.Empty;
+                if (System.Version.TryParse(_status.InstalledMonitorVersion, out var v))
+                    return $"Monitor v{new System.Version(v.Major, v.Minor, v.Build)}";
+                return $"Monitor v{_status.InstalledMonitorVersion}";
+            }
+        }
 
         public event PropertyChangedEventHandler? PropertyChanged;
 

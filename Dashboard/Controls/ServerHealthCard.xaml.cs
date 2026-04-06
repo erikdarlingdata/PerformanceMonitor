@@ -25,6 +25,8 @@ namespace PerformanceMonitorDashboard.Controls
         private static readonly SolidColorBrush UnknownBrush = new(Color.FromRgb(0x88, 0x88, 0x88));   // Gray
 
         public event EventHandler<ServerHealthStatus>? CardClicked;
+        public event EventHandler<ServerHealthStatus>? EditServerRequested;
+        public event EventHandler<ServerHealthStatus>? CheckVersionRequested;
 
         public ServerHealthCard()
         {
@@ -166,6 +168,24 @@ namespace PerformanceMonitorDashboard.Controls
             {
                 CardClicked?.Invoke(this, status);
             }
+        }
+
+        private void OpenInNewTab_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is ServerHealthStatus status)
+                CardClicked?.Invoke(this, status);
+        }
+
+        private void EditServer_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is ServerHealthStatus status)
+                EditServerRequested?.Invoke(this, status);
+        }
+
+        private void CheckVersion_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is ServerHealthStatus status)
+                CheckVersionRequested?.Invoke(this, status);
         }
     }
 }

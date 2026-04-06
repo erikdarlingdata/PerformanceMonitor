@@ -90,6 +90,7 @@
                 <Button Content="Add Server..." Width="100" Height="30" Margin="0,0,8,0" Click="AddServer_Click"/>
                 <Button Content="Edit..." Width="80" Height="30" Margin="0,0,8,0" Click="EditServer_Click"/>
                 <Button x:Name="ToggleFavoriteButton" Content="Toggle Favorite" Width="110" Height="30" Margin="0,0,8,0" Click="ToggleFavorite_Click"/>
+                <Button x:Name="CheckUpdatesButton" Content="Check Server Version" Width="140" Height="30" Margin="0,0,8,0" Click="CheckForUpdates_Click"/>
                 <Button Content="Remove" Width="80" Height="30" Margin="0,0,8,0" Click="RemoveServer_Click"
                         Foreground="{DynamicResource ErrorBrush}"/>
             </StackPanel>

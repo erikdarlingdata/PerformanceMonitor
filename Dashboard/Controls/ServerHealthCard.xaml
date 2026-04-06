@@ -8,6 +8,19 @@
              Background="Transparent"
              MouseLeftButtonDown="Card_MouseLeftButtonDown"
              Cursor="Hand">
+    <UserControl.ContextMenu>
+        <ContextMenu>
+            <MenuItem Header="Open in New Tab" Click="OpenInNewTab_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F5C2;"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Edit Server..." Click="EditServer_Click">
+                <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Check Server Version" Click="CheckVersion_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F504;"/></MenuItem.Icon>
+            </MenuItem>
+        </ContextMenu>
+    </UserControl.ContextMenu>
     <UserControl.Resources>
         <ResourceDictionary>
             <!-- Severity to color converter -->

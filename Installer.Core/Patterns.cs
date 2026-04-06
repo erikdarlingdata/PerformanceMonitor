@@ -28,6 +28,14 @@ public static partial class Patterns
         RegexOptions.Compiled | RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
     /// <summary>
+    /// Matches MSBuild-mangled upgrade folder names from embedded resource names.
+    /// MSBuild converts "2.2.0-to-2.3.0" to "_2._2._0_to_2._3._0" (dots become namespace
+    /// separators, hyphens become underscores, digit-leading segments get underscore prefix).
+    /// </summary>
+    [GeneratedRegex(@"^(_\d+\._\d+\._\d+_to_\d+\._\d+\._\d+)\.")]
+    public static partial Regex EmbeddedUpgradeFolderPattern();
+
+    /// <summary>
     /// Prefixes that indicate excluded scripts (uninstall, test, troubleshooting).
     /// </summary>
     public static readonly string[] ExcludedPrefixes = ["00_", "97_", "99_"];

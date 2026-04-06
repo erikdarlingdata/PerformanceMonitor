@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.Data.SqlClient;
+using Installer.Core;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Interfaces;
 using PerformanceMonitorDashboard.Models;
@@ -323,6 +324,36 @@ namespace PerformanceMonitorDashboard.Services
                 {
                     Logger.Info($"Connectivity check passed for server '{server.DisplayName}'");
                     status.UserCancelledMfa = false; // Clear any previous cancellation flag
+
+                    /* Query installed PerformanceMonitor version */
+                    try
+                    {
+                        using var versionCmd = new SqlCommand(@"
+                            IF DB_ID(N'PerformanceMonitor') IS NOT NULL
+                            AND EXISTS (
+                                SELECT 1
+                                FROM PerformanceMonitor.sys.tables AS t
+                                JOIN PerformanceMonitor.sys.schemas AS s
+                                    ON t.schema_id = s.schema_id
+                                WHERE s.name = N'config'
+                                AND   t.name = N'installation_history'
+                            )
+                            BEGIN
+                                SELECT TOP (1)
+                                    installer_version
+                                FROM PerformanceMonitor.config.installation_history
+                                WHERE installation_status = N'SUCCESS'
+                                ORDER BY installation_date DESC;
+                            END;", connection);
+                        versionCmd.CommandTimeout = ConnectionCheckTimeoutSeconds;
+                        var versionResult = await versionCmd.ExecuteScalarAsync();
+                        status.InstalledMonitorVersion = versionResult is string v ? v : null;
+                    }
+                    catch (SqlException)
+                    {
+                        /* Non-critical — don't fail the connectivity check */
+                        status.InstalledMonitorVersion = null;
+                    }
                 }
             }
             catch (SqlException ex)
@@ -381,6 +412,17 @@ namespace PerformanceMonitorDashboard.Services
             var servers = GetAllServers();
             var tasks = servers.Select(s => CheckConnectionAsync(s.Id));
             await Task.WhenAll(tasks);
+        }
+
+        public async Task<string?> GetInstalledVersionAsync(ServerConnection server)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "master",
+                ConnectTimeout = ConnectionCheckTimeoutSeconds
+            };
+            return await InstallationService.GetInstalledVersionAsync(builder.ConnectionString);
         }
 
         private void LoadServers()

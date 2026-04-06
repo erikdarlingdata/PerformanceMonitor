@@ -8,9 +8,11 @@
 
 using System;
 using System.Linq;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using Installer.Core;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 
@@ -187,6 +189,111 @@ namespace PerformanceMonitorDashboard
                     MessageBoxButton.OK,
                     MessageBoxImage.Information
                 );
+            }
+        }
+
+        private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
+        {
+            if (ServersDataGrid.SelectedItem is not ServerConnection server)
+            {
+                MessageBox.Show(
+                    "Please select a server to check for updates.",
+                    "No Server Selected",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            CheckUpdatesButton.IsEnabled = false;
+            CheckUpdatesButton.Content = "Checking...";
+
+            try
+            {
+                string? installedVersion = await _serverManager.GetInstalledVersionAsync(server);
+
+                if (installedVersion == null)
+                {
+                    MessageBox.Show(
+                        $"No PerformanceMonitor installation found on '{server.DisplayNameWithIntent}'.\n\nUse Edit to install.",
+                        "Not Installed",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return;
+                }
+
+                string appVersion = Assembly.GetExecutingAssembly()
+                    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                    ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
+                /* Strip git hash suffix if present (e.g., "2.5.0+abc123" → "2.5.0") */
+                int plusIndex = appVersion.IndexOf('+');
+                if (plusIndex >= 0) appVersion = appVersion[..plusIndex];
+
+                /* Normalize both to 3-part for comparison */
+                string Normalize(string v)
+                {
+                    if (Version.TryParse(v, out var parsed))
+                        return new Version(parsed.Major, parsed.Minor, parsed.Build).ToString();
+                    return v;
+                }
+
+                string normalizedInstalled = Normalize(installedVersion);
+                string normalizedApp = Normalize(appVersion);
+
+                if (Version.TryParse(normalizedInstalled, out var installed) &&
+                    Version.TryParse(normalizedApp, out var app) &&
+                    installed < app)
+                {
+                    var result = MessageBox.Show(
+                        $"'{server.DisplayNameWithIntent}' has v{normalizedInstalled} installed.\n\nv{normalizedApp} is available. Open the server editor to upgrade?",
+                        "Update Available",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Information);
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        var dialog = new AddServerDialog(server);
+                        dialog.Owner = this;
+
+                        if (dialog.ShowDialog() == true)
+                        {
+                            try
+                            {
+                                _serverManager.UpdateServer(dialog.ServerConnection, dialog.Username, dialog.Password);
+                                LoadServers();
+                                ServersModified = true;
+                            }
+                            catch (Exception ex)
+                            {
+                                MessageBox.Show(
+                                    $"Failed to update server:\n\n{ex.Message}",
+                                    "Error",
+                                    MessageBoxButton.OK,
+                                    MessageBoxImage.Error);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    MessageBox.Show(
+                        $"'{server.DisplayNameWithIntent}' is up to date (v{normalizedInstalled}).",
+                        "No Updates",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"Failed to check for updates:\n\n{ex.Message}",
+                    "Connection Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            finally
+            {
+                CheckUpdatesButton.IsEnabled = true;
+                CheckUpdatesButton.Content = "Check Server Version";
             }
         }
 

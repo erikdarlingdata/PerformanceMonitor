@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -168,6 +169,10 @@ namespace PerformanceMonitorDashboard.Controls
                 // and the UI updates automatically via data binding
                 await databaseService.RefreshNocHealthStatusAsync(status);
 
+                // Populate installed monitor version from connectivity check
+                var connStatus = _serverManager.GetConnectionStatus(server.Id);
+                status.MonitorVersion = connStatus.InstalledMonitorVersion;
+
                 // Update tab badges in MainWindow
                 UpdateTabBadges(status);
             }
@@ -219,6 +224,80 @@ namespace PerformanceMonitorDashboard.Controls
         private void ServerHealthCard_CardClicked(object? sender, ServerHealthStatus status)
         {
             ServerCardClicked?.Invoke(this, status.Server);
+        }
+
+        private void ServerHealthCard_EditServerRequested(object? sender, ServerHealthStatus status)
+        {
+            var server = status.Server;
+            var dialog = new AddServerDialog(server);
+            dialog.Owner = Window.GetWindow(this);
+
+            if (dialog.ShowDialog() == true)
+            {
+                try
+                {
+                    _serverManager.UpdateServer(dialog.ServerConnection, dialog.Username, dialog.Password);
+                    _ = ReloadServersAsync();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to update server:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+        }
+
+        private async void ServerHealthCard_CheckVersionRequested(object? sender, ServerHealthStatus status)
+        {
+            var server = status.Server;
+
+            try
+            {
+                string? installedVersion = await _serverManager.GetInstalledVersionAsync(server);
+
+                if (installedVersion == null)
+                {
+                    MessageBox.Show(
+                        $"No PerformanceMonitor installation found on '{server.DisplayNameWithIntent}'.",
+                        "Not Installed", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                string appVersion = Assembly.GetExecutingAssembly()
+                    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                    ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
+                int plusIndex = appVersion.IndexOf('+');
+                if (plusIndex >= 0) appVersion = appVersion[..plusIndex];
+
+                static string Normalize(string v) =>
+                    Version.TryParse(v, out var p) ? new Version(p.Major, p.Minor, p.Build).ToString() : v;
+
+                string normalizedInstalled = Normalize(installedVersion);
+                string normalizedApp = Normalize(appVersion);
+
+                if (Version.TryParse(normalizedInstalled, out var installed) &&
+                    Version.TryParse(normalizedApp, out var app) &&
+                    installed < app)
+                {
+                    var result = MessageBox.Show(
+                        $"'{server.DisplayNameWithIntent}' has v{normalizedInstalled} installed.\n\nv{normalizedApp} is available. Open the server editor to upgrade?",
+                        "Update Available", MessageBoxButton.YesNo, MessageBoxImage.Information);
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        ServerHealthCard_EditServerRequested(sender, status);
+                    }
+                }
+                else
+                {
+                    MessageBox.Show(
+                        $"'{server.DisplayNameWithIntent}' is up to date (v{normalizedInstalled}).",
+                        "No Updates", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to check version:\n\n{ex.Message}", "Connection Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         /// <summary>

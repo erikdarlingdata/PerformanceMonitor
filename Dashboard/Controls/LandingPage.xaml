@@ -74,7 +74,9 @@
                     <DataTemplate>
                         <local:ServerHealthCard Width="300"
                                                 Height="220"
-                                                CardClicked="ServerHealthCard_CardClicked"/>
+                                                CardClicked="ServerHealthCard_CardClicked"
+                                                EditServerRequested="ServerHealthCard_EditServerRequested"
+                                                CheckVersionRequested="ServerHealthCard_CheckVersionRequested"/>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>

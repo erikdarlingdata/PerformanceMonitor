@@ -81,6 +81,12 @@ namespace PerformanceMonitorDashboard.Models
         public int? UtcOffsetMinutes { get; set; }
 
         /// <summary>
+        /// The installed PerformanceMonitor version on the server (e.g., "2.5.0").
+        /// Null if the PerformanceMonitor database is not installed.
+        /// </summary>
+        public string? InstalledMonitorVersion { get; set; }
+
+        /// <summary>
         /// Gets the status display text for the UI.
         /// </summary>
         public string StatusText

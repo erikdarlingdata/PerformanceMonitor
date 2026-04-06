@@ -100,12 +100,13 @@ namespace PerformanceMonitorInstaller
                 }
             }
 
-            /*Parse encryption option (default: Mandatory)*/
-            var encryptArg = args.FirstOrDefault(a => a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase));
+            /*Parse encryption option (default: Mandatory)
+              Supports both --encrypt=optional and --encrypt optional */
             string encryptionLevel = "Mandatory";
-            if (encryptArg != null)
+            var encryptEqualsArg = args.FirstOrDefault(a => a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase));
+            if (encryptEqualsArg != null)
             {
-                string encryptValue = encryptArg.Substring("--encrypt=".Length).ToLowerInvariant();
+                string encryptValue = encryptEqualsArg.Substring("--encrypt=".Length).ToLowerInvariant();
                 encryptionLevel = encryptValue switch
                 {
                     "optional" => "Optional",
@@ -113,21 +114,38 @@ namespace PerformanceMonitorInstaller
                     _ => "Mandatory"
                 };
             }
-
-            /*Filter out option flags and --entra <email> to get positional arguments*/
-            var filteredArgsList = args
-                .Where(a => !a.Equals("--reinstall", StringComparison.OrdinalIgnoreCase))
-                .Where(a => !a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase))
-                .Where(a => !a.Equals("--reset-schedule", StringComparison.OrdinalIgnoreCase))
-                .Where(a => !a.Equals("--trust-cert", StringComparison.OrdinalIgnoreCase))
-                .Where(a => !a.StartsWith("--encrypt=", StringComparison.OrdinalIgnoreCase))
-                .Where(a => !a.Equals("--entra", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            /*Remove the entra email from positional args if present*/
-            if (entraEmail != null)
+            else
             {
-                filteredArgsList.Remove(entraEmail);
+                int encryptIndex = Array.FindIndex(args, a => a.Equals("--encrypt", StringComparison.OrdinalIgnoreCase));
+                if (encryptIndex >= 0 && encryptIndex + 1 < args.Length && !args[encryptIndex + 1].StartsWith("--", StringComparison.Ordinal))
+                {
+                    encryptionLevel = args[encryptIndex + 1].ToLowerInvariant() switch
+                    {
+                        "optional" => "Optional",
+                        "strict" => "Strict",
+                        _ => "Mandatory"
+                    };
+                }
+            }
+
+            /*Filter out all --flags and their trailing values to get positional arguments
+              (server, username, password). Flags like --entra <email> and --encrypt <level>
+              have a following value that must also be removed.*/
+            var filteredArgsList = new List<string>();
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i].StartsWith("--", StringComparison.Ordinal))
+                {
+                    /*Skip flags that take a trailing value (--entra <email>, --encrypt <level>)*/
+                    if ((args[i].Equals("--entra", StringComparison.OrdinalIgnoreCase)
+                        || args[i].Equals("--encrypt", StringComparison.OrdinalIgnoreCase))
+                        && i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                    {
+                        i++; /*skip the value too*/
+                    }
+                    continue;
+                }
+                filteredArgsList.Add(args[i]);
             }
 
             var filteredArgs = filteredArgsList.ToArray();
@@ -230,6 +248,24 @@ namespace PerformanceMonitorInstaller
                     WaitForExit();
                     return (int)InstallationResultCode.InvalidArguments;
                 }
+
+                Console.Write("Trust server certificate? (Y/N, default Y): ");
+                string? trustResponse = Console.ReadLine()?.Trim();
+                trustCert = string.IsNullOrWhiteSpace(trustResponse)
+                    || trustResponse.Equals("Y", StringComparison.OrdinalIgnoreCase);
+
+                Console.WriteLine("Encryption level:");
+                Console.WriteLine("  [O] Optional (default)");
+                Console.WriteLine("  [M] Mandatory");
+                Console.WriteLine("  [S] Strict");
+                Console.Write("Choice (O/M/S, default O): ");
+                string? encryptResponse = Console.ReadLine()?.Trim();
+                encryptionLevel = encryptResponse?.ToUpperInvariant() switch
+                {
+                    "M" => "Mandatory",
+                    "S" => "Strict",
+                    _ => "Optional"
+                };
 
                 Console.WriteLine("Authentication type:");
                 Console.WriteLine("  [W] Windows Authentication (default)");

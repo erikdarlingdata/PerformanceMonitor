@@ -56,3 +56,6 @@ nul
 Lite/config/servers.json
 Lite/servers.json
 Lite/collection_schedule.json
+
+# Plans directory
+plans/

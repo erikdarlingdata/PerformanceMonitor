@@ -1841,30 +1841,42 @@ OPTION(MAXDOP 1, RECOMPILE);";
 
                 if (edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
                 {
-                    var hasDatabaseId = false;
-                    using (var colCheck = new SqlCommand(
-                        "SELECT COL_LENGTH('sys.dm_db_persisted_sku_features', 'database_id')", connection))
-                    {
-                        colCheck.CommandTimeout = 10;
-                        hasDatabaseId = await colCheck.ExecuteScalarAsync() is not null and not DBNull;
-                    }
+                    /*
+                    sys.dm_db_persisted_sku_features is database-scoped on all versions.
+                    Query across all online user databases for TDE usage — the only feature
+                    still Enterprise-only since 2016 SP1 (Compression, Partitioning,
+                    ColumnStoreIndex are all available in Standard).
+                    */
+                    using var featCmd = new SqlCommand(@"
+DECLARE
+    @sql nvarchar(max) = N'';
 
-                    var featSql = hasDatabaseId
-                        ? "SELECT DB_NAME(database_id) AS database_name, feature_name FROM sys.dm_db_persisted_sku_features"
-                        : "SELECT N'(unknown)' AS database_name, feature_name FROM sys.dm_db_persisted_sku_features";
-                    using var featCmd = new SqlCommand(featSql, connection);
+SELECT
+    @sql += N'
+SELECT ' + QUOTENAME(name, '''') + N' AS database_name
+FROM ' + QUOTENAME(name) + N'.sys.dm_db_persisted_sku_features
+WHERE feature_name = N''TransparentDataEncryption''
+UNION ALL'
+FROM sys.databases
+WHERE database_id > 4
+AND   state_desc = N'ONLINE';
+
+IF @sql <> N''
+BEGIN
+    SET @sql = LEFT(@sql, LEN(@sql) - 10);
+    EXEC sys.sp_executesql @sql;
+END;", connection);
                     featCmd.CommandTimeout = 30;
 
-                    var features = new List<string>();
+                    var tdeDbNames = new List<string>();
                     using var featReader = await featCmd.ExecuteReaderAsync();
                     while (await featReader.ReadAsync())
                     {
-                        var db = featReader.IsDBNull(0) ? "" : featReader.GetString(0);
-                        var feat = featReader.IsDBNull(1) ? "" : featReader.GetString(1);
-                        features.Add($"{db}: {feat}");
+                        if (!featReader.IsDBNull(0))
+                            tdeDbNames.Add(featReader.GetString(0));
                     }
 
-                    if (features.Count == 0)
+                    if (tdeDbNames.Count == 0)
                     {
                         recommendations.Add(new FinOpsRecommendation
                         {
@@ -1872,23 +1884,23 @@ OPTION(MAXDOP 1, RECOMPILE);";
                             Severity = "High",
                             Confidence = "High",
                             Finding = "Enterprise Edition with no Enterprise-only features detected",
-                            Detail = "sys.dm_db_persisted_sku_features reports no Enterprise-only feature usage. " +
+                            Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
+                                     "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
                                      "Review whether Standard Edition would meet workload requirements for potential license savings.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
                         });
                     }
                     else
                     {
-                        // Check 8: Enterprise feature detail report — list what blocks a downgrade
                         recommendations.Add(new FinOpsRecommendation
                         {
                             Category = "Licensing",
                             Severity = "Low",
                             Confidence = "High",
-                            Finding = "Enterprise features in use — downgrade blockers identified",
-                            Detail = $"The following databases use Enterprise-only features: {string.Join("; ", features.Take(20))}" +
-                                     (features.Count > 20 ? $" and {features.Count - 20} more" : "") +
-                                     ". Address these before considering a Standard Edition downgrade."
+                            Finding = "TDE in use — Enterprise Edition downgrade blocker",
+                            Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
+                                     (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
+                                     ". TDE must be removed before downgrading to Standard Edition."
                         });
 
                         // Check 10: License cost impact estimate (only when features ARE in use)

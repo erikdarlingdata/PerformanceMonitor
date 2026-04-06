@@ -313,6 +313,24 @@ namespace PerformanceMonitorDashboard
             return (connected, errorMessage, mfaCancelled, serverVersion);
         }
 
+        private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
+        {
+            if (!ValidateInputs()) return;
+
+            CheckForUpdatesButton.IsEnabled = false;
+            CheckForUpdatesButton.Content = "Checking...";
+
+            try
+            {
+                await DetectDatabaseStatusAsync();
+            }
+            finally
+            {
+                CheckForUpdatesButton.IsEnabled = true;
+                CheckForUpdatesButton.Content = "Check for Updates";
+            }
+        }
+
         private async void TestConnection_Click(object sender, RoutedEventArgs e)
         {
             if (!ValidateInputs()) return;
@@ -331,11 +349,8 @@ namespace PerformanceMonitorDashboard
                     MessageBoxImage.Information
                 );
 
-                /* After successful connection in Add mode, check database status */
-                if (!_isEditMode)
-                {
-                    await DetectDatabaseStatusAsync();
-                }
+                /* After successful connection, check database status */
+                await DetectDatabaseStatusAsync();
             }
             else if (mfaCancelled)
             {

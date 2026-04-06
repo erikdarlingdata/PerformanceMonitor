@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Installer.Core;
 using Installer.Core.Models;
 using Installer.Tests.Helpers;
@@ -145,5 +146,39 @@ public class UpgradeOrderingTests
 
         Assert.Equal(2, upgrades.Count);
         Assert.DoesNotContain(upgrades, u => u.FolderName == "2.2.0-to-2.3.0");
+    }
+
+    [Fact]
+    public void EmbeddedResources_FindsUpgradeFolders()
+    {
+        // Regression test for #772: MSBuild mangles embedded resource names
+        // (e.g., "2.2.0-to-2.3.0" → "_2._2._0_to_2._3._0"), which broke
+        // upgrade discovery when using Split('.')[0].
+        var provider = ScriptProvider.FromEmbeddedResources();
+        var upgrades = provider.GetApplicableUpgrades("2.2.0", "2.5.0");
+
+        Assert.NotEmpty(upgrades);
+        Assert.Contains(upgrades, u => u.FolderName == "2.2.0-to-2.3.0");
+    }
+
+    [Theory]
+    [InlineData("_2._2._0_to_2._3._0.upgrade.txt", "_2._2._0_to_2._3._0")]
+    [InlineData("_2._2._0_to_2._3._0.03_add_growth_vlf_columns.sql", "_2._2._0_to_2._3._0")]
+    [InlineData("_10._1._0_to_10._2._0.01_schema.sql", "_10._1._0_to_10._2._0")]
+    public void EmbeddedUpgradeFolderPattern_ExtractsMangledName(string resourceSuffix, string expectedMangled)
+    {
+        var match = Patterns.EmbeddedUpgradeFolderPattern().Match(resourceSuffix);
+
+        Assert.True(match.Success);
+        Assert.Equal(expectedMangled, match.Groups[1].Value);
+    }
+
+    [Theory]
+    [InlineData("not-a-version")]
+    [InlineData("readme.txt")]
+    [InlineData("README.md")]
+    public void EmbeddedUpgradeFolderPattern_RejectsNonVersionStrings(string input)
+    {
+        Assert.False(Patterns.EmbeddedUpgradeFolderPattern().Match(input).Success);
     }
 }
