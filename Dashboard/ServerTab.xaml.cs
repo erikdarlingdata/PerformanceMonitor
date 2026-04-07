@@ -157,6 +157,7 @@ namespace PerformanceMonitorDashboard
             {
                 SetDrillDownGlobalRange(from, to);
             };
+            PerformanceTab.SubTabChanged += () => UpdateCompareDropdownState();
             SystemEventsContent.Initialize(_databaseService);
             var baselineProvider = new Analysis.SqlServerBaselineProvider(_databaseService.ConnectionString);
             ResourceMetricsContent.Initialize(_databaseService, baselineProvider);
@@ -1639,6 +1640,8 @@ namespace PerformanceMonitorDashboard
             // Only handle events from the main DataTabControl, not from nested sub-tab controls
             if (e.Source != DataTabControl) return;
 
+            UpdateCompareDropdownState();
+
             // Don't refresh during initial load or if already refreshing
             if (_isRefreshing || !IsLoaded) return;
 
@@ -1677,6 +1680,76 @@ namespace PerformanceMonitorDashboard
             scheduleWindow.Owner = Window.GetWindow(this);
             scheduleWindow.ShowDialog();
         }
+
+        #region Global Compare Dropdown
+
+        private async void CompareToCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!IsLoaded || _isRefreshing) return;
+
+            var comparisonRange = GetComparisonRange();
+
+            try
+            {
+                // Feed comparison to Resource Metrics (Server Trends overlay)
+                await ResourceMetricsContent.SetComparisonRangeAsync(comparisonRange);
+
+                // Feed comparison to Query Performance grids
+                PerformanceTab.SetComparisonRange(comparisonRange);
+                await PerformanceTab.RefreshComparisonAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Comparison refresh failed: {ex.Message}", ex);
+            }
+        }
+
+        private (DateTime From, DateTime To)? GetComparisonRange()
+        {
+            if (CompareToCombo == null || CompareToCombo.SelectedIndex <= 0) return null;
+
+            var currentEnd = _globalToDate ?? DateTime.UtcNow;
+            var currentStart = _globalFromDate ?? currentEnd.AddHours(-_globalHoursBack);
+
+            return CompareToCombo.SelectedIndex switch
+            {
+                1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1)),   // Yesterday
+                2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Last week
+                3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Same day last week
+                _ => null
+            };
+        }
+
+        private bool IsComparisonSupportedOnCurrentTab()
+        {
+            return DataTabControl.SelectedIndex switch
+            {
+                1 => PerformanceTab.SubTabControl.SelectedIndex is 3 or 4 or 5, // Query Stats / Proc Stats / Query Store
+                3 => true, // Resource Metrics — Server Trends overlay
+                _ => false
+            };
+        }
+
+        private void UpdateCompareDropdownState()
+        {
+            var supported = IsComparisonSupportedOnCurrentTab();
+
+            if (supported)
+            {
+                CompareToCombo.IsEnabled = true;
+                CompareToCombo.Opacity = 1.0;
+                CompareToCombo.ToolTip = "Compare current period against a baseline";
+            }
+            else
+            {
+                CompareToCombo.SelectedIndex = 0;
+                CompareToCombo.IsEnabled = false;
+                CompareToCombo.Opacity = 0.5;
+                CompareToCombo.ToolTip = "Comparison is not available for this tab";
+            }
+        }
+
+        #endregion
 
         private void TimeDisplayMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {

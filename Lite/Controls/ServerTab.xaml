@@ -107,7 +107,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <ComboBox x:Name="CompareToCombo" SelectedIndex="0" Width="130" Margin="0,0,8,0"
                               SelectionChanged="CompareToCombo_SelectionChanged"
-                              ToolTip="Overlay a reference period on the Overview charts">
+                              ToolTip="Compare current period against a baseline">
                         <ComboBoxItem Content="None"/>
                         <ComboBoxItem Content="Yesterday"/>
                         <ComboBoxItem Content="Last week"/>
@@ -349,10 +349,15 @@
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0"/>
-                            <DataGrid Grid.Row="1" x:Name="QueryStatsGrid"
+                                <TextBlock x:Name="QueryStatsComparisonBanner" Grid.Row="1" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#2244AAFF"/>
+                            <DataGrid Grid.Row="2" x:Name="QueryStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -477,16 +482,129 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            <DataGrid Grid.Row="2" x:Name="QueryStatsComparisonGrid" Visibility="Collapsed"
+                                      AutoGenerateColumns="False" IsReadOnly="True"
+                                      RowStyle="{StaticResource GridRowStyle}"
+                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                      CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Binding="{Binding StatusBadge}" Width="55">
+                                        <DataGridTextColumn.Header><TextBlock Text="" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                <Setter Property="HorizontalAlignment" Value="Center"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsNew}" Value="True">
+                                                        <Setter Property="Foreground" Value="#FF6B6B"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsGone}" Value="True">
+                                                        <Setter Property="Foreground" Value="#888888"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
+                                        <DataGridTextColumn.Header><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                                        <DataGridTextColumn.Header><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Execs" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Exec &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                                <Setter Property="Padding" Value="0,0,5,0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                <Setter Property="Foreground" Value="{Binding ExecutionDeltaBrush}"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Dur &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                                <Setter Property="Padding" Value="0,0,5,0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                <Setter Property="Foreground" Value="{Binding DurationDeltaBrush}"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="95">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="CPU &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                                <Setter Property="Padding" Value="0,0,5,0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                <Setter Property="Foreground" Value="{Binding CpuDeltaBrush}"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="85">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg Reads" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Reads" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Reads &#x0394;" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                                <Setter Property="Padding" Value="0,0,5,0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                <Setter Property="Foreground" Value="{Binding ReadsDeltaBrush}"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding QueryHash}" Width="140">
+                                        <DataGridTextColumn.Header><TextBlock Text="Query Hash" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn Width="500">
+                                        <DataGridTemplateColumn.Header><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                           ToolTip="{Binding QueryText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
                             </Grid>
                         </TabItem>
                         <TabItem Header="Top Procedures by Duration">
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="ProcStatsSlicer" Grid.Row="0"/>
-                            <DataGrid Grid.Row="1" x:Name="ProcedureStatsGrid"
+                                <TextBlock x:Name="ProcStatsComparisonBanner" Grid.Row="1" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#2244AAFF"/>
+                            <DataGrid Grid.Row="2" x:Name="ProcedureStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -590,16 +708,88 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
+                            <DataGrid Grid.Row="2" x:Name="ProcStatsComparisonGrid" Visibility="Collapsed"
+                                      AutoGenerateColumns="False" IsReadOnly="True"
+                                      RowStyle="{StaticResource GridRowStyle}"
+                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                      CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Binding="{Binding StatusBadge}" Width="55">
+                                        <DataGridTextColumn.Header><TextBlock Text="" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                <Setter Property="HorizontalAlignment" Value="Center"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsNew}" Value="True"><Setter Property="Foreground" Value="#FF6B6B"/></DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsGone}" Value="True"><Setter Property="Foreground" Value="#888888"/></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
+                                        <DataGridTextColumn.Header><TextBlock Text="Database" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding FullName}" Width="200">
+                                        <DataGridTextColumn.Header><TextBlock Text="Procedure" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                                        <DataGridTextColumn.Header><TextBlock Text="Executions" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Execs" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Exec &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ExecutionDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg Dur (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Dur (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Dur &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding DurationDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="95">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg CPU (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base CPU (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="CPU &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding CpuDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="85">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg Reads" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Reads" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Reads &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ReadsDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
                             </Grid>
                         </TabItem>
                         <TabItem Header="Query Store by Duration">
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="QueryStoreSlicer" Grid.Row="0"/>
-                            <DataGrid Grid.Row="1" x:Name="QueryStoreGrid"
+                                <TextBlock x:Name="QueryStoreComparisonBanner" Grid.Row="1" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#2244AAFF"/>
+                            <DataGrid Grid.Row="2" x:Name="QueryStoreGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -698,6 +888,82 @@
                                     <DataGridTemplateColumn Width="500">
                                         <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                                                                 <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                           ToolTip="{Binding QueryText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <DataGrid Grid.Row="2" x:Name="QueryStoreComparisonGrid" Visibility="Collapsed"
+                                      AutoGenerateColumns="False" IsReadOnly="True"
+                                      RowStyle="{StaticResource GridRowStyle}"
+                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                      CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Binding="{Binding StatusBadge}" Width="55">
+                                        <DataGridTextColumn.Header><TextBlock Text="" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                <Setter Property="HorizontalAlignment" Value="Center"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsNew}" Value="True"><Setter Property="Foreground" Value="#FF6B6B"/></DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsGone}" Value="True"><Setter Property="Foreground" Value="#888888"/></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
+                                        <DataGridTextColumn.Header><TextBlock Text="Database" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                                        <DataGridTextColumn.Header><TextBlock Text="Executions" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineExecutionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Execs" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ExecutionDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Exec &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ExecutionDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg Dur (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Dur (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding DurationDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Dur &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding DurationDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="95">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg CPU (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base CPU (ms)" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CpuDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="CPU &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding CpuDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="85">
+                                        <DataGridTextColumn.Header><TextBlock Text="Avg Reads" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAvgReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95">
+                                        <DataGridTextColumn.Header><TextBlock Text="Base Reads" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ReadsDeltaDisplay}" Width="80">
+                                        <DataGridTextColumn.Header><TextBlock Text="Reads &#x0394;" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="Padding" Value="0,0,5,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{Binding ReadsDeltaBrush}"/></Style></DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding QueryHash}" Width="140">
+                                        <DataGridTextColumn.Header><TextBlock Text="Query Hash" FontWeight="Bold"/></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn Width="500">
+                                        <DataGridTemplateColumn.Header><TextBlock Text="Query Text" FontWeight="Bold"/></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>

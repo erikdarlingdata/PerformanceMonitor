@@ -189,6 +189,19 @@ public class CollectionLogRow
 
 public class CollectorHealthRow
 {
+    /// <summary>
+    /// On-load collectors run once per tab open, not on the scheduled loop.
+    /// Staleness thresholds don't apply to them.
+    /// </summary>
+    private static readonly HashSet<string> OnLoadCollectors = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "server_config",
+        "database_config",
+        "database_scoped_config",
+        "trace_flags",
+        "server_properties"
+    };
+
     public string CollectorName { get; set; } = "";
     public long TotalRuns { get; set; }
     public long SuccessCount { get; set; }
@@ -211,6 +224,11 @@ public class CollectorHealthRow
         {
             if (TotalRuns == 0) return "NEVER_RUN";
             if (PermissionDeniedCount > 0 && ErrorCount == 0 && SuccessCount == 0) return "NO_PERMISSIONS";
+            if (OnLoadCollectors.Contains(CollectorName))
+            {
+                if (FailureRatePercent > 20) return "WARNING";
+                return "HEALTHY";
+            }
             if (HoursSinceLastSuccess > 24) return "FAILING";
             if (HoursSinceLastSuccess > 4) return "STALE";
             if (FailureRatePercent > 20) return "WARNING";

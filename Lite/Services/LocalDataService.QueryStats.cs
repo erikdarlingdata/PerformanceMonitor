@@ -185,6 +185,122 @@ LIMIT $4";
     }
 
     /// <summary>
+    /// Gets query stats comparison between a current time range and a baseline range.
+    /// Returns delta percentages for duration, CPU, reads, and execution count.
+    /// </summary>
+    public async Task<List<Models.QueryStatsComparisonItem>> GetQueryStatsComparisonAsync(
+        int serverId,
+        DateTime currentStart, DateTime currentEnd,
+        DateTime baselineStart, DateTime baselineEnd)
+    {
+        using var _q = TimeQuery("GetQueryStatsComparisonAsync", "v_query_stats comparison");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+WITH top_current AS (
+    SELECT query_hash, database_name
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 AND collection_time <= $3
+    AND   delta_execution_count > 0
+    GROUP BY query_hash, database_name
+    ORDER BY SUM(delta_execution_count) DESC
+    LIMIT 100
+),
+top_baseline AS (
+    SELECT query_hash, database_name
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4 AND collection_time <= $5
+    AND   delta_execution_count > 0
+    GROUP BY query_hash, database_name
+    ORDER BY SUM(delta_execution_count) DESC
+    LIMIT 100
+),
+top_hashes AS (
+    SELECT DISTINCT query_hash, database_name
+    FROM (
+        SELECT * FROM top_current
+        UNION ALL
+        SELECT * FROM top_baseline
+    ) combined
+),
+current_period AS (
+    SELECT th.database_name, th.query_hash,
+           SUM(qs.delta_execution_count) AS exec_count,
+           SUM(qs.delta_elapsed_time)::DOUBLE / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+           SUM(qs.delta_worker_time)::DOUBLE / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+           SUM(qs.delta_physical_reads)::DOUBLE / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+           MAX(qs.query_text) AS query_text
+    FROM top_hashes th
+    INNER JOIN v_query_stats qs
+      ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+      AND qs.database_name IS NOT DISTINCT FROM th.database_name
+    WHERE qs.server_id = $1
+    AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+    AND   qs.delta_execution_count > 0
+    GROUP BY th.database_name, th.query_hash
+),
+baseline_period AS (
+    SELECT th.database_name, th.query_hash,
+           SUM(qs.delta_execution_count) AS exec_count,
+           SUM(qs.delta_elapsed_time)::DOUBLE / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+           SUM(qs.delta_worker_time)::DOUBLE / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+           SUM(qs.delta_physical_reads)::DOUBLE / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+           MAX(qs.query_text) AS query_text
+    FROM top_hashes th
+    INNER JOIN v_query_stats qs
+      ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+      AND qs.database_name IS NOT DISTINCT FROM th.database_name
+    WHERE qs.server_id = $1
+    AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+    AND   qs.delta_execution_count > 0
+    GROUP BY th.database_name, th.query_hash
+)
+SELECT COALESCE(c.database_name, b.database_name) AS database_name,
+       COALESCE(c.query_hash, b.query_hash) AS query_hash,
+       COALESCE(c.query_text, b.query_text) AS query_text,
+       c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
+       b.exec_count AS baseline_exec_count,
+       b.avg_duration_ms AS baseline_avg_duration_ms,
+       b.avg_cpu_ms AS baseline_avg_cpu_ms,
+       b.avg_reads AS baseline_avg_reads
+FROM current_period c
+FULL OUTER JOIN baseline_period b
+  ON  c.database_name IS NOT DISTINCT FROM b.database_name
+  AND c.query_hash IS NOT DISTINCT FROM b.query_hash;";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = currentStart });
+        command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineStart });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineEnd });
+
+        var items = new List<Models.QueryStatsComparisonItem>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new Models.QueryStatsComparisonItem
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                QueryHash = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                ExecutionCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                AvgDurationMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                AvgCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                AvgReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
+                BaselineExecutionCount = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
+                BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
+                BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
+                BaselineAvgReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Gets collection-level history for a specific query hash (for drilldown).
     /// </summary>
     public async Task<List<QueryStatsHistoryRow>> GetQueryStatsHistoryAsync(int serverId, string databaseName, string queryHash, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
@@ -574,6 +690,123 @@ LIMIT $4";
 
         return items;
     }
+
+    /// <summary>
+    /// Gets procedure stats comparison between a current time range and a baseline range.
+    /// </summary>
+    public async Task<List<Models.ProcedureStatsComparisonItem>> GetProcedureStatsComparisonAsync(
+        int serverId,
+        DateTime currentStart, DateTime currentEnd,
+        DateTime baselineStart, DateTime baselineEnd)
+    {
+        using var _q = TimeQuery("GetProcedureStatsComparisonAsync", "v_procedure_stats comparison");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+WITH top_current AS (
+    SELECT database_name, schema_name, object_name
+    FROM v_procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 AND collection_time <= $3
+    AND   delta_execution_count > 0
+    GROUP BY database_name, schema_name, object_name
+    ORDER BY SUM(delta_execution_count) DESC
+    LIMIT 100
+),
+top_baseline AS (
+    SELECT database_name, schema_name, object_name
+    FROM v_procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4 AND collection_time <= $5
+    AND   delta_execution_count > 0
+    GROUP BY database_name, schema_name, object_name
+    ORDER BY SUM(delta_execution_count) DESC
+    LIMIT 100
+),
+top_procs AS (
+    SELECT DISTINCT database_name, schema_name, object_name
+    FROM (
+        SELECT * FROM top_current
+        UNION ALL
+        SELECT * FROM top_baseline
+    ) combined
+),
+current_period AS (
+    SELECT tp.database_name, tp.schema_name, tp.object_name,
+           SUM(ps.delta_execution_count) AS exec_count,
+           SUM(ps.delta_elapsed_time)::DOUBLE / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+           SUM(ps.delta_worker_time)::DOUBLE / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+           SUM(ps.delta_physical_reads)::DOUBLE / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads
+    FROM top_procs tp
+    INNER JOIN v_procedure_stats ps
+      ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
+      AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
+      AND ps.object_name IS NOT DISTINCT FROM tp.object_name
+    WHERE ps.server_id = $1
+    AND   ps.collection_time >= $2 AND ps.collection_time <= $3
+    AND   ps.delta_execution_count > 0
+    GROUP BY tp.database_name, tp.schema_name, tp.object_name
+),
+baseline_period AS (
+    SELECT tp.database_name, tp.schema_name, tp.object_name,
+           SUM(ps.delta_execution_count) AS exec_count,
+           SUM(ps.delta_elapsed_time)::DOUBLE / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+           SUM(ps.delta_worker_time)::DOUBLE / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+           SUM(ps.delta_physical_reads)::DOUBLE / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads
+    FROM top_procs tp
+    INNER JOIN v_procedure_stats ps
+      ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
+      AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
+      AND ps.object_name IS NOT DISTINCT FROM tp.object_name
+    WHERE ps.server_id = $1
+    AND   ps.collection_time >= $4 AND ps.collection_time <= $5
+    AND   ps.delta_execution_count > 0
+    GROUP BY tp.database_name, tp.schema_name, tp.object_name
+)
+SELECT COALESCE(c.database_name, b.database_name) AS database_name,
+       COALESCE(c.schema_name, b.schema_name) AS schema_name,
+       COALESCE(c.object_name, b.object_name) AS object_name,
+       c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
+       b.exec_count AS baseline_exec_count,
+       b.avg_duration_ms AS baseline_avg_duration_ms,
+       b.avg_cpu_ms AS baseline_avg_cpu_ms,
+       b.avg_reads AS baseline_avg_reads
+FROM current_period c
+FULL OUTER JOIN baseline_period b
+  ON  c.database_name IS NOT DISTINCT FROM b.database_name
+  AND c.schema_name IS NOT DISTINCT FROM b.schema_name
+  AND c.object_name IS NOT DISTINCT FROM b.object_name;";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = currentStart });
+        command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineStart });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineEnd });
+
+        var items = new List<Models.ProcedureStatsComparisonItem>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new Models.ProcedureStatsComparisonItem
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ObjectName = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                ExecutionCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                AvgDurationMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                AvgCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                AvgReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
+                BaselineExecutionCount = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
+                BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
+                BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
+                BaselineAvgReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+            });
+        }
+
+        return items;
+    }
+
     /// <summary>
     /// Gets query duration trend — total elapsed time per collection snapshot.
     /// </summary>

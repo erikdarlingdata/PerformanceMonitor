@@ -1025,33 +1025,15 @@ namespace PerformanceMonitorDashboard.Controls
 
         #region Server Trends Tab
 
-        private async void CompareToCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (!IsLoaded) return;
-            ComparisonRange = GetComparisonRange();
-            await RefreshServerTrendsAsync();
-        }
-
         private (DateTime From, DateTime To)? ComparisonRange { get; set; }
 
         /// <summary>
-        /// Computes the reference time range for the comparison overlay.
-        /// Returns null if "None" is selected.
+        /// Sets the comparison range from the global Compare dropdown and refreshes Server Trends.
         /// </summary>
-        private (DateTime From, DateTime To)? GetComparisonRange()
+        public async Task SetComparisonRangeAsync((DateTime From, DateTime To)? range)
         {
-            if (CompareToCombo == null || CompareToCombo.SelectedIndex <= 0) return null;
-
-            var currentEnd = _serverTrendsToDate ?? DateTime.UtcNow;
-            var currentStart = _serverTrendsFromDate ?? currentEnd.AddHours(-_serverTrendsHoursBack);
-
-            return CompareToCombo.SelectedIndex switch
-            {
-                1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1)),   // Yesterday
-                2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Last week
-                3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Same day last week
-                _ => null
-            };
+            ComparisonRange = range;
+            await RefreshServerTrendsAsync();
         }
 
         private async Task RefreshServerTrendsAsync()

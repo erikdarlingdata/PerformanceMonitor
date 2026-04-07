@@ -636,6 +636,20 @@ public partial class ServerTab : UserControl
         }
 
         await RefreshOverviewAsync(hoursBack, fromDate, toDate);
+
+        // Also refresh comparison grids
+        try
+        {
+            var currentEnd = toDate ?? DateTime.UtcNow;
+            var currentStart = fromDate ?? currentEnd.AddHours(-hoursBack);
+            await RefreshQueryStatsComparisonAsync(currentStart, currentEnd);
+            await RefreshProcStatsComparisonAsync(currentStart, currentEnd);
+            await RefreshQueryStoreComparisonAsync(currentStart, currentEnd);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Comparison refresh failed: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -960,12 +974,27 @@ public partial class ServerTab : UserControl
         LiveSnapshotIndicator.Text = "";
         _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        {
+            var cEnd = toDate ?? DateTime.UtcNow;
+            var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
+            await RefreshQueryStatsComparisonAsync(cStart, cEnd);
+        }
         _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        {
+            var cEnd2 = toDate ?? DateTime.UtcNow;
+            var cStart2 = fromDate ?? cEnd2.AddHours(-hoursBack);
+            await RefreshProcStatsComparisonAsync(cStart2, cEnd2);
+        }
         _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
         _deadlockFilterMgr!.UpdateData(DeadlockProcessDetail.ParseFromRows(deadlockTask.Result));
         _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+        {
+            var cEnd3 = toDate ?? DateTime.UtcNow;
+            var cStart3 = fromDate ?? cEnd3.AddHours(-hoursBack);
+            await RefreshQueryStoreComparisonAsync(cStart3, cEnd3);
+        }
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
@@ -1076,18 +1105,33 @@ public partial class ServerTab : UserControl
                         _queryStatsFilterMgr!.UpdateData(queryStats);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadQueryStatsSlicerAsync();
+                        {
+                            var cEnd = toDate ?? DateTime.UtcNow;
+                            var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
+                            await RefreshQueryStatsComparisonAsync(cStart, cEnd);
+                        }
                         break;
                     case 3: // Top Procedures by Duration
                         var procStats = await _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes);
                         _procStatsFilterMgr!.UpdateData(procStats);
                         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadProcStatsSlicerAsync();
+                        {
+                            var cEnd = toDate ?? DateTime.UtcNow;
+                            var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
+                            await RefreshProcStatsComparisonAsync(cStart, cEnd);
+                        }
                         break;
                     case 4: // Query Store by Duration
                         var qsData = await _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate);
                         _queryStoreFilterMgr!.UpdateData(qsData);
                         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
                         _ = LoadQueryStoreSlicerAsync();
+                        {
+                            var cEnd = toDate ?? DateTime.UtcNow;
+                            var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
+                            await RefreshQueryStoreComparisonAsync(cStart, cEnd);
+                        }
                         break;
                     case 5: // Query Heatmap
                         var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
@@ -1127,12 +1171,27 @@ public partial class ServerTab : UserControl
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _ = LoadQueryStatsSlicerAsync();
+            {
+                var cEnd = toDate ?? DateTime.UtcNow;
+                var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
+                await RefreshQueryStatsComparisonAsync(cStart, cEnd);
+            }
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
             SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _ = LoadProcStatsSlicerAsync();
+            {
+                var cEnd2 = toDate ?? DateTime.UtcNow;
+                var cStart2 = fromDate ?? cEnd2.AddHours(-hoursBack);
+                await RefreshProcStatsComparisonAsync(cStart2, cEnd2);
+            }
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
             SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
             _ = LoadQueryStoreSlicerAsync();
+            {
+                var cEnd3 = toDate ?? DateTime.UtcNow;
+                var cStart3 = fromDate ?? cEnd3.AddHours(-hoursBack);
+                await RefreshQueryStoreComparisonAsync(cStart3, cEnd3);
+            }
 
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result);
@@ -1144,6 +1203,120 @@ public partial class ServerTab : UserControl
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshQueriesAsync failed: {ex.Message}");
         }
+    }
+
+    private bool IsQueryStatsComparisonActive => GetComparisonRange() != null;
+
+    private void SetQueryStatsComparisonMode(bool active, (DateTime From, DateTime To)? baselineRange = null)
+    {
+        QueryStatsGrid.Visibility = active ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+        QueryStatsComparisonGrid.Visibility = active ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        QueryStatsComparisonBanner.Visibility = active ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+
+        if (active && baselineRange.HasValue)
+        {
+            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
+            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
+            QueryStatsComparisonBanner.Text = $"Comparing against baseline: {from} \u2192 {to}";
+        }
+    }
+
+    private async System.Threading.Tasks.Task RefreshQueryStatsComparisonAsync(DateTime currentStart, DateTime currentEnd)
+    {
+        var baselineRange = GetComparisonRange();
+        if (baselineRange == null)
+        {
+            SetQueryStatsComparisonMode(false);
+            return;
+        }
+
+        SetQueryStatsComparisonMode(true, baselineRange);
+
+        var items = await _dataService.GetQueryStatsComparisonAsync(
+            _serverId, currentStart, currentEnd,
+            baselineRange.Value.From, baselineRange.Value.To);
+
+        // Sort: NEW first, then by duration delta descending, GONE last
+        var sorted = items
+            .OrderBy(x => x.SortGroup)
+            .ThenByDescending(x => x.SortableDurationDelta)
+            .ToList();
+
+        QueryStatsComparisonGrid.ItemsSource = sorted;
+    }
+
+    private void SetProcStatsComparisonMode(bool active, (DateTime From, DateTime To)? baselineRange = null)
+    {
+        ProcedureStatsGrid.Visibility = active ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+        ProcStatsComparisonGrid.Visibility = active ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        ProcStatsComparisonBanner.Visibility = active ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+
+        if (active && baselineRange.HasValue)
+        {
+            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
+            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
+            ProcStatsComparisonBanner.Text = $"Comparing against baseline: {from} \u2192 {to}";
+        }
+    }
+
+    private async System.Threading.Tasks.Task RefreshProcStatsComparisonAsync(DateTime currentStart, DateTime currentEnd)
+    {
+        var baselineRange = GetComparisonRange();
+        if (baselineRange == null)
+        {
+            SetProcStatsComparisonMode(false);
+            return;
+        }
+
+        SetProcStatsComparisonMode(true, baselineRange);
+
+        var items = await _dataService.GetProcedureStatsComparisonAsync(
+            _serverId, currentStart, currentEnd,
+            baselineRange.Value.From, baselineRange.Value.To);
+
+        var sorted = items
+            .OrderBy(x => x.SortGroup)
+            .ThenByDescending(x => x.SortableDurationDelta)
+            .ToList();
+
+        ProcStatsComparisonGrid.ItemsSource = sorted;
+    }
+
+    private void SetQueryStoreComparisonMode(bool active, (DateTime From, DateTime To)? baselineRange = null)
+    {
+        QueryStoreGrid.Visibility = active ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+        QueryStoreComparisonGrid.Visibility = active ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        QueryStoreComparisonBanner.Visibility = active ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+
+        if (active && baselineRange.HasValue)
+        {
+            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
+            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
+            QueryStoreComparisonBanner.Text = $"Comparing against baseline: {from} \u2192 {to}";
+        }
+    }
+
+    private async System.Threading.Tasks.Task RefreshQueryStoreComparisonAsync(DateTime currentStart, DateTime currentEnd)
+    {
+        var baselineRange = GetComparisonRange();
+        if (baselineRange == null)
+        {
+            SetQueryStoreComparisonMode(false);
+            return;
+        }
+
+        SetQueryStoreComparisonMode(true, baselineRange);
+
+        var items = await _dataService.GetQueryStoreComparisonAsync(
+            _serverId, currentStart, currentEnd,
+            baselineRange.Value.From, baselineRange.Value.To);
+
+        var sorted = items
+            .OrderBy(x => x.SortGroup)
+            .ThenByDescending(x => x.SortableDurationDelta)
+            .ToList();
+
+        QueryStoreComparisonGrid.ItemsSource = sorted;
     }
 
     /// <summary>Tab 3 — CPU</summary>
@@ -1591,6 +1764,8 @@ public partial class ServerTab : UserControl
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
             && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl) return;
 
+        UpdateCompareDropdownState();
+
         var hoursBack = GetHoursBack();
         DateTime? fromDate = null, toDate = null;
         if (IsCustomRange)
@@ -1604,6 +1779,35 @@ public partial class ServerTab : UserControl
             }
         }
         await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true);
+    }
+
+    private bool IsComparisonSupportedOnCurrentTab()
+    {
+        return MainTabControl.SelectedIndex switch
+        {
+            0 => true, // Overview — correlated timeline lanes
+            2 => QueriesSubTabControl.SelectedIndex is 2 or 3 or 4, // Top Queries / Top Procedures / Query Store
+            _ => false
+        };
+    }
+
+    private void UpdateCompareDropdownState()
+    {
+        var supported = IsComparisonSupportedOnCurrentTab();
+
+        if (supported)
+        {
+            CompareToCombo.IsEnabled = true;
+            CompareToCombo.Opacity = 1.0;
+            CompareToCombo.ToolTip = "Compare current period against a baseline";
+        }
+        else
+        {
+            CompareToCombo.SelectedIndex = 0;
+            CompareToCombo.IsEnabled = false;
+            CompareToCombo.Opacity = 0.5;
+            CompareToCombo.ToolTip = "Comparison is not available for this tab";
+        }
     }
 
     /// <summary>
@@ -4681,6 +4885,7 @@ public partial class ServerTab : UserControl
             var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
             var queryStats = await _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes);
             _queryStatsFilterMgr!.UpdateData(queryStats);
+            await RefreshQueryStatsComparisonAsync(fromServer, toServer);
         }
         catch (Exception ex)
         {
@@ -4779,6 +4984,7 @@ public partial class ServerTab : UserControl
             var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
             var qsData = await _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, fromServer, toServer);
             _queryStoreFilterMgr!.UpdateData(qsData);
+            await RefreshQueryStoreComparisonAsync(fromServer, toServer);
         }
         catch (Exception ex)
         {
@@ -4875,6 +5081,7 @@ public partial class ServerTab : UserControl
             var toServer = ServerTimeHelper.ToServerTime(e.EndUtc);
             var procStats = await _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes);
             _procStatsFilterMgr!.UpdateData(procStats);
+            await RefreshProcStatsComparisonAsync(fromServer, toServer);
         }
         catch (Exception ex)
         {
