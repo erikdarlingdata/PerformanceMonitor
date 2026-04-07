@@ -47,16 +47,63 @@ public static partial class PlanAnalyzer
         {
             var reason = stmt.NonParallelPlanReason switch
             {
+                // User/config forced serial
                 "MaxDOPSetToOne" => "MAXDOP is set to 1",
-                "EstimatedDOPIsOne" => "Estimated DOP is 1 (the plan's estimated cost was below the cost threshold for parallelism)",
-                "NoParallelPlansInDesktopOrExpressEdition" => "Express/Desktop edition does not support parallelism",
-                "CouldNotGenerateValidParallelPlan" => "Optimizer could not generate a valid parallel plan. Common causes: scalar UDFs, inserts into table variables, certain system functions, or OPTION (MAXDOP 1) hints",
                 "QueryHintNoParallelSet" => "OPTION (MAXDOP 1) hint forces serial execution",
+                "ParallelismDisabledByTraceFlag" => "Parallelism disabled by trace flag",
+
+                // Passive — optimizer chose serial, nothing wrong
+                "EstimatedDOPIsOne" => "Estimated DOP is 1 (the plan's estimated cost was below the cost threshold for parallelism)",
+
+                // Edition/environment limitations
+                "NoParallelPlansInDesktopOrExpressEdition" => "Express/Desktop edition does not support parallelism",
+                "NoParallelCreateIndexInNonEnterpriseEdition" => "Parallel index creation requires Enterprise edition",
+                "NoParallelPlansDuringUpgrade" => "Parallel plans disabled during upgrade",
+                "NoParallelForPDWCompilation" => "Parallel plans not supported for PDW compilation",
+                "NoParallelForCloudDBReplication" => "Parallel plans not supported during cloud DB replication",
+
+                // Query constructs that block parallelism (actionable)
+                "CouldNotGenerateValidParallelPlan" => "Optimizer could not generate a valid parallel plan. Common causes: scalar UDFs, inserts into table variables, certain system functions, or OPTION (MAXDOP 1) hints",
+                "TSQLUserDefinedFunctionsNotParallelizable" => "T-SQL scalar UDF prevents parallelism. Rewrite as an inline table-valued function, or on SQL Server 2019+ check if the UDF is eligible for automatic inlining",
+                "CLRUserDefinedFunctionRequiresDataAccess" => "CLR UDF with data access prevents parallelism",
+                "NonParallelizableIntrinsicFunction" => "Non-parallelizable intrinsic function in the query",
+                "TableVariableTransactionsDoNotSupportParallelNestedTransaction" => "Table variable transaction prevents parallelism. Consider using a #temp table instead",
+                "UpdatingWritebackVariable" => "Updating a writeback variable prevents parallelism",
+                "DMLQueryReturnsOutputToClient" => "DML with OUTPUT clause returning results to client prevents parallelism",
+                "MixedSerialAndParallelOnlineIndexBuildNotSupported" => "Mixed serial/parallel online index build not supported",
+                "NoRangesResumableCreate" => "Resumable index create cannot use parallelism for this operation",
+
+                // Cursor limitations
+                "NoParallelCursorFetchByBookmark" => "Cursor fetch by bookmark cannot use parallelism",
+                "NoParallelDynamicCursor" => "Dynamic cursors cannot use parallelism",
+                "NoParallelFastForwardCursor" => "Fast-forward cursors cannot use parallelism",
+
+                // Memory-optimized / natively compiled
+                "NoParallelForMemoryOptimizedTables" => "Memory-optimized tables do not support parallel plans",
+                "NoParallelForDmlOnMemoryOptimizedTable" => "DML on memory-optimized tables cannot use parallelism",
+                "NoParallelForNativelyCompiledModule" => "Natively compiled modules do not support parallelism",
+
+                // Remote queries
+                "NoParallelWithRemoteQuery" => "Remote queries cannot use parallelism",
+                "NoRemoteParallelismForMatrix" => "Remote parallelism not available for this query shape",
+
                 _ => stmt.NonParallelPlanReason
             };
 
-            var isActionable = stmt.NonParallelPlanReason is "MaxDOPSetToOne"
-                or "QueryHintNoParallelSet" or "CouldNotGenerateValidParallelPlan";
+            var isActionable = stmt.NonParallelPlanReason is
+                "MaxDOPSetToOne" or "QueryHintNoParallelSet" or "ParallelismDisabledByTraceFlag"
+                or "CouldNotGenerateValidParallelPlan"
+                or "TSQLUserDefinedFunctionsNotParallelizable"
+                or "CLRUserDefinedFunctionRequiresDataAccess"
+                or "NonParallelizableIntrinsicFunction"
+                or "TableVariableTransactionsDoNotSupportParallelNestedTransaction"
+                or "UpdatingWritebackVariable"
+                or "DMLQueryReturnsOutputToClient"
+                or "NoParallelCursorFetchByBookmark"
+                or "NoParallelDynamicCursor"
+                or "NoParallelFastForwardCursor"
+                or "NoParallelWithRemoteQuery"
+                or "NoRemoteParallelismForMatrix";
 
             stmt.PlanWarnings.Add(new PlanWarning
             {
