@@ -55,13 +55,14 @@ public static partial class PlanAnalyzer
                 _ => stmt.NonParallelPlanReason
             };
 
-            var isExplicit = stmt.NonParallelPlanReason is "MaxDOPSetToOne" or "QueryHintNoParallelSet";
+            var isActionable = stmt.NonParallelPlanReason is "MaxDOPSetToOne"
+                or "QueryHintNoParallelSet" or "CouldNotGenerateValidParallelPlan";
 
             stmt.PlanWarnings.Add(new PlanWarning
             {
                 WarningType = "Serial Plan",
                 Message = $"Query running serially: {reason}.",
-                Severity = isExplicit ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info
+                Severity = isActionable ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info
             });
         }
 
