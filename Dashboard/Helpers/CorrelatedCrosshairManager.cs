@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
- * This file is part of the SQL Server Performance Monitor Lite.
+ * This file is part of the SQL Server Performance Monitor Dashboard.
  *
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  *
@@ -15,6 +15,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using PerformanceMonitorDashboard.Services;
@@ -62,20 +63,34 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     /// <summary>
     /// Registers a chart lane for crosshair synchronization.
     /// </summary>
-    public void AddLane(ScottPlot.WPF.WpfPlot chart, string label, string unit, TextBlock valueLabel)
+    public void AddLane(ScottPlot.WPF.WpfPlot chart, string label, string unit)
     {
         var lane = new LaneInfo
         {
             Chart = chart,
             Label = label,
-            Unit = unit,
-            ValueLabel = valueLabel
+            Unit = unit
         };
 
         chart.MouseMove += (s, e) => OnMouseMove(lane, e);
         chart.MouseLeave += (s, e) => OnMouseLeave();
 
         _lanes.Add(lane);
+    }
+
+    /// <summary>
+    /// Sets the expected baseline range for a lane (upper/lower bounds).
+    /// Values outside this range get ▲/▼ indicators in the tooltip.
+    /// </summary>
+    public void SetLaneBaseline(ScottPlot.WPF.WpfPlot chart, double lower, double upper,
+        double minAnomalyValue = 0, bool isEventBased = false)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null) return;
+        lane.BaselineLower = lower;
+        lane.BaselineUpper = upper;
+        lane.MinAnomalyValue = minAnomalyValue;
+        lane.IsEventBased = isEventBased;
     }
 
     /// <summary>
@@ -118,16 +133,30 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     }
 
     /// <summary>
+    /// Sets the label shown in the tooltip for comparison data (e.g., "yesterday").
+    /// </summary>
+    public void SetComparisonLabel(string label)
+    {
+        _comparisonLabel = label;
+    }
+
+    private string? _comparisonLabel;
+
+    /// <summary>
     /// Clears data and VLines. Call before re-populating charts.
     /// </summary>
     public void PrepareForRefresh()
     {
         _isRefreshing = true;
         _tooltip.IsOpen = false;
+        _comparisonLabel = null;
         foreach (var lane in _lanes)
         {
             lane.Series.Clear();
             lane.VLine = null;
+            lane.BaselineUpper = null;
+            lane.BaselineLower = null;
+            lane.MinAnomalyValue = 0;
         }
     }
 
@@ -165,10 +194,14 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         var mouseCoords = sourceLane.Chart.Plot.GetCoordinates(pixel);
         double xValue = mouseCoords.X;
 
-        var tooltipLines = new List<string>();
+        _tooltipText.Inlines.Clear();
         var time = DateTime.FromOADate(xValue);
         var displayTime = ServerTimeHelper.ConvertForDisplay(time, ServerTimeHelper.CurrentDisplayMode);
-        tooltipLines.Add(displayTime.ToString("yyyy-MM-dd HH:mm:ss"));
+        _tooltipText.Inlines.Add(new Run(displayTime.ToString("yyyy-MM-dd HH:mm:ss")));
+        if (_comparisonLabel != null)
+            _tooltipText.Inlines.Add(new Run($"  (dashed = {_comparisonLabel})") { Foreground = DimBrush });
+
+        var defaultBrush = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0));
 
         foreach (var lane in _lanes)
         {
@@ -179,51 +212,49 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
             if (lane.Series.Count == 1)
             {
-                // Single series — use lane label and unit
                 var series = lane.Series[0];
                 double? value = FindNearestValue(series, xValue);
 
                 if (value.HasValue)
                 {
-                    lane.ValueLabel.Text = $"{value.Value:N1} {lane.Unit}";
-                    tooltipLines.Add($"{lane.Label}: {value.Value:N1} {lane.Unit}");
+                    var indicator = GetBaselineIndicator(lane, value.Value);
+
+                    // Tooltip: value + arrow + "30d avg" context
+                    _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: {value.Value:N1} {lane.Unit}") { Foreground = defaultBrush });
+                    if (indicator != null)
+                    {
+                        _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
+                    }
                 }
                 else
                 {
-                    lane.ValueLabel.Text = "";
-                    tooltipLines.Add($"{lane.Label}: —");
+                    _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = defaultBrush });
                 }
             }
             else if (lane.Series.Count > 1)
             {
-                // Multiple series — show each with its own name
-                var valueParts = new List<string>();
                 foreach (var series in lane.Series)
                 {
                     double? value = FindNearestValue(series, xValue);
                     string unit = series.Unit ?? lane.Unit;
                     if (value.HasValue)
                     {
-                        valueParts.Add($"{value.Value:N0}");
-                        tooltipLines.Add($"{series.Name}: {value.Value:N0} {unit}");
+                        _tooltipText.Inlines.Add(new Run($"\n{series.Name}: {value.Value:N0} {unit}") { Foreground = defaultBrush });
+                        var indicator = GetBaselineIndicator(lane, value.Value);
+                        if (indicator != null)
+                            _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
                     }
                     else
-                    {
-                        tooltipLines.Add($"{series.Name}: —");
-                    }
+                        _tooltipText.Inlines.Add(new Run($"\n{series.Name}: —") { Foreground = defaultBrush });
                 }
-                lane.ValueLabel.Text = valueParts.Count > 0 ? string.Join("/", valueParts) : "";
             }
             else
             {
-                lane.ValueLabel.Text = "";
-                tooltipLines.Add($"{lane.Label}: —");
+                _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = defaultBrush });
             }
 
             lane.Chart.Refresh();
         }
-
-        _tooltipText.Text = string.Join("\n", tooltipLines);
         _tooltip.PlacementTarget = sourceLane.Chart;
         _tooltip.HorizontalOffset = pos.X + 15;
         _tooltip.VerticalOffset = pos.Y + 15;
@@ -265,6 +296,38 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         return val;
     }
 
+    private static readonly SolidColorBrush RedBrush = new(Color.FromRgb(0xFF, 0x52, 0x52));
+    private static readonly SolidColorBrush GreenBrush = new(Color.FromRgb(0x69, 0xF0, 0x69));
+    private static readonly SolidColorBrush DimBrush = new(Color.FromRgb(0x90, 0x96, 0xA0));
+
+    private record struct BaselineIndicator(string Symbol, SolidColorBrush Brush);
+
+    private static string? FormatBaselineContext(LaneInfo lane)
+    {
+        if (lane.BaselineUpper == null || lane.BaselineLower == null) return null;
+        var mean = (lane.BaselineUpper.Value + lane.BaselineLower.Value) / 2.0;
+        var formatted = mean >= 1000 ? $"{mean:N0}" : mean >= 10 ? $"{mean:N1}" : $"{mean:N2}";
+        return $"30d avg: ~{formatted}";
+    }
+
+    private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value)
+    {
+        if (lane.BaselineUpper == null || lane.BaselineLower == null) return null;
+        // For event-based metrics (blocking/deadlocks): value significantly above
+        // the baseline mean is a spike, even if within the wide ± 2σ band.
+        // Uses 3x mean as threshold — if you normally see ~5 events and now see 20, that's a spike.
+        var mean = (lane.BaselineUpper.Value + lane.BaselineLower.Value) / 2.0;
+        if (lane.IsEventBased && value >= 1.0 && (mean < 1.0 || value > mean * 3))
+            return new BaselineIndicator("▲", RedBrush);
+        // ▲ requires both: outside band AND above absolute minimum (prevents 1% CPU false alarms)
+        if (value > lane.BaselineUpper.Value && value >= lane.MinAnomalyValue)
+            return new BaselineIndicator("▲", RedBrush);
+        // ▼ always shown when below band (drops are always interesting — tuning feedback)
+        if (value < lane.BaselineLower.Value)
+            return new BaselineIndicator("▼", GreenBrush);
+        return null;
+    }
+
     private void OnMouseLeave()
     {
         _tooltip.IsOpen = false;
@@ -272,7 +335,6 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         {
             if (lane.VLine != null)
                 lane.VLine.IsVisible = false;
-            lane.ValueLabel.Text = "";
             lane.Chart.Refresh();
         }
     }
@@ -303,7 +365,10 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public string Label { get; set; } = "";
         public string Unit { get; set; } = "";
         public ScottPlot.Plottables.VerticalLine? VLine { get; set; }
-        public TextBlock ValueLabel { get; set; } = null!;
         public List<DataSeries> Series { get; set; } = new();
+        public double? BaselineUpper { get; set; }
+        public double? BaselineLower { get; set; }
+        public double MinAnomalyValue { get; set; }
+        public bool IsEventBased { get; set; }
     }
 }

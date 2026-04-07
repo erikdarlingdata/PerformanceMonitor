@@ -229,7 +229,7 @@ public partial class TimeRangeSlicerControl : UserControl
         SlicerCanvas.Children.Add(new Path { Data = lineGeo, Stroke = lineBrush, StrokeThickness = 1.5 });
 
         // X-axis labels — evenly spaced by TIME, skip if too close
-        var labelBrush = FindBrush("SlicerLabelBrush", "#99E4E6EB");
+        var labelBrush = FindBrush("SlicerLabelBrush", "#E4E6EB");
         const double minLabelSpacingPx = 90;
         double lastLabelX = -minLabelSpacingPx;
         int targetLabels = Math.Max(2, (int)(w / minLabelSpacingPx));

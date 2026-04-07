@@ -445,7 +445,7 @@ public class ScenarioTests : IDisposable
         var facts = await collector.CollectFactsAsync(context);
 
         // Run anomaly detection (compares analysis window against baseline)
-        var anomalyDetector = new AnomalyDetector(_duckDb);
+        var anomalyDetector = new AnomalyDetector(_duckDb, new BaselineProvider(_duckDb));
         var anomalies = await anomalyDetector.DetectAnomaliesAsync(context);
         facts.AddRange(anomalies);
 

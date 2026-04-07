@@ -23,13 +23,14 @@ public class AnalysisService
     private readonly InferenceEngine _engine;
     private readonly DrillDownCollector _drillDown;
     private readonly AnomalyDetector _anomalyDetector;
+    private readonly BaselineProvider _baselineProvider;
     /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
     /// Production: 72. Dev/testing: 0.5 (raise before release).
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 72;
+    internal double MinimumDataHours { get; set; } = 24; // TODO: restore to 72 before release
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings for UI display.
@@ -60,7 +61,8 @@ public class AnalysisService
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
         _drillDown = new DrillDownCollector(duckDb, planFetcher);
-        _anomalyDetector = new AnomalyDetector(duckDb);
+        _baselineProvider = new BaselineProvider(duckDb);
+        _anomalyDetector = new AnomalyDetector(duckDb, _baselineProvider);
     }
 
     /// <summary>

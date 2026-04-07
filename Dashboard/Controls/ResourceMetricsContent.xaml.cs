@@ -214,10 +214,11 @@ namespace PerformanceMonitorDashboard.Controls
         /// <summary>
         /// Initializes the control with required dependencies.
         /// </summary>
-        public void Initialize(DatabaseService databaseService)
+        public void Initialize(DatabaseService databaseService,
+            Analysis.SqlServerBaselineProvider? baselineProvider = null)
         {
             _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
-            CorrelatedLanes.Initialize(databaseService);
+            CorrelatedLanes.Initialize(databaseService, baselineProvider);
         }
 
         /// <summary>
@@ -1024,12 +1025,41 @@ namespace PerformanceMonitorDashboard.Controls
 
         #region Server Trends Tab
 
+        private async void CompareToCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            ComparisonRange = GetComparisonRange();
+            await RefreshServerTrendsAsync();
+        }
+
+        private (DateTime From, DateTime To)? ComparisonRange { get; set; }
+
+        /// <summary>
+        /// Computes the reference time range for the comparison overlay.
+        /// Returns null if "None" is selected.
+        /// </summary>
+        private (DateTime From, DateTime To)? GetComparisonRange()
+        {
+            if (CompareToCombo == null || CompareToCombo.SelectedIndex <= 0) return null;
+
+            var currentEnd = _serverTrendsToDate ?? DateTime.UtcNow;
+            var currentStart = _serverTrendsFromDate ?? currentEnd.AddHours(-_serverTrendsHoursBack);
+
+            return CompareToCombo.SelectedIndex switch
+            {
+                1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1)),   // Yesterday
+                2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Last week
+                3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Same day last week
+                _ => null
+            };
+        }
+
         private async Task RefreshServerTrendsAsync()
         {
             if (_databaseService == null) return;
             try
             {
-                await CorrelatedLanes.RefreshAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate);
+                await CorrelatedLanes.RefreshAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate, ComparisonRange);
             }
             catch (Exception ex)
             {

@@ -22,7 +22,7 @@
 
     <!-- Text Colors (dark on light backgrounds) -->
     <Color x:Key="ForegroundColor">#1A2A3A</Color>
-    <Color x:Key="ForegroundDimColor">#364D61</Color>
+    <Color x:Key="ForegroundDimColor">#1A2A3A</Color>
     <Color x:Key="ForegroundMutedColor">#5B7A90</Color>
 
     <!-- Border Colors (subtle, low-contrast) -->

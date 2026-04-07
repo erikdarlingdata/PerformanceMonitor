@@ -22,7 +22,7 @@
 
     <!-- Text Colors (off-white to reduce eye strain) -->
     <Color x:Key="ForegroundColor">#E4E6EB</Color>
-    <Color x:Key="ForegroundDimColor">#9DA5B4</Color>
+    <Color x:Key="ForegroundDimColor">#E4E6EB</Color>
     <Color x:Key="ForegroundMutedColor">#6B7280</Color>
 
     <!-- Border Colors (subtle, low-contrast) -->
@@ -1265,7 +1265,7 @@
     <SolidColorBrush x:Key="SlicerSelectedBrush" Color="#22FFFFFF"/>
     <SolidColorBrush x:Key="SlicerHandleBrush" Color="#E4E6EB"/>
     <SolidColorBrush x:Key="SlicerBorderBrush" Color="#3A3D45"/>
-    <SolidColorBrush x:Key="SlicerLabelBrush" Color="#99E4E6EB"/>
+    <SolidColorBrush x:Key="SlicerLabelBrush" Color="#E4E6EB"/>
     <SolidColorBrush x:Key="SlicerToggleBrush" Color="#E4E6EB"/>
 
 </ResourceDictionary>

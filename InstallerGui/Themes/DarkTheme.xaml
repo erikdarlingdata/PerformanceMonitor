@@ -17,7 +17,7 @@
     <SolidColorBrush x:Key="BackgroundLighterBrush" Color="#2a2d35"/>
 
     <SolidColorBrush x:Key="ForegroundBrush" Color="#E4E6EB"/>
-    <SolidColorBrush x:Key="ForegroundMutedBrush" Color="#6B7280"/>
+    <SolidColorBrush x:Key="ForegroundMutedBrush" Color="#E4E6EB"/>
 
     <SolidColorBrush x:Key="BorderBrush" Color="#2a2d35"/>
 

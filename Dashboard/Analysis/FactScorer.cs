@@ -308,9 +308,12 @@ public class FactScorer
     /// </summary>
     private static double ScoreAnomalyFact(Fact fact)
     {
-        if (   fact.Key.StartsWith("ANOMALY_CPU_SPIKE"    , StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_READ_LATENCY" , StringComparison.OrdinalIgnoreCase)
-            || fact.Key.StartsWith("ANOMALY_WRITE_LATENCY", StringComparison.OrdinalIgnoreCase)
+        if (   fact.Key.StartsWith("ANOMALY_CPU_SPIKE"      , StringComparison.OrdinalIgnoreCase)
+            || fact.Key.StartsWith("ANOMALY_READ_LATENCY"  , StringComparison.OrdinalIgnoreCase)
+            || fact.Key.StartsWith("ANOMALY_WRITE_LATENCY" , StringComparison.OrdinalIgnoreCase)
+            || fact.Key.StartsWith("ANOMALY_BATCH_REQUESTS", StringComparison.OrdinalIgnoreCase)
+            || fact.Key.StartsWith("ANOMALY_SESSION_SPIKE" , StringComparison.OrdinalIgnoreCase)
+            || fact.Key.StartsWith("ANOMALY_QUERY_DURATION", StringComparison.OrdinalIgnoreCase)
             )
         {
             // Deviation-based scoring: 2σ = 0.5, 4σ = 1.0

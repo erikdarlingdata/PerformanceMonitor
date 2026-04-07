@@ -60,7 +60,8 @@ public class FindingStore
                 RootFactValue = story.RootFactValue,
                 LeafFactKey = story.LeafFactKey,
                 LeafFactValue = story.LeafFactValue,
-                FactCount = story.FactCount
+                FactCount = story.FactCount,
+                RootFactMetadata = story.RootFactMetadata
             };
 
             await InsertFindingAsync(finding);

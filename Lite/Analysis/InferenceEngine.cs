@@ -150,7 +150,8 @@ public class InferenceEngine
             LeafFactKey = leafKey,
             LeafFactValue = leafFact?.Severity,
             FactCount = path.Count,
-            IsAbsolution = false
+            IsAbsolution = false,
+            RootFactMetadata = rootFact?.Metadata
         };
     }
 

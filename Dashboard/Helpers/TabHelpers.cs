@@ -157,7 +157,7 @@ namespace PerformanceMonitorDashboard.Helpers
             {
                 figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
                 dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
-                textColor        = ScottPlot.Color.FromHex("#364D61");
+                textColor        = ScottPlot.Color.FromHex("#1A2A3A");
                 gridColor        = ScottPlot.Color.FromHex("#A8BDD0").WithAlpha(120);
                 legendBg         = ScottPlot.Color.FromHex("#EEF4FA");
                 legendFg         = ScottPlot.Color.FromHex("#1A2A3A");
@@ -167,7 +167,7 @@ namespace PerformanceMonitorDashboard.Helpers
             {
                 figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
                 dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
-                textColor        = ScottPlot.Color.FromHex("#4A5568");
+                textColor        = ScottPlot.Color.FromHex("#1A1D23");
                 gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
                 legendBg         = ScottPlot.Color.FromHex("#FFFFFF");
                 legendFg         = ScottPlot.Color.FromHex("#1A1D23");
@@ -177,7 +177,7 @@ namespace PerformanceMonitorDashboard.Helpers
             {
                 figureBackground = ScottPlot.Color.FromHex("#22252b");
                 dataBackground   = ScottPlot.Color.FromHex("#111217");
-                textColor        = ScottPlot.Color.FromHex("#9DA5B4");
+                textColor        = ScottPlot.Color.FromHex("#E4E6EB");
                 gridColor        = ScottPlot.Colors.White.WithAlpha(40);
                 legendBg         = ScottPlot.Color.FromHex("#22252b");
                 legendFg         = ScottPlot.Color.FromHex("#E4E6EB");
@@ -226,10 +226,10 @@ namespace PerformanceMonitorDashboard.Helpers
         public static void ReapplyAxisColors(WpfPlot chart)
         {
             var textColor = ThemeManager.CurrentTheme == "CoolBreeze"
-                ? ScottPlot.Color.FromHex("#364D61")
+                ? ScottPlot.Color.FromHex("#1A2A3A")
                 : ThemeManager.HasLightBackground
-                    ? ScottPlot.Color.FromHex("#4A5568")
-                    : ScottPlot.Color.FromHex("#9DA5B4");
+                    ? ScottPlot.Color.FromHex("#1A1D23")
+                    : ScottPlot.Color.FromHex("#E4E6EB");
             chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Bottom.Label.ForeColor = textColor;

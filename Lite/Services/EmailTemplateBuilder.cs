@@ -116,7 +116,7 @@ internal static class EmailTemplateBuilder
         sb.Append($"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\">");
         sb.Append("<tr><td>");
         sb.Append($"<span style=\"font-family:{FontStack};font-size:18px;font-weight:600;color:#FFFFFF;\">SQL Server Performance Monitor</span><br>");
-        sb.Append($"<span style=\"font-family:{FontStack};font-size:12px;color:#808080;\">{WebUtility.HtmlEncode(EditionName)}</span>");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:12px;color:#E4E6EB;\">{WebUtility.HtmlEncode(EditionName)}</span>");
         sb.Append("</td></tr></table>");
         sb.Append("</td></tr>");
 
@@ -167,7 +167,7 @@ internal static class EmailTemplateBuilder
         /* Footer */
         sb.Append("<tr><td style=\"padding:0 24px;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"height:1px;background-color:#404040;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>");
         sb.Append("<tr><td style=\"padding:12px 24px 16px 24px;\">");
-        sb.Append($"<span style=\"font-family:{FontStack};font-size:11px;color:#808080;\">");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:11px;color:#E4E6EB;\">");
         sb.Append($"Sent by {WebUtility.HtmlEncode(EditionName)}");
         if (!isTest)
         {
@@ -200,7 +200,7 @@ internal static class EmailTemplateBuilder
         /* Separator + heading */
         sb.Append("<tr><td style=\"padding:0 24px;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"height:1px;background-color:#404040;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>");
         sb.Append("<tr><td style=\"padding:12px 24px 4px 24px;\">");
-        sb.Append($"<span style=\"font-family:{FontStack};font-size:13px;font-weight:600;color:#808080;letter-spacing:0.5px;\">RECENT EVENTS</span>");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:13px;font-weight:600;color:#E4E6EB;letter-spacing:0.5px;\">RECENT EVENTS</span>");
         sb.Append("</td></tr>");
 
         foreach (var item in context.Details)

@@ -23,6 +23,7 @@ public class AnalysisService
     private readonly InferenceEngine _engine;
     private readonly SqlServerDrillDownCollector _drillDown;
     private readonly SqlServerAnomalyDetector _anomalyDetector;
+    private readonly SqlServerBaselineProvider _baselineProvider;
 
     /// <summary>
     /// Minimum hours of collected data required before analysis will run.
@@ -60,7 +61,8 @@ public class AnalysisService
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
         _drillDown = new SqlServerDrillDownCollector(connectionString, planFetcher);
-        _anomalyDetector = new SqlServerAnomalyDetector(connectionString);
+        _baselineProvider = new SqlServerBaselineProvider(connectionString);
+        _anomalyDetector = new SqlServerAnomalyDetector(connectionString, _baselineProvider);
     }
 
     /// <summary>

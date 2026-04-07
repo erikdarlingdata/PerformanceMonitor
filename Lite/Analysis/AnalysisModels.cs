@@ -72,6 +72,7 @@ public class AnalysisStory
     public double? LeafFactValue { get; set; }
     public int FactCount { get; set; }
     public bool IsAbsolution { get; set; }
+    public Dictionary<string, double>? RootFactMetadata { get; set; }
 }
 
 /// <summary>
@@ -104,6 +105,12 @@ public class AnalysisFinding
     /// Contains supporting detail keyed by category (e.g., "top_deadlocks", "queries_at_spike").
     /// </summary>
     public Dictionary<string, object>? DrillDown { get; set; }
+
+    /// <summary>
+    /// Root fact metadata from anomaly detection. Ephemeral — not persisted to DuckDB.
+    /// Contains baseline context (mean, stddev, tier, hour, dow) for anomaly findings.
+    /// </summary>
+    public Dictionary<string, double>? RootFactMetadata { get; set; }
 }
 
 /// <summary>

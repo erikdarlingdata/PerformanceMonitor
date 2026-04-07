@@ -158,7 +158,8 @@ namespace PerformanceMonitorDashboard
                 SetDrillDownGlobalRange(from, to);
             };
             SystemEventsContent.Initialize(_databaseService);
-            ResourceMetricsContent.Initialize(_databaseService);
+            var baselineProvider = new Analysis.SqlServerBaselineProvider(_databaseService.ConnectionString);
+            ResourceMetricsContent.Initialize(_databaseService, baselineProvider);
             ResourceMetricsContent.ChartDrillDownRequested += OnChildChartDrillDown;
 
             // Set default time range on UserControls based on user preferences

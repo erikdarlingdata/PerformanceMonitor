@@ -18,15 +18,11 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="80"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="CPU %" VerticalAlignment="Center"
                        FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="CpuChart"/>
-            <TextBlock Grid.Column="2" x:Name="CpuValueLabel" VerticalAlignment="Center"
-                       HorizontalAlignment="Right" FontSize="11"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
         </Grid>
 
         <!-- Lane 2: Wait Stats -->
@@ -34,15 +30,11 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="80"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="Wait ms/sec" VerticalAlignment="Center"
                        FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="WaitStatsChart"/>
-            <TextBlock Grid.Column="2" x:Name="WaitStatsValueLabel" VerticalAlignment="Center"
-                       HorizontalAlignment="Right" FontSize="11"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
         </Grid>
 
         <!-- Lane 3: Blocking -->
@@ -50,7 +42,6 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="80"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" VerticalAlignment="Center"
                        FontSize="12" FontWeight="SemiBold"
@@ -60,25 +51,18 @@
                 <Run Text="Deadlocking"/>
             </TextBlock>
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="BlockingChart"/>
-            <TextBlock Grid.Column="2" x:Name="BlockingValueLabel" VerticalAlignment="Center"
-                       HorizontalAlignment="Right" FontSize="11"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
         </Grid>
 
-        <!-- Lane 4: Memory -->
+        <!-- Lane 4: Buffer Pool -->
         <Grid Grid.Row="3" Margin="0,2,0,2">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="80"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Memory MB" VerticalAlignment="Center"
+            <TextBlock Grid.Column="0" Text="Buffer Pool MB" VerticalAlignment="Center"
                        FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="MemoryChart"/>
-            <TextBlock Grid.Column="2" x:Name="MemoryValueLabel" VerticalAlignment="Center"
-                       HorizontalAlignment="Right" FontSize="11"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
         </Grid>
 
         <!-- Lane 5: File I/O -->
@@ -86,15 +70,11 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="80"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="I/O Latency" VerticalAlignment="Center"
                        FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="FileIoChart"/>
-            <TextBlock Grid.Column="2" x:Name="FileIoValueLabel" VerticalAlignment="Center"
-                       HorizontalAlignment="Right" FontSize="11"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
         </Grid>
     </Grid>
 </UserControl>

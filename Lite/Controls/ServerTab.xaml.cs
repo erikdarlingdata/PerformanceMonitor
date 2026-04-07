@@ -618,6 +618,60 @@ public partial class ServerTab : UserControl
         }
     }
 
+    private async void CompareToCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _isRefreshing) return;
+
+        var hoursBack = GetHoursBack();
+        DateTime? fromDate = null, toDate = null;
+        if (IsCustomRange)
+        {
+            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+            if (fromLocal.HasValue && toLocal.HasValue)
+            {
+                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
+                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
+            }
+        }
+
+        await RefreshOverviewAsync(hoursBack, fromDate, toDate);
+    }
+
+    /// <summary>
+    /// Computes the reference time range for the comparison overlay based on the
+    /// current Compare dropdown selection and the active time range.
+    /// Returns null if "None" is selected.
+    /// </summary>
+    private (DateTime From, DateTime To)? GetComparisonRange()
+    {
+        if (CompareToCombo == null || CompareToCombo.SelectedIndex <= 0) return null;
+
+        var hoursBack = GetHoursBack();
+        DateTime? fromDate = null, toDate = null;
+        if (IsCustomRange)
+        {
+            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+            if (fromLocal.HasValue && toLocal.HasValue)
+            {
+                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
+                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
+            }
+        }
+
+        var currentEnd = toDate ?? DateTime.UtcNow;
+        var currentStart = fromDate ?? currentEnd.AddHours(-hoursBack);
+
+        return CompareToCombo.SelectedIndex switch
+        {
+            1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1)),   // Yesterday
+            2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Last week
+            3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Same day last week
+            _ => null
+        };
+    }
+
     private async void CustomDateRange_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded || _isRefreshing) return;
@@ -1098,7 +1152,8 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate);
+            var comparison = GetComparisonRange();
+            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, comparison);
         }
         catch (Exception ex)
         {
@@ -3619,7 +3674,7 @@ public partial class ServerTab : UserControl
         {
             figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
             dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
-            textColor        = ScottPlot.Color.FromHex("#364D61");
+            textColor        = ScottPlot.Color.FromHex("#1A2A3A");
             gridColor        = ScottPlot.Color.FromHex("#A8BDD0").WithAlpha(120);
             legendBg         = ScottPlot.Color.FromHex("#EEF4FA");
             legendFg         = ScottPlot.Color.FromHex("#1A2A3A");
@@ -3629,7 +3684,7 @@ public partial class ServerTab : UserControl
         {
             figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
             dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
-            textColor        = ScottPlot.Color.FromHex("#4A5568");
+            textColor        = ScottPlot.Color.FromHex("#1A1D23");
             gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
             legendBg         = ScottPlot.Color.FromHex("#FFFFFF");
             legendFg         = ScottPlot.Color.FromHex("#1A1D23");
@@ -3639,7 +3694,7 @@ public partial class ServerTab : UserControl
         {
             figureBackground = ScottPlot.Color.FromHex("#22252b");
             dataBackground   = ScottPlot.Color.FromHex("#111217");
-            textColor        = ScottPlot.Color.FromHex("#9DA5B4");
+            textColor        = ScottPlot.Color.FromHex("#E4E6EB");
             gridColor        = ScottPlot.Colors.White.WithAlpha(40);
             legendBg         = ScottPlot.Color.FromHex("#22252b");
             legendFg         = ScottPlot.Color.FromHex("#E4E6EB");
@@ -3710,10 +3765,10 @@ public partial class ServerTab : UserControl
     private static void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
         var textColor = Helpers.ThemeManager.CurrentTheme == "CoolBreeze"
-            ? ScottPlot.Color.FromHex("#364D61")
+            ? ScottPlot.Color.FromHex("#1A2A3A")
             : Helpers.ThemeManager.HasLightBackground
-                ? ScottPlot.Color.FromHex("#4A5568")
-                : ScottPlot.Color.FromHex("#9DA5B4");
+                ? ScottPlot.Color.FromHex("#1A1D23")
+                : ScottPlot.Color.FromHex("#E4E6EB");
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;

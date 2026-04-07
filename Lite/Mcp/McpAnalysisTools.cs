@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpAnalysisTools
 {
-    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Returns structured findings with severity scores, evidence chains, and recommended next tools to call. The AI client should interpret the findings and provide recommendations — the engine provides the reasoning, not the prose.")]
+    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call.")]
     public static async Task<string> AnalyzeServer(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -162,13 +162,13 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "compare_analysis"), Description("Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, before vs after a change, or yesterday vs today. Returns facts from both periods side-by-side with severity deltas.")]
+    [McpServerTool(Name = "compare_analysis"), Description("Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, before vs after a change, or yesterday vs today. Returns facts from both periods side-by-side with severity deltas. Note: for routine anomaly detection, use analyze_server instead — it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons.")]
     public static async Task<string> CompareAnalysis(
         AnalysisService analysisService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours back for the comparison (recent) period. Default 4.")] int hours_back = 4,
-        [Description("Hours back for the baseline period start, measured from now. Default 28 (yesterday same time, assuming 4-hour windows). The baseline period will be the same duration as the comparison period.")] int baseline_hours_back = 28)
+        [Description("Hours back for the baseline period start, measured from now. Default 28 (yesterday same time). The baseline period will be the same duration as the comparison period.")] int baseline_hours_back = 28)
     {
         var resolved = ServerResolver.Resolve(serverManager, server_name);
         if (resolved == null)
@@ -832,6 +832,48 @@ internal static class ToolRecommendations
         }
 
         return result;
+    }
+
+    private static readonly string[] DayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    /// <summary>
+    /// Formats baseline context from anomaly fact metadata into a human-readable object
+    /// for MCP output. Example: "4.1σ above baseline for Tue 14:00, mean 68.2"
+    /// </summary>
+    private static object? FormatBaselineContext(Dictionary<string, double> metadata)
+    {
+        var result = new Dictionary<string, object>();
+
+        if (metadata.TryGetValue("deviation_sigma", out var sigma))
+            result["deviation"] = $"{sigma:F1}σ";
+
+        if (metadata.TryGetValue("ratio", out var ratio))
+            result["ratio"] = $"{ratio:F1}x";
+
+        if (metadata.TryGetValue("baseline_mean", out var mean))
+            result["baseline_mean"] = Math.Round(mean, 2);
+
+        if (metadata.TryGetValue("baseline_mean_ms", out var meanMs))
+            result["baseline_mean"] = Math.Round(meanMs, 2);
+
+        if (metadata.TryGetValue("baseline_stddev", out var stddev))
+            result["baseline_stddev"] = Math.Round(stddev, 2);
+
+        if (metadata.TryGetValue("baseline_hour", out var hour) &&
+            metadata.TryGetValue("baseline_dow", out var dow))
+        {
+            var dowIdx = (int)dow;
+            var dayName = dowIdx >= 0 && dowIdx < DayNames.Length ? DayNames[dowIdx] : "?";
+            result["bucket"] = hour >= 0 ? $"{dayName} {(int)hour:00}:00" : "flat";
+        }
+
+        if (metadata.TryGetValue("baseline_tier", out var tier))
+            result["tier"] = tier switch { 0 => "full", 1 => "hour_only", _ => "flat" };
+
+        if (metadata.TryGetValue("baseline_samples", out var samples))
+            result["baseline_samples"] = (int)samples;
+
+        return result.Count > 0 ? result : null;
     }
 }
 

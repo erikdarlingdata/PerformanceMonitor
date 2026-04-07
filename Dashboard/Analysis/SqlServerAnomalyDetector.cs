@@ -7,71 +7,108 @@ using PerformanceMonitorDashboard.Helpers;
 namespace PerformanceMonitorDashboard.Analysis;
 
 /// <summary>
-/// Detects anomalies by comparing the analysis window's metrics against a
-/// baseline period. When a metric deviates significantly from baseline
-/// (mean + standard deviation), an ANOMALY fact is emitted.
+/// Detects anomalies by comparing the analysis window's metrics against
+/// time-bucketed baselines (hour-of-day x day-of-week, 30-day rolling window).
 ///
-/// This is the "oh shit" mode -- detecting acute deviations that don't show
-/// up in aggregate analysis because they're brief. A 5-minute CPU spike
-/// that averages out over 4 hours is invisible to aggregate scoring but
-/// obvious when compared against "what was this metric doing before?"
+/// Two detection patterns:
+/// - Z-score: (observed - mean) / stddev — used for continuous metrics
+///   (CPU, batch requests, I/O latency, session counts, query duration)
+/// - Ratio: currentRate / baselineRate — used for rate/event metrics
+///   (wait stats, blocking, deadlocks)
 ///
-/// Baseline selection: uses the 24 hours preceding the analysis window.
-/// If less data is available, uses whatever exists with lower confidence.
+/// Baseline computation and caching are handled by SqlServerBaselineProvider.
 ///
-/// Port of Lite's AnomalyDetector -- uses SQL Server collect.* tables instead of DuckDB views.
-/// No server_id filtering -- Dashboard monitors one server per database.
+/// Port of Lite's AnomalyDetector — uses SQL Server collect.* tables instead of DuckDB views.
+/// No server_id filtering — Dashboard monitors one server per database.
+/// No memory metric — Dashboard doesn't collect memory stats.
 /// </summary>
 public class SqlServerAnomalyDetector
 {
     private readonly string _connectionString;
+    private readonly SqlServerBaselineProvider _baselineProvider;
 
     /// <summary>
-    /// Minimum number of baseline samples needed for reliable detection.
-    /// Below this, anomalies are still detected but with reduced confidence.
+    /// Default number of standard deviations above baseline mean to flag as anomalous.
     /// </summary>
-    private const int MinBaselineSamples = 10;
+    private const double DefaultDeviationThreshold = 2.0;
 
     /// <summary>
-    /// Number of standard deviations above baseline mean to flag as anomalous.
+    /// Default ratio threshold for rate-based anomaly detection (wait stats).
     /// </summary>
-    private const double DeviationThreshold = 2.0;
+    private const double DefaultRatioThreshold = 5.0;
 
-    public SqlServerAnomalyDetector(string connectionString)
+    /// <summary>
+    /// Default ratio threshold for event-based anomaly detection (blocking/deadlocks).
+    /// </summary>
+    private const double DefaultEventRatioThreshold = 3.0;
+
+    /// <summary>
+    /// Per-metric deviation thresholds. Metrics not listed use DefaultDeviationThreshold.
+    /// </summary>
+    private readonly Dictionary<string, double> _deviationThresholds = new();
+
+    public SqlServerAnomalyDetector(string connectionString, SqlServerBaselineProvider baselineProvider)
     {
         _connectionString = connectionString;
+        _baselineProvider = baselineProvider;
     }
 
     /// <summary>
-    /// Detects anomalies by comparing the analysis window against a baseline period.
+    /// Sets a custom deviation threshold for a specific metric.
+    /// </summary>
+    public void SetDeviationThreshold(string metricName, double threshold)
+    {
+        _deviationThresholds[metricName] = threshold;
+    }
+
+    private double GetDeviationThreshold(string metricName)
+    {
+        return _deviationThresholds.TryGetValue(metricName, out var threshold)
+            ? threshold
+            : DefaultDeviationThreshold;
+    }
+
+    /// <summary>
+    /// Adds baseline context metadata to an anomaly fact's metadata dictionary.
+    /// </summary>
+    private static void AddBaselineContext(Dictionary<string, double> metadata, BaselineBucket baseline)
+    {
+        metadata["baseline_hour"] = baseline.HourOfDay;
+        metadata["baseline_dow"] = baseline.DayOfWeek;
+        metadata["baseline_tier"] = (double)baseline.Tier;
+    }
+
+    /// <summary>
+    /// Detects anomalies by comparing the analysis window against time-bucketed baselines.
     /// Returns anomaly facts to be merged into the main fact list.
     /// </summary>
     public async Task<List<Fact>> DetectAnomaliesAsync(AnalysisContext context)
     {
         var anomalies = new List<Fact>();
 
-        // Baseline: 24 hours preceding the analysis window
-        var baselineEnd = context.TimeRangeStart;
-        var baselineStart = baselineEnd.AddHours(-24);
-
-        // Check if baseline period has any data at all -- if not, skip all anomaly detection.
-        // Without baseline data, everything looks anomalous.
-        if (!await HasBaselineDataAsync(baselineStart, baselineEnd))
+        // Check if baseline period has any data at all — if not, skip all anomaly detection.
+        if (!await HasBaselineDataAsync())
             return anomalies;
 
-        await DetectCpuAnomalies(context, baselineStart, baselineEnd, anomalies);
-        await DetectWaitAnomalies(context, baselineStart, baselineEnd, anomalies);
-        await DetectBlockingAnomalies(context, baselineStart, baselineEnd, anomalies);
-        await DetectIoAnomalies(context, baselineStart, baselineEnd, anomalies);
+        // Existing detection methods (upgraded to time-bucketed baselines)
+        await DetectCpuAnomalies(context, anomalies);
+        await DetectWaitAnomalies(context, anomalies);
+        await DetectBlockingAnomalies(context, anomalies);
+        await DetectIoAnomalies(context, anomalies);
+
+        // New detection methods
+        await DetectBatchRequestAnomalies(context, anomalies);
+        await DetectSessionAnomalies(context, anomalies);
+        await DetectQueryDurationAnomalies(context, anomalies);
 
         return anomalies;
     }
 
     /// <summary>
-    /// Checks if the baseline period has any collected data.
-    /// Uses wait_stats as canary -- if waits are collected, other data is too.
+    /// Checks if the server has enough historical data for meaningful baselines.
+    /// Uses wait_stats and cpu_utilization_stats as canary.
     /// </summary>
-    private async Task<bool> HasBaselineDataAsync(DateTime baselineStart, DateTime baselineEnd)
+    private async Task<bool> HasBaselineDataAsync()
     {
         try
         {
@@ -84,12 +121,11 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
     (SELECT COUNT(*) FROM collect.wait_stats
-     WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd)
+     WHERE collection_time >= @cutoff)
   + (SELECT COUNT(*) FROM collect.cpu_utilization_stats
-     WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd);";
+     WHERE collection_time >= @cutoff);";
 
-            cmd.Parameters.Add(new SqlParameter("@baselineStart", baselineStart));
-            cmd.Parameters.Add(new SqlParameter("@baselineEnd", baselineEnd));
+            cmd.Parameters.Add(new SqlParameter("@cutoff", DateTime.UtcNow.AddDays(-30)));
 
             var count = Convert.ToInt64(await cmd.ExecuteScalarAsync() ?? 0);
             return count > 0;
@@ -98,51 +134,24 @@ SELECT
     }
 
     /// <summary>
-    /// Detects CPU utilization anomalies by comparing per-sample values
-    /// against the baseline distribution.
+    /// Detects CPU utilization anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectCpuAnomalies(AnalysisContext context,
-        DateTime baselineStart, DateTime baselineEnd, List<Fact> anomalies)
+    private async Task DetectCpuAnomalies(AnalysisContext context, List<Fact> anomalies)
     {
         try
         {
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.Cpu, context.TimeRangeStart);
+
+            if (baseline.SampleCount == 0) return;
+            var effectiveStdDev = baseline.EffectiveStdDev;
+            if (effectiveStdDev <= 0) return;
+
             using var connection = new SqlConnection(_connectionString);
             await connection.OpenAsync();
 
-            // Get baseline stats
-            using var baselineCmd = connection.CreateCommand();
-            baselineCmd.CommandText = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT
-    AVG(CAST(sqlserver_cpu_utilization AS FLOAT)) AS mean_cpu,
-    STDEV(CAST(sqlserver_cpu_utilization AS FLOAT)) AS stddev_cpu,
-    COUNT(*) AS sample_count
-FROM collect.cpu_utilization_stats
-WHERE collection_time >= @baselineStart
-AND   collection_time < @baselineEnd;";
-
-            baselineCmd.Parameters.Add(new SqlParameter("@baselineStart", baselineStart));
-            baselineCmd.Parameters.Add(new SqlParameter("@baselineEnd", baselineEnd));
-
-            double baselineMean = 0, baselineStdDev = 0;
-            long baselineSamples = 0;
-
-            using (var reader = await baselineCmd.ExecuteReaderAsync())
-            {
-                if (await reader.ReadAsync())
-                {
-                    baselineMean = reader.IsDBNull(0) ? 0 : Convert.ToDouble(reader.GetValue(0));
-                    baselineStdDev = reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1));
-                    baselineSamples = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2));
-                }
-            }
-
-            if (baselineSamples < 3 || baselineStdDev <= 0) return;
-
-            // Get peak and average in the analysis window
-            using var windowCmd = connection.CreateCommand();
-            windowCmd.CommandText = @"
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
@@ -156,24 +165,35 @@ FROM collect.cpu_utilization_stats
 WHERE collection_time >= @windowStart
 AND   collection_time < @windowEnd;";
 
-            windowCmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
-            windowCmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
+            cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
+            cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
 
-            using var windowReader = await windowCmd.ExecuteReaderAsync();
-            if (!await windowReader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return;
 
-            var peakCpu = windowReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(windowReader.GetValue(0));
-            var avgCpu = windowReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(windowReader.GetValue(1));
-            var windowSamples = windowReader.IsDBNull(2) ? 0L : Convert.ToInt64(windowReader.GetValue(2));
-            var peakTime = windowReader.IsDBNull(3) ? (DateTime?)null : windowReader.GetDateTime(3);
+            var peakCpu = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var avgCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            var peakTime = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
 
             if (windowSamples == 0) return;
 
-            // Check if peak deviates significantly from baseline
-            var deviation = (peakCpu - baselineMean) / baselineStdDev;
-            if (deviation < DeviationThreshold || peakCpu < 50) return; // Don't flag low absolute values
+            var deviation = (peakCpu - baseline.Mean) / effectiveStdDev;
+            if (deviation < GetDeviationThreshold(SqlServerMetricNames.Cpu) || peakCpu < 50) return;
 
-            var confidence = baselineSamples >= MinBaselineSamples ? 1.0 : (double)baselineSamples / MinBaselineSamples;
+            var metadata = new Dictionary<string, double>
+            {
+                ["peak_cpu"] = peakCpu,
+                ["avg_cpu_in_window"] = avgCpu,
+                ["baseline_mean"] = baseline.Mean,
+                ["baseline_stddev"] = effectiveStdDev,
+                ["deviation_sigma"] = deviation,
+                ["baseline_samples"] = baseline.SampleCount,
+                ["window_samples"] = windowSamples,
+                ["confidence"] = 1.0,
+                ["peak_time_ticks"] = peakTime?.Ticks ?? 0
+            };
+            AddBaselineContext(metadata, baseline);
 
             anomalies.Add(new Fact
             {
@@ -181,18 +201,7 @@ AND   collection_time < @windowEnd;";
                 Key = "ANOMALY_CPU_SPIKE",
                 Value = peakCpu,
                 ServerId = context.ServerId,
-                Metadata = new Dictionary<string, double>
-                {
-                    ["peak_cpu"] = peakCpu,
-                    ["avg_cpu_in_window"] = avgCpu,
-                    ["baseline_mean"] = baselineMean,
-                    ["baseline_stddev"] = baselineStdDev,
-                    ["deviation_sigma"] = deviation,
-                    ["baseline_samples"] = baselineSamples,
-                    ["window_samples"] = windowSamples,
-                    ["confidence"] = confidence,
-                    ["peak_time_ticks"] = peakTime?.Ticks ?? 0
-                }
+                Metadata = metadata
             });
         }
         catch (Exception ex)
@@ -202,96 +211,74 @@ AND   collection_time < @windowEnd;";
     }
 
     /// <summary>
-    /// Detects wait stat anomalies -- significant waits in the analysis window
-    /// that were absent or much lower in the baseline.
+    /// Detects wait stat anomalies — total wait time significantly above
+    /// baseline rate for this time bucket. Uses ratio-based scoring.
     /// </summary>
-    private async Task DetectWaitAnomalies(AnalysisContext context,
-        DateTime baselineStart, DateTime baselineEnd, List<Fact> anomalies)
+    private async Task DetectWaitAnomalies(AnalysisContext context, List<Fact> anomalies)
     {
         try
         {
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.WaitStats, context.TimeRangeStart);
+
+            if (baseline.SampleCount == 0) return;
+
             using var connection = new SqlConnection(_connectionString);
             await connection.OpenAsync();
 
-            // Check if baseline has any wait data at all -- if not, skip
-            using var checkCmd = connection.CreateCommand();
-            checkCmd.CommandText = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT COUNT(*) FROM collect.wait_stats
-WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd;";
-
-            checkCmd.Parameters.Add(new SqlParameter("@baselineStart", baselineStart));
-            checkCmd.Parameters.Add(new SqlParameter("@baselineEnd", baselineEnd));
-
-            var baselineCount = Convert.ToInt64(await checkCmd.ExecuteScalarAsync() ?? 0);
-            if (baselineCount == 0) return;
-
-            // Get per-wait-type totals in both windows
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-;WITH baseline AS (
-    SELECT wait_type,
-           CAST(SUM(wait_time_ms_delta) AS BIGINT) AS total_ms
-    FROM collect.wait_stats
-    WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd
-    AND   wait_time_ms_delta > 0
-    GROUP BY wait_type
-),
-current_window AS (
-    SELECT wait_type,
-           CAST(SUM(wait_time_ms_delta) AS BIGINT) AS total_ms
-    FROM collect.wait_stats
-    WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
-    AND   wait_time_ms_delta > 0
-    GROUP BY wait_type
-)
 SELECT TOP 10
-    c.wait_type,
-    c.total_ms AS current_ms,
-    COALESCE(b.total_ms, 0) AS baseline_ms
-FROM current_window c
-LEFT JOIN baseline b ON c.wait_type = b.wait_type
-WHERE c.total_ms > 10000  -- At least 10 seconds of wait time
-ORDER BY c.total_ms DESC;";
+    wait_type,
+    CAST(SUM(wait_time_ms_delta) AS BIGINT) AS total_ms
+FROM collect.wait_stats
+WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+AND   wait_time_ms_delta > 0
+GROUP BY wait_type
+HAVING SUM(wait_time_ms_delta) > 10000
+ORDER BY total_ms DESC;";
 
-            cmd.Parameters.Add(new SqlParameter("@baselineStart", baselineStart));
-            cmd.Parameters.Add(new SqlParameter("@baselineEnd", baselineEnd));
             cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
             cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
+
+            var currentHours = (context.TimeRangeEnd - context.TimeRangeStart).TotalHours;
+            if (currentHours <= 0) currentHours = 1;
+
+            var baselineRate = baseline.SampleCount > 0 ? baseline.Mean : 0;
 
             using var reader = await cmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
                 var waitType = reader.GetString(0);
                 var currentMs = Convert.ToInt64(reader.GetValue(1));
-                var baselineMs = Convert.ToInt64(reader.GetValue(2));
-
-                // Normalize to per-hour rates before comparing (windows are different lengths)
-                var baselineHours = (baselineEnd - baselineStart).TotalHours;
-                var currentHours = (context.TimeRangeEnd - context.TimeRangeStart).TotalHours;
-                if (baselineHours <= 0) baselineHours = 1;
-                if (currentHours <= 0) currentHours = 1;
+                var currentRate = currentMs / currentHours;
 
                 double ratio;
                 string anomalyType;
 
-                if (baselineMs == 0)
+                if (baselineRate <= 0 || baseline.SampleCount == 0)
                 {
-                    ratio = currentMs > 60_000 ? 100.0 : 0; // Only flag if > 1 minute total
+                    ratio = currentMs > 60_000 ? 100.0 : 0;
                     anomalyType = "new";
                 }
                 else
                 {
-                    var baselineRate = baselineMs / baselineHours;
-                    var currentRate = currentMs / currentHours;
-                    ratio = baselineRate > 0 ? currentRate / baselineRate : 100.0;
+                    ratio = currentRate / baselineRate;
                     anomalyType = "spike";
                 }
 
-                if (ratio < 5.0) continue; // Need at least 5x increase
+                if (ratio < DefaultRatioThreshold) continue;
+
+                var metadata = new Dictionary<string, double>
+                {
+                    ["current_ms"] = currentMs,
+                    ["baseline_mean"] = baseline.Mean,
+                    ["ratio"] = ratio,
+                    ["is_new"] = anomalyType == "new" ? 1 : 0
+                };
+                AddBaselineContext(metadata, baseline);
 
                 anomalies.Add(new Fact
                 {
@@ -299,13 +286,7 @@ ORDER BY c.total_ms DESC;";
                     Key = $"ANOMALY_WAIT_{waitType}",
                     Value = currentMs,
                     ServerId = context.ServerId,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["current_ms"] = currentMs,
-                        ["baseline_ms"] = baselineMs,
-                        ["ratio"] = ratio,
-                        ["is_new"] = anomalyType == "new" ? 1 : 0
-                    }
+                    Metadata = metadata
                 });
             }
         }
@@ -316,35 +297,20 @@ ORDER BY c.total_ms DESC;";
     }
 
     /// <summary>
-    /// Detects blocking/deadlock anomalies -- events in the analysis window
-    /// that are significantly above baseline rates.
+    /// Detects blocking/deadlock anomalies — event rates significantly above
+    /// baseline for this time bucket. Uses ratio-based scoring.
     /// </summary>
-    private async Task DetectBlockingAnomalies(AnalysisContext context,
-        DateTime baselineStart, DateTime baselineEnd, List<Fact> anomalies)
+    private async Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies)
     {
         try
         {
+            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.Blocking, context.TimeRangeStart);
+            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.Deadlock, context.TimeRangeStart);
+
             using var connection = new SqlConnection(_connectionString);
             await connection.OpenAsync();
-
-            // Check if baseline period has any data at all
-            using var checkCmd = connection.CreateCommand();
-            checkCmd.CommandText = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT
-    (SELECT COUNT(*) FROM collect.blocking_BlockedProcessReport
-     WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd)
-  + (SELECT COUNT(*) FROM collect.deadlocks
-     WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd)
-  + (SELECT COUNT(*) FROM collect.wait_stats
-     WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd);";
-
-            checkCmd.Parameters.Add(new SqlParameter("@baselineStart", baselineStart));
-            checkCmd.Parameters.Add(new SqlParameter("@baselineEnd", baselineEnd));
-
-            var baselineDataCount = Convert.ToInt64(await checkCmd.ExecuteScalarAsync() ?? 0);
-            if (baselineDataCount == 0) return; // No baseline data = can't detect anomaly
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -352,74 +318,61 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
     (SELECT COUNT(*) FROM collect.blocking_BlockedProcessReport
-     WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd) AS baseline_blocking,
-    (SELECT COUNT(*) FROM collect.blocking_BlockedProcessReport
      WHERE collection_time >= @windowStart AND collection_time <= @windowEnd) AS current_blocking,
-    (SELECT COUNT(*) FROM collect.deadlocks
-     WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd) AS baseline_deadlocks,
     (SELECT COUNT(*) FROM collect.deadlocks
      WHERE collection_time >= @windowStart AND collection_time <= @windowEnd) AS current_deadlocks;";
 
-            cmd.Parameters.Add(new SqlParameter("@baselineStart", baselineStart));
-            cmd.Parameters.Add(new SqlParameter("@baselineEnd", baselineEnd));
             cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
             cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
             if (!await reader.ReadAsync()) return;
 
-            var baselineBlocking = Convert.ToInt64(reader.GetValue(0));
-            var currentBlocking = Convert.ToInt64(reader.GetValue(1));
-            var baselineDeadlocks = Convert.ToInt64(reader.GetValue(2));
-            var currentDeadlocks = Convert.ToInt64(reader.GetValue(3));
+            var currentBlocking = Convert.ToInt64(reader.GetValue(0));
+            var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
 
-            // Normalize to per-hour rates (windows are different lengths)
-            var baselineHours = (baselineEnd - baselineStart).TotalHours;
-            var currentHours = (context.TimeRangeEnd - context.TimeRangeStart).TotalHours;
-            if (baselineHours <= 0) baselineHours = 1;
-            if (currentHours <= 0) currentHours = 1;
+            var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
+            var baselineDeadlockRate = deadlockBaseline.SampleCount > 0 ? deadlockBaseline.Mean : 0;
 
-            var baselineBlockingRate = baselineBlocking / baselineHours;
-            var currentBlockingRate = currentBlocking / currentHours;
-            var blockingRatio = baselineBlocking > 0 ? currentBlockingRate / baselineBlockingRate : 100.0;
-
-            var baselineDeadlockRate = baselineDeadlocks / baselineHours;
-            var currentDeadlockRate = currentDeadlocks / currentHours;
-            var deadlockRatio = baselineDeadlocks > 0 ? currentDeadlockRate / baselineDeadlockRate : 100.0;
-
-            // Blocking spike: at least 5 events AND 3x baseline rate (or new)
-            if (currentBlocking >= 5 && (baselineBlocking == 0 || blockingRatio >= 3))
+            // Blocking spike: at least 5 events AND 3x baseline rate (or no baseline)
+            if (currentBlocking >= 5 && (baselineBlockingRate <= 0 || currentBlocking / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
+                var metadata = new Dictionary<string, double>
+                {
+                    ["current_count"] = currentBlocking,
+                    ["baseline_rate"] = baselineBlockingRate,
+                    ["ratio"] = baselineBlockingRate > 0 ? currentBlocking / baselineBlockingRate : 100.0
+                };
+                AddBaselineContext(metadata, blockingBaseline);
+
                 anomalies.Add(new Fact
                 {
                     Source = "anomaly",
                     Key = "ANOMALY_BLOCKING_SPIKE",
                     Value = currentBlocking,
                     ServerId = context.ServerId,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["current_count"] = currentBlocking,
-                        ["baseline_count"] = baselineBlocking,
-                        ["ratio"] = blockingRatio
-                    }
+                    Metadata = metadata
                 });
             }
 
-            // Deadlock spike: at least 3 events AND 3x baseline rate (or new)
-            if (currentDeadlocks >= 3 && (baselineDeadlocks == 0 || deadlockRatio >= 3))
+            // Deadlock spike: at least 3 events AND 3x baseline rate (or no baseline)
+            if (currentDeadlocks >= 3 && (baselineDeadlockRate <= 0 || currentDeadlocks / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
             {
+                var metadata = new Dictionary<string, double>
+                {
+                    ["current_count"] = currentDeadlocks,
+                    ["baseline_rate"] = baselineDeadlockRate,
+                    ["ratio"] = baselineDeadlockRate > 0 ? currentDeadlocks / baselineDeadlockRate : 100.0
+                };
+                AddBaselineContext(metadata, deadlockBaseline);
+
                 anomalies.Add(new Fact
                 {
                     Source = "anomaly",
                     Key = "ANOMALY_DEADLOCK_SPIKE",
                     Value = currentDeadlocks,
                     ServerId = context.ServerId,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["current_count"] = currentDeadlocks,
-                        ["baseline_count"] = baselineDeadlocks,
-                        ["ratio"] = deadlockRatio
-                    }
+                    Metadata = metadata
                 });
             }
         }
@@ -430,14 +383,19 @@ SELECT
     }
 
     /// <summary>
-    /// Detects I/O latency anomalies -- significant increase in read/write latency
-    /// compared to baseline.
+    /// Detects I/O latency anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectIoAnomalies(AnalysisContext context,
-        DateTime baselineStart, DateTime baselineEnd, List<Fact> anomalies)
+    private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies)
     {
         try
         {
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.IoLatency, context.TimeRangeStart);
+
+            if (baseline.SampleCount == 0) return;
+            var effectiveStdDev = baseline.EffectiveStdDev;
+            if (effectiveStdDev <= 0) return;
+
             using var connection = new SqlConnection(_connectionString);
             await connection.OpenAsync();
 
@@ -445,92 +403,74 @@ SELECT
             cmd.CommandText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-;WITH baseline AS (
-    SELECT
-        AVG(io_stall_read_ms_delta * 1.0 / NULLIF(num_of_reads_delta, 0)) AS avg_read_lat,
-        AVG(io_stall_write_ms_delta * 1.0 / NULLIF(num_of_writes_delta, 0)) AS avg_write_lat,
-        STDEV(io_stall_read_ms_delta * 1.0 / NULLIF(num_of_reads_delta, 0)) AS stddev_read,
-        STDEV(io_stall_write_ms_delta * 1.0 / NULLIF(num_of_writes_delta, 0)) AS stddev_write,
-        COUNT(*) AS samples
-    FROM collect.file_io_stats
-    WHERE collection_time >= @baselineStart AND collection_time < @baselineEnd
-    AND   (num_of_reads_delta > 0 OR num_of_writes_delta > 0)
-),
-current_window AS (
-    SELECT
-        AVG(io_stall_read_ms_delta * 1.0 / NULLIF(num_of_reads_delta, 0)) AS avg_read_lat,
-        AVG(io_stall_write_ms_delta * 1.0 / NULLIF(num_of_writes_delta, 0)) AS avg_write_lat
-    FROM collect.file_io_stats
-    WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
-    AND   (num_of_reads_delta > 0 OR num_of_writes_delta > 0)
-)
-SELECT b.avg_read_lat, b.stddev_read, c.avg_read_lat,
-       b.avg_write_lat, b.stddev_write, c.avg_write_lat,
-       b.samples
-FROM baseline b, current_window c;";
+SELECT
+    AVG(io_stall_read_ms_delta * 1.0 / NULLIF(num_of_reads_delta, 0)) AS avg_read_lat,
+    AVG(io_stall_write_ms_delta * 1.0 / NULLIF(num_of_writes_delta, 0)) AS avg_write_lat
+FROM collect.file_io_stats
+WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+AND   (num_of_reads_delta > 0 OR num_of_writes_delta > 0);";
 
-            cmd.Parameters.Add(new SqlParameter("@baselineStart", baselineStart));
-            cmd.Parameters.Add(new SqlParameter("@baselineEnd", baselineEnd));
             cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
             cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
             if (!await reader.ReadAsync()) return;
 
-            var baselineReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var stddevRead = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var currentReadLat = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
-            var baselineWriteLat = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
-            var stddevWrite = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
-            var currentWriteLat = reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5));
-            var samples = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6));
+            var currentReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var currentWriteLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
 
-            if (samples < 3) return;
+            var ioThreshold = GetDeviationThreshold(SqlServerMetricNames.IoLatency);
 
             // Read latency anomaly
-            if (stddevRead > 0 && currentReadLat > 10) // At least 10ms to matter
+            if (currentReadLat > 10)
             {
-                var readDeviation = (currentReadLat - baselineReadLat) / stddevRead;
-                if (readDeviation >= DeviationThreshold)
+                var readDeviation = (currentReadLat - baseline.Mean) / effectiveStdDev;
+                if (readDeviation >= ioThreshold)
                 {
+                    var metadata = new Dictionary<string, double>
+                    {
+                        ["current_latency_ms"] = currentReadLat,
+                        ["baseline_mean_ms"] = baseline.Mean,
+                        ["baseline_stddev_ms"] = effectiveStdDev,
+                        ["deviation_sigma"] = readDeviation,
+                        ["baseline_samples"] = baseline.SampleCount
+                    };
+                    AddBaselineContext(metadata, baseline);
+
                     anomalies.Add(new Fact
                     {
                         Source = "anomaly",
                         Key = "ANOMALY_READ_LATENCY",
                         Value = currentReadLat,
                         ServerId = context.ServerId,
-                        Metadata = new Dictionary<string, double>
-                        {
-                            ["current_latency_ms"] = currentReadLat,
-                            ["baseline_mean_ms"] = baselineReadLat,
-                            ["baseline_stddev_ms"] = stddevRead,
-                            ["deviation_sigma"] = readDeviation,
-                            ["baseline_samples"] = samples
-                        }
+                        Metadata = metadata
                     });
                 }
             }
 
             // Write latency anomaly
-            if (stddevWrite > 0 && currentWriteLat > 5) // At least 5ms to matter
+            if (currentWriteLat > 5)
             {
-                var writeDeviation = (currentWriteLat - baselineWriteLat) / stddevWrite;
-                if (writeDeviation >= DeviationThreshold)
+                var writeDeviation = (currentWriteLat - baseline.Mean) / effectiveStdDev;
+                if (writeDeviation >= ioThreshold)
                 {
+                    var metadata = new Dictionary<string, double>
+                    {
+                        ["current_latency_ms"] = currentWriteLat,
+                        ["baseline_mean_ms"] = baseline.Mean,
+                        ["baseline_stddev_ms"] = effectiveStdDev,
+                        ["deviation_sigma"] = writeDeviation,
+                        ["baseline_samples"] = baseline.SampleCount
+                    };
+                    AddBaselineContext(metadata, baseline);
+
                     anomalies.Add(new Fact
                     {
                         Source = "anomaly",
                         Key = "ANOMALY_WRITE_LATENCY",
                         Value = currentWriteLat,
                         ServerId = context.ServerId,
-                        Metadata = new Dictionary<string, double>
-                        {
-                            ["current_latency_ms"] = currentWriteLat,
-                            ["baseline_mean_ms"] = baselineWriteLat,
-                            ["baseline_stddev_ms"] = stddevWrite,
-                            ["deviation_sigma"] = writeDeviation,
-                            ["baseline_samples"] = samples
-                        }
+                        Metadata = metadata
                     });
                 }
             }
@@ -538,6 +478,231 @@ FROM baseline b, current_window c;";
         catch (Exception ex)
         {
             Logger.Error($"[SqlServerAnomalyDetector] I/O anomaly detection failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Detects batch requests/sec anomalies using z-score against time-bucketed baseline.
+    /// </summary>
+    private async Task DetectBatchRequestAnomalies(AnalysisContext context, List<Fact> anomalies)
+    {
+        try
+        {
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.BatchRequests, context.TimeRangeStart);
+
+            if (baseline.SampleCount == 0) return;
+            var effectiveStdDev = baseline.EffectiveStdDev;
+            if (effectiveStdDev <= 0) return;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    AVG(cntr_value_delta) AS avg_batch,
+    MAX(cntr_value_delta) AS peak_batch,
+    COUNT(*) AS sample_count
+FROM collect.perfmon_stats
+WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+AND   counter_name = 'Batch Requests/sec'
+AND   cntr_value_delta >= 0;";
+
+            cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
+            cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
+
+            using var reader = await cmd.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return;
+
+            var avgBatch = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var peakBatch = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+
+            if (windowSamples == 0) return;
+
+            var deviation = (peakBatch - baseline.Mean) / effectiveStdDev;
+            if (deviation < GetDeviationThreshold(SqlServerMetricNames.BatchRequests)) return;
+
+            var metadata = new Dictionary<string, double>
+            {
+                ["peak_batch_requests"] = peakBatch,
+                ["avg_batch_requests"] = avgBatch,
+                ["baseline_mean"] = baseline.Mean,
+                ["baseline_stddev"] = effectiveStdDev,
+                ["deviation_sigma"] = deviation,
+                ["baseline_samples"] = baseline.SampleCount,
+                ["window_samples"] = windowSamples
+            };
+            AddBaselineContext(metadata, baseline);
+
+            anomalies.Add(new Fact
+            {
+                Source = "anomaly",
+                Key = "ANOMALY_BATCH_REQUESTS",
+                Value = peakBatch,
+                ServerId = context.ServerId,
+                Metadata = metadata
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerAnomalyDetector] Batch request anomaly detection failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Detects session/connection count anomalies using z-score against time-bucketed baseline.
+    /// </summary>
+    private async Task DetectSessionAnomalies(AnalysisContext context, List<Fact> anomalies)
+    {
+        try
+        {
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.SessionCount, context.TimeRangeStart);
+
+            if (baseline.SampleCount == 0) return;
+            var effectiveStdDev = baseline.EffectiveStdDev;
+            if (effectiveStdDev <= 0) return;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+;WITH per_collection AS (
+    SELECT collection_time,
+           SUM(total_sessions) AS total_connections
+    FROM collect.session_stats
+    WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+    GROUP BY collection_time
+)
+SELECT AVG(CAST(total_connections AS FLOAT)) AS avg_connections,
+       MAX(total_connections) AS peak_connections,
+       COUNT(*) AS sample_count
+FROM per_collection;";
+
+            cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
+            cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
+
+            using var reader = await cmd.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return;
+
+            var avgConnections = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var peakConnections = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+
+            if (windowSamples == 0) return;
+
+            var deviation = (peakConnections - baseline.Mean) / effectiveStdDev;
+            if (deviation < GetDeviationThreshold(SqlServerMetricNames.SessionCount)) return;
+
+            var metadata = new Dictionary<string, double>
+            {
+                ["peak_connections"] = peakConnections,
+                ["avg_connections"] = avgConnections,
+                ["baseline_mean"] = baseline.Mean,
+                ["baseline_stddev"] = effectiveStdDev,
+                ["deviation_sigma"] = deviation,
+                ["baseline_samples"] = baseline.SampleCount,
+                ["window_samples"] = windowSamples
+            };
+            AddBaselineContext(metadata, baseline);
+
+            anomalies.Add(new Fact
+            {
+                Source = "anomaly",
+                Key = "ANOMALY_SESSION_SPIKE",
+                Value = peakConnections,
+                ServerId = context.ServerId,
+                Metadata = metadata
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerAnomalyDetector] Session anomaly detection failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Detects query duration aggregate anomalies using z-score against time-bucketed baseline.
+    /// Measures total elapsed time across all queries per collection interval.
+    /// </summary>
+    private async Task DetectQueryDurationAnomalies(AnalysisContext context, List<Fact> anomalies)
+    {
+        try
+        {
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.QueryDuration, context.TimeRangeStart);
+
+            if (baseline.SampleCount == 0) return;
+            var effectiveStdDev = baseline.EffectiveStdDev;
+            if (effectiveStdDev <= 0) return;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+;WITH per_collection AS (
+    SELECT collection_time,
+           SUM(total_elapsed_time_delta) AS total_elapsed
+    FROM collect.query_stats
+    WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+    AND   execution_count_delta > 0
+    AND   total_elapsed_time_delta >= 0
+    GROUP BY collection_time
+)
+SELECT AVG(CAST(total_elapsed AS FLOAT)) AS avg_elapsed,
+       MAX(total_elapsed) AS peak_elapsed,
+       COUNT(*) AS sample_count
+FROM per_collection;";
+
+            cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
+            cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
+
+            using var reader = await cmd.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return;
+
+            var avgElapsed = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var peakElapsed = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+
+            if (windowSamples == 0) return;
+
+            var deviation = (peakElapsed - baseline.Mean) / effectiveStdDev;
+            if (deviation < GetDeviationThreshold(SqlServerMetricNames.QueryDuration)) return;
+
+            var metadata = new Dictionary<string, double>
+            {
+                ["peak_total_elapsed_us"] = peakElapsed,
+                ["avg_total_elapsed_us"] = avgElapsed,
+                ["baseline_mean"] = baseline.Mean,
+                ["baseline_stddev"] = effectiveStdDev,
+                ["deviation_sigma"] = deviation,
+                ["baseline_samples"] = baseline.SampleCount,
+                ["window_samples"] = windowSamples
+            };
+            AddBaselineContext(metadata, baseline);
+
+            anomalies.Add(new Fact
+            {
+                Source = "anomaly",
+                Key = "ANOMALY_QUERY_DURATION",
+                Value = peakElapsed,
+                ServerId = context.ServerId,
+                Metadata = metadata
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerAnomalyDetector] Query duration anomaly detection failed: {ex.Message}");
         }
     }
 }

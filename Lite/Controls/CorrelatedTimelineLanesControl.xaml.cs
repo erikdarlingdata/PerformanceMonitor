@@ -15,6 +15,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
@@ -51,17 +52,18 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         }
 
         _crosshairManager = new CorrelatedCrosshairManager();
-        _crosshairManager.AddLane(CpuChart, "CPU", "%", CpuValueLabel);
-        _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec", WaitStatsValueLabel);
-        _crosshairManager.AddLane(BlockingChart, "Blocking", "events", BlockingValueLabel);
-        _crosshairManager.AddLane(MemoryChart, "Memory", "MB", MemoryValueLabel);
-        _crosshairManager.AddLane(FileIoChart, "I/O Latency", "ms", FileIoValueLabel);
+        _crosshairManager.AddLane(CpuChart, "CPU", "%");
+        _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
+        _crosshairManager.AddLane(BlockingChart, "Blocking", "events");
+        _crosshairManager.AddLane(MemoryChart, "Buffer Pool", "MB");
+        _crosshairManager.AddLane(FileIoChart, "I/O Latency", "ms");
     }
 
     /// <summary>
     /// Refreshes all lane data for the given time range.
     /// </summary>
-    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate,
+        (DateTime From, DateTime To)? comparisonRange = null)
     {
         if (_dataService == null || _isRefreshing) return;
         _isRefreshing = true;
@@ -77,28 +79,43 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var memoryTask = _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var fileIoTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate);
 
+            // Fetch baselines for band rendering — chart-unit-matched metrics
+            var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
+            var cpuBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime);
+            var waitBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime);
+            var ioBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime);
+            var blockingBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.BlockingPerMinute, referenceTime);
+
             try
             {
-                await Task.WhenAll(cpuTask, waitTask, blockingTask, deadlockTask, memoryTask, fileIoTask);
+                await Task.WhenAll(cpuTask, waitTask, blockingTask, deadlockTask, memoryTask, fileIoTask,
+                    cpuBaselineTask, waitBaselineTask, ioBaselineTask, blockingBaselineTask);
             }
             catch (Exception ex)
             {
                 AppLogger.Info("CorrelatedLanes", $"Data fetch failed: {ex.Message}");
             }
 
+            var cpuBaseline = cpuBaselineTask.IsCompletedSuccessfully ? cpuBaselineTask.Result : null;
+            var waitBaseline = waitBaselineTask.IsCompletedSuccessfully ? waitBaselineTask.Result : null;
+            var ioBaseline = ioBaselineTask.IsCompletedSuccessfully ? ioBaselineTask.Result : null;
+            var blockingBaseline = blockingBaselineTask.IsCompletedSuccessfully ? blockingBaselineTask.Result : null;
+
             var utcOffset = ServerTimeHelper.UtcOffsetMinutes;
 
+            // minAnomalyValue: absolute floor below which dots/arrows are suppressed even if outside band.
+            // Prevents "1% CPU above 0.5% baseline" false alarms on idle servers.
             if (cpuTask.IsCompletedSuccessfully)
                 UpdateLane(CpuChart, "CPU %",
                     cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)d.SqlServerCpu)).ToList(),
-                    "#4FC3F7", 0, 105);
+                    "#4FC3F7", 0, 105, cpuBaseline, minAnomalyValue: 10);
             else
                 ShowEmpty(CpuChart, "CPU %");
 
             if (waitTask.IsCompletedSuccessfully)
                 UpdateLane(WaitStatsChart, "Wait ms/sec",
                     waitTask.Result.Select(d => (d.CollectionTime.AddMinutes(utcOffset).ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
-                    "#FFB74D");
+                    "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100);
             else
                 ShowEmpty(WaitStatsChart, "Wait ms/sec");
 
@@ -109,11 +126,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var deadlockData = deadlockTask.IsCompletedSuccessfully
                     ? deadlockTask.Result.Select(d => (d.Time.AddMinutes(utcOffset).ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
-                UpdateBlockingLane(blockingData, deadlockData);
+                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
-                UpdateLane(MemoryChart, "Memory MB",
+                UpdateLane(MemoryChart, "Buffer Pool MB",
                     memoryTask.Result.Select(d => (d.CollectionTime.AddMinutes(utcOffset).ToOADate(), d.BufferPoolMb)).ToList(),
                     "#CE93D8");
             else
@@ -126,10 +143,65 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     .OrderBy(g => g.Key)
                     .Select(g => (g.Key.AddMinutes(utcOffset).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
                     .ToList();
-                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784");
+                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }
             else
                 ShowEmpty(FileIoChart, "I/O ms");
+
+            // Comparison overlay — fetch reference period data and render as ghost lines
+            if (comparisonRange.HasValue)
+            {
+                var refFrom = comparisonRange.Value.From;
+                var refTo = comparisonRange.Value.To;
+                // Time shift: offset to align reference data with current chart X axis
+                var timeShift = (fromDate ?? DateTime.UtcNow.AddHours(-hoursBack)) - refFrom;
+
+                var refCpuTask = _dataService.GetCpuUtilizationAsync(_serverId, 0, refFrom, refTo);
+                var refWaitTask = _dataService.GetTotalWaitTrendAsync(_serverId, 0, refFrom, refTo);
+                var refBlockingTask = _dataService.GetBlockingTrendAsync(_serverId, 0, refFrom, refTo);
+                var refMemoryTask = _dataService.GetMemoryTrendAsync(_serverId, 0, refFrom, refTo);
+                var refIoTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, 0, refFrom, refTo);
+
+                try { await Task.WhenAll(refCpuTask, refWaitTask, refBlockingTask, refMemoryTask, refIoTask); }
+                catch (Exception ex) { AppLogger.Info("CorrelatedLanes", $"Comparison fetch failed: {ex.Message}"); }
+
+                AppLogger.Info("CorrelatedLanes",
+                    $"Comparison: refFrom={refFrom:o}, refTo={refTo:o}, shift={timeShift.TotalHours:F1}h, " +
+                    $"cpuRows={refCpuTask.Result?.Count ?? 0}, waitRows={refWaitTask.Result?.Count ?? 0}");
+
+                if (refCpuTask.IsCompletedSuccessfully)
+                    AddGhostLine(CpuChart, refCpuTask.Result
+                        .Select(d => (d.SampleTime.Add(timeShift).ToOADate(), (double)d.SqlServerCpu)).ToList(), "#4FC3F7");
+
+                if (refWaitTask.IsCompletedSuccessfully)
+                    AddGhostLine(WaitStatsChart, refWaitTask.Result
+                        .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.WaitTimeMsPerSecond)).ToList(), "#FFB74D");
+
+                if (refBlockingTask.IsCompletedSuccessfully)
+                {
+                    var refBlocking = refBlockingTask.Result
+                        .Select(d => (d.Time.AddMinutes(utcOffset).Add(timeShift).ToOADate(), (double)d.Count)).ToList();
+                    if (refBlocking.Count > 0)
+                        AddGhostLine(BlockingChart, refBlocking, "#E57373");
+                }
+
+                if (refMemoryTask.IsCompletedSuccessfully)
+                    AddGhostLine(MemoryChart, refMemoryTask.Result
+                        .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.BufferPoolMb)).ToList(), "#CE93D8");
+
+                if (refIoTask.IsCompletedSuccessfully)
+                {
+                    var refIo = refIoTask.Result
+                        .GroupBy(d => d.CollectionTime)
+                        .OrderBy(g => g.Key)
+                        .Select(g => (g.Key.AddMinutes(utcOffset).Add(timeShift).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                        .ToList();
+                    AddGhostLine(FileIoChart, refIo, "#81C784");
+                }
+
+                // Register reference data with crosshair manager for tooltip
+                _crosshairManager?.SetComparisonLabel(ComparisonLabel(comparisonRange.Value, fromDate, hoursBack));
+            }
 
             _crosshairManager?.ReattachVLines();
             SyncXAxes(hoursBack, fromDate, toDate, utcOffset);
@@ -141,7 +213,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
-        List<(double Time, double Value)> deadlockData)
+        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null)
     {
         ClearChart(BlockingChart);
         ApplyTheme(BlockingChart);
@@ -197,6 +269,24 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             maxCount = Math.Max(maxCount, deadlockData.Max(d => d.Value));
         }
 
+        // Baseline band for blocking
+        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        {
+            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
+            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+
+            _crosshairManager?.SetLaneBaseline(BlockingChart, lower, upper, isEventBased: true);
+
+            var band = BlockingChart.Plot.Add.HorizontalSpan(lower, upper);
+            band.FillStyle.Color = ScottPlot.Color.FromHex("#E57373").WithAlpha(25);
+            band.LineStyle.Width = 0;
+
+            var meanLine = BlockingChart.Plot.Add.HorizontalLine(baseline.Mean);
+            meanLine.Color = ScottPlot.Color.FromHex("#E57373").WithAlpha(60);
+            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
+            meanLine.LineWidth = 1;
+        }
+
         BlockingChart.Plot.Axes.DateTimeTicksBottom();
         BlockingChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         ReapplyAxisColors(BlockingChart);
@@ -212,7 +302,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
     private void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
         List<(double Time, double Value)> data, string colorHex,
-        double? yMin = null, double? yMax = null)
+        double? yMin = null, double? yMax = null, BaselineBucket? baseline = null,
+        double minAnomalyValue = 0)
     {
         ClearChart(chart);
         ApplyTheme(chart);
@@ -225,6 +316,43 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         var times = data.Select(d => d.Time).ToArray();
         var values = data.Select(d => d.Value).ToArray();
+
+        // Render baseline band FIRST (behind the data line)
+        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        {
+            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
+            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+
+            _crosshairManager?.SetLaneBaseline(chart, lower, upper, minAnomalyValue);
+
+            var band = chart.Plot.Add.HorizontalSpan(lower, upper);
+            band.FillStyle.Color = ScottPlot.Color.FromHex(colorHex).WithAlpha(25);
+            band.LineStyle.Width = 0;
+
+            var meanLine = chart.Plot.Add.HorizontalLine(baseline.Mean);
+            meanLine.Color = ScottPlot.Color.FromHex(colorHex).WithAlpha(60);
+            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
+            meanLine.LineWidth = 1;
+
+            // Highlight anomalous points (outside ± 2σ band AND above absolute minimum)
+            var anomalyIndices = new List<int>();
+            for (int i = 0; i < values.Length; i++)
+            {
+                if ((values[i] > upper && values[i] >= minAnomalyValue) || values[i] < lower)
+                    anomalyIndices.Add(i);
+            }
+
+            if (anomalyIndices.Count > 0)
+            {
+                var anomalyTimes = anomalyIndices.Select(i => times[i]).ToArray();
+                var anomalyValues = anomalyIndices.Select(i => values[i]).ToArray();
+                var anomalyScatter = chart.Plot.Add.Scatter(anomalyTimes, anomalyValues);
+                anomalyScatter.Color = ScottPlot.Color.FromHex("#FF5252");
+                anomalyScatter.MarkerSize = 6;
+                anomalyScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
+                anomalyScatter.LineWidth = 0;
+            }
+        }
 
         var scatter = chart.Plot.Add.Scatter(times, values);
         scatter.Color = ScottPlot.Color.FromHex(colorHex);
@@ -289,6 +417,38 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Renders a semi-transparent dashed ghost line for comparison overlay.
+    /// </summary>
+    private static void AddGhostLine(ScottPlot.WPF.WpfPlot chart,
+        List<(double Time, double Value)> data, string colorHex)
+    {
+        if (data.Count == 0) return;
+
+        var times = data.Select(d => d.Time).ToArray();
+        var values = data.Select(d => d.Value).ToArray();
+
+        var scatter = chart.Plot.Add.Scatter(times, values);
+        // White-ish ghost line — distinct from the primary colored line
+        scatter.Color = ScottPlot.Colors.White.WithAlpha(140);
+        scatter.MarkerSize = 0;
+        scatter.LineWidth = 1.5f;
+        scatter.LinePattern = ScottPlot.LinePattern.Dashed;
+
+        chart.Refresh();
+    }
+
+    private static string ComparisonLabel((DateTime From, DateTime To) range,
+        DateTime? fromDate, int hoursBack)
+    {
+        var currentStart = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
+        var daysBack = (currentStart - range.From).TotalDays;
+
+        if (Math.Abs(daysBack - 1) < 0.5) return "yesterday";
+        if (Math.Abs(daysBack - 7) < 0.5) return "last week";
+        return $"{daysBack:N0}d ago";
+    }
+
     private static void ClearChart(ScottPlot.WPF.WpfPlot chart)
     {
         chart.Reset();
@@ -332,21 +492,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
             dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
-            textColor        = ScottPlot.Color.FromHex("#364D61");
+            textColor        = ScottPlot.Color.FromHex("#1A2A3A");
             gridColor        = ScottPlot.Color.FromHex("#A8BDD0").WithAlpha(120);
         }
         else if (ThemeManager.HasLightBackground)
         {
             figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
             dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
-            textColor        = ScottPlot.Color.FromHex("#4A5568");
+            textColor        = ScottPlot.Color.FromHex("#1A1D23");
             gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
         }
         else
         {
             figureBackground = ScottPlot.Color.FromHex("#22252b");
             dataBackground   = ScottPlot.Color.FromHex("#111217");
-            textColor        = ScottPlot.Color.FromHex("#9DA5B4");
+            textColor        = ScottPlot.Color.FromHex("#E4E6EB");
             gridColor        = ScottPlot.Colors.White.WithAlpha(40);
         }
 
@@ -368,10 +528,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     private static void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
         var textColor = ThemeManager.CurrentTheme == "CoolBreeze"
-            ? ScottPlot.Color.FromHex("#364D61")
+            ? ScottPlot.Color.FromHex("#1A2A3A")
             : ThemeManager.HasLightBackground
-                ? ScottPlot.Color.FromHex("#4A5568")
-                : ScottPlot.Color.FromHex("#9DA5B4");
+                ? ScottPlot.Color.FromHex("#1A1D23")
+                : ScottPlot.Color.FromHex("#E4E6EB");
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;

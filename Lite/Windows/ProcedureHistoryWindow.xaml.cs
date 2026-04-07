@@ -134,14 +134,14 @@ public partial class ProcedureHistoryWindow : Window
         {
             figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
             dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
-            textColor        = ScottPlot.Color.FromHex("#4A5568");
+            textColor        = ScottPlot.Color.FromHex("#1A1D23");
             gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
         }
         else
         {
             figureBackground = ScottPlot.Color.FromHex("#22252b");
             dataBackground   = ScottPlot.Color.FromHex("#111217");
-            textColor        = ScottPlot.Color.FromHex("#9DA5B4");
+            textColor        = ScottPlot.Color.FromHex("#E4E6EB");
             gridColor        = ScottPlot.Colors.White.WithAlpha(40);
         }
         chart.Plot.FigureBackground.Color = figureBackground;
