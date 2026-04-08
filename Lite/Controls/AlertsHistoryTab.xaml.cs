@@ -19,6 +19,7 @@ using System.Windows.Threading;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -419,7 +420,7 @@ public partial class AlertsHistoryTab : UserControl
 
         foreach (var col in grid.Columns)
         {
-            sb.Append(col.Header?.ToString() ?? "");
+            sb.Append(DataGridClipboardBehavior.GetHeaderText(col));
             sb.Append('\t');
         }
         sb.AppendLine();
@@ -456,7 +457,7 @@ public partial class AlertsHistoryTab : UserControl
 
         var headers = new List<string>();
         foreach (var col in grid.Columns)
-            headers.Add(CsvEscape(col.Header?.ToString() ?? ""));
+            headers.Add(CsvEscape(DataGridClipboardBehavior.GetHeaderText(col)));
         sb.AppendLine(string.Join(",", headers));
 
         foreach (var item in grid.Items)

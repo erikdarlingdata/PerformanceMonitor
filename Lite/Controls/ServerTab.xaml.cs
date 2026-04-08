@@ -4213,7 +4213,7 @@ public partial class ServerTab : UserControl
         var headers = new List<string>();
         foreach (var col in grid.Columns)
         {
-            headers.Add(CsvEscape(col.Header?.ToString() ?? "", sep));
+            headers.Add(CsvEscape(DataGridClipboardBehavior.GetHeaderText(col), sep));
         }
         sb.AppendLine(string.Join(sep, headers));
 

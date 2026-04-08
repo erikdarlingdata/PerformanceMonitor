@@ -18,6 +18,7 @@ using System.Windows.Data;
 using System.Windows.Media;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -884,7 +885,7 @@ public partial class FinOpsTab : UserControl
 
         foreach (var col in grid.Columns)
         {
-            sb.Append(col.Header?.ToString() ?? "");
+            sb.Append(DataGridClipboardBehavior.GetHeaderText(col));
             sb.Append('\t');
         }
         sb.AppendLine();
@@ -930,7 +931,7 @@ public partial class FinOpsTab : UserControl
 
         var headers = new List<string>();
         foreach (var col in grid.Columns)
-            headers.Add(CsvEscape(col.Header?.ToString() ?? ""));
+            headers.Add(CsvEscape(DataGridClipboardBehavior.GetHeaderText(col)));
         sb.AppendLine(string.Join(",", headers));
 
         foreach (var item in grid.Items)
