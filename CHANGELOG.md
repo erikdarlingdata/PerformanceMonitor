@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-04-08
+
+### Added
+
+- **Correlated timeline lanes** on Lite Overview and Dashboard — synchronized CPU, memory, waits, and TempDB trend lanes for at-a-glance correlation ([#688])
+- **Dynamic baselines and anomaly detection** in Lite and Dashboard — automatic baseline calculation with anomaly highlighting on key metrics ([#692], [#693])
+- **Query grid comparison** — before/after comparison mode for query grids in Lite and Dashboard with global Compare dropdown ([#687])
+- **Nonclustered index count badge** on modification operators in plan viewer ([#788])
+- **Upgrade detection in Edit Server** dialog — see pending upgrades without adding a new server ([#772])
+- **CLI installer interactive mode** prompts for trust-cert and encryption settings ([#784])
+- **SignPath code signing** — release binaries are now digitally signed via the [SignPath FOSS](https://signpath.io) program
+
+### Changed
+
+- **PlanAnalyzer Rule 3 (Serial Plan)** comprehensively refined — severity demotion for TRIVIAL and 0ms plans, `CouldNotGenerateValidParallelPlan` treated as actionable, all 25 `NonParallelPlanReason` values now covered
+- **PlanAnalyzer warning rules** ported from PerformanceStudio improvements
+- **Text readability** — replaced all muted/dim text colors with full foreground colors for readability
+
+### Fixed
+
+- **Embedded resource upgrade discovery** broken — upgrades silently returned zero results for Dashboard installs ([#772])
+- **Archive compaction OOM** on large parquet groups
+- **CLI installer argument parsing** treating flags as positional args ([#786])
+- **Lite long-running query alerts** firing on stale DuckDB snapshots
+- **FinOps Enterprise feature detection** now queries all databases and filters to TDE only ([#780])
+- **Second launch error** — now brings existing window to foreground instead ([#769])
+- **Overview tab Memory Grant** showing 0 for all timestamps ([#776])
+- **Lite FinOps Enterprise features** query error on servers without `database_id` column ([#777])
+- **Collector health status** incorrect for on-load collectors
+- **CSV and clipboard exports** writing `System.Windows.Controls.StackPanel` as column headers instead of actual header text ([#805])
+
+[#687]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/687
+[#688]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/688
+[#692]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/692
+[#693]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/693
+[#769]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/769
+[#772]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/772
+[#776]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/776
+[#777]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/777
+[#780]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/780
+[#784]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/784
+[#786]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/786
+[#788]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/788
+[#805]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/805
+
 ## [2.5.0] - 2026-03-30
 
 ### Important
