@@ -693,6 +693,17 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for complete license texts.
 
 ---
 
+## Sponsors
+
+<table>
+  <tr>
+    <td><a href="https://signpath.io"><img src="https://about.signpath.io/wp-content/uploads/2024/01/signpath_logo_blue.svg" alt="SignPath" width="40"></a></td>
+    <td>Free code signing on Windows provided by <a href="https://signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a></td>
+  </tr>
+</table>
+
+---
+
 ## License
 
 Copyright (c) 2026 Darling Data, LLC. Licensed under the MIT License. See [LICENSE](LICENSE) for details.
