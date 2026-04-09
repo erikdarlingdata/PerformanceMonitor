@@ -152,7 +152,7 @@ public abstract class ScriptProvider
 
         return candidates
             .Where(x => x.FromVersion != null && x.ToVersion != null)
-            .Where(x => x.FromVersion >= current)
+            .Where(x => x.ToVersion > current)
             .Where(x => x.ToVersion <= target)
             .OrderBy(x => x.FromVersion)
             .ToList();

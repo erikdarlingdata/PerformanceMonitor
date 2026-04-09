@@ -149,6 +149,23 @@ public class UpgradeOrderingTests
     }
 
     [Fact]
+    public void PatchVersion_GetsUpgradeFromPriorMinor()
+    {
+        // Regression test for #817: user on v2.4.1 should still get the
+        // 2.4.0-to-2.5.0 upgrade applied (patch version within range)
+        using var dir = new TempDirectoryBuilder()
+            .WithUpgrade("2.3.0", "2.4.0", "01_a.sql")
+            .WithUpgrade("2.4.0", "2.5.0", "01_b.sql")
+            .WithUpgrade("2.5.0", "2.6.0", "01_c.sql");
+
+        var upgrades = ScriptProvider.FromDirectory(dir.RootPath).GetApplicableUpgrades("2.4.1", "2.6.0");
+
+        Assert.Equal(2, upgrades.Count);
+        Assert.Equal("2.4.0-to-2.5.0", upgrades[0].FolderName);
+        Assert.Equal("2.5.0-to-2.6.0", upgrades[1].FolderName);
+    }
+
+    [Fact]
     public void EmbeddedResources_FindsUpgradeFolders()
     {
         // Regression test for #772: MSBuild mangles embedded resource names
