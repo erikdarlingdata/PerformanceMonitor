@@ -178,6 +178,8 @@ BEGIN
             Aggregate deadlock data by database
             Update rows if database already exists from blocking aggregation
             Otherwise insert new rows
+            Include databases from previous collection with zero counts so
+            deltas reset to 0 when no new events occur (#803)
             */
             WITH
                 deadlock_aggregates AS
@@ -192,9 +194,41 @@ BEGIN
                 AND   bl.collection_time < @start_time
                 GROUP BY
                     bl.database_name
+            ),
+                combined_source AS
+            (
+                SELECT
+                    da.database_name,
+                    da.deadlock_count,
+                    da.total_deadlock_wait_time_ms,
+                    da.victim_count
+                FROM deadlock_aggregates AS da
+
+                UNION ALL
+
+                /*
+                Carry forward databases from previous collection with zero
+                counts so delta calculation can reset them to 0
+                */
+                SELECT DISTINCT
+                    bds.database_name,
+                    0,
+                    0,
+                    0
+                FROM collect.blocking_deadlock_stats AS bds
+                WHERE bds.collection_time >= @last_deadlock_collection
+                AND   bds.collection_time < @start_time
+                AND   bds.database_name <> N'(none)'
+                AND   NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM deadlock_aggregates AS da
+                    WHERE da.database_name = bds.database_name
+                )
             )
             MERGE collect.blocking_deadlock_stats WITH (SERIALIZABLE) AS target
-            USING deadlock_aggregates AS source
+            USING combined_source AS source
                 ON  target.database_name = source.database_name
                 AND target.collection_time >= @start_time
             WHEN MATCHED 
