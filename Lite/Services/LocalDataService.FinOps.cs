@@ -93,9 +93,22 @@ DECLARE
             THEN N'SELECT @gb = SUM(CAST(size AS bigint)) * 8.0 / 1024.0 / 1024.0 FROM sys.database_files'
             ELSE N'SELECT @gb = SUM(CAST(size AS bigint)) * 8.0 / 1024.0 / 1024.0 FROM sys.master_files'
         END,
-    @storage_gb decimal(19,2);
+    @storage_gb decimal(19,2),
+    @host_os nvarchar(256);
 
 EXEC sys.sp_executesql @storage_sql, N'@gb decimal(19,2) OUTPUT', @gb = @storage_gb OUTPUT;
+
+IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
+    EXEC sys.sp_executesql N'SELECT @os = host_distribution FROM sys.dm_os_host_info',
+        N'@os nvarchar(256) OUTPUT', @os = @host_os OUTPUT;
+
+IF @host_os IS NULL
+BEGIN
+    DECLARE @ver nvarchar(4000) = @@VERSION;
+    DECLARE @on_pos int = CHARINDEX(N' on ', @ver);
+    IF @on_pos > 0
+        SET @host_os = LTRIM(SUBSTRING(@ver, @on_pos + 4, LEN(@ver)));
+END;
 
 SELECT
     CONVERT(nvarchar(256), SERVERPROPERTY('Edition')),
@@ -110,7 +123,8 @@ SELECT
     si.cores_per_socket,
     CONVERT(int, SERVERPROPERTY('EngineEdition')),
     CONVERT(int, SERVERPROPERTY('IsHadrEnabled')),
-    CONVERT(int, SERVERPROPERTY('IsClustered'))
+    CONVERT(int, SERVERPROPERTY('IsClustered')),
+    @host_os
 FROM sys.dm_os_sys_info AS si;";
 
         using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
@@ -137,6 +151,7 @@ FROM sys.dm_os_sys_info AS si;";
                 EngineEdition = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
                 IsHadrEnabled = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)) == 1,
                 IsClustered = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)) == 1,
+                HostOsVersion = reader.IsDBNull(13) ? "" : reader.GetString(13),
                 LastUpdated = DateTime.Now
             };
         }
@@ -2295,6 +2310,7 @@ public class ServerPropertyRow
     public string ServerName { get; set; } = "";
     public string Edition { get; set; } = "";
     public string ProductVersion { get; set; } = "";
+    public string HostOsVersion { get; set; } = "";
     public string? ProductLevel { get; set; }
     public string? ProductUpdateLevel { get; set; }
     public int EngineEdition { get; set; }

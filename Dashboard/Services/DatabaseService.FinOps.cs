@@ -391,6 +391,20 @@ OPTION(MAXDOP 1, RECOMPILE);";
             await connection.OpenAsync();
 
             const string query = @"
+DECLARE @host_os nvarchar(256);
+IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
+    EXEC sys.sp_executesql N'SELECT @os = host_distribution FROM sys.dm_os_host_info',
+        N'@os nvarchar(256) OUTPUT', @os = @host_os OUTPUT;
+
+IF @host_os IS NULL
+BEGIN
+    /* SQL 2016 or Azure SQL DB: parse OS from @@VERSION */
+    DECLARE @ver nvarchar(4000) = @@VERSION;
+    DECLARE @on_pos int = CHARINDEX(N' on ', @ver);
+    IF @on_pos > 0
+        SET @host_os = LTRIM(SUBSTRING(@ver, @on_pos + 4, LEN(@ver)));
+END;
+
 SELECT
     edition =
         CONVERT(nvarchar(256), SERVERPROPERTY('Edition')),
@@ -417,7 +431,9 @@ SELECT
     is_hadr_enabled =
         CONVERT(int, SERVERPROPERTY('IsHadrEnabled')),
     is_clustered =
-        CONVERT(int, SERVERPROPERTY('IsClustered'))
+        CONVERT(int, SERVERPROPERTY('IsClustered')),
+    host_os =
+        @host_os
 FROM sys.dm_os_sys_info AS si;";
 
             using var command = new SqlCommand(query, connection);
@@ -446,6 +462,7 @@ FROM sys.dm_os_sys_info AS si;";
                     EngineEdition = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10)),
                     IsHadrEnabled = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)) == 1,
                     IsClustered = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)) == 1,
+                    HostOsVersion = reader.IsDBNull(13) ? "" : reader.GetString(13),
                     LastUpdated = DateTime.Now
                 };
             }
@@ -2496,6 +2513,7 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
         public string ServerName { get; set; } = "";
         public string Edition { get; set; } = "";
         public string SqlVersion { get; set; } = "";
+        public string HostOsVersion { get; set; } = "";
         public int CpuCount { get; set; }
         public long PhysicalMemoryMb { get; set; }
         public int? SocketCount { get; set; }

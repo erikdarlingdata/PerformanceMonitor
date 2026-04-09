@@ -2447,6 +2447,14 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding HostOsVersion}" Width="200">
+                                <DataGridTextColumn.Header>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HostOsVersion" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Host OS" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </DataGridTextColumn.Header>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding CpuCount, StringFormat='{}{0:N0}'}" Width="70">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
