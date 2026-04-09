@@ -38,10 +38,11 @@ public static partial class PlanAnalyzer
     private static void AnalyzeStatement(PlanStatement stmt)
     {
         // Rule 3: Serial plan with reason
-        // Skip: trivial cost (< 0.01), TRIVIAL optimization (can't go parallel anyway),
+        // Skip: cost < 1 (CTFP is an integer so cost < 1 can never go parallel),
+        // TRIVIAL optimization (can't go parallel anyway),
         // and 0ms actual elapsed time (not worth flagging).
         if (!string.IsNullOrEmpty(stmt.NonParallelPlanReason)
-            && stmt.StatementSubTreeCost >= 0.01
+            && stmt.StatementSubTreeCost >= 1.0
             && stmt.StatementOptmLevel != "TRIVIAL"
             && !(stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs == 0))
         {
@@ -105,12 +106,44 @@ public static partial class PlanAnalyzer
                 or "NoParallelWithRemoteQuery"
                 or "NoRemoteParallelismForMatrix";
 
-            stmt.PlanWarnings.Add(new PlanWarning
+            // MaxDOPSetToOne needs special handling: check whether the user explicitly
+            // set MAXDOP 1 in the query text, or if it's a server/db/RG setting.
+            // SQL Server truncates StatementText at ~4,000 characters in plan XML.
+            if (stmt.NonParallelPlanReason == "MaxDOPSetToOne")
             {
-                WarningType = "Serial Plan",
-                Message = $"Query running serially: {reason}.",
-                Severity = isActionable ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info
-            });
+                var text = stmt.StatementText ?? "";
+                var hasMaxdop1InText = Regex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
+                var isTruncated = text.Length >= 3990;
+
+                if (hasMaxdop1InText)
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Serial Plan",
+                        Message = $"Query running serially: {reason}.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+                else if (isTruncated)
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Serial Plan",
+                        Message = $"Query running serially: {reason}. MAXDOP 1 may be set at the server, database, resource governor, or query level (query text was truncated).",
+                        Severity = PlanWarningSeverity.Info
+                    });
+                }
+                // else: not truncated, no MAXDOP 1 in text — server/db/RG setting, suppress entirely
+            }
+            else
+            {
+                stmt.PlanWarnings.Add(new PlanWarning
+                {
+                    WarningType = "Serial Plan",
+                    Message = $"Query running serially: {reason}.",
+                    Severity = isActionable ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info
+                });
+            }
         }
 
         // Rule 9: Memory grant issues (statement-level)
@@ -203,8 +236,8 @@ public static partial class PlanAnalyzer
         // Rule 20: Local variables without RECOMPILE
         // Parameters with no CompiledValue are likely local variables — the optimizer
         // cannot sniff their values and uses density-based ("unknown") estimates.
-        // Skip trivial statements (simple variable assignments) where estimate quality doesn't matter.
-        if (stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 0.01)
+        // Skip statements with cost < 1 (can't go parallel, estimate quality rarely matters).
+        if (stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
         {
             var unsnifffedParams = stmt.Parameters
                 .Where(p => string.IsNullOrEmpty(p.CompiledValue))
@@ -259,28 +292,33 @@ public static partial class PlanAnalyzer
                 var speedup = (double)cpu / elapsed;
                 var efficiency = Math.Max(0.0, Math.Min(100.0, (speedup - 1.0) / (dop - 1.0) * 100.0));
 
+                // Build targeted advice from wait stats if available
+                var waitAdvice = GetWaitStatsAdvice(stmt.WaitStats);
+
                 if (speedup < 0.5)
                 {
                     // CPU well below Elapsed: threads are waiting, not doing CPU work
                     var waitPct = (1.0 - speedup) * 100;
+                    var advice = waitAdvice ?? "Common causes include spills to tempdb, physical I/O reads, lock or latch contention, and memory grant waits.";
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Parallel Wait Bottleneck",
                         Message = $"Parallel plan (DOP {dop}, {efficiency:N0}% efficient) with elapsed time ({elapsed:N0}ms) exceeding CPU time ({cpu:N0}ms). " +
                                   $"Approximately {waitPct:N0}% of elapsed time was spent waiting rather than on CPU. " +
-                                  $"Common causes include spills to tempdb, physical I/O reads, lock or latch contention, and memory grant waits.",
+                                  advice,
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
                 else if (efficiency < 40)
                 {
                     // CPU >= Elapsed but well below DOP potential — parallelism is ineffective
+                    var advice = waitAdvice ?? "Look for parallel thread skew, blocking exchanges, or serial zones in the plan that prevent effective parallel execution.";
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Ineffective Parallelism",
                         Message = $"Parallel plan (DOP {dop}) is only {efficiency:N0}% efficient — CPU time ({cpu:N0}ms) vs elapsed time ({elapsed:N0}ms). " +
                                   $"At DOP {dop}, ideal CPU time would be ~{elapsed * dop:N0}ms. " +
-                                  $"Look for parallel thread skew, blocking exchanges, or serial zones in the plan that prevent effective parallel execution.",
+                                  advice,
                         Severity = efficiency < 20 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                     });
                 }
@@ -483,8 +521,11 @@ public static partial class PlanAnalyzer
         {
             if (node.ActualRows == 0)
             {
-                // Zero rows is always worth noting — resources were allocated for nothing
-                if (node.EstimateRows >= 100)
+                // Zero rows with a significant estimate — only warn on operators that
+                // actually allocate meaningful resources (memory grants for hash/sort/spool).
+                // Skip Parallelism, Bitmap, Compute Scalar, Filter, Concatenation, etc.
+                // where 0 rows is just a consequence of upstream filtering.
+                if (node.EstimateRows >= 100 && AllocatesResources(node))
                 {
                     node.Warnings.Add(new PlanWarning
                     {
@@ -670,12 +711,74 @@ public static partial class PlanAnalyzer
             !IsProbeOnly(node.Predicate))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
+            var details = BuildScanImpactDetails(node, stmt);
+            var severity = PlanWarningSeverity.Warning;
+            if (details.CostPct >= 90 || details.ElapsedPct >= 90)
+                severity = PlanWarningSeverity.Critical;
+            var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
+            if (!string.IsNullOrEmpty(details.Summary))
+                message += $" {details.Summary}";
+            message += " Check that you have appropriate indexes.";
+            message += $"\nPredicate: {Truncate(displayPredicate, 200)}";
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Scan With Predicate",
-                Message = $"Scan with residual predicate — SQL Server is reading every row and filtering after the fact. Check that you have appropriate indexes.\nPredicate: {Truncate(displayPredicate, 200)}",
-                Severity = PlanWarningSeverity.Warning
+                Message = message,
+                Severity = severity
             });
+        }
+
+        // Rule 32: Cardinality misestimate on expensive scan — likely preventing index usage
+        // When a scan dominates the plan AND the estimate is vastly higher than actual rows,
+        // the optimizer chose a scan because it thought it needed most of the table.
+        // With accurate estimates, it would likely seek instead.
+        if (node.HasActualStats && IsRowstoreScan(node)
+            && node.EstimateRows > 0 && node.ActualRows >= 0 && node.ActualRowsRead > 0)
+        {
+            var impact = BuildScanImpactDetails(node, stmt);
+            var overestimateRatio = node.EstimateRows / Math.Max(1.0, node.ActualRows);
+            var selectivity = (double)node.ActualRows / node.ActualRowsRead;
+
+            // Fire when: scan is >= 50% of plan, estimate is >= 10x actual, and < 10% selectivity
+            if ((impact.CostPct >= 50 || impact.ElapsedPct >= 50)
+                && overestimateRatio >= 10.0
+                && selectivity < 0.10)
+            {
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Scan Cardinality Misestimate",
+                    Message = $"Estimated {node.EstimateRows:N0} rows but only {node.ActualRows:N0} returned ({selectivity * 100:N3}% of {node.ActualRowsRead:N0} rows read). " +
+                              $"The {overestimateRatio:N0}x overestimate likely caused the optimizer to choose a scan instead of a seek. " +
+                              $"An index on the predicate columns could dramatically reduce I/O.",
+                    Severity = PlanWarningSeverity.Critical
+                });
+            }
+        }
+
+        // Rule 33: Estimated plan CE guess detection — scans with telltale default selectivity
+        // When the optimizer uses a local variable or can't sniff, it falls back to density-based
+        // guesses: 30% (equality), 10% (inequality), 9% (LIKE/between), ~16.43% (sqrt(30%)),
+        // 1% (multi-inequality). On large tables, these guesses can hide the need for an index.
+        if (!node.HasActualStats && IsRowstoreScan(node)
+            && node.TableCardinality >= 100_000 && node.EstimateRows > 0
+            && !string.IsNullOrEmpty(node.Predicate))
+        {
+            var impact = BuildScanImpactDetails(node, stmt);
+            if (impact.CostPct >= 50)
+            {
+                var guessDesc = DetectCeGuess(node.EstimateRows, node.TableCardinality);
+                if (guessDesc != null)
+                {
+                    node.Warnings.Add(new PlanWarning
+                    {
+                        WarningType = "Estimated Plan CE Guess",
+                        Message = $"Estimated {node.EstimateRows:N0} rows from {node.TableCardinality:N0} row table — {guessDesc}. " +
+                                  $"The optimizer may be using a default guess instead of accurate statistics. " +
+                                  $"If actual selectivity is much lower, an index on the predicate columns could help significantly.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
         }
 
         // Rule 13: Mismatched data types (GetRangeWithMismatchedTypes / GetRangeThroughConvert)
@@ -1073,12 +1176,14 @@ public static partial class PlanAnalyzer
         if (IsNullCoalesceRegExp().IsMatch(predicate))
             return "ISNULL/COALESCE wrapping column";
 
-        // Common function calls on columns
+        // Common function calls on columns — but only if the function wraps a column,
+        // not a parameter/variable. Split on comparison operators to check which side
+        // the function is on. Predicate format: [db].[schema].[table].[col]>func(...)
         var funcMatch = FunctionInPredicateRegex.Match(predicate);
         if (funcMatch.Success)
         {
             var funcName = funcMatch.Groups[1].Value.ToUpperInvariant();
-            if (funcName != "CONVERT_IMPLICIT")
+            if (funcName != "CONVERT_IMPLICIT" && IsFunctionOnColumnSide(predicate, funcMatch))
                 return $"Function call ({funcName}) on column";
         }
 
@@ -1429,6 +1534,156 @@ public static partial class PlanAnalyzer
     private static string Truncate(string value, int maxLength)
     {
         return value.Length <= maxLength ? value : value[..maxLength] + "...";
+    }
+
+    /// <summary>
+    /// Returns targeted advice based on statement-level wait stats, or null if no waits.
+    /// When the dominant wait type is clear, gives specific guidance instead of generic advice.
+    /// </summary>
+    private static string? GetWaitStatsAdvice(List<WaitStatInfo> waits)
+    {
+        if (waits.Count == 0)
+            return null;
+
+        var totalMs = waits.Sum(w => w.WaitTimeMs);
+        if (totalMs == 0)
+            return null;
+
+        var top = waits.OrderByDescending(w => w.WaitTimeMs).First();
+        var topPct = (double)top.WaitTimeMs / totalMs * 100;
+
+        // Only give targeted advice if the dominant wait is >= 80% of total wait time
+        if (topPct < 80)
+            return null;
+
+        var waitType = top.WaitType.ToUpperInvariant();
+        var advice = waitType switch
+        {
+            _ when waitType.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) =>
+                $"I/O bound — {topPct:N0}% of wait time is {top.WaitType}. Data is being read from disk rather than memory. Consider adding indexes to reduce I/O, or investigate memory pressure.",
+            _ when waitType.StartsWith("LATCH_", StringComparison.Ordinal) =>
+                $"Latch contention — {topPct:N0}% of wait time is {top.WaitType}.",
+            _ when waitType.StartsWith("LCK_", StringComparison.Ordinal) =>
+                $"Lock contention — {topPct:N0}% of wait time is {top.WaitType}. Other sessions are holding locks that this query needs.",
+            _ when waitType.StartsWith("CXPACKET", StringComparison.Ordinal) || waitType.StartsWith("CXCONSUMER", StringComparison.Ordinal) =>
+                $"Parallel thread skew — {topPct:N0}% of wait time is {top.WaitType}. Work is unevenly distributed across parallel threads.",
+            _ when waitType.Contains("IO_COMPLETION", StringComparison.Ordinal) =>
+                $"I/O bound — {topPct:N0}% of wait time is {top.WaitType}.",
+            _ when waitType.StartsWith("RESOURCE_SEMAPHORE", StringComparison.Ordinal) =>
+                $"Memory grant wait — {topPct:N0}% of wait time is {top.WaitType}. The query had to wait for a memory grant.",
+            _ => $"Dominant wait is {top.WaitType} ({topPct:N0}% of wait time)."
+        };
+
+        return advice;
+    }
+
+    /// <summary>
+    /// Returns true for operators that allocate meaningful resources based on row estimates.
+    /// Hash Match (hash table), Sort (sort buffer), Spool (worktable).
+    /// </summary>
+    private static bool AllocatesResources(PlanNode node)
+    {
+        var op = node.PhysicalOp;
+        return op.StartsWith("Hash", StringComparison.OrdinalIgnoreCase)
+            || op.StartsWith("Sort", StringComparison.OrdinalIgnoreCase)
+            || op.EndsWith("Spool", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private record ScanImpact(double CostPct, double ElapsedPct, string? Summary);
+
+    /// <summary>
+    /// Builds impact details for a scan node: what % of plan time/cost it represents,
+    /// and what fraction of rows survived filtering.
+    /// </summary>
+    private static ScanImpact BuildScanImpactDetails(PlanNode node, PlanStatement stmt)
+    {
+        var parts = new List<string>();
+
+        // % of plan cost
+        double costPct = 0;
+        if (stmt.StatementSubTreeCost > 0 && node.EstimatedTotalSubtreeCost > 0)
+        {
+            costPct = node.EstimatedTotalSubtreeCost / stmt.StatementSubTreeCost * 100;
+            if (costPct >= 50)
+                parts.Add($"This scan is {costPct:N0}% of the plan cost.");
+        }
+
+        // % of elapsed time (actual plans)
+        double elapsedPct = 0;
+        if (node.HasActualStats && node.ActualElapsedMs > 0 &&
+            stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs > 0)
+        {
+            elapsedPct = (double)node.ActualElapsedMs / stmt.QueryTimeStats.ElapsedTimeMs * 100;
+            if (elapsedPct >= 50)
+                parts.Add($"This scan took {elapsedPct:N0}% of elapsed time.");
+        }
+
+        // Row selectivity: rows returned vs rows read (actual) or vs table cardinality (estimated)
+        if (node.HasActualStats && node.ActualRowsRead > 0 && node.ActualRows < node.ActualRowsRead)
+        {
+            var selectivity = (double)node.ActualRows / node.ActualRowsRead * 100;
+            if (selectivity < 10)
+                parts.Add($"Only {selectivity:N3}% of rows survived filtering ({node.ActualRows:N0} of {node.ActualRowsRead:N0}).");
+        }
+        else if (!node.HasActualStats && node.TableCardinality > 0 && node.EstimateRows < node.TableCardinality)
+        {
+            var selectivity = node.EstimateRows / node.TableCardinality * 100;
+            if (selectivity < 10)
+                parts.Add($"Only {selectivity:N1}% of rows estimated to survive filtering.");
+        }
+
+        return new ScanImpact(costPct, elapsedPct, parts.Count > 0 ? string.Join(" ", parts) : null);
+    }
+
+    /// <summary>
+    /// Checks whether a function call in a predicate is on the column side of the comparison.
+    /// Predicate ScalarStrings look like: [db].[schema].[table].[col]>dateadd(day,(0),[@var])
+    /// If the function is only on the parameter/literal side, it's still SARGable.
+    /// </summary>
+    private static bool IsFunctionOnColumnSide(string predicate, Match funcMatch)
+    {
+        // Find the comparison operator that splits the predicate into left/right sides.
+        // Operators in ScalarString: >=, <=, <>, >, <, =
+        var compMatch = Regex.Match(predicate, @"(?<![<>])([<>=!]{1,2})(?![<>=])");
+        if (!compMatch.Success)
+            return true; // No comparison found — can't determine side, assume worst case
+
+        var compPos = compMatch.Index;
+        var funcPos = funcMatch.Index;
+
+        // Determine which side the function is on
+        var funcSide = funcPos < compPos ? "left" : "right";
+
+        // Check if that side also contains a column reference [...].[...].[...]
+        string side = funcSide == "left"
+            ? predicate[..compPos]
+            : predicate[(compPos + compMatch.Length)..];
+
+        // Column references are multi-part bracket-qualified: [schema].[table].[column]
+        // Variables are [@var] or [@var] — single bracket pair with @ prefix.
+        // Match [identifier].[identifier] (at least two dotted parts) to distinguish columns.
+        return Regex.IsMatch(side, @"\[[^\]@]+\]\.\[");
+    }
+
+    /// <summary>
+    /// Detects well-known CE default selectivity guesses by comparing EstimateRows to TableCardinality.
+    /// Returns a description of the guess pattern, or null if no known pattern matches.
+    /// </summary>
+    private static string? DetectCeGuess(double estimateRows, double tableCardinality)
+    {
+        if (tableCardinality <= 0) return null;
+        var selectivity = estimateRows / tableCardinality;
+
+        // Known CE guess selectivities with a 2% tolerance band
+        return selectivity switch
+        {
+            >= 0.29 and <= 0.31 => $"matches the 30% equality guess ({selectivity * 100:N1}%)",
+            >= 0.098 and <= 0.102 => $"matches the 10% inequality guess ({selectivity * 100:N1}%)",
+            >= 0.088 and <= 0.092 => $"matches the 9% LIKE/BETWEEN guess ({selectivity * 100:N1}%)",
+            >= 0.155 and <= 0.175 => $"matches the ~16.4% compound predicate guess ({selectivity * 100:N1}%)",
+            >= 0.009 and <= 0.011 => $"matches the 1% multi-inequality guess ({selectivity * 100:N1}%)",
+            _ => null
+        };
     }
 
     [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase)]

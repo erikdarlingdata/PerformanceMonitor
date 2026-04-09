@@ -37,8 +37,9 @@ public static class ShowPlanParser
         foreach (var batchEl in batches)
         {
             var batch = new PlanBatch();
-            var statementsEl = batchEl.Element(Ns + "Statements");
-            if (statementsEl != null)
+            // A Batch can contain multiple <Statements> elements (e.g., DECLARE + SELECT).
+            // Use Elements() to iterate all of them, not just the first.
+            foreach (var statementsEl in batchEl.Elements(Ns + "Statements"))
             {
                 foreach (var stmtEl in statementsEl.Elements())
                 {
@@ -204,7 +205,27 @@ public static class ShowPlanParser
             }
         }
 
-        if (queryPlanEl == null) return stmt;
+        if (queryPlanEl == null)
+        {
+            // Statements with no QueryPlan (e.g., DECLARE/ASSIGN) still get a synthetic
+            // root node so they appear in the statement tab list.
+            var stmtType = stmt.StatementType.Length > 0
+                ? stmt.StatementType.ToUpperInvariant()
+                : "STATEMENT";
+            stmt.RootNode = new PlanNode
+            {
+                NodeId = -1,
+                PhysicalOp = stmtType,
+                LogicalOp = stmtType,
+                IconName = stmtType switch
+                {
+                    "ASSIGN" => "assign",
+                    "DECLARE" => "declare",
+                    _ => "language_construct_catch_all"
+                }
+            };
+            return stmt;
+        }
 
         ParseStmtAttributes(stmt, stmtEl);
         ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
