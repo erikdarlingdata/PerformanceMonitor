@@ -61,6 +61,7 @@ public partial class AddServerDialog : Window
         DatabaseNameBox.Text = existing.DatabaseName ?? "";
         UtilityDatabaseBox.Text = existing.UtilityDatabase ?? "";
         ReadOnlyIntentCheckBox.IsChecked = existing.ReadOnlyIntent;
+        MultiSubnetFailoverCheckBox.IsChecked = existing.MultiSubnetFailover;
         MonthlyCostBox.Text = existing.MonthlyCostUsd.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         // Set authentication mode
@@ -146,7 +147,8 @@ public partial class AddServerDialog : Window
             Encrypt = ParseEncryptOption(GetSelectedEncryptMode()),
             ApplicationIntent = ReadOnlyIntentCheckBox.IsChecked == true
                 ? ApplicationIntent.ReadOnly
-                : ApplicationIntent.ReadWrite
+                : ApplicationIntent.ReadWrite,
+            MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true
         };
 
         if (WindowsAuthRadio.IsChecked == true)
@@ -350,6 +352,7 @@ public partial class AddServerDialog : Window
                 AddedServer.DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
                 AddedServer.UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim();
                 AddedServer.ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
+                AddedServer.MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true;
                 if (decimal.TryParse(MonthlyCostBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
                     AddedServer.MonthlyCostUsd = editCost;
 
@@ -375,6 +378,7 @@ public partial class AddServerDialog : Window
                     DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim(),
                     UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim(),
                     ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true,
+                    MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
                     MonthlyCostUsd = monthlyCost
                 };
 

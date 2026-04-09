@@ -70,6 +70,12 @@ namespace PerformanceMonitorDashboard.Models
         public bool ReadOnlyIntent { get; set; } = false;
 
         /// <summary>
+        /// When true, sets MultiSubnetFailover=true on the connection string.
+        /// Recommended for AG listeners and FCIs spanning multiple subnets.
+        /// </summary>
+        public bool MultiSubnetFailover { get; set; } = false;
+
+        /// <summary>
         /// Monthly cost of this server in USD, used for FinOps cost attribution.
         /// Set to 0 to hide cost columns. All FinOps costs are proportional to this budget.
         /// </summary>
@@ -120,6 +126,7 @@ namespace PerformanceMonitorDashboard.Models
                         _ => SqlConnectionEncryptOption.Mandatory
                     },
                     ApplicationIntent = ReadOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
+                    MultiSubnetFailover = MultiSubnetFailover,
                     Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive
                 };
 
@@ -151,7 +158,8 @@ namespace PerformanceMonitorDashboard.Models
                 password,
                 EncryptMode,
                 TrustServerCertificate,
-                ReadOnlyIntent
+                ReadOnlyIntent,
+                MultiSubnetFailover
             ).ConnectionString;
         }
 

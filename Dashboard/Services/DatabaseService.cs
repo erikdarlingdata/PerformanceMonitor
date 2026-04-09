@@ -92,7 +92,8 @@ namespace PerformanceMonitorDashboard.Services
             string? password = null,
             string encryptMode = "Mandatory",
             bool trustServerCertificate = false,
-            bool readOnlyIntent = false)
+            bool readOnlyIntent = false,
+            bool multiSubnetFailover = false)
         {
             var builder = new SqlConnectionStringBuilder
             {
@@ -101,7 +102,8 @@ namespace PerformanceMonitorDashboard.Services
                 TrustServerCertificate = trustServerCertificate,
                 IntegratedSecurity = useWindowsAuth,
                 MultipleActiveResultSets = true,
-                ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite
+                ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
+                MultiSubnetFailover = multiSubnetFailover
             };
 
             // Set encryption mode

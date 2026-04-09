@@ -111,6 +111,12 @@
                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"
                               ToolTip="Sets ApplicationIntent=ReadOnly. Required when connecting via an AG listener or Azure failover group endpoint to route to a readable secondary."/>
 
+                    <!-- Multi-Subnet Failover -->
+                    <CheckBox x:Name="MultiSubnetFailoverCheckBox"
+                              Content="Multi-subnet failover (for AG listeners and FCIs)"
+                              Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"
+                              ToolTip="Sets MultiSubnetFailover=true. Connects to all IPs in parallel during failover. Recommended for AG listeners and failover cluster instances spanning multiple subnets."/>
+
                     <!-- Is Favorite -->
                     <CheckBox x:Name="IsFavoriteCheckBox" Content="Mark as favorite (appears at top of list)"
                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>

@@ -90,6 +90,12 @@ public class ServerConnection
     public bool ReadOnlyIntent { get; set; } = false;
 
     /// <summary>
+    /// When true, sets MultiSubnetFailover=true on the connection string.
+    /// Recommended for AG listeners and FCIs spanning multiple subnets.
+    /// </summary>
+    public bool MultiSubnetFailover { get; set; } = false;
+
+    /// <summary>
     /// Server name with "(Read-Only)" suffix when ReadOnlyIntent is enabled.
     /// Used for sidebar subtitle and status text.
     /// </summary>
@@ -205,7 +211,8 @@ public class ServerConnection
             CommandTimeout = 60,
             TrustServerCertificate = TrustServerCertificate,
             MultipleActiveResultSets = true,
-            ApplicationIntent = ReadOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite
+            ApplicationIntent = ReadOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
+            MultiSubnetFailover = MultiSubnetFailover
         };
 
         // Set encryption mode

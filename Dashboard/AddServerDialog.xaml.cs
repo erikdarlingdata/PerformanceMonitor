@@ -78,6 +78,7 @@ namespace PerformanceMonitorDashboard
             };
             TrustServerCertificateCheckBox.IsChecked = existingServer.TrustServerCertificate;
             ReadOnlyIntentCheckBox.IsChecked = existingServer.ReadOnlyIntent;
+            MultiSubnetFailoverCheckBox.IsChecked = existingServer.MultiSubnetFailover;
 
             if (existingServer.AuthenticationType == AuthenticationTypes.EntraMFA)
             {
@@ -154,7 +155,8 @@ namespace PerformanceMonitorDashboard
                 Encrypt = ParseEncryptOption(GetSelectedEncryptMode()),
                 ApplicationIntent = ReadOnlyIntentCheckBox.IsChecked == true
                     ? ApplicationIntent.ReadOnly
-                    : ApplicationIntent.ReadWrite
+                    : ApplicationIntent.ReadWrite,
+                MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true
             };
 
             if (WindowsAuthRadio.IsChecked == true)
@@ -821,6 +823,7 @@ namespace PerformanceMonitorDashboard
             EncryptModeComboBox.IsEnabled = enabled;
             TrustServerCertificateCheckBox.IsEnabled = enabled;
             ReadOnlyIntentCheckBox.IsEnabled = enabled;
+            MultiSubnetFailoverCheckBox.IsEnabled = enabled;
             IsFavoriteCheckBox.IsEnabled = enabled;
             MonthlyCostTextBox.IsEnabled = enabled;
             DescriptionTextBox.IsEnabled = enabled;
@@ -915,6 +918,7 @@ namespace PerformanceMonitorDashboard
                 ServerConnection.EncryptMode = GetSelectedEncryptMode();
                 ServerConnection.TrustServerCertificate = TrustServerCertificateCheckBox.IsChecked == true;
                 ServerConnection.ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
+                ServerConnection.MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true;
                 if (decimal.TryParse(MonthlyCostTextBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
                     ServerConnection.MonthlyCostUsd = editCost;
             }
@@ -936,6 +940,7 @@ namespace PerformanceMonitorDashboard
                     EncryptMode = GetSelectedEncryptMode(),
                     TrustServerCertificate = TrustServerCertificateCheckBox.IsChecked == true,
                     ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true,
+                    MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
                     MonthlyCostUsd = monthlyCost
                 };
             }
