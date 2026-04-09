@@ -618,7 +618,8 @@ namespace PerformanceMonitorDashboard
                     preValidationAction = async () =>
                     {
                         AppendInstallLog("Installing community dependencies...", "Info");
-                        using var depInstaller = new DependencyInstaller();
+                        string communityDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "community");
+                        using var depInstaller = new DependencyInstaller(communityDir);
                         await depInstaller.InstallDependenciesAsync(installerConnStr, progress, cancellationToken);
                     };
                 }

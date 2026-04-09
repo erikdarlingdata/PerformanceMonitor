@@ -60,7 +60,8 @@ namespace PerformanceMonitorInstallerGui
             try
             {
                 InitializeComponent();
-                _dependencyInstaller = new DependencyInstaller();
+                string communityDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "community");
+                _dependencyInstaller = new DependencyInstaller(communityDir);
 
                 /*Set window title with version*/
                 Title = $"Performance Monitor Installer v{AppVersion}";

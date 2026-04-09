@@ -636,7 +636,8 @@ namespace PerformanceMonitorInstaller
             Execute installation using Installer.Core
             Use DependencyInstaller for community dependencies before validation
             */
-            using var dependencyInstaller = new DependencyInstaller();
+            string communityDir = Path.Combine(monitorRootDirectory, "community");
+            using var dependencyInstaller = new DependencyInstaller(communityDir);
 
             var installResult = await InstallationService.ExecuteInstallationAsync(
                 connectionString,

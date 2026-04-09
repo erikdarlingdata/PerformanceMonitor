@@ -59,3 +59,6 @@ Lite/collection_schedule.json
 
 # Plans directory
 plans/
+
+# Community scripts (user-provided, not bundled)
+community/*.sql
