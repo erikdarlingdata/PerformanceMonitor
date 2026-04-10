@@ -153,16 +153,7 @@ public partial class ServerTab : UserControl
         };
         _refreshTimer.Tick += async (s, e) =>
         {
-            if (_isRefreshing) return;
-            _isRefreshing = true;
-            try
-            {
-                await RefreshAllDataAsync(fullRefresh: false);
-            }
-            finally
-            {
-                _isRefreshing = false;
-            }
+            await RefreshAllDataAsync(fullRefresh: false);
         };
         _refreshTimer.Start();
 

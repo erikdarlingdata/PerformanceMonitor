@@ -2459,7 +2459,7 @@
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuCount" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>
-                                        <TextBlock Text="CPUs" FontWeight="Bold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Logical CPUs" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle>
