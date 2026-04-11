@@ -36,30 +36,49 @@ The installer:
 
 ## Upgrade Script Guidelines
 
-1. **Always check before altering**: Use `IF NOT EXISTS` checks before adding columns/indexes
-2. **Be idempotent**: Scripts should be safe to run multiple times
-3. **Preserve data**: Never DROP tables with data (use ALTER/UPDATE instead)
-4. **Add comments**: Document why each change is being made
-5. **Test upgrade paths**: Test upgrading from each previous version
+1. **Start from `_template.sql`**: Copy the template for every new upgrade script — it has the required SET options and `USE PerformanceMonitor` that the installer depends on
+2. **Always check before altering**: Use `IF NOT EXISTS` / `IF EXISTS` checks before adding or modifying columns/indexes
+3. **Be idempotent**: Scripts should be safe to run multiple times
+4. **Preserve data**: Never DROP tables with data (use ALTER/UPDATE instead)
+5. **Add comments**: Document why each change is being made
+6. **Test upgrade paths**: Test upgrading from each previous version
 
 ## Example Upgrade Script
 
 ```sql
 /*
+Copyright 2026 Darling Data, LLC
+https://www.erikdarling.com/
+
 Upgrade from 1.0.0 to 1.1.0
 Adds execution context tracking to query_stats
 */
 
--- Add new column if it doesn't exist
-IF NOT EXISTS (
-    SELECT 1/0
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET QUOTED_IDENTIFIER ON;
+SET NUMERIC_ROUNDABORT OFF;
+SET IMPLICIT_TRANSACTIONS OFF;
+SET STATISTICS TIME, IO OFF;
+GO
+
+USE PerformanceMonitor;
+GO
+
+IF NOT EXISTS
+(
+    SELECT
+        1/0
     FROM sys.columns
-    WHERE object_id = OBJECT_ID('collect.query_stats')
-    AND name = 'execution_context'
+    WHERE object_id = OBJECT_ID(N'collect.query_stats')
+    AND   name = N'execution_context'
 )
 BEGIN
     ALTER TABLE collect.query_stats
-    ADD execution_context nvarchar(128) NULL;
+        ADD execution_context nvarchar(128) NULL;
 
     PRINT 'Added execution_context column to collect.query_stats';
 END;

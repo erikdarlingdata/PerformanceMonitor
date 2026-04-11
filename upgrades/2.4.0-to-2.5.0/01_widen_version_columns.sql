@@ -3,6 +3,20 @@ Widen sql_server_version and sql_server_edition columns in config.installation_h
 Some @@VERSION strings exceed 255 characters (#712)
 */
 
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET QUOTED_IDENTIFIER ON;
+SET NUMERIC_ROUNDABORT OFF;
+SET IMPLICIT_TRANSACTIONS OFF;
+SET STATISTICS TIME, IO OFF;
+GO
+
+USE PerformanceMonitor;
+GO
+
 IF EXISTS
 (
     SELECT
