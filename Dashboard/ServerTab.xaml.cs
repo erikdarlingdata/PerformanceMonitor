@@ -344,22 +344,7 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Tick += async (s, e) =>
                 {
-                    if (_isRefreshing) return;
-                    _isRefreshing = true;
-
-                    try
-                    {
-                        await LoadDataAsync(fullRefresh: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Error($"Error in auto-refresh: {ex.Message}", ex);
-                        StatusText.Text = "Auto-refresh error";
-                    }
-                    finally
-                    {
-                        _isRefreshing = false;
-                    }
+                    await LoadDataAsync(fullRefresh: false);
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.IsChecked = true;
@@ -415,22 +400,7 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Tick += async (s, e) =>
                 {
-                    if (_isRefreshing) return;
-                    _isRefreshing = true;
-
-                    try
-                    {
-                        await LoadDataAsync(fullRefresh: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Error($"Error in auto-refresh: {ex.Message}", ex);
-                        StatusText.Text = "Auto-refresh error";
-                    }
-                    finally
-                    {
-                        _isRefreshing = false;
-                    }
+                    await LoadDataAsync(fullRefresh: false);
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.IsChecked = true;
@@ -464,22 +434,7 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Tick += async (s, args) =>
                 {
-                    if (_isRefreshing) return;
-                    _isRefreshing = true;
-
-                    try
-                    {
-                        await LoadDataAsync(fullRefresh: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Error($"Error in auto-refresh: {ex.Message}", ex);
-                        StatusText.Text = "Auto-refresh error";
-                    }
-                    finally
-                    {
-                        _isRefreshing = false;
-                    }
+                    await LoadDataAsync(fullRefresh: false);
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.Content = $"Auto-Refresh: {prefs.AutoRefreshIntervalSeconds}s";
@@ -1129,6 +1084,9 @@ namespace PerformanceMonitorDashboard
         /// </summary>
         private async Task LoadDataAsync(bool fullRefresh = true)
         {
+            if (_isRefreshing) return;
+            _isRefreshing = true;
+
             using var _ = Helpers.MethodProfiler.StartTiming("ServerTab");
             try
             {
@@ -1139,12 +1097,19 @@ namespace PerformanceMonitorDashboard
                 if (!connected)
                 {
                     StatusText.Text = $"Failed to connect to {_serverConnection.DisplayName}";
-                    MessageBox.Show(
-                        $"Could not connect to SQL Server: {_serverConnection.ServerName}\n\nCheck connection settings",
-                        "Connection Error",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Error
-                    );
+                    if (fullRefresh)
+                    {
+                        MessageBox.Show(
+                            $"Could not connect to SQL Server: {_serverConnection.ServerName}\n\nCheck connection settings",
+                            "Connection Error",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Error
+                        );
+                    }
+                    else
+                    {
+                        Logger.Error($"Auto-refresh connection failed for {_serverConnection.DisplayName}");
+                    }
                     return;
                 }
 
@@ -1167,16 +1132,24 @@ namespace PerformanceMonitorDashboard
             catch (Exception ex)
             {
                 StatusText.Text = "Error loading data";
-                MessageBox.Show(
-                    $"Error loading data:\n\n{ex.Message}",
-                    "Error",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error
-                );
+                if (fullRefresh)
+                {
+                    MessageBox.Show(
+                        $"Error loading data:\n\n{ex.Message}",
+                        "Error",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error
+                    );
+                }
+                else
+                {
+                    Logger.Error($"Auto-refresh error for {_serverConnection.DisplayName}: {ex.Message}", ex);
+                }
             }
             finally
             {
                 RefreshButton.IsEnabled = true;
+                _isRefreshing = false;
             }
         }
 
