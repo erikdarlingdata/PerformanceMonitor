@@ -47,6 +47,7 @@ namespace PerformanceMonitorDashboard
         private readonly UserPreferencesService _preferencesService;
         private DispatcherTimer? _autoRefreshTimer;
         private bool _isRefreshing;
+        private DateTime _refreshStartedUtc;
         private bool _suppressPickerUpdates;
 
         // Filter state dictionaries for each DataGrid
@@ -344,7 +345,22 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Tick += async (s, e) =>
                 {
-                    await LoadDataAsync(fullRefresh: false);
+                    _autoRefreshTimer?.Stop();
+                    try
+                    {
+                        await RefreshVisibleTabAsync();
+                        StatusText.Text = "Ready";
+                        FooterText.Text = $"Last refresh: {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Server: {_serverConnection.DisplayName}";
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Auto-refresh error: {ex.Message}", ex);
+                        StatusText.Text = "Auto-refresh error";
+                    }
+                    finally
+                    {
+                        _autoRefreshTimer?.Start();
+                    }
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.IsChecked = true;
@@ -400,7 +416,22 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Tick += async (s, e) =>
                 {
-                    await LoadDataAsync(fullRefresh: false);
+                    _autoRefreshTimer?.Stop();
+                    try
+                    {
+                        await RefreshVisibleTabAsync();
+                        StatusText.Text = "Ready";
+                        FooterText.Text = $"Last refresh: {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Server: {_serverConnection.DisplayName}";
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Auto-refresh error: {ex.Message}", ex);
+                        StatusText.Text = "Auto-refresh error";
+                    }
+                    finally
+                    {
+                        _autoRefreshTimer?.Start();
+                    }
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.IsChecked = true;
@@ -434,7 +465,22 @@ namespace PerformanceMonitorDashboard
                 };
                 _autoRefreshTimer.Tick += async (s, args) =>
                 {
-                    await LoadDataAsync(fullRefresh: false);
+                    _autoRefreshTimer?.Stop();
+                    try
+                    {
+                        await RefreshVisibleTabAsync();
+                        StatusText.Text = "Ready";
+                        FooterText.Text = $"Last refresh: {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Server: {_serverConnection.DisplayName}";
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Auto-refresh error: {ex.Message}", ex);
+                        StatusText.Text = "Auto-refresh error";
+                    }
+                    finally
+                    {
+                        _autoRefreshTimer?.Start();
+                    }
                 };
                 _autoRefreshTimer.Start();
                 AutoRefreshToggle.Content = $"Auto-Refresh: {prefs.AutoRefreshIntervalSeconds}s";
@@ -1084,8 +1130,14 @@ namespace PerformanceMonitorDashboard
         /// </summary>
         private async Task LoadDataAsync(bool fullRefresh = true)
         {
-            if (_isRefreshing) return;
+            if (_isRefreshing)
+            {
+                // If a previous refresh has been running for over 2 minutes, it's stuck — allow a new one
+                if ((DateTime.UtcNow - _refreshStartedUtc).TotalMinutes < 2) return;
+                Logger.Error($"Previous refresh appears stuck (started {_refreshStartedUtc:HH:mm:ss}), allowing new refresh");
+            }
             _isRefreshing = true;
+            _refreshStartedUtc = DateTime.UtcNow;
 
             using var _ = Helpers.MethodProfiler.StartTiming("ServerTab");
             try
@@ -1616,9 +1668,11 @@ namespace PerformanceMonitorDashboard
             UpdateCompareDropdownState();
 
             // Don't refresh during initial load or if already refreshing
-            if (_isRefreshing || !IsLoaded) return;
+            if (!IsLoaded) return;
+            if (_isRefreshing && (DateTime.UtcNow - _refreshStartedUtc).TotalMinutes < 2) return;
 
             _isRefreshing = true;
+            _refreshStartedUtc = DateTime.UtcNow;
             try
             {
                 await RefreshVisibleTabAsync();
