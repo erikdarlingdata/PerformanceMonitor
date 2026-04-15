@@ -128,6 +128,50 @@ public partial class App : Application
     public static string SlackWebhookUrl { get; set; } = "";
     public static string SlackProxyAddress { get; set; } = "";
 
+    private const string TeamsWebhookCredentialKey = "TeamsWebhook";
+    private const string SlackWebhookCredentialKey = "SlackWebhook";
+
+    /// <summary>
+    /// Gets a webhook URL from Windows Credential Manager.
+    /// </summary>
+    public static string GetWebhookUrl(string credentialKey)
+    {
+        try
+        {
+            var credService = new Services.CredentialService();
+            var cred = credService.GetCredential(credentialKey);
+            return cred?.Password ?? "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("App", $"Failed to retrieve webhook URL for {credentialKey}: {ex.Message}");
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// Saves a webhook URL to Windows Credential Manager.
+    /// </summary>
+    public static void SaveWebhookUrl(string credentialKey, string url)
+    {
+        try
+        {
+            var credService = new Services.CredentialService();
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                credService.DeleteCredential(credentialKey);
+            }
+            else
+            {
+                credService.SaveCredential(credentialKey, "webhook", url);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey}: {ex.Message}");
+        }
+    }
+
     /* SMTP email alert settings */
     public static bool SmtpEnabled { get; set; } = false;
     public static string SmtpServer { get; set; } = "";
@@ -356,13 +400,33 @@ public partial class App : Application
 
             /* Teams webhook settings */
             if (root.TryGetProperty("teams_webhook_enabled", out v)) TeamsWebhookEnabled = v.GetBoolean();
-            if (root.TryGetProperty("teams_webhook_url", out v)) TeamsWebhookUrl = v.GetString() ?? "";
             if (root.TryGetProperty("teams_proxy_address", out v)) TeamsProxyAddress = v.GetString() ?? "";
 
             /* Slack webhook settings */
             if (root.TryGetProperty("slack_webhook_enabled", out v)) SlackWebhookEnabled = v.GetBoolean();
-            if (root.TryGetProperty("slack_webhook_url", out v)) SlackWebhookUrl = v.GetString() ?? "";
             if (root.TryGetProperty("slack_proxy_address", out v)) SlackProxyAddress = v.GetString() ?? "";
+
+            /* Migrate webhook URLs from plaintext settings.json to Credential Manager */
+            if (root.TryGetProperty("teams_webhook_url", out v))
+            {
+                var legacyUrl = v.GetString() ?? "";
+                if (!string.IsNullOrWhiteSpace(legacyUrl))
+                {
+                    SaveWebhookUrl(TeamsWebhookCredentialKey, legacyUrl);
+                }
+            }
+            if (root.TryGetProperty("slack_webhook_url", out v))
+            {
+                var legacyUrl = v.GetString() ?? "";
+                if (!string.IsNullOrWhiteSpace(legacyUrl))
+                {
+                    SaveWebhookUrl(SlackWebhookCredentialKey, legacyUrl);
+                }
+            }
+
+            /* Load webhook URLs from Credential Manager */
+            TeamsWebhookUrl = GetWebhookUrl(TeamsWebhookCredentialKey);
+            SlackWebhookUrl = GetWebhookUrl(SlackWebhookCredentialKey);
 
             /* SMTP settings */
             if (root.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.GetBoolean();
