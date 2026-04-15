@@ -24,7 +24,10 @@ namespace PerformanceMonitorDashboard.Services
     public class WebhookAlertService
     {
         private const string EditionName = "Performance Monitor Dashboard";
+        private const string TeamsWebhookCredentialKey = "TeamsWebhook";
+        private const string SlackWebhookCredentialKey = "SlackWebhook";
         private static readonly JsonSerializerOptions s_jsonOptions = new() { PropertyNamingPolicy = null };
+        private static readonly CredentialService s_credentialService = new();
 
         private readonly UserPreferencesService _preferencesService;
         private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
@@ -41,6 +44,50 @@ namespace PerformanceMonitorDashboard.Services
             _preferencesService = preferencesService;
             Current = this;
         }
+
+        /// <summary>
+        /// Gets a webhook URL from Windows Credential Manager.
+        /// </summary>
+        public static string GetWebhookUrl(string credentialKey)
+        {
+            try
+            {
+                var cred = s_credentialService.GetCredential(credentialKey);
+                return cred?.Password ?? "";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Failed to retrieve webhook URL for {credentialKey}: {ex.Message}");
+                return "";
+            }
+        }
+
+        /// <summary>
+        /// Saves a webhook URL to Windows Credential Manager.
+        /// </summary>
+        public static void SaveWebhookUrl(string credentialKey, string url)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    s_credentialService.DeleteCredential(credentialKey);
+                }
+                else
+                {
+                    s_credentialService.SaveCredential(credentialKey, "webhook", url);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Failed to save webhook URL for {credentialKey}: {ex.Message}");
+            }
+        }
+
+        public static string GetTeamsWebhookUrl() => GetWebhookUrl(TeamsWebhookCredentialKey);
+        public static string GetSlackWebhookUrl() => GetWebhookUrl(SlackWebhookCredentialKey);
+        public static void SaveTeamsWebhookUrl(string url) => SaveWebhookUrl(TeamsWebhookCredentialKey, url);
+        public static void SaveSlackWebhookUrl(string url) => SaveWebhookUrl(SlackWebhookCredentialKey, url);
 
         /// <summary>
         /// Sends webhook alerts to all configured channels (Teams and/or Slack).
@@ -67,12 +114,14 @@ namespace PerformanceMonitorDashboard.Services
 
                 bool sent = false;
 
-                if (prefs.TeamsWebhookEnabled && !string.IsNullOrWhiteSpace(prefs.TeamsWebhookUrl))
+                var teamsUrl = GetTeamsWebhookUrl();
+                if (prefs.TeamsWebhookEnabled && !string.IsNullOrWhiteSpace(teamsUrl))
                 {
                     sent |= await TrySendTeamsAlertAsync(prefs, metricName, serverName, currentValue, thresholdValue, context);
                 }
 
-                if (prefs.SlackWebhookEnabled && !string.IsNullOrWhiteSpace(prefs.SlackWebhookUrl))
+                var slackUrl = GetSlackWebhookUrl();
+                if (prefs.SlackWebhookEnabled && !string.IsNullOrWhiteSpace(slackUrl))
                 {
                     sent |= await TrySendSlackAlertAsync(prefs, metricName, serverName, currentValue, thresholdValue, context);
                 }
@@ -148,7 +197,7 @@ namespace PerformanceMonitorDashboard.Services
             try
             {
                 var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, context: context);
-                var error = await PostWebhookAsync(prefs.TeamsWebhookUrl, payload, prefs.TeamsProxyAddress);
+                var error = await PostWebhookAsync(GetTeamsWebhookUrl(), payload, prefs.TeamsProxyAddress);
 
                 if (error != null)
                 {
@@ -268,7 +317,7 @@ namespace PerformanceMonitorDashboard.Services
             try
             {
                 var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, context: context);
-                var error = await PostWebhookAsync(prefs.SlackWebhookUrl, payload, prefs.SlackProxyAddress);
+                var error = await PostWebhookAsync(GetSlackWebhookUrl(), payload, prefs.SlackProxyAddress);
 
                 if (error != null)
                 {

@@ -210,11 +210,27 @@ namespace PerformanceMonitorDashboard
 
             // Webhook settings (Teams / Slack)
             TeamsWebhookEnabledCheckBox.IsChecked = prefs.TeamsWebhookEnabled;
-            TeamsWebhookUrlTextBox.Text = prefs.TeamsWebhookUrl;
             TeamsProxyAddressTextBox.Text = prefs.TeamsProxyAddress;
             SlackWebhookEnabledCheckBox.IsChecked = prefs.SlackWebhookEnabled;
-            SlackWebhookUrlTextBox.Text = prefs.SlackWebhookUrl;
             SlackProxyAddressTextBox.Text = prefs.SlackProxyAddress;
+
+            /* Migrate legacy plaintext webhook URLs to Credential Manager */
+            if (!string.IsNullOrWhiteSpace(prefs.TeamsWebhookUrl))
+            {
+                WebhookAlertService.SaveTeamsWebhookUrl(prefs.TeamsWebhookUrl);
+                prefs.TeamsWebhookUrl = "";
+                _preferencesService.SavePreferences(prefs);
+            }
+            if (!string.IsNullOrWhiteSpace(prefs.SlackWebhookUrl))
+            {
+                WebhookAlertService.SaveSlackWebhookUrl(prefs.SlackWebhookUrl);
+                prefs.SlackWebhookUrl = "";
+                _preferencesService.SavePreferences(prefs);
+            }
+
+            /* Load webhook URLs from Credential Manager */
+            TeamsWebhookUrlTextBox.Text = WebhookAlertService.GetTeamsWebhookUrl();
+            SlackWebhookUrlTextBox.Text = WebhookAlertService.GetSlackWebhookUrl();
             UpdateTeamsControlStates();
             UpdateSlackControlStates();
 
@@ -705,11 +721,15 @@ namespace PerformanceMonitorDashboard
 
             // Save webhook settings (Teams / Slack)
             prefs.TeamsWebhookEnabled = TeamsWebhookEnabledCheckBox.IsChecked == true;
-            prefs.TeamsWebhookUrl = TeamsWebhookUrlTextBox.Text?.Trim() ?? "";
+            prefs.TeamsWebhookUrl = "";  /* URLs stored in Credential Manager, not preferences */
             prefs.TeamsProxyAddress = TeamsProxyAddressTextBox.Text?.Trim() ?? "";
             prefs.SlackWebhookEnabled = SlackWebhookEnabledCheckBox.IsChecked == true;
-            prefs.SlackWebhookUrl = SlackWebhookUrlTextBox.Text?.Trim() ?? "";
+            prefs.SlackWebhookUrl = "";  /* URLs stored in Credential Manager, not preferences */
             prefs.SlackProxyAddress = SlackProxyAddressTextBox.Text?.Trim() ?? "";
+
+            /* Save webhook URLs to Credential Manager */
+            WebhookAlertService.SaveTeamsWebhookUrl(TeamsWebhookUrlTextBox.Text?.Trim() ?? "");
+            WebhookAlertService.SaveSlackWebhookUrl(SlackWebhookUrlTextBox.Text?.Trim() ?? "");
 
             // Save MCP server settings
             bool mcpWasEnabled = prefs.McpEnabled;
