@@ -648,6 +648,7 @@
     <!-- ============================================ -->
     <Style TargetType="DataGrid">
         <Setter Property="helpers:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
+        <Setter Property="helpers:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
@@ -792,6 +793,7 @@
     <!-- ListView Style                               -->
     <!-- ============================================ -->
     <Style TargetType="ListView">
+        <Setter Property="helpers:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
