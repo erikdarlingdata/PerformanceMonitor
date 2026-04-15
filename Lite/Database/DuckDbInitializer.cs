@@ -724,7 +724,7 @@ public class DuckDbInitializer
                 string viewSql;
                 if (hasParquetFiles)
                 {
-                    var globPath = parquetGlob.Replace("\\", "/");
+                    var globPath = EscapeSqlPath(parquetGlob.Replace("\\", "/"));
                     if (table == "config_alert_log")
                     {
                         viewSql = $@"CREATE OR REPLACE VIEW v_{table} AS
@@ -935,5 +935,9 @@ WHERE NOT EXISTS (
         await InitializeAsync();
     }
 
-
+    /// <summary>
+    /// Escapes single quotes in a file path for safe interpolation into DuckDB SQL.
+    /// DuckDB does not support parameterized paths in read_parquet() or COPY TO.
+    /// </summary>
+    internal static string EscapeSqlPath(string path) => path.Replace("'", "''");
 }
