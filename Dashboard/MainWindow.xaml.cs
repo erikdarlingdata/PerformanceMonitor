@@ -886,6 +886,7 @@ namespace PerformanceMonitorDashboard
                             serverTab.AlertAcknowledged -= handler;
                             _alertAcknowledgedHandlers.Remove(tabId);
                         }
+                        serverTab.CleanupOnClose();
                     }
                     _openTabs.Remove(tabId);
                     _tabBadges.Remove(tabId);
@@ -1092,6 +1093,7 @@ namespace PerformanceMonitorDashboard
 
                     if (_openTabs.TryGetValue(server.Id, out var tabItem))
                     {
+                        if (tabItem.Content is ServerTab st) st.CleanupOnClose();
                         _openTabs.Remove(server.Id);
                         ServerTabControl.Items.Remove(tabItem);
                     }

@@ -377,6 +377,8 @@ namespace PerformanceMonitorDashboard
                     if (cts.Token.IsCancellationRequested) break;
                     if (_isRefreshing) continue;
 
+                    _isRefreshing = true;
+                    _refreshStartedUtc = DateTime.UtcNow;
                     try
                     {
                         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -387,13 +389,16 @@ namespace PerformanceMonitorDashboard
                     }
                     catch (OperationCanceledException) when (!cts.Token.IsCancellationRequested)
                     {
-                        // SQL query cancelled or timed out, but our loop CTS is still alive — keep going
                         Logger.Error($"Auto-refresh query cancelled for {_serverConnection.DisplayName}, continuing loop");
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         Logger.Error($"Auto-refresh error: {ex.Message}", ex);
                         StatusText.Text = "Auto-refresh error";
+                    }
+                    finally
+                    {
+                        _isRefreshing = false;
                     }
                 }
             }
@@ -405,9 +410,18 @@ namespace PerformanceMonitorDashboard
 
         private void ServerTab_Unloaded(object sender, RoutedEventArgs e)
         {
-            // Don't cancel auto-refresh on tab switch — WPF fires Unloaded when
-            // a TabItem is deselected, not just when the control is destroyed.
-            // The loop is lightweight and should keep ticking in the background.
+            // WPF fires Unloaded on tab switch, not just destruction.
+            // Don't tear down state here — the auto-refresh loop and chart
+            // state must survive tab switches. Cleanup happens when the tab
+            // is actually removed from the TabControl (via CleanupOnClose).
+        }
+
+        /// <summary>
+        /// Full cleanup — call when the server tab is permanently removed, not on tab switch.
+        /// </summary>
+        public void CleanupOnClose()
+        {
+            _autoRefreshCts?.Cancel();
             _autoRefreshTimer?.Stop();
             _autoRefreshTimer = null;
 
