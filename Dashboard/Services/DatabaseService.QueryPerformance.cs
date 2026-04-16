@@ -64,7 +64,7 @@ namespace PerformanceMonitorDashboard.Services
                             OR    (first_execution_time <= @from_date AND last_execution_time >= @to_date)
                             ORDER BY
                                 avg_worker_time_ms DESC
-                            OPTION(HASH GROUP);";
+                            OPTION(RECOMPILE, HASH GROUP);";
                     }
                     else
                     {
@@ -96,7 +96,7 @@ namespace PerformanceMonitorDashboard.Services
                             WHERE last_execution_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())
                             ORDER BY
                                 avg_worker_time_ms DESC
-                            OPTION(HASH GROUP);";
+                            OPTION(RECOMPILE, HASH GROUP);";
                     }
 
                     using var command = new SqlCommand(query, connection);
@@ -190,7 +190,8 @@ namespace PerformanceMonitorDashboard.Services
                             ORDER BY
                                 b.event_time DESC,
                                 CASE b.activity WHEN N'blocking' THEN 0 ELSE 1 END,
-                                LEN(b.blocking_tree) - LEN(REPLACE(b.blocking_tree, N'>', N''));";
+                                LEN(b.blocking_tree) - LEN(REPLACE(b.blocking_tree, N'>', N''))
+                            OPTION(RECOMPILE);";
                     }
                     else
                     {
@@ -234,7 +235,8 @@ namespace PerformanceMonitorDashboard.Services
                             ORDER BY
                                 b.event_time DESC,
                                 CASE b.activity WHEN N'blocking' THEN 0 ELSE 1 END,
-                                LEN(b.blocking_tree) - LEN(REPLACE(b.blocking_tree, N'>', N''));";
+                                LEN(b.blocking_tree) - LEN(REPLACE(b.blocking_tree, N'>', N''))
+                            OPTION(RECOMPILE);";
                     }
         
                     using var command = new SqlCommand(query, connection);
@@ -345,7 +347,8 @@ namespace PerformanceMonitorDashboard.Services
                             WHERE d.event_date >= @from_date
                             AND   d.event_date <= @to_date
                             ORDER BY
-                                d.event_date DESC;";
+                                d.event_date DESC
+                            OPTION(RECOMPILE);";
                     }
                     else
                     {
@@ -398,7 +401,8 @@ namespace PerformanceMonitorDashboard.Services
                             FROM collect.deadlocks AS d
                             WHERE d.event_date >= DATEADD(HOUR, @hours_back, SYSDATETIME())
                             ORDER BY
-                                d.event_date DESC;";
+                                d.event_date DESC
+                            OPTION(RECOMPILE);";
                     }
         
                     using var command = new SqlCommand(query, connection);
@@ -1048,67 +1052,75 @@ ORDER BY bucket_hour;";
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Aggregate inline from collect.query_stats with time filter applied
-                    // BEFORE the GROUP BY so counts/averages reflect only the selected time range.
-                    // Uses a CTE to first get MAX per plan lifetime (creation_time), then SUM across
-                    // lifetimes. This handles plan eviction correctly — when a plan is evicted and
-                    // re-cached, the cumulative counter resets, so MAX alone undercounts.
+                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 500,
+                    // then hydrate text/plan for only the winners. This avoids decompressing
+                    // query_text and query_plan_text for every row in the table.
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-        WITH per_lifetime AS
-        (
-            SELECT
-                database_name = qs.database_name,
-                query_hash = qs.query_hash,
-                object_type = MAX(qs.object_type),
-                schema_name = MAX(qs.schema_name),
-                object_name = MAX(qs.object_name),
-                first_execution_time = MIN(qs.creation_time),
-                last_execution_time = MAX(qs.last_execution_time),
-                execution_count = MAX(qs.execution_count),
-                total_worker_time = MAX(qs.total_worker_time),
-                min_worker_time = MIN(qs.min_worker_time),
-                max_worker_time = MAX(qs.max_worker_time),
-                total_elapsed_time = MAX(qs.total_elapsed_time),
-                min_elapsed_time = MIN(qs.min_elapsed_time),
-                max_elapsed_time = MAX(qs.max_elapsed_time),
-                total_logical_reads = MAX(qs.total_logical_reads),
-                total_logical_writes = MAX(qs.total_logical_writes),
-                total_physical_reads = MAX(qs.total_physical_reads),
-                min_physical_reads = MIN(qs.min_physical_reads),
-                max_physical_reads = MAX(qs.max_physical_reads),
-                total_rows = MAX(qs.total_rows),
-                min_rows = MIN(qs.min_rows),
-                max_rows = MAX(qs.max_rows),
-                min_dop = MIN(qs.min_dop),
-                max_dop = MAX(qs.max_dop),
-                min_grant_kb = MIN(qs.min_grant_kb),
-                max_grant_kb = MAX(qs.max_grant_kb),
-                total_spills = MAX(qs.total_spills),
-                min_spills = MIN(qs.min_spills),
-                max_spills = MAX(qs.max_spills),
-                query_text = CAST(DECOMPRESS(MAX(qs.query_text)) AS nvarchar(max)),
-                query_plan_text = CAST(DECOMPRESS(MAX(qs.query_plan_text)) AS nvarchar(max)),
-                query_plan_hash = MAX(qs.query_plan_hash),
-                sql_handle = MAX(qs.sql_handle),
-                plan_handle = MAX(qs.plan_handle)
-            FROM collect.query_stats AS qs
-            WHERE (
-                (@fromSlicer = 1 AND qs.collection_time >= @fromDate AND qs.collection_time <= @toDate)
-                OR
-                (@fromSlicer = 0 AND @useCustomDates = 0 AND qs.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
-                OR
-                (@fromSlicer = 0 AND @useCustomDates = 1 AND
-                    ((qs.creation_time >= @fromDate AND qs.creation_time <= @toDate)
-                    OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
-                    OR (qs.creation_time <= @fromDate AND qs.last_execution_time >= @toDate)))
-            )
-            GROUP BY
-                qs.database_name,
-                qs.query_hash,
-                qs.creation_time
+        /*Phase 1: aggregate per plan lifetime — numeric only, no DECOMPRESS*/
+        DROP TABLE IF EXISTS #per_lifetime;
+
+        SELECT
+            qs.database_name,
+            qs.query_hash,
+            qs.creation_time,
+            object_type = MAX(qs.object_type),
+            schema_name = MAX(qs.schema_name),
+            object_name = MAX(qs.object_name),
+            last_execution_time = MAX(qs.last_execution_time),
+            execution_count = MAX(qs.execution_count),
+            total_worker_time = MAX(qs.total_worker_time),
+            min_worker_time = MIN(qs.min_worker_time),
+            max_worker_time = MAX(qs.max_worker_time),
+            total_elapsed_time = MAX(qs.total_elapsed_time),
+            min_elapsed_time = MIN(qs.min_elapsed_time),
+            max_elapsed_time = MAX(qs.max_elapsed_time),
+            total_logical_reads = MAX(qs.total_logical_reads),
+            total_logical_writes = MAX(qs.total_logical_writes),
+            total_physical_reads = MAX(qs.total_physical_reads),
+            min_physical_reads = MIN(qs.min_physical_reads),
+            max_physical_reads = MAX(qs.max_physical_reads),
+            total_rows = MAX(qs.total_rows),
+            min_rows = MIN(qs.min_rows),
+            max_rows = MAX(qs.max_rows),
+            min_dop = MIN(qs.min_dop),
+            max_dop = MAX(qs.max_dop),
+            min_grant_kb = MIN(qs.min_grant_kb),
+            max_grant_kb = MAX(qs.max_grant_kb),
+            total_spills = MAX(qs.total_spills),
+            min_spills = MIN(qs.min_spills),
+            max_spills = MAX(qs.max_spills),
+            query_plan_hash = MAX(qs.query_plan_hash),
+            sql_handle = MAX(qs.sql_handle),
+            plan_handle = MAX(qs.plan_handle)
+        INTO #per_lifetime
+        FROM collect.query_stats AS qs
+        WHERE (
+            (@fromSlicer = 1 AND qs.collection_time >= @fromDate AND qs.collection_time <= @toDate)
+            OR
+            (@fromSlicer = 0 AND @useCustomDates = 0 AND qs.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
+            OR
+            (@fromSlicer = 0 AND @useCustomDates = 1 AND
+                ((qs.creation_time >= @fromDate AND qs.creation_time <= @toDate)
+                OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
+                OR (qs.creation_time <= @fromDate AND qs.last_execution_time >= @toDate)))
         )
+        GROUP BY
+            qs.database_name,
+            qs.query_hash,
+            qs.creation_time
+        OPTION
+        (
+            RECOMPILE,
+            HASH GROUP,
+            HASH JOIN,
+            USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
+        );
+
+        /*Phase 2: sum across lifetimes, rank, take TOP 500*/
+        DROP TABLE IF EXISTS #top_ranked;
+
         SELECT TOP (500)
             database_name = pl.database_name,
             query_hash = CONVERT(nvarchar(20), pl.query_hash, 1),
@@ -1119,7 +1131,7 @@ ORDER BY bucket_hour;";
                     THEN N'Adhoc'
                     ELSE QUOTENAME(MAX(pl.schema_name)) + N'.' + QUOTENAME(MAX(pl.object_name))
                 END,
-            first_execution_time = MIN(pl.first_execution_time),
+            first_execution_time = MIN(pl.creation_time),
             last_execution_time = MAX(pl.last_execution_time),
             execution_count = SUM(pl.execution_count),
             total_worker_time = SUM(pl.total_worker_time),
@@ -1149,12 +1161,11 @@ ORDER BY bucket_hour;";
             total_spills = SUM(pl.total_spills),
             min_spills = MIN(pl.min_spills),
             max_spills = MAX(pl.max_spills),
-            query_text = CONVERT(nvarchar(max), MAX(pl.query_text)),
-            query_plan_xml = MAX(pl.query_plan_text),
             query_plan_hash = CONVERT(nvarchar(20), MAX(pl.query_plan_hash), 1),
             sql_handle = CONVERT(nvarchar(130), MAX(pl.sql_handle), 1),
             plan_handle = CONVERT(nvarchar(130), MAX(pl.plan_handle), 1)
-        FROM per_lifetime AS pl
+        INTO #top_ranked
+        FROM #per_lifetime AS pl
         GROUP BY
             pl.database_name,
             pl.query_hash
@@ -1162,10 +1173,73 @@ ORDER BY bucket_hour;";
             avg_worker_time_ms DESC
         OPTION
         (
-            HASH GROUP,
-            HASH JOIN,
-            USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
-        );";
+            RECOMPILE,
+            HASH GROUP
+        );
+
+        /*Phase 3: hydrate text and plan XML for the TOP 500 winners only*/
+        SELECT
+            tr.database_name,
+            tr.query_hash,
+            tr.object_type,
+            tr.object_name,
+            tr.first_execution_time,
+            tr.last_execution_time,
+            tr.execution_count,
+            tr.total_worker_time,
+            tr.avg_worker_time_ms,
+            tr.min_worker_time_ms,
+            tr.max_worker_time_ms,
+            tr.total_elapsed_time,
+            tr.avg_elapsed_time_ms,
+            tr.min_elapsed_time_ms,
+            tr.max_elapsed_time_ms,
+            tr.total_logical_reads,
+            tr.avg_logical_reads,
+            tr.total_logical_writes,
+            tr.avg_logical_writes,
+            tr.total_physical_reads,
+            tr.avg_physical_reads,
+            tr.min_physical_reads,
+            tr.max_physical_reads,
+            tr.total_rows,
+            tr.avg_rows,
+            tr.min_rows,
+            tr.max_rows,
+            tr.min_dop,
+            tr.max_dop,
+            tr.min_grant_kb,
+            tr.max_grant_kb,
+            tr.total_spills,
+            tr.min_spills,
+            tr.max_spills,
+            qt.query_text,
+            qp.query_plan_xml,
+            tr.query_plan_hash,
+            tr.sql_handle,
+            tr.plan_handle
+        FROM #top_ranked AS tr
+        OUTER APPLY
+        (
+            SELECT TOP (1)
+                query_text = CAST(DECOMPRESS(qs2.query_text) AS nvarchar(max))
+            FROM collect.query_stats AS qs2
+            WHERE qs2.query_hash = CONVERT(binary(8), tr.query_hash, 1)
+            AND   qs2.database_name = tr.database_name
+            ORDER BY qs2.collection_time DESC
+        ) AS qt
+        OUTER APPLY
+        (
+            SELECT TOP (1)
+                query_plan_xml = CAST(DECOMPRESS(qs3.query_plan_text) AS nvarchar(max))
+            FROM collect.query_stats AS qs3
+            WHERE qs3.query_hash = CONVERT(binary(8), tr.query_hash, 1)
+            AND   qs3.database_name = tr.database_name
+            AND   qs3.query_plan_text IS NOT NULL
+            ORDER BY qs3.collection_time DESC
+        ) AS qp
+        ORDER BY
+            tr.avg_worker_time_ms DESC;";
 
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
@@ -1286,64 +1360,72 @@ ORDER BY bucket_hour;";
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Aggregate inline from collect.procedure_stats with time filter applied
-                    // BEFORE the GROUP BY so counts/averages reflect only the selected time range.
-                    // Uses a CTE to first get MAX per plan lifetime (cached_time), then SUM across
-                    // lifetimes. This handles plan eviction correctly — when a plan is evicted and
-                    // re-cached, the cumulative counter resets, so MAX alone undercounts.
+                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 500,
+                    // then hydrate plan XML for only the winners.
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-        WITH per_lifetime AS
-        (
-            SELECT
-                database_name = ps.database_name,
-                schema_name = ps.schema_name,
-                object_name = ps.object_name,
-                object_id = MAX(ps.object_id),
-                object_type = MAX(ps.object_type),
-                type_desc = MAX(ps.type_desc),
-                first_cached_time = MIN(ps.cached_time),
-                last_execution_time = MAX(ps.last_execution_time),
-                execution_count = MAX(ps.execution_count),
-                total_worker_time = MAX(ps.total_worker_time),
-                min_worker_time = MIN(ps.min_worker_time),
-                max_worker_time = MAX(ps.max_worker_time),
-                total_elapsed_time = MAX(ps.total_elapsed_time),
-                min_elapsed_time = MIN(ps.min_elapsed_time),
-                max_elapsed_time = MAX(ps.max_elapsed_time),
-                total_logical_reads = MAX(ps.total_logical_reads),
-                min_logical_reads = MIN(ps.min_logical_reads),
-                max_logical_reads = MAX(ps.max_logical_reads),
-                total_logical_writes = MAX(ps.total_logical_writes),
-                min_logical_writes = MIN(ps.min_logical_writes),
-                max_logical_writes = MAX(ps.max_logical_writes),
-                total_physical_reads = MAX(ps.total_physical_reads),
-                min_physical_reads = MIN(ps.min_physical_reads),
-                max_physical_reads = MAX(ps.max_physical_reads),
-                total_spills = MAX(ps.total_spills),
-                min_spills = MIN(ps.min_spills),
-                max_spills = MAX(ps.max_spills),
-                query_plan_text = CAST(DECOMPRESS(MAX(ps.query_plan_text)) AS nvarchar(max)),
-                sql_handle = MAX(ps.sql_handle),
-                plan_handle = MAX(ps.plan_handle)
-            FROM collect.procedure_stats AS ps
-            WHERE (
-                (@fromSlicer = 1 AND ps.collection_time >= @fromDate AND ps.collection_time <= @toDate)
-                OR
-                (@fromSlicer = 0 AND @useCustomDates = 0 AND ps.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
-                OR
-                (@fromSlicer = 0 AND @useCustomDates = 1 AND
-                    ((ps.cached_time >= @fromDate AND ps.cached_time <= @toDate)
-                    OR (ps.last_execution_time >= @fromDate AND ps.last_execution_time <= @toDate)
-                    OR (ps.cached_time <= @fromDate AND ps.last_execution_time >= @toDate)))
-            )
-            GROUP BY
-                ps.database_name,
-                ps.schema_name,
-                ps.object_name,
-                ps.cached_time
+        /*Phase 1: aggregate per plan lifetime — numeric only, no DECOMPRESS*/
+        DROP TABLE IF EXISTS #proc_per_lifetime;
+
+        SELECT
+            ps.database_name,
+            ps.schema_name,
+            ps.object_name,
+            ps.cached_time,
+            object_id = MAX(ps.object_id),
+            object_type = MAX(ps.object_type),
+            type_desc = MAX(ps.type_desc),
+            last_execution_time = MAX(ps.last_execution_time),
+            execution_count = MAX(ps.execution_count),
+            total_worker_time = MAX(ps.total_worker_time),
+            min_worker_time = MIN(ps.min_worker_time),
+            max_worker_time = MAX(ps.max_worker_time),
+            total_elapsed_time = MAX(ps.total_elapsed_time),
+            min_elapsed_time = MIN(ps.min_elapsed_time),
+            max_elapsed_time = MAX(ps.max_elapsed_time),
+            total_logical_reads = MAX(ps.total_logical_reads),
+            min_logical_reads = MIN(ps.min_logical_reads),
+            max_logical_reads = MAX(ps.max_logical_reads),
+            total_logical_writes = MAX(ps.total_logical_writes),
+            min_logical_writes = MIN(ps.min_logical_writes),
+            max_logical_writes = MAX(ps.max_logical_writes),
+            total_physical_reads = MAX(ps.total_physical_reads),
+            min_physical_reads = MIN(ps.min_physical_reads),
+            max_physical_reads = MAX(ps.max_physical_reads),
+            total_spills = MAX(ps.total_spills),
+            min_spills = MIN(ps.min_spills),
+            max_spills = MAX(ps.max_spills),
+            sql_handle = MAX(ps.sql_handle),
+            plan_handle = MAX(ps.plan_handle)
+        INTO #proc_per_lifetime
+        FROM collect.procedure_stats AS ps
+        WHERE (
+            (@fromSlicer = 1 AND ps.collection_time >= @fromDate AND ps.collection_time <= @toDate)
+            OR
+            (@fromSlicer = 0 AND @useCustomDates = 0 AND ps.last_execution_time >= DATEADD(HOUR, -@hoursBack, SYSDATETIME()))
+            OR
+            (@fromSlicer = 0 AND @useCustomDates = 1 AND
+                ((ps.cached_time >= @fromDate AND ps.cached_time <= @toDate)
+                OR (ps.last_execution_time >= @fromDate AND ps.last_execution_time <= @toDate)
+                OR (ps.cached_time <= @fromDate AND ps.last_execution_time >= @toDate)))
         )
+        GROUP BY
+            ps.database_name,
+            ps.schema_name,
+            ps.object_name,
+            ps.cached_time
+        OPTION
+        (
+            RECOMPILE,
+            HASH GROUP,
+            HASH JOIN,
+            USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
+        );
+
+        /*Phase 2: sum across lifetimes, rank, take TOP 500*/
+        DROP TABLE IF EXISTS #proc_top_ranked;
+
         SELECT TOP (500)
             database_name = pl.database_name,
             object_id = MAX(pl.object_id),
@@ -1352,7 +1434,7 @@ ORDER BY bucket_hour;";
             procedure_name = pl.object_name,
             object_type = MAX(pl.object_type),
             type_desc = MAX(pl.type_desc),
-            first_cached_time = MIN(pl.first_cached_time),
+            first_cached_time = MIN(pl.cached_time),
             last_execution_time = MAX(pl.last_execution_time),
             execution_count = SUM(pl.execution_count),
             total_worker_time = SUM(pl.total_worker_time),
@@ -1379,10 +1461,10 @@ ORDER BY bucket_hour;";
             avg_spills = SUM(pl.total_spills) / NULLIF(SUM(pl.execution_count), 0),
             min_spills = MIN(pl.min_spills),
             max_spills = MAX(pl.max_spills),
-            query_plan_xml = MAX(pl.query_plan_text),
             sql_handle = CONVERT(nvarchar(130), MAX(pl.sql_handle), 1),
             plan_handle = CONVERT(nvarchar(130), MAX(pl.plan_handle), 1)
-        FROM per_lifetime AS pl
+        INTO #proc_top_ranked
+        FROM #proc_per_lifetime AS pl
         GROUP BY
             pl.database_name,
             pl.schema_name,
@@ -1391,10 +1473,63 @@ ORDER BY bucket_hour;";
             avg_worker_time_ms DESC
         OPTION
         (
-            HASH GROUP,
-            HASH JOIN,
-            USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
-        );";
+            RECOMPILE,
+            HASH GROUP
+        );
+
+        /*Phase 3: hydrate plan XML for the TOP 500 winners only*/
+        SELECT
+            tr.database_name,
+            tr.object_id,
+            tr.object_name,
+            tr.schema_name,
+            tr.procedure_name,
+            tr.object_type,
+            tr.type_desc,
+            tr.first_cached_time,
+            tr.last_execution_time,
+            tr.execution_count,
+            tr.total_worker_time,
+            tr.avg_worker_time_ms,
+            tr.min_worker_time_ms,
+            tr.max_worker_time_ms,
+            tr.total_elapsed_time,
+            tr.avg_elapsed_time_ms,
+            tr.min_elapsed_time_ms,
+            tr.max_elapsed_time_ms,
+            tr.total_logical_reads,
+            tr.avg_logical_reads,
+            tr.min_logical_reads,
+            tr.max_logical_reads,
+            tr.total_logical_writes,
+            tr.avg_logical_writes,
+            tr.min_logical_writes,
+            tr.max_logical_writes,
+            tr.total_physical_reads,
+            tr.avg_physical_reads,
+            tr.min_physical_reads,
+            tr.max_physical_reads,
+            tr.total_spills,
+            tr.avg_spills,
+            tr.min_spills,
+            tr.max_spills,
+            qp.query_plan_xml,
+            tr.sql_handle,
+            tr.plan_handle
+        FROM #proc_top_ranked AS tr
+        OUTER APPLY
+        (
+            SELECT TOP (1)
+                query_plan_xml = CAST(DECOMPRESS(ps2.query_plan_text) AS nvarchar(max))
+            FROM collect.procedure_stats AS ps2
+            WHERE ps2.database_name = tr.database_name
+            AND   ps2.schema_name = tr.schema_name
+            AND   ps2.object_name = tr.procedure_name
+            AND   ps2.query_plan_text IS NOT NULL
+            ORDER BY ps2.collection_time DESC
+        ) AS qp
+        ORDER BY
+            tr.avg_worker_time_ms DESC;";
 
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
@@ -1513,11 +1648,14 @@ ORDER BY bucket_hour;";
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Aggregate inline from collect.query_store_data with time filter applied
-                    // BEFORE the GROUP BY so counts/averages reflect only the selected time range.
-                    // Note: query_plan_xml is NOT fetched here for performance - use GetQueryStorePlanXmlAsync on demand
+                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 500,
+                    // then hydrate query text for only the winners.
+                    // Note: query_plan_xml is NOT fetched here — use GetQueryStorePlanXmlAsync on demand.
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        /*Phase 1: aggregate numerics, rank TOP 500 — no DECOMPRESS*/
+        DROP TABLE IF EXISTS #qs_top_ranked;
 
         SELECT TOP (500)
             database_name = qsd.database_name,
@@ -1557,7 +1695,6 @@ ORDER BY bucket_hour;";
             plan_type = MAX(qsd.plan_type),
             is_forced_plan = MAX(CONVERT(tinyint, qsd.is_forced_plan)),
             compatibility_level = MAX(qsd.compatibility_level),
-            query_sql_text = CAST(DECOMPRESS(MAX(qsd.query_sql_text)) AS nvarchar(max)),
             query_plan_hash = CONVERT(nvarchar(20), MAX(qsd.query_plan_hash), 1),
             force_failure_count = SUM(qsd.force_failure_count),
             last_force_failure_reason_desc = MAX(qsd.last_force_failure_reason_desc),
@@ -1568,6 +1705,7 @@ ORDER BY bucket_hour;";
             max_num_physical_io_reads = MAX(qsd.max_num_physical_io_reads),
             min_log_bytes_used = MIN(qsd.min_log_bytes_used),
             max_log_bytes_used = MAX(qsd.max_log_bytes_used)
+        INTO #qs_top_ranked
         FROM collect.query_store_data AS qsd
         WHERE (
             (@fromSlicer = 1 AND qsd.collection_time >= @fromDate AND qsd.collection_time <= @toDate)
@@ -1586,10 +1724,28 @@ ORDER BY bucket_hour;";
             avg_cpu_time_ms DESC
         OPTION
         (
+            RECOMPILE,
             HASH GROUP,
             HASH JOIN,
             USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
-        );";
+        );
+
+        /*Phase 2: hydrate query text for the TOP 500 winners only*/
+        SELECT
+            tr.*,
+            qt.query_sql_text
+        FROM #qs_top_ranked AS tr
+        OUTER APPLY
+        (
+            SELECT TOP (1)
+                query_sql_text = CAST(DECOMPRESS(qsd2.query_sql_text) AS nvarchar(max))
+            FROM collect.query_store_data AS qsd2
+            WHERE qsd2.database_name = tr.database_name
+            AND   qsd2.query_id = tr.query_id
+            ORDER BY qsd2.collection_time DESC
+        ) AS qt
+        ORDER BY
+            tr.avg_cpu_time_ms DESC;";
 
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
@@ -1642,17 +1798,17 @@ ORDER BY bucket_hour;";
                             PlanType = reader.IsDBNull(34) ? null : reader.GetString(34),
                             IsForcedPlan = !reader.IsDBNull(35) && reader.GetByte(35) == 1,
                             CompatibilityLevel = reader.IsDBNull(36) ? null : reader.GetInt16(36),
-                            QuerySqlText = reader.IsDBNull(37) ? null : reader.GetString(37),
-                            QueryPlanHash = reader.IsDBNull(38) ? null : reader.GetString(38),
-                            ForceFailureCount = reader.IsDBNull(39) ? null : reader.GetInt64(39),
-                            LastForceFailureReasonDesc = reader.IsDBNull(40) ? null : reader.GetString(40),
-                            PlanForcingType = reader.IsDBNull(41) ? null : reader.GetString(41),
-                            MinClrTimeMs = reader.IsDBNull(42) ? null : Convert.ToDouble(reader.GetValue(42), CultureInfo.InvariantCulture),
-                            MaxClrTimeMs = reader.IsDBNull(43) ? null : Convert.ToDouble(reader.GetValue(43), CultureInfo.InvariantCulture),
-                            MinNumPhysicalIoReads = reader.IsDBNull(44) ? null : reader.GetInt64(44),
-                            MaxNumPhysicalIoReads = reader.IsDBNull(45) ? null : reader.GetInt64(45),
-                            MinLogBytesUsed = reader.IsDBNull(46) ? null : reader.GetInt64(46),
-                            MaxLogBytesUsed = reader.IsDBNull(47) ? null : reader.GetInt64(47)
+                            QueryPlanHash = reader.IsDBNull(37) ? null : reader.GetString(37),
+                            ForceFailureCount = reader.IsDBNull(38) ? null : reader.GetInt64(38),
+                            LastForceFailureReasonDesc = reader.IsDBNull(39) ? null : reader.GetString(39),
+                            PlanForcingType = reader.IsDBNull(40) ? null : reader.GetString(40),
+                            MinClrTimeMs = reader.IsDBNull(41) ? null : Convert.ToDouble(reader.GetValue(41), CultureInfo.InvariantCulture),
+                            MaxClrTimeMs = reader.IsDBNull(42) ? null : Convert.ToDouble(reader.GetValue(42), CultureInfo.InvariantCulture),
+                            MinNumPhysicalIoReads = reader.IsDBNull(43) ? null : reader.GetInt64(43),
+                            MaxNumPhysicalIoReads = reader.IsDBNull(44) ? null : reader.GetInt64(44),
+                            MinLogBytesUsed = reader.IsDBNull(45) ? null : reader.GetInt64(45),
+                            MaxLogBytesUsed = reader.IsDBNull(46) ? null : reader.GetInt64(46),
+                            QuerySqlText = reader.IsDBNull(47) ? null : reader.GetString(47)
                             // QueryPlanXml is fetched on-demand via GetQueryStorePlanXmlAsync
                         });
                     }
@@ -4213,6 +4369,7 @@ GROUP BY
     qs.creation_time
 OPTION
 (
+    RECOMPILE,
     HASH GROUP,
     USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
 );
@@ -4274,6 +4431,7 @@ ORDER BY
     avg_worker_time_ms DESC
 OPTION
 (
+    RECOMPILE,
     HASH GROUP
 );
 
@@ -4450,6 +4608,7 @@ GROUP BY
     ps.cached_time
 OPTION
 (
+    RECOMPILE,
     HASH GROUP,
     USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
 );
@@ -4501,6 +4660,7 @@ ORDER BY
     avg_worker_time_ms DESC
 OPTION
 (
+    RECOMPILE,
     HASH GROUP
 );";
 
@@ -4638,6 +4798,7 @@ ORDER BY
     avg_cpu_time_ms DESC
 OPTION
 (
+    RECOMPILE,
     HASH GROUP,
     HASH JOIN,
     USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
