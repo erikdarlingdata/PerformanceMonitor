@@ -1104,7 +1104,6 @@ ORDER BY bucket_hour;";
                     OR (qs.last_execution_time >= @fromDate AND qs.last_execution_time <= @toDate)
                     OR (qs.creation_time <= @fromDate AND qs.last_execution_time >= @toDate)))
             )
-            AND CAST(DECOMPRESS(qs.query_text) AS nvarchar(max)) NOT LIKE N'WAITFOR%'
             GROUP BY
                 qs.database_name,
                 qs.query_hash,
@@ -1477,7 +1476,7 @@ SELECT
     ISNULL(SUM(qsd.avg_physical_io_reads * qsd.count_executions), 0) AS total_physical_reads,
     ISNULL(SUM(qsd.avg_logical_io_writes * qsd.count_executions), 0) AS total_writes
 FROM collect.query_store_data AS qsd
-WHERE CAST(DECOMPRESS(qsd.query_sql_text) AS nvarchar(max)) NOT LIKE N'WAITFOR%'
+WHERE 1 = 1
 {timeFilter}
 GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, qsd.collection_time), 0)
 ORDER BY bucket_hour;";
@@ -1580,7 +1579,6 @@ ORDER BY bucket_hour;";
                 OR (qsd.server_last_execution_time >= @fromDate AND qsd.server_last_execution_time <= @toDate)
                 OR (qsd.server_first_execution_time <= @fromDate AND qsd.server_last_execution_time >= @toDate)))
         )
-        AND CAST(DECOMPRESS(qsd.query_sql_text) AS nvarchar(max)) NOT LIKE N'WAITFOR%'
         GROUP BY
             qsd.database_name,
             qsd.query_id
