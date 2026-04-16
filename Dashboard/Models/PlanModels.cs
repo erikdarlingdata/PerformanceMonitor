@@ -61,6 +61,7 @@ public class PlanStatement
     public SetOptionsInfo? SetOptions { get; set; }
     public List<PlanParameter> Parameters { get; set; } = new();
     public List<WaitStatInfo> WaitStats { get; set; } = new();
+    public List<WaitBenefit> WaitBenefits { get; set; } = new();
     public QueryTimeInfo? QueryTimeStats { get; set; }
 
     // Wave 2: MaxQueryMemory + QueryPlan-level warnings
@@ -370,6 +371,17 @@ public class PlanWarning
     public string Message { get; set; } = "";
     public PlanWarningSeverity Severity { get; set; }
     public SpillDetail? SpillDetails { get; set; }
+
+    /// <summary>
+    /// Maximum percentage of elapsed time that could be saved by addressing this finding.
+    /// null = not quantifiable, 0 = calculated as negligible.
+    /// </summary>
+    public double? MaxBenefitPercent { get; set; }
+
+    /// <summary>
+    /// Short actionable fix suggestion (e.g., "Add INCLUDE (columns) to index").
+    /// </summary>
+    public string? ActionableFix { get; set; }
 }
 
 public enum PlanWarningSeverity { Info, Warning, Critical }
@@ -431,6 +443,13 @@ public class PlanParameter
     public string DataType { get; set; } = "";
     public string? CompiledValue { get; set; }
     public string? RuntimeValue { get; set; }
+}
+
+public class WaitBenefit
+{
+    public string WaitType { get; set; } = "";
+    public double MaxBenefitPercent { get; set; }
+    public string Category { get; set; } = "";
 }
 
 public class WaitStatInfo
