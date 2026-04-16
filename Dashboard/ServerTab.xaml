@@ -101,7 +101,7 @@
                 <StackPanel Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Vertical" Margin="15,0,0,0">
                     <StackPanel Orientation="Horizontal">
                         <Button x:Name="ApplyToAllButton" Content="Apply to All Tabs" Click="ApplyToAllTabs_Click" Margin="2,0" Padding="12,5" Style="{DynamicResource AccentButton}"/>
-                        <Button x:Name="RefreshButton" Content="Refresh Tab" Click="RefreshButton_Click" Margin="2,0" Padding="12,5" Style="{DynamicResource SuccessButton}"/>
+                        <Button x:Name="RefreshButton" Content="Refresh Tab" Click="RefreshButton_Click" Margin="2,0" Padding="12,5" Style="{DynamicResource SuccessButton}" ToolTip="Refresh the current tab. Ctrl+Click to refresh all tabs."/>
                         <ToggleButton x:Name="AutoRefreshToggle" Content="Auto-Refresh: Off" Click="AutoRefreshToggle_Click" Margin="8,0,2,0" Padding="12,5" MinWidth="130" ToolTip="Toggle auto-refresh on/off. Configure interval in Settings."/>
                         <Button Content="Edit Schedules" Click="EditSchedules_Click" Margin="8,0,2,0" Padding="12,5" Style="{DynamicResource AccentButton}" ToolTip="Edit collector schedules (frequency, retention, enabled/disabled)"/>
                         <TextBlock Text="|" VerticalAlignment="Center" Margin="8,0,4,0" Foreground="{DynamicResource ForegroundBrush}"/>

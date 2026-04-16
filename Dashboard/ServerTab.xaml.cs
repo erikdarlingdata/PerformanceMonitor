@@ -51,6 +51,7 @@ namespace PerformanceMonitorDashboard
         private bool _isRefreshing;
         private DateTime _refreshStartedUtc;
         private bool _suppressPickerUpdates;
+        private readonly HashSet<string> _initializedTabs = new();
 
         // Filter state dictionaries for each DataGrid
 
@@ -424,6 +425,7 @@ namespace PerformanceMonitorDashboard
             _autoRefreshCts?.Cancel();
             _autoRefreshTimer?.Stop();
             _autoRefreshTimer = null;
+            _initializedTabs.Clear();
 
             Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
             Loaded -= ServerTab_Loaded;
@@ -549,7 +551,8 @@ namespace PerformanceMonitorDashboard
                 if (e.Key == System.Windows.Input.Key.F5)
                 {
                     e.Handled = true;
-                    await LoadDataAsync();
+                    bool fullRefresh = System.Windows.Input.Keyboard.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Control);
+                    await LoadDataAsync(fullRefresh);
                 }
                 else if (e.Key == System.Windows.Input.Key.V &&
                          System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
@@ -640,7 +643,7 @@ namespace PerformanceMonitorDashboard
                 CriticalIssuesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 DefaultTraceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
 
-                await LoadDataAsync();
+                await LoadDataAsync(fullRefresh: false);
                 SetupAutoRefresh();
             }
             catch (Exception ex)
@@ -654,7 +657,8 @@ namespace PerformanceMonitorDashboard
         {
             try
             {
-                await LoadDataAsync();
+                bool fullRefresh = System.Windows.Input.Keyboard.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Control);
+                await LoadDataAsync(fullRefresh);
             }
             catch (Exception ex)
             {
@@ -1271,7 +1275,9 @@ namespace PerformanceMonitorDashboard
         }
 
         /// <summary>
-        /// Refreshes only the currently visible tab — used on auto-refresh timer tick.
+        /// Refreshes only the currently visible tab. On first visit to a tab,
+        /// does a full refresh so all sub-tabs are populated. Subsequent visits
+        /// only refresh the active sub-tab for speed.
         /// </summary>
         private async Task RefreshVisibleTabAsync()
         {
@@ -1279,6 +1285,7 @@ namespace PerformanceMonitorDashboard
             if (selectedTab == null) return;
 
             var tabHeader = GetTabHeaderText(selectedTab);
+            bool firstVisit = _initializedTabs.Add(tabHeader);
 
             switch (tabHeader)
             {
@@ -1286,19 +1293,19 @@ namespace PerformanceMonitorDashboard
                     await RefreshOverviewTabAsync();
                     break;
                 case "Queries":
-                    await RefreshQueriesTabAsync(fullRefresh: false);
+                    await RefreshQueriesTabAsync(fullRefresh: firstVisit);
                     break;
                 case "Resource Metrics":
-                    await RefreshResourceMetricsTabAsync(fullRefresh: false);
+                    await RefreshResourceMetricsTabAsync(fullRefresh: firstVisit);
                     break;
                 case "Memory":
-                    await RefreshMemoryTabAsync(fullRefresh: false);
+                    await RefreshMemoryTabAsync(fullRefresh: firstVisit);
                     break;
                 case "Locking":
                     await RefreshLockingTabAsync();
                     break;
                 case "System Events":
-                    await RefreshSystemEventsTabAsync(fullRefresh: false);
+                    await RefreshSystemEventsTabAsync(fullRefresh: firstVisit);
                     break;
                 // Plan Viewer has no data to refresh
             }

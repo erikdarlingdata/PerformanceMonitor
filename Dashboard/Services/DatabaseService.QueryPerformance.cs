@@ -1110,7 +1110,7 @@ ORDER BY bucket_hour;";
                 qs.query_hash,
                 qs.creation_time
         )
-        SELECT
+        SELECT TOP (500)
             database_name = pl.database_name,
             query_hash = CONVERT(nvarchar(20), pl.query_hash, 1),
             object_type = MAX(pl.object_type),
@@ -1345,7 +1345,7 @@ ORDER BY bucket_hour;";
                 ps.object_name,
                 ps.cached_time
         )
-        SELECT
+        SELECT TOP (500)
             database_name = pl.database_name,
             object_id = MAX(pl.object_id),
             object_name = QUOTENAME(pl.schema_name) + N'.' + QUOTENAME(pl.object_name),
@@ -1520,7 +1520,7 @@ ORDER BY bucket_hour;";
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-        SELECT
+        SELECT TOP (500)
             database_name = qsd.database_name,
             query_id = qsd.query_id,
             execution_type_desc = MAX(qsd.execution_type_desc),
