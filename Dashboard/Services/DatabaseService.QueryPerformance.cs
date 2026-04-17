@@ -1123,7 +1123,7 @@ ORDER BY bucket_hour;";
 
         SELECT TOP (500)
             database_name = pl.database_name,
-            query_hash = CONVERT(nvarchar(20), pl.query_hash, 1),
+            query_hash = pl.query_hash,
             object_type = MAX(pl.object_type),
             object_name =
                 CASE MAX(pl.object_type)
@@ -1180,7 +1180,7 @@ ORDER BY bucket_hour;";
         /*Phase 3: hydrate text and plan XML for the TOP 500 winners only*/
         SELECT
             tr.database_name,
-            tr.query_hash,
+            query_hash = CONVERT(nvarchar(20), tr.query_hash, 1),
             tr.object_type,
             tr.object_name,
             tr.first_execution_time,
@@ -1224,7 +1224,7 @@ ORDER BY bucket_hour;";
             SELECT TOP (1)
                 query_text = CAST(DECOMPRESS(qs2.query_text) AS nvarchar(max))
             FROM collect.query_stats AS qs2
-            WHERE qs2.query_hash = CONVERT(binary(8), tr.query_hash, 1)
+            WHERE qs2.query_hash = tr.query_hash
             AND   qs2.database_name = tr.database_name
             ORDER BY qs2.collection_time DESC
         ) AS qt
@@ -1233,7 +1233,7 @@ ORDER BY bucket_hour;";
             SELECT TOP (1)
                 query_plan_xml = CAST(DECOMPRESS(qs3.query_plan_text) AS nvarchar(max))
             FROM collect.query_stats AS qs3
-            WHERE qs3.query_hash = CONVERT(binary(8), tr.query_hash, 1)
+            WHERE qs3.query_hash = tr.query_hash
             AND   qs3.database_name = tr.database_name
             AND   qs3.query_plan_text IS NOT NULL
             ORDER BY qs3.collection_time DESC
@@ -4379,7 +4379,7 @@ DROP TABLE IF EXISTS #top_ranked;
 
 SELECT TOP (@top + 5)
     database_name = pl.database_name,
-    query_hash = CONVERT(nvarchar(20), pl.query_hash, 1),
+    query_hash = pl.query_hash,
     object_type = MAX(pl.object_type),
     object_name =
         CASE MAX(pl.object_type)
@@ -4438,7 +4438,7 @@ OPTION
 /*Phase 3: hydrate text for winners only, apply WAITFOR filter*/
 SELECT TOP (@top)
     tr.database_name,
-    tr.query_hash,
+    query_hash = CONVERT(nvarchar(20), tr.query_hash, 1),
     tr.object_type,
     tr.object_name,
     tr.first_execution_time,
@@ -4481,7 +4481,7 @@ OUTER APPLY
     SELECT TOP (1)
         query_text = CAST(DECOMPRESS(qs2.query_text) AS nvarchar(max))
     FROM collect.query_stats AS qs2
-    WHERE qs2.query_hash = CONVERT(binary(8), tr.query_hash, 1)
+    WHERE qs2.query_hash = tr.query_hash
     AND   qs2.database_name = tr.database_name
     ORDER BY qs2.collection_time DESC
 ) AS qt
