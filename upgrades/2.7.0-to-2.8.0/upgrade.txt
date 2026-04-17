@@ -1,0 +1,1 @@
+01_add_query_lookup_indexes.sql
