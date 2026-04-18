@@ -81,6 +81,7 @@ WHERE der.session_id <> @@SPID
 AND   der.session_id >= 50
 AND   dest.text IS NOT NULL
 AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+{2}
 ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC
 OPTION(MAXDOP 1, RECOMPILE);
 """;
@@ -89,12 +90,21 @@ OPTION(MAXDOP 1, RECOMPILE);
     /// <summary>
     /// Builds the query snapshots SQL with or without live query plan support.
     /// Used by both the collector and the live snapshot button.
+    /// On Azure SQL Database the result set is scoped to the current database only,
+    /// because logins without access to master can't resolve cross-database requests (see #857).
     /// </summary>
-    internal static string BuildQuerySnapshotsQuery(bool supportsLiveQueryPlan)
+    internal static string BuildQuerySnapshotsQuery(bool supportsLiveQueryPlan, bool isAzureSqlDatabase)
     {
-        return supportsLiveQueryPlan
-            ? string.Format(null, QuerySnapshotsBaseFormat, "live_query_plan = deqs.query_plan,", "OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs")
-            : string.Format(null, QuerySnapshotsBaseFormat, "live_query_plan = CONVERT(xml, NULL),", "");
+        var liveQueryPlanColumn = supportsLiveQueryPlan
+            ? "live_query_plan = deqs.query_plan,"
+            : "live_query_plan = CONVERT(xml, NULL),";
+        var liveQueryPlanApply = supportsLiveQueryPlan
+            ? "OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs"
+            : "";
+        var azureScopePredicate = isAzureSqlDatabase
+            ? "AND   der.database_id = DB_ID()"
+            : "";
+        return string.Format(null, QuerySnapshotsBaseFormat, liveQueryPlanColumn, liveQueryPlanApply, azureScopePredicate);
     }
 
     /// <summary>
@@ -106,8 +116,9 @@ OPTION(MAXDOP 1, RECOMPILE);
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
         var supportsLiveQueryPlan = serverStatus.SqlMajorVersion >= 13 || serverStatus.SqlMajorVersion == 0
             || serverStatus.SqlEngineEdition == 5 || serverStatus.SqlEngineEdition == 8;
+        var isAzureSqlDatabase = serverStatus.SqlEngineEdition == 5;
 
-        var query = BuildQuerySnapshotsQuery(supportsLiveQueryPlan);
+        var query = BuildQuerySnapshotsQuery(supportsLiveQueryPlan, isAzureSqlDatabase);
 
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;

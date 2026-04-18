@@ -112,6 +112,7 @@ public partial class ServerTab : UserControl
 
     public int UtcOffsetMinutes { get; }
     private readonly bool _hasMsdbAccess;
+    private readonly bool _isAzureSqlDatabase;
 
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
@@ -120,7 +121,7 @@ public partial class ServerTab : UserControl
     public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
     public event Func<Task>? ManualRefreshRequested;
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0, bool hasMsdbAccess = true)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, bool isAzureSqlDatabase = false)
     {
         InitializeComponent();
 
@@ -130,6 +131,7 @@ public partial class ServerTab : UserControl
         _credentialService = credentialService;
         UtcOffsetMinutes = utcOffsetMinutes;
         _hasMsdbAccess = hasMsdbAccess;
+        _isAzureSqlDatabase = isAzureSqlDatabase;
         ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
@@ -5137,7 +5139,7 @@ public partial class ServerTab : UserControl
                 ConnectTimeout = 15
             };
 
-            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: true);
+            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: true, isAzureSqlDatabase: _isAzureSqlDatabase);
 
             await using var connection = new SqlConnection(builder.ConnectionString);
             await connection.OpenAsync();
