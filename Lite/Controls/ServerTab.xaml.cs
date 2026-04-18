@@ -135,7 +135,7 @@ public partial class ServerTab : UserControl
         ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
-        ConnectionStatusText.Text = server.ServerNameDisplay;
+        ConnectionStatusText.Text = "Connecting...";
 
         /* Apply default time range from settings */
         TimeRangeCombo.SelectedIndex = App.DefaultTimeRangeHours switch
@@ -841,7 +841,7 @@ public partial class ServerTab : UserControl
             }
 
             var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
-            ConnectionStatusText.Text = $"{_server.ServerNameDisplay} - Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
+            ConnectionStatusText.Text = $"Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
         }
         catch (Exception ex)
         {
@@ -1876,7 +1876,7 @@ public partial class ServerTab : UserControl
         otherPlot.Color = ScottPlot.Color.FromHex("#E57373");
         _cpuHover?.Add(otherPlot, "Other");
 
-        CpuChart.Plot.Axes.DateTimeTicksBottom();
+        CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(CpuChart);
         CpuChart.Plot.YLabel("CPU %");
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
@@ -1932,7 +1932,7 @@ public partial class ServerTab : UserControl
         grantPlot.Color = ScottPlot.Color.FromHex("#FFB74D");
         _memoryHover?.Add(grantPlot, "Memory Grants");
 
-        MemoryChart.Plot.Axes.DateTimeTicksBottom();
+        MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(MemoryChart);
         MemoryChart.Plot.YLabel("Memory (GB)");
 
@@ -1989,7 +1989,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottom();
+        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
         SetChartYLimitsWithLegendPadding(MemoryGrantSizingChart, 0, sizingMax > 0 ? sizingMax : 100);
@@ -2025,7 +2025,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottom();
+        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Plot.YLabel("Count");
         SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
@@ -2061,7 +2061,7 @@ public partial class ServerTab : UserControl
         vsPlot.Color = ScottPlot.Color.FromHex("#81C784");
         _tempDbHover?.Add(vsPlot, "Version Store");
 
-        TempDbChart.Plot.Axes.DateTimeTicksBottom();
+        TempDbChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
@@ -2107,7 +2107,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottom();
+        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(TempDbFileIoChart);
         TempDbFileIoChart.Plot.YLabel("TempDB File I/O Latency (ms)");
         SetChartYLimitsWithLegendPadding(TempDbFileIoChart, 0, maxLatency > 0 ? maxLatency : 10);
@@ -2191,14 +2191,14 @@ public partial class ServerTab : UserControl
             }
         }
 
-        FileIoReadChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoReadChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoReadChart);
         FileIoReadChart.Plot.YLabel("Read Latency (ms)");
         SetChartYLimitsWithLegendPadding(FileIoReadChart, 0, readMax > 0 ? readMax : 10);
         ShowChartLegend(FileIoReadChart);
         FileIoReadChart.Refresh();
 
-        FileIoWriteChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoWriteChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoWriteChart);
         FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
@@ -2255,14 +2255,14 @@ public partial class ServerTab : UserControl
             }
         }
 
-        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
         SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
         ShowChartLegend(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Refresh();
 
-        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
         SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
@@ -2298,7 +2298,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Lock Waits";
             zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
             zeroLine.MarkerSize = 0;
-            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
             LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
             LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -2325,7 +2325,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
         LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -2362,7 +2362,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Blocking Incidents";
             zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
             zeroLine.MarkerSize = 0;
-            BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
             BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -2404,7 +2404,7 @@ public partial class ServerTab : UserControl
         plot.MarkerSize = 0; /* No markers, just lines */
         _blockingTrendHover?.Add(plot, "Blocking Incidents");
 
-        BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
+        BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
         BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -2441,7 +2441,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Deadlocks";
             zeroLine.Color = ScottPlot.Color.FromHex("#FFB74D");
             zeroLine.MarkerSize = 0;
-            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
+            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
             DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTrendChart);
             DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -2483,7 +2483,7 @@ public partial class ServerTab : UserControl
         plot.MarkerSize = 0; /* No markers, just lines */
         _deadlockTrendHover?.Add(plot, "Deadlocks");
 
-        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
+        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTrendChart);
         DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -2520,7 +2520,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Current Waits";
             zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
             zeroLine.MarkerSize = 0;
-            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsDurationChart);
             CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -2550,7 +2550,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
         CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsDurationChart);
         CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -2585,7 +2585,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Blocked Sessions";
             zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
             zeroLine.MarkerSize = 0;
-            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsBlockedChart);
             CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
@@ -2615,7 +2615,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
         CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
@@ -2642,7 +2642,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#4FC3F7");
         _queryDurationTrendHover?.Add(plot, "Query Duration");
 
-        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
+        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(QueryDurationTrendChart);
         QueryDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
         SetChartYLimitsWithLegendPadding(QueryDurationTrendChart, 0, values.Max());
@@ -2666,7 +2666,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#81C784");
         _procDurationTrendHover?.Add(plot, "Procedure Duration");
 
-        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
+        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(ProcDurationTrendChart);
         ProcDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
         SetChartYLimitsWithLegendPadding(ProcDurationTrendChart, 0, values.Max());
@@ -2690,7 +2690,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#FFB74D");
         _queryStoreDurationTrendHover?.Add(plot, "Query Store Duration");
 
-        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
+        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
         SetChartYLimitsWithLegendPadding(QueryStoreDurationTrendChart, 0, values.Max());
@@ -2855,7 +2855,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#BA68C8");
         _executionCountTrendHover?.Add(plot, "Executions");
 
-        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottom();
+        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Plot.YLabel("Executions/sec");
         SetChartYLimitsWithLegendPadding(ExecutionCountTrendChart, 0, values.Max());
@@ -3415,7 +3415,7 @@ public partial class ServerTab : UserControl
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            WaitStatsChart.Plot.Axes.DateTimeTicksBottom();
+            WaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
@@ -3579,7 +3579,7 @@ public partial class ServerTab : UserControl
                 }
             }
 
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");
             SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
@@ -3773,7 +3773,7 @@ public partial class ServerTab : UserControl
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            PerfmonChart.Plot.Axes.DateTimeTicksBottom();
+            PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
@@ -3913,6 +3913,8 @@ public partial class ServerTab : UserControl
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
         chart.Plot.Axes.Left.Label.ForeColor = textColor;
+        chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
+        chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
 
         // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
         chart.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
@@ -3970,6 +3972,8 @@ public partial class ServerTab : UserControl
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
         chart.Plot.Axes.Left.Label.ForeColor = textColor;
+        chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
+        chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
     }
 
     /// <summary>
@@ -5309,7 +5313,7 @@ public partial class ServerTab : UserControl
             colorIdx++;
         }
 
-        CollectorDurationChart.Plot.Axes.DateTimeTicksBottom();
+        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(CollectorDurationChart);
         CollectorDurationChart.Plot.YLabel("Duration (ms)");
         CollectorDurationChart.Plot.Axes.AutoScale();

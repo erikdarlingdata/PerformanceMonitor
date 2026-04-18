@@ -287,7 +287,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             meanLine.LineWidth = 1;
         }
 
-        BlockingChart.Plot.Axes.DateTimeTicksBottom();
+        BlockingChart.Plot.Axes.DateTimeTicksBottomDateChange();
         BlockingChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         ReapplyAxisColors(BlockingChart);
 
@@ -363,7 +363,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         _crosshairManager?.SetLaneData(chart, times, values);
 
-        chart.Plot.Axes.DateTimeTicksBottom();
+        chart.Plot.Axes.DateTimeTicksBottomDateChange();
         // Hide bottom tick labels on all lanes except the last (File I/O)
         if (chart != FileIoChart)
             chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;

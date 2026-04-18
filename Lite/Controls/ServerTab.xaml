@@ -202,7 +202,7 @@
             <!-- Query Performance Tab -->
             <TabItem Header="Queries">
                 <Grid Margin="8">
-                    <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Performance Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -1046,7 +1046,7 @@
 
             <!-- Memory Tab -->
             <TabItem Header="Memory">
-                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0">
+                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
                         <Grid Margin="8">
@@ -1182,7 +1182,7 @@
             <!-- File I/O Tab -->
             <TabItem Header="File I/O">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <!-- File I/O Latency sub-tab -->
                         <TabItem Header="File I/O Latency">
                             <Grid>
@@ -1239,7 +1239,7 @@
             <!-- Blocking Tab -->
             <TabItem Header="Blocking">
                 <Grid Margin="8">
-                    <TabControl x:Name="BlockingSubTabControl" Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="BlockingSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -1578,7 +1578,7 @@
             <!-- Configuration Tab -->
             <TabItem Header="Configuration">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Server Configuration">
                             <DataGrid x:Name="ServerConfigGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
@@ -1802,7 +1802,7 @@
             <!-- Collection Health Tab -->
             <TabItem Header="Collection Health">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Health Summary">
                             <DataGrid x:Name="CollectionHealthGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
