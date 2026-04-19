@@ -117,7 +117,17 @@ public sealed class McpSystemEventTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure notifications from the ring buffer. Shows RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, and other memory broker notifications with process/system indicators.")]
+    [McpServerTool(Name = "get_memory_pressure_events"), Description(@"Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.
+
+Indicator scale (applies to both memory_indicators_process and memory_indicators_system):
+  0-1 = normal, no pressure
+  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)
+  3+  = severe pressure (aggressive buffer pool / plan cache eviction)
+
+memory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).
+memory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).
+
+For actionable interpretation and suggested follow-up tools, see the 'Interpreting Memory Pressure Events' section of the server instructions.")]
     public static async Task<string> GetMemoryPressureEvents(
         ServerManager serverManager,
         DatabaseServiceRegistry registry,
