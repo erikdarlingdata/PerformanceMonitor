@@ -190,6 +190,18 @@ CREATE TABLE IF NOT EXISTS memory_clerks (
     memory_mb DECIMAL(18,2)
 )";
 
+    public const string CreateMemoryPressureEventsTable = @"
+CREATE TABLE IF NOT EXISTS memory_pressure_events (
+    collection_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    sample_time TIMESTAMP NOT NULL,
+    memory_notification VARCHAR NOT NULL,
+    memory_indicators_process INTEGER NOT NULL,
+    memory_indicators_system INTEGER NOT NULL
+)";
+
     public const string CreateDeadlocksTable = @"
 CREATE TABLE IF NOT EXISTS deadlocks (
     deadlock_id BIGINT PRIMARY KEY,
@@ -519,6 +531,9 @@ CREATE INDEX IF NOT EXISTS idx_file_io_time ON file_io_stats(server_id, collecti
     public const string CreateMemoryIndex = @"
 CREATE INDEX IF NOT EXISTS idx_memory_time ON memory_stats(server_id, collection_time)";
 
+    public const string CreateMemoryPressureEventsIndex = @"
+CREATE INDEX IF NOT EXISTS idx_memory_pressure_events_time ON memory_pressure_events(server_id, sample_time)";
+
     public const string CreateTempdbIndex = @"
 CREATE INDEX IF NOT EXISTS idx_tempdb_time ON tempdb_stats(server_id, collection_time)";
 
@@ -726,6 +741,7 @@ ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
         yield return CreateFileIoStatsTable;
         yield return CreateMemoryStatsTable;
         yield return CreateMemoryClerksTable;
+        yield return CreateMemoryPressureEventsTable;
         yield return CreateDeadlocksTable;
         yield return CreateProcedureStatsTable;
         yield return CreateQueryStoreStatsTable;
@@ -769,6 +785,7 @@ ON dismissed_archive_alerts (alert_time, server_id, metric_name)";
         yield return CreateWaitingTasksIndex;
         yield return CreateBlockedProcessReportsIndex;
         yield return CreateMemoryClerksIndex;
+        yield return CreateMemoryPressureEventsIndex;
         yield return CreateDatabaseScopedConfigIndex;
         yield return CreateTraceFlagsIndex;
         yield return CreateRunningJobsIndex;

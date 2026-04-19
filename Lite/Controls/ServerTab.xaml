@@ -1176,6 +1176,13 @@
                         </Grid>
                     </TabItem>
 
+                    <!-- Memory Pressure Events Sub-Tab -->
+                    <TabItem Header="Memory Pressure Events">
+                        <Grid>
+                            <ScottPlot:WpfPlot x:Name="MemoryPressureEventsChart" Margin="5"/>
+                        </Grid>
+                    </TabItem>
+
                 </TabControl>
             </TabItem>
 

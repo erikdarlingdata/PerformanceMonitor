@@ -38,6 +38,7 @@ public class ScheduleManager
             ["wait_stats"] = 1, ["query_stats"] = 1, ["procedure_stats"] = 1,
             ["query_store"] = 2, ["query_snapshots"] = 1, ["cpu_utilization"] = 1,
             ["file_io_stats"] = 1, ["memory_stats"] = 1, ["memory_clerks"] = 2,
+            ["memory_pressure_events"] = 5,
             ["tempdb_stats"] = 1, ["perfmon_stats"] = 1, ["deadlocks"] = 1,
             ["memory_grant_stats"] = 1, ["waiting_tasks"] = 1,
             ["blocked_process_report"] = 1, ["running_jobs"] = 2
@@ -47,6 +48,7 @@ public class ScheduleManager
             ["wait_stats"] = 1, ["query_stats"] = 1, ["procedure_stats"] = 1,
             ["query_store"] = 5, ["query_snapshots"] = 1, ["cpu_utilization"] = 1,
             ["file_io_stats"] = 1, ["memory_stats"] = 1, ["memory_clerks"] = 5,
+            ["memory_pressure_events"] = 5,
             ["tempdb_stats"] = 1, ["perfmon_stats"] = 1, ["deadlocks"] = 1,
             ["memory_grant_stats"] = 1, ["waiting_tasks"] = 1,
             ["blocked_process_report"] = 1, ["running_jobs"] = 5
@@ -56,6 +58,7 @@ public class ScheduleManager
             ["wait_stats"] = 5, ["query_stats"] = 10, ["procedure_stats"] = 10,
             ["query_store"] = 30, ["query_snapshots"] = 5, ["cpu_utilization"] = 5,
             ["file_io_stats"] = 10, ["memory_stats"] = 10, ["memory_clerks"] = 30,
+            ["memory_pressure_events"] = 15,
             ["tempdb_stats"] = 5, ["perfmon_stats"] = 5, ["deadlocks"] = 5,
             ["memory_grant_stats"] = 5, ["waiting_tasks"] = 5,
             ["blocked_process_report"] = 5, ["running_jobs"] = 30
@@ -739,6 +742,7 @@ public class ScheduleManager
             new() { Name = "file_io_stats", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "File I/O statistics from sys.dm_io_virtual_file_stats" },
             new() { Name = "memory_stats", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Memory statistics from sys.dm_os_sys_memory and performance counters" },
             new() { Name = "memory_clerks", Enabled = true, FrequencyMinutes = 5, RetentionDays = 30, Description = "Memory clerk allocations from sys.dm_os_memory_clerks" },
+            new() { Name = "memory_pressure_events", Enabled = true, FrequencyMinutes = 5, RetentionDays = 30, Description = "Memory pressure notifications from RING_BUFFER_RESOURCE_MONITOR" },
             new() { Name = "tempdb_stats", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "TempDB space usage from sys.dm_db_file_space_usage" },
             new() { Name = "perfmon_stats", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Key performance counters from sys.dm_os_performance_counters" },
             new() { Name = "deadlocks", Enabled = true, FrequencyMinutes = 1, RetentionDays = 30, Description = "Deadlocks from system_health extended event session" },
