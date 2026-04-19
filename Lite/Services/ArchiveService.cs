@@ -56,6 +56,7 @@ public class ArchiveService
         ("file_io_stats", "collection_time"),
         ("memory_stats", "collection_time"),
         ("memory_clerks", "collection_time"),
+        ("memory_pressure_events", "collection_time"),
         ("tempdb_stats", "collection_time"),
         ("perfmon_stats", "collection_time"),
         ("deadlocks", "collection_time"),

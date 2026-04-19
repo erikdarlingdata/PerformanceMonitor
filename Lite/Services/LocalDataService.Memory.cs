@@ -182,6 +182,48 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// Gets memory pressure events (from RING_BUFFER_RESOURCE_MONITOR) for charting.
+    /// </summary>
+    public async Task<List<MemoryPressureEventRow>> GetMemoryPressureEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+
+        command.CommandText = @"
+SELECT
+    sample_time,
+    memory_notification,
+    memory_indicators_process,
+    memory_indicators_system
+FROM v_memory_pressure_events
+WHERE server_id = $1
+AND   sample_time >= $2
+AND   sample_time <= $3
+ORDER BY sample_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<MemoryPressureEventRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new MemoryPressureEventRow
+            {
+                SampleTime = reader.GetDateTime(0),
+                MemoryNotification = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                MemoryIndicatorsProcess = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                MemoryIndicatorsSystem = reader.IsDBNull(3) ? 0 : reader.GetInt32(3)
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Gets the latest memory clerk breakdown.
     /// </summary>
     public async Task<List<MemoryClerkRow>> GetLatestMemoryClerksAsync(int serverId)
@@ -251,4 +293,12 @@ public class MemoryClerkTrendPoint
     public DateTime CollectionTime { get; set; }
     public string ClerkType { get; set; } = "";
     public double MemoryMb { get; set; }
+}
+
+public class MemoryPressureEventRow
+{
+    public DateTime SampleTime { get; set; }
+    public string MemoryNotification { get; set; } = "";
+    public int MemoryIndicatorsProcess { get; set; }
+    public int MemoryIndicatorsSystem { get; set; }
 }

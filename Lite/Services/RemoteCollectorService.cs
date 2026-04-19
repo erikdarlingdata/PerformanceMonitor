@@ -389,6 +389,7 @@ public partial class RemoteCollectorService
                 "cpu_utilization" => await CollectCpuUtilizationAsync(server, cancellationToken),
                 "memory_stats" => await CollectMemoryStatsAsync(server, cancellationToken),
                 "memory_clerks" => await CollectMemoryClerksAsync(server, cancellationToken),
+                "memory_pressure_events" => await CollectMemoryPressureEventsAsync(server, cancellationToken),
                 "file_io_stats" => await CollectFileIoStatsAsync(server, cancellationToken),
                 "query_stats" => await CollectQueryStatsAsync(server, cancellationToken),
                 "procedure_stats" => await CollectProcedureStatsAsync(server, cancellationToken),

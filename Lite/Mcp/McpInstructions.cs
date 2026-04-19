@@ -78,6 +78,7 @@ internal static class McpInstructions
         | `get_memory_trend` | Memory usage over time | `server_name`, `hours_back` |
         | `get_memory_clerks` | Top memory consumers by clerk type | `server_name` |
         | `get_memory_grants` | Active/recent memory grants (detect grant pressure) | `server_name`, `hours_back` (default 1), `limit` |
+        | `get_memory_pressure_events` | Ring buffer memory pressure notifications (sp_pressuredetector source) | `server_name`, `hours_back` |
 
         ### I/O Tools
         | Tool | Purpose | Key Parameters |
@@ -195,6 +196,49 @@ internal static class McpInstructions
         - **`get_blocked_process_reports`**: Captures events from SQL Server's Blocked Process Report extended event (via sp_HumanEventsBlockViewer). Fires when a session has been blocked longer than the configured threshold. Includes richer detail: isolation levels, transaction names, full query text for both blocker and blocked.
 
         **Use `get_blocking` first** for a quick overview. **Use `get_blocked_process_reports`** when you need detailed analysis of prolonged blocking events.
+
+        ## Interpreting Memory Pressure Events
+
+        `get_memory_pressure_events` returns notifications from the `RING_BUFFER_RESOURCE_MONITOR` ring buffer. The `memory_indicators_process` and `memory_indicators_system` values are SQL Server's Resource Monitor signals. Indicator scale:
+
+        - **0-1**: normal operating state, not actionable
+        - **2 (medium)**: Resource Monitor has crossed a threshold and is starting to respond — trimming caches, reducing memory grants. Worth investigating if sustained or frequent.
+        - **3+ (severe)**: aggressive response — buffer pool pages are being evicted, plan cache entries thrown out, workspace memory starved. Always worth investigating.
+
+        The two indicators report different things:
+
+        - `memory_indicators_process` — the SQL Server *process itself* is under memory pressure. Usually workload-induced (large memory grants, plan cache bloat, buffer pool churn).
+        - `memory_indicators_system` — Windows is signaling low memory *system-wide*. Something on the whole box is consuming memory; SQL Server may or may not be the culprit.
+
+        ### What to check when process pressure (indicator >= 2) fires
+
+        The workload is squeezing SQL Server itself. Follow-up tools:
+        | Signal to check | Tool |
+        |-----------------|------|
+        | Memory grant contention, workspace memory pressure | `get_memory_grants` |
+        | Buffer pool composition, memory clerk distribution | `get_memory_clerks` |
+        | Page Life Expectancy, target vs total server memory | `get_memory_stats`, `get_memory_trend` |
+        | Queries that requested large grants during the window | `get_top_queries_by_cpu` |
+        | `RESOURCE_SEMAPHORE` waits in the same window | `get_wait_stats`, `get_wait_trend` |
+
+        ### What to check when system pressure (indicator >= 2) fires but process does not
+
+        The box is tight on memory, but SQL Server's own process is not the cause. SQL Server feels Windows' low-memory notification but isn't driving it. Typical root causes: other services on the machine (anti-virus, backup agents, monitoring agents, additional SQL instances, SSIS/SSRS, RDP sessions), oversized file system cache, or VM-host memory oversubscription. Follow-up:
+
+        | Signal to check | Tool |
+        |-----------------|------|
+        | SQL Server's memory configuration (`max server memory` vs total RAM) | `get_server_properties` |
+        | Is SQL Server itself actually fine? | `get_memory_stats`, `get_memory_clerks` |
+
+        Most of the diagnosis in this case is *outside* the monitored SQL instance — tell the user to check what else is running on the host.
+
+        ### Patterns
+
+        - **Both process and system firing together** → real capacity problem. Add RAM, tune the workload, or reduce concurrency.
+        - **Process only** → workload/schema issue, not a hardware problem. Tune queries and indexes.
+        - **System only** → non-SQL workload on the host; SQL itself is healthy but the tenant mix is tight.
+        - **Bursty spikes** → correlate the pressure window with `get_running_jobs` (scheduled maintenance, index rebuilds, big reports) and `get_top_queries_by_cpu` for that period.
+        - **Flat-line sustained** → chronic under-provisioning; memory needs to grow or workload needs to shrink.
 
         ## Tool Relationships
 

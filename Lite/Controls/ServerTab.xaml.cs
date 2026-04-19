@@ -65,6 +65,7 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _memoryClerksHover;
     private Helpers.ChartHoverHelper? _memoryGrantSizingHover;
     private Helpers.ChartHoverHelper? _memoryGrantActivityHover;
+    private Helpers.ChartHoverHelper? _memoryPressureEventsHover;
     private Helpers.ChartHoverHelper? _currentWaitsDurationHover;
     private Helpers.ChartHoverHelper? _currentWaitsBlockedHover;
 
@@ -202,6 +203,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(MemoryClerksChart);
         ApplyTheme(MemoryGrantSizingChart);
         ApplyTheme(MemoryGrantActivityChart);
+        ApplyTheme(MemoryPressureEventsChart);
         ApplyTheme(FileIoReadChart);
         ApplyTheme(FileIoWriteChart);
         ApplyTheme(FileIoReadThroughputChart);
@@ -240,6 +242,7 @@ public partial class ServerTab : UserControl
         _memoryClerksHover = new Helpers.ChartHoverHelper(MemoryClerksChart, "MB");
         _memoryGrantSizingHover = new Helpers.ChartHoverHelper(MemoryGrantSizingChart, "MB");
         _memoryGrantActivityHover = new Helpers.ChartHoverHelper(MemoryGrantActivityChart, "");
+        _memoryPressureEventsHover = new Helpers.ChartHoverHelper(MemoryPressureEventsChart, "events");
         _currentWaitsDurationHover = new Helpers.ChartHoverHelper(CurrentWaitsDurationChart, "ms");
         _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
 
@@ -918,6 +921,7 @@ public partial class ServerTab : UserControl
         var queryStoreTask = _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate);
         var memoryGrantTrendTask = _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate);
         var memoryGrantChartTask = _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate);
+        var memoryPressureEventsTask = _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate);
         var serverConfigTask = SafeQueryAsync(() => _dataService.GetLatestServerConfigAsync(_serverId));
         var databaseConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseConfigAsync(_serverId));
         var databaseScopedConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseScopedConfigAsync(_serverId));
@@ -931,7 +935,7 @@ public partial class ServerTab : UserControl
             snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
             queryStatsTask, procStatsTask, fileIoTrendTask, fileIoThroughputTask, tempDbTask, tempDbFileIoTask,
             deadlockTask, blockedProcessTask, waitTypesTask, memoryClerkTypesTask, perfmonCountersTask,
-            queryStoreTask, memoryGrantTrendTask, memoryGrantChartTask,
+            queryStoreTask, memoryGrantTrendTask, memoryGrantChartTask, memoryPressureEventsTask,
             serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
             runningJobsTask, collectionHealthTask, collectionLogTask, dailySummaryTask);
 
@@ -1022,6 +1026,7 @@ public partial class ServerTab : UserControl
         UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result);
         UpdateExecutionCountTrendChart(executionCountTrendTask.Result);
         UpdateMemoryGrantCharts(memoryGrantChartTask.Result);
+        UpdateMemoryPressureEventsChart(memoryPressureEventsTask.Result, hoursBack, fromDate, toDate);
 
         /* Populate pickers (preserve selections) */
         PopulateWaitTypePicker(waitTypesTask.Result);
@@ -1367,6 +1372,10 @@ public partial class ServerTab : UserControl
                         var grantChart = await _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate);
                         UpdateMemoryGrantCharts(grantChart);
                         break;
+                    case 3: // Memory Pressure Events
+                        var pressureEvents = await _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate);
+                        UpdateMemoryPressureEventsChart(pressureEvents, hoursBack, fromDate, toDate);
+                        break;
                 }
                 return;
             }
@@ -1377,12 +1386,14 @@ public partial class ServerTab : UserControl
             var memoryClerkTypesTask = _dataService.GetDistinctMemoryClerkTypesAsync(_serverId, hoursBack, fromDate, toDate);
             var memoryGrantTrendTask = _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var memoryGrantChartTask = _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate);
+            var memoryPressureEventsTask = _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate);
 
-            await System.Threading.Tasks.Task.WhenAll(memoryTask, memoryTrendTask, memoryClerkTypesTask, memoryGrantTrendTask, memoryGrantChartTask);
+            await System.Threading.Tasks.Task.WhenAll(memoryTask, memoryTrendTask, memoryClerkTypesTask, memoryGrantTrendTask, memoryGrantChartTask, memoryPressureEventsTask);
 
             UpdateMemorySummary(memoryTask.Result);
             UpdateMemoryChart(memoryTrendTask.Result, memoryGrantTrendTask.Result);
             UpdateMemoryGrantCharts(memoryGrantChartTask.Result);
+            UpdateMemoryPressureEventsChart(memoryPressureEventsTask.Result, hoursBack, fromDate, toDate);
             PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             await UpdateMemoryClerksChartFromPickerAsync();
         }
@@ -2031,6 +2042,119 @@ public partial class ServerTab : UserControl
         SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
         ShowChartLegend(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Refresh();
+    }
+
+    /// <summary>
+    /// Stacked bar chart of memory pressure events per hour, split by SQL Server (process) vs
+    /// Operating System (system) and stacked by severity (medium=indicator 2, severe=indicator >= 3).
+    /// </summary>
+    private void UpdateMemoryPressureEventsChart(List<MemoryPressureEventRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(MemoryPressureEventsChart);
+        _memoryPressureEventsHover?.Clear();
+        ApplyTheme(MemoryPressureEventsChart);
+
+        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        double xMin = rangeStart.ToOADate();
+        double xMax = rangeEnd.ToOADate();
+
+        /* Only count rows where SQL Server reported actual pressure (indicator >= 2 matches sp_pressuredetector). */
+        var pressureRows = data
+            .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
+            .OrderBy(d => d.SampleTime)
+            .ToList();
+
+        bool hasData = false;
+        int maxBarCount = 0;
+
+        if (pressureRows.Count > 0)
+        {
+            var grouped = pressureRows
+                .GroupBy(d => new DateTime(d.SampleTime.Year, d.SampleTime.Month, d.SampleTime.Day, d.SampleTime.Hour, 0, 0))
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            double hourWidth = 1.0 / 24.0;
+            double barSize = hourWidth * 0.4;
+            double barOffset = hourWidth * 0.22;
+
+            var sqlMediumColor = ScottPlot.Color.FromHex("#FFB74D"); // orange 300
+            var sqlSevereColor = ScottPlot.Color.FromHex("#E65100"); // orange 900
+            var osMediumColor = ScottPlot.Color.FromHex("#E57373");  // red 300
+            var osSevereColor = ScottPlot.Color.FromHex("#B71C1C");  // red 900
+
+            var sqlMediumBars = new List<ScottPlot.Bar>();
+            var sqlSevereBars = new List<ScottPlot.Bar>();
+            var osMediumBars = new List<ScottPlot.Bar>();
+            var osSevereBars = new List<ScottPlot.Bar>();
+
+            foreach (var g in grouped)
+            {
+                int sqlMedium = g.Count(d => d.MemoryIndicatorsProcess == 2);
+                int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
+                int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
+                int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
+                double x = g.Key.AddMinutes(UtcOffsetMinutes).ToOADate();
+
+                if (sqlMedium > 0)
+                    sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
+                if (sqlSevere > 0)
+                    sqlSevereBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
+                if (osMedium > 0)
+                    osMediumBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
+                if (osSevere > 0)
+                    osSevereBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
+
+                int sqlTotal = sqlMedium + sqlSevere;
+                int osTotal = osMedium + osSevere;
+                if (sqlTotal > maxBarCount) maxBarCount = sqlTotal;
+                if (osTotal > maxBarCount) maxBarCount = osTotal;
+            }
+
+            if (sqlMediumBars.Count > 0 || sqlSevereBars.Count > 0 || osMediumBars.Count > 0 || osSevereBars.Count > 0)
+            {
+                hasData = true;
+
+                if (sqlMediumBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(sqlMediumBars);
+                    bp.LegendText = "SQL Server (medium)";
+                    _memoryPressureEventsHover?.Add(bp, "SQL Server (medium)");
+                }
+                if (sqlSevereBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(sqlSevereBars);
+                    bp.LegendText = "SQL Server (severe)";
+                    _memoryPressureEventsHover?.Add(bp, "SQL Server (severe)");
+                }
+                if (osMediumBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(osMediumBars);
+                    bp.LegendText = "Operating System (medium)";
+                    _memoryPressureEventsHover?.Add(bp, "Operating System (medium)");
+                }
+                if (osSevereBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(osSevereBars);
+                    bp.LegendText = "Operating System (severe)";
+                    _memoryPressureEventsHover?.Add(bp, "Operating System (severe)");
+                }
+            }
+        }
+
+        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        ReapplyAxisColors(MemoryPressureEventsChart);
+        MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
+        SetChartYLimitsWithLegendPadding(MemoryPressureEventsChart, 0, Math.Max(maxBarCount, 5));
+
+        if (hasData)
+        {
+            ShowChartLegend(MemoryPressureEventsChart);
+        }
+
+        MemoryPressureEventsChart.Refresh();
     }
 
     private void UpdateTempDbChart(List<TempDbRow> data)
@@ -5367,6 +5491,7 @@ public partial class ServerTab : UserControl
         _memoryClerksHover?.Dispose();
         _memoryGrantSizingHover?.Dispose();
         _memoryGrantActivityHover?.Dispose();
+        _memoryPressureEventsHover?.Dispose();
         _currentWaitsDurationHover?.Dispose();
         _currentWaitsBlockedHover?.Dispose();
     }
