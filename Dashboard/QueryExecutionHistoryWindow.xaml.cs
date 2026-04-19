@@ -226,7 +226,7 @@ namespace PerformanceMonitorDashboard
                 colorIndex++;
             }
 
-            HistoryChart.Plot.Axes.DateTimeTicksBottom();
+            HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
             Helpers.TabHelpers.ReapplyAxisColors(HistoryChart);
             HistoryChart.Plot.YLabel(metricLabel);
             HistoryChart.Plot.XLabel("Collection Time");

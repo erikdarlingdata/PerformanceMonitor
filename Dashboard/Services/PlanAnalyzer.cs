@@ -253,7 +253,7 @@ public static partial class PlanAnalyzer
 
             if (unsnifffedParams.Count > 0)
             {
-                var hasRecompile = stmt.StatementText.Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
+                var hasRecompile = (stmt.StatementText ?? "").Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
                 if (!hasRecompile)
                 {
                     var names = string.Join(", ", unsnifffedParams.Select(p => p.Name));
@@ -1099,7 +1099,7 @@ public static partial class PlanAnalyzer
         // Rule 28: Row Count Spool — NOT IN with nullable column
         // Pattern: Row Count Spool with high rewinds, child scan has IS NULL predicate,
         // and statement text contains NOT IN
-        if (node.PhysicalOp.Contains("Row Count Spool"))
+        if ((node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
         {
             var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
             if (rewinds > 10000 && HasNotInPattern(node, stmt))
@@ -1118,7 +1118,7 @@ public static partial class PlanAnalyzer
         if (!(node.HasActualStats && node.ActualExecutions == 0))
         foreach (var w in node.Warnings.ToList())
         {
-            if (w.WarningType == "Implicit Conversion" && w.Message.StartsWith("Seek Plan"))
+            if (w.WarningType == "Implicit Conversion" && w.Message.StartsWith("Seek Plan", StringComparison.Ordinal))
             {
                 w.Severity = PlanWarningSeverity.Critical;
                 w.Message = $"Implicit conversion prevented an index seek, forcing a scan instead. Fix the data type mismatch: ensure the parameter or variable type matches the column type exactly. {w.Message}";
@@ -1828,7 +1828,7 @@ public static partial class PlanAnalyzer
             || op.EndsWith("Spool", StringComparison.OrdinalIgnoreCase);
     }
 
-    private record ScanImpact(double CostPct, double ElapsedPct, string? Summary);
+    private sealed record ScanImpact(double CostPct, double ElapsedPct, string? Summary);
 
     /// <summary>
     /// Builds impact details for a scan node: what % of plan time/cost it represents,

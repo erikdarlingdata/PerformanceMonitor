@@ -353,7 +353,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            MemoryStatsOverviewChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryStatsOverviewChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryStatsOverviewChart.Plot.Axes.SetLimitsX(xMin, xMax);
             MemoryStatsOverviewChart.Plot.YLabel("MB");
             // Fixed negative space for legend
@@ -605,7 +605,7 @@ namespace PerformanceMonitorDashboard.Controls
                 MemoryGrantSizingChart.Plot.Legend.FontSize = 12;
             }
 
-            MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryGrantSizingChart.Plot.Axes.SetLimitsX(xMin, xMax);
             MemoryGrantSizingChart.Plot.YLabel("MB");
             MemoryGrantSizingChart.Plot.Axes.AutoScaleY();
@@ -675,7 +675,7 @@ namespace PerformanceMonitorDashboard.Controls
                 MemoryGrantActivityChart.Plot.Legend.FontSize = 12;
             }
 
-            MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryGrantActivityChart.Plot.Axes.SetLimitsX(xMin, xMax);
             MemoryGrantActivityChart.Plot.YLabel("Count");
             MemoryGrantActivityChart.Plot.Axes.AutoScaleY();
@@ -856,7 +856,7 @@ namespace PerformanceMonitorDashboard.Controls
                     MemoryClerksTopText.Text = "N/A";
                 }
 
-                MemoryClerksChart.Plot.Axes.DateTimeTicksBottom();
+                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
                 MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
                 MemoryClerksChart.Plot.YLabel("MB");
                 MemoryClerksChart.Plot.Axes.AutoScaleY();
@@ -1001,7 +1001,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            PlanCacheChart.Plot.Axes.DateTimeTicksBottom();
+            PlanCacheChart.Plot.Axes.DateTimeTicksBottomDateChange();
             PlanCacheChart.Plot.Axes.SetLimitsX(xMin, xMax);
             PlanCacheChart.Plot.YLabel("MB");
             // Fixed negative space for legend
@@ -1120,7 +1120,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             MemoryPressureEventsChart.Plot.YLabel("Event Count");
             // Fixed negative space for legend

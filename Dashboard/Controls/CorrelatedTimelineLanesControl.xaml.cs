@@ -320,7 +320,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             }
         }
 
-        BlockingChart.Plot.Axes.DateTimeTicksBottom();
+        BlockingChart.Plot.Axes.DateTimeTicksBottomDateChange();
         BlockingChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         TabHelpers.ReapplyAxisColors(BlockingChart);
 
@@ -394,7 +394,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         _crosshairManager?.SetLaneData(chart, times, values);
 
-        chart.Plot.Axes.DateTimeTicksBottom();
+        chart.Plot.Axes.DateTimeTicksBottomDateChange();
         if (chart != FileIoChart)
             chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
 

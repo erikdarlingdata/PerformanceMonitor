@@ -404,7 +404,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            LatchStatsChart.Plot.Axes.DateTimeTicksBottom();
+            LatchStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             LatchStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(LatchStatsChart);
             LatchStatsChart.Plot.YLabel("Wait Time (ms/sec)");
@@ -495,7 +495,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            SpinlockStatsChart.Plot.Axes.DateTimeTicksBottom();
+            SpinlockStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             SpinlockStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(SpinlockStatsChart);
             SpinlockStatsChart.Plot.YLabel("Collisions/sec");
@@ -603,7 +603,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            TempDbLatencyChart.Plot.Axes.DateTimeTicksBottom();
+            TempDbLatencyChart.Plot.Axes.DateTimeTicksBottomDateChange();
             TempDbLatencyChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(TempDbLatencyChart);
             TempDbLatencyChart.Plot.YLabel("Latency (ms)");
@@ -708,7 +708,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            TempdbStatsChart.Plot.Axes.DateTimeTicksBottom();
+            TempdbStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             TempdbStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TempdbStatsChart.Plot.Axes.AutoScaleY();
             TempdbStatsChart.Plot.YLabel("MB");
@@ -879,7 +879,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            SessionStatsChart.Plot.Axes.DateTimeTicksBottom();
+            SessionStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             SessionStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(SessionStatsChart);
             SessionStatsChart.Plot.YLabel("Session Count");
@@ -1014,7 +1014,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            chart.Plot.Axes.DateTimeTicksBottom();
+            chart.Plot.Axes.DateTimeTicksBottomDateChange();
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
             chart.Plot.YLabel(yLabel);
             TabHelpers.LockChartVerticalAxis(chart);
@@ -1485,7 +1485,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            PerfmonCountersChart.Plot.Axes.DateTimeTicksBottom();
+            PerfmonCountersChart.Plot.Axes.DateTimeTicksBottomDateChange();
             PerfmonCountersChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(PerfmonCountersChart);
             PerfmonCountersChart.Plot.YLabel("Value/sec");
@@ -1816,7 +1816,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            WaitStatsDetailChart.Plot.Axes.DateTimeTicksBottom();
+            WaitStatsDetailChart.Plot.Axes.DateTimeTicksBottomDateChange();
             WaitStatsDetailChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.SetChartYLimitsWithLegendPadding(WaitStatsDetailChart);
             WaitStatsDetailChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");

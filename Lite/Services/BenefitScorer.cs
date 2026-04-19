@@ -616,20 +616,20 @@ public static class BenefitScorer
         var wt = waitType.ToUpperInvariant();
         return wt switch
         {
-            _ when wt.StartsWith("PAGEIOLATCH") => "I/O",
-            _ when wt.Contains("IO_COMPLETION") => "I/O",
-            _ when wt.StartsWith("WRITELOG") => "I/O",
+            _ when wt.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) => "I/O",
+            _ when wt.Contains("IO_COMPLETION", StringComparison.Ordinal) => "I/O",
+            _ when wt.StartsWith("WRITELOG", StringComparison.Ordinal) => "I/O",
             _ when wt == "SOS_SCHEDULER_YIELD" => "CPU",
-            _ when wt.StartsWith("CXPACKET") || wt.StartsWith("CXCONSUMER") => "Parallelism",
-            _ when wt.StartsWith("CXSYNC") => "Parallelism",
-            _ when wt.StartsWith("HT") => "Hash",
+            _ when wt.StartsWith("CXPACKET", StringComparison.Ordinal) || wt.StartsWith("CXCONSUMER", StringComparison.Ordinal) => "Parallelism",
+            _ when wt.StartsWith("CXSYNC", StringComparison.Ordinal) => "Parallelism",
+            _ when wt.StartsWith("HT", StringComparison.Ordinal) => "Hash",
             _ when wt == "BPSORT" => "Sort",
             _ when wt == "BMPBUILD" => "Hash",
-            _ when wt.StartsWith("PAGELATCH") => "Latch",
-            _ when wt.StartsWith("LATCH_") => "Latch",
-            _ when wt.StartsWith("LCK_") => "Lock",
+            _ when wt.StartsWith("PAGELATCH", StringComparison.Ordinal) => "Latch",
+            _ when wt.StartsWith("LATCH_", StringComparison.Ordinal) => "Latch",
+            _ when wt.StartsWith("LCK_", StringComparison.Ordinal) => "Lock",
             _ when wt == "ASYNC_NETWORK_IO" => "Network",
-            _ when wt.Contains("MEMORY_ALLOCATION") => "Memory",
+            _ when wt.Contains("MEMORY_ALLOCATION", StringComparison.Ordinal) => "Memory",
             _ when wt == "SOS_PHYS_PAGE_CACHE" => "Memory",
             _ => "Other"
         };
