@@ -32,7 +32,7 @@
         </ResourceDictionary>
     </UserControl.Resources>
 
-    <TabControl x:Name="SubTabControl" TabStripPlacement="Top" Margin="0,5,0,0">
+    <TabControl x:Name="SubTabControl" TabStripPlacement="Top" Margin="0,5,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
         <!-- Memory Overview Sub-Tab -->
         <TabItem Header="Memory Overview">
             <!-- Chart + Summary Panel (grid removed) -->

@@ -2253,7 +2253,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsBlockingEventsChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsBlockingEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsBlockingEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsBlockingEventsChart.Plot.YLabel("Count");
             LockChartVerticalAxis(BlockingStatsBlockingEventsChart);
@@ -2282,7 +2282,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsDurationChart.Plot.YLabel("Duration (ms)");
             LockChartVerticalAxis(BlockingStatsDurationChart);
@@ -2311,7 +2311,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsDeadlocksChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsDeadlocksChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsDeadlocksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsDeadlocksChart.Plot.YLabel("Count");
             LockChartVerticalAxis(BlockingStatsDeadlocksChart);
@@ -2340,7 +2340,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsDeadlockWaitTimeChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsDeadlockWaitTimeChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsDeadlockWaitTimeChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsDeadlockWaitTimeChart.Plot.YLabel("Duration (ms)");
             LockChartVerticalAxis(BlockingStatsDeadlockWaitTimeChart);
@@ -2386,7 +2386,7 @@ namespace PerformanceMonitorDashboard
                 colorIndex++;
             }
 
-            CollectorDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             TabHelpers.ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Plot.YLabel("Duration (ms)");
             CollectorDurationChart.Plot.Axes.AutoScale();
@@ -2449,7 +2449,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            LockWaitStatsChart.Plot.Axes.DateTimeTicksBottom();
+            LockWaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             LockWaitStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             LockWaitStatsChart.Plot.YLabel("Wait Time (ms/sec)");
             _legendPanels[LockWaitStatsChart] = LockWaitStatsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2506,7 +2506,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
             CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
             _legendPanels[CurrentWaitsDurationChart] = CurrentWaitsDurationChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2563,7 +2563,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(xMin, xMax);
             CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
             _legendPanels[CurrentWaitsBlockedChart] = CurrentWaitsBlockedChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2903,7 +2903,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewCpuChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewCpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewCpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewCpuChart.Plot.Axes.SetLimitsY(0, 100);
             ResourceOverviewCpuChart.Plot.YLabel("CPU %");
@@ -2966,7 +2966,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewMemoryChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewMemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewMemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewMemoryChart.Plot.YLabel("MB");
             LockChartVerticalAxis(ResourceOverviewMemoryChart);
@@ -3043,7 +3043,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewIoChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewIoChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewIoChart.Plot.Axes.AutoScaleY();
             ResourceOverviewIoChart.Plot.YLabel("Latency (ms)");
@@ -3115,7 +3115,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewWaitChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewWaitChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewWaitChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewWaitChart.Plot.Axes.AutoScaleY();
             ResourceOverviewWaitChart.Plot.YLabel("Wait Time (ms/sec)");

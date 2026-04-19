@@ -163,7 +163,7 @@
         <TabControl Grid.Row="1" x:Name="DataTabControl" Margin="10,0,10,0" SelectionChanged="DataTabControl_SelectionChanged">
             <!-- Overview Tab - At-a-glance health and status -->
             <TabItem Header="Overview">
-                <TabControl>
+                <TabControl ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Resource Overview Sub-Tab - Consolidated view of CPU, Memory, I/O, Waits -->
                     <TabItem Header="Resource Overview">
                         <!-- 2x2 Chart Grid -->
@@ -255,7 +255,7 @@
 
                     <!-- Collection Health Sub-Tab -->
                     <TabItem Header="Collection Health">
-                        <TabControl>
+                        <TabControl ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                             <TabItem Header="Health Summary">
                                 <Grid>
                                     <DataGrid x:Name="HealthDataGrid"
@@ -498,7 +498,7 @@
                         </Border>
                     </StackPanel>
                 </TabItem.Header>
-                <TabControl x:Name="LockingSubTabControl">
+                <TabControl x:Name="LockingSubTabControl" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Blocking/Deadlock Stats Sub-Tab (default tab) -->
                     <TabItem Header="Blocking/Deadlock Trends">
                         <Grid>

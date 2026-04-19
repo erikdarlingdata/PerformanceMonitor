@@ -463,7 +463,7 @@ GROUP BY DATEPART(HOUR, minute_bucket),
         return totalSumSq / (totalSamples - 1);
     }
 
-    private class CachedBaseline
+    private sealed class CachedBaseline
     {
         public DateTime ComputedAt { get; init; }
         public DateTime RealTime { get; init; }

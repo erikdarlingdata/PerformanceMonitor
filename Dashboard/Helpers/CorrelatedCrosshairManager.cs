@@ -350,7 +350,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _lanes.Clear();
     }
 
-    private class DataSeries
+    private sealed class DataSeries
     {
         public string Name { get; set; } = "";
         public string? Unit { get; set; }
@@ -359,7 +359,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public bool IsEventBased { get; set; }
     }
 
-    private class LaneInfo
+    private sealed class LaneInfo
     {
         public ScottPlot.WPF.WpfPlot Chart { get; set; } = null!;
         public string Label { get; set; } = "";

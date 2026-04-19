@@ -44,7 +44,7 @@
                       SelectionChanged="ServerSelector_SelectionChanged"/>
         </StackPanel>
 
-        <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
+        <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
 
         <!-- Recommendations Sub-Tab -->
         <TabItem Header="Recommendations">

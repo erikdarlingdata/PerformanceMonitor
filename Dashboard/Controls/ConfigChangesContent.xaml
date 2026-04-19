@@ -15,7 +15,7 @@
             <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click"/>
         </ContextMenu>
     </UserControl.Resources>
-    <TabControl>
+    <TabControl ItemContainerStyle="{DynamicResource SubTabItemStyle}">
         <!-- Server Configuration Changes Sub-Tab -->
         <TabItem Header="Server Config Changes">
             <Grid>
