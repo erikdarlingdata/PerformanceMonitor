@@ -39,6 +39,15 @@ public class CollectorHealthEntry
     public int ConsecutiveErrors { get; set; }
     public int TotalErrors { get; set; }
     public int TotalSuccesses { get; set; }
+
+    /*
+     * Set when a collector hits a non-transient permission error
+     * (SQL errors 229 / 297 / 300). The scheduler skips the collector
+     * for the rest of the app session so we don't churn the log with
+     * identical denials every interval. Cleared on app restart — if
+     * permissions get granted later, the next launch retries once.
+     */
+    public bool IsPermissionRestricted { get; set; }
 }
 
 /// <summary>
@@ -225,9 +234,12 @@ public partial class RemoteCollectorService
             {
                 /* Permission errors are not transient — don't count as failures
                    (which would show FAILING) but don't count as success either.
-                   Record the error message so the user can see what's wrong. */
+                   Record the error message so the user can see what's wrong,
+                   and flag the collector so the scheduler stops retrying for
+                   the rest of the app session. */
                 entry.LastErrorTime = DateTime.UtcNow;
                 entry.LastErrorMessage = errorMessage;
+                entry.IsPermissionRestricted = true;
             }
             else
             {
@@ -236,6 +248,19 @@ public partial class RemoteCollectorService
                 entry.ConsecutiveErrors++;
                 entry.TotalErrors++;
             }
+        }
+    }
+
+    /// <summary>
+    /// Returns true if a collector has hit a permission denial this session
+    /// and should be skipped without re-running. See <see cref="CollectorHealthEntry.IsPermissionRestricted"/>.
+    /// </summary>
+    private bool IsCollectorPermissionRestricted(int serverId, string collectorName)
+    {
+        lock (_healthLock)
+        {
+            return _collectorHealth.TryGetValue((serverId, collectorName), out var entry)
+                && entry.IsPermissionRestricted;
         }
     }
 
@@ -376,6 +401,15 @@ public partial class RemoteCollectorService
             {
                 AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} SKIPPED - MFA authentication cancelled by user");
                 _logger?.LogDebug("Skipping collector '{Collector}' for server '{Server}' - user cancelled MFA",
+                    collectorName, server.DisplayName);
+                return;
+            }
+
+            // Skip collectors that have already hit a non-transient permission denial
+            // this session. Flag is in-memory — next app start retries once (see #857).
+            if (IsCollectorPermissionRestricted(GetServerId(server), collectorName))
+            {
+                _logger?.LogDebug("Skipping collector '{Collector}' for server '{Server}' - permission denied this session",
                     collectorName, server.DisplayName);
                 return;
             }
