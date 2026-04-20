@@ -570,6 +570,72 @@ OPTION(RECOMPILE);',
     }
 
     /// <summary>
+    /// Fetches a query plan on-demand by sql_handle + statement offsets.
+    /// Used for Blocked Process Reports, where query_hash is not present in the
+    /// XE event payload — only the sql_handle and offsets from executionStack frames.
+    /// </summary>
+    public static async Task<string?> FetchPlanBySqlHandleAsync(
+        string connectionString,
+        string databaseName,
+        string sqlHandleHex,
+        int statementStartOffset,
+        int statementEndOffset)
+    {
+        if (string.IsNullOrWhiteSpace(sqlHandleHex)) return null;
+        var handleBytes = HexStringToBytes(sqlHandleHex);
+        if (handleBytes == null || handleBytes.Length == 0) return null;
+
+        using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var quotedDbName = await GetValidatedDatabaseNameAsync(connection, databaseName)
+                           ?? "[master]";
+
+        var query = $@"
+EXECUTE {quotedDbName}.sys.sp_executesql
+    N'
+SELECT TOP (1)
+    query_plan_text = tqp.query_plan
+FROM sys.dm_exec_query_stats AS qs
+OUTER APPLY sys.dm_exec_text_query_plan(qs.plan_handle, qs.statement_start_offset, qs.statement_end_offset) AS tqp
+WHERE qs.sql_handle = @h
+AND   qs.statement_start_offset = @stmt_start
+AND   qs.statement_end_offset = @stmt_end
+AND   tqp.query_plan IS NOT NULL
+ORDER BY
+    qs.last_execution_time DESC
+OPTION(RECOMPILE);',
+    N'@h varbinary(64), @stmt_start int, @stmt_end int',
+    @h, @stmt_start, @stmt_end;";
+
+        using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
+        command.Parameters.Add(new SqlParameter("@h", SqlDbType.VarBinary, 64) { Value = handleBytes });
+        command.Parameters.Add(new SqlParameter("@stmt_start", SqlDbType.Int) { Value = statementStartOffset });
+        command.Parameters.Add(new SqlParameter("@stmt_end", SqlDbType.Int) { Value = statementEndOffset });
+        var result = await command.ExecuteScalarAsync();
+        return result as string;
+    }
+
+    private static byte[]? HexStringToBytes(string hex)
+    {
+        var start = hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+        var len = hex.Length - start;
+        if (len <= 0 || (len % 2) != 0) return null;
+        var bytes = new byte[len / 2];
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            if (!byte.TryParse(hex.AsSpan(start + i * 2, 2),
+                               System.Globalization.NumberStyles.HexNumber,
+                               System.Globalization.CultureInfo.InvariantCulture,
+                               out bytes[i]))
+            {
+                return null;
+            }
+        }
+        return bytes;
+    }
+
+    /// <summary>
     /// Gets top procedures by CPU for a server.
     /// </summary>
     public async Task<List<Models.TimeSliceBucket>> GetProcStatsSlicerDataAsync(

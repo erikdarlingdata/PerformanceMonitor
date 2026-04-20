@@ -4861,6 +4861,104 @@ public partial class ServerTab : UserControl
         catch { return null; }
     }
 
+    // ── Blocked Process Report plan lookup ──
+
+    /* SQL Server writes this 42-byte all-zero handle into executionStack frames
+       for dynamic SQL / system contexts where no persistent sql_handle exists.
+       Filter matches sp_HumanEventsBlockViewer's XPath exclusion. */
+    private static readonly string ZeroSqlHandle = "0x" + new string('0', 84);
+
+    private async void ViewBlockedSidePlan_Click(object sender, RoutedEventArgs e)
+        => await ShowBlockedProcessPlanAsync(sender, blockingSide: false);
+
+    private async void ViewBlockingSidePlan_Click(object sender, RoutedEventArgs e)
+        => await ShowBlockedProcessPlanAsync(sender, blockingSide: true);
+
+    private async System.Threading.Tasks.Task ShowBlockedProcessPlanAsync(object sender, bool blockingSide)
+    {
+        if (sender is not MenuItem menuItem) return;
+        var grid = FindParentDataGrid(menuItem);
+        if (grid?.CurrentItem is not BlockedProcessReportRow row) return;
+
+        var sideLabel = blockingSide ? "Blocking" : "Blocked";
+        var spid = blockingSide ? row.BlockingSpid : row.BlockedSpid;
+        var queryText = blockingSide ? row.BlockingSqlText : row.BlockedSqlText;
+        var label = $"Est Plan - {sideLabel} SPID {spid}";
+
+        var frames = ExtractBlockedProcessFrames(row.BlockedProcessReportXml, blockingSide);
+        if (frames.Count == 0)
+        {
+            MessageBox.Show(
+                $"The {sideLabel.ToLowerInvariant()} process report has no resolvable sql_handle. " +
+                "This usually means the query ran as dynamic SQL or a system context — " +
+                "SQL Server records a zero handle in that case and the plan can't be recovered.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        string? planXml = null;
+        try
+        {
+            var connStr = _server.GetConnectionString(_credentialService);
+            foreach (var f in frames)
+            {
+                planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
+                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
+                if (!string.IsNullOrEmpty(planXml)) break;
+            }
+        }
+        catch { }
+
+        if (!string.IsNullOrEmpty(planXml))
+        {
+            OpenPlanTab(planXml, label, queryText);
+            PlanViewerTabItem.IsSelected = true;
+        }
+        else
+        {
+            MessageBox.Show(
+                $"The plan for the {sideLabel.ToLowerInvariant()} query is no longer in the plan cache on {_server.ServerName}. " +
+                "Blocked process reports only give us a sql_handle — if that plan has been evicted, we can't recover it.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    private static IReadOnlyList<(string SqlHandle, int StmtStart, int StmtEnd)> ExtractBlockedProcessFrames(
+        string bprXml, bool blockingSide)
+    {
+        var empty = Array.Empty<(string, int, int)>();
+        if (string.IsNullOrWhiteSpace(bprXml)) return empty;
+        try
+        {
+            var doc = System.Xml.Linq.XElement.Parse(bprXml);
+            var processContainer = blockingSide
+                ? doc.Element("blocking-process")
+                : doc.Element("blocked-process");
+            var stack = processContainer?.Element("process")?.Element("executionStack");
+            if (stack == null) return empty;
+
+            var frames = new List<(string, int, int)>();
+            foreach (var frame in stack.Elements("frame"))
+            {
+                var handle = frame.Attribute("sqlhandle")?.Value;
+                if (string.IsNullOrWhiteSpace(handle)) continue;
+                if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
+
+                int stmtStart = 0;
+                int stmtEnd = -1;
+                int.TryParse(frame.Attribute("stmtstart")?.Value, out stmtStart);
+                if (int.TryParse(frame.Attribute("stmtend")?.Value, out var se)) stmtEnd = se;
+
+                frames.Add((handle!, stmtStart, stmtEnd));
+            }
+            return frames;
+        }
+        catch
+        {
+            return empty;
+        }
+    }
+
     // ── Active Queries Slicer ──
 
     private async System.Threading.Tasks.Task LoadActiveQueriesSlicerAsync()
