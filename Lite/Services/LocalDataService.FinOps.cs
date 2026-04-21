@@ -2176,7 +2176,7 @@ HAVING COUNT(*) >= 24";
             AppLogger.Error("FinOps", $"Recommendation check failed (Reserved capacity): {ex.Message}");
         }
 
-        return recommendations;
+        return recommendations.OrderBy(r => r.SeveritySort).ToList();
     }
 
     private static string FormatDuration(long seconds)
@@ -2578,6 +2578,13 @@ public class RecommendationRow
     public string Detail { get; set; } = "";
     public decimal? EstMonthlySavings { get; set; }
     public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
+    public int SeveritySort => Severity switch
+    {
+        "High" => 1,
+        "Medium" => 2,
+        "Low" => 3,
+        _ => 4
+    };
 }
 
 /// <summary>
