@@ -2470,7 +2470,7 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
                 Logger.Error($"[{ServerLabel}] Recommendation check failed (Reserved capacity): {ex.Message}", ex);
             }
 
-            return recommendations;
+            return recommendations.OrderBy(r => r.SeveritySort).ToList();
         }
 
         private static string FormatDuration(long seconds)
@@ -2873,6 +2873,14 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
         public string Detail { get; set; } = "";
         public decimal? EstMonthlySavings { get; set; }
         public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
+
+        public int SeveritySort => Severity switch
+        {
+            "High" => 1,
+            "Medium" => 2,
+            "Low" => 3,
+            _ => 4
+        };
     }
 
     public class FinOpsHighImpactQuery
