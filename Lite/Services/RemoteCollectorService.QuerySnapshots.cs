@@ -217,11 +217,18 @@ DROP TABLE #req;
     /// </summary>
     private async Task<int> CollectQuerySnapshotsAsync(ServerConnection server, CancellationToken cancellationToken)
     {
-        // dm_exec_query_statistics_xml requires SQL Server 2016 SP1+ (version 13)
+        /*
+         * sys.dm_exec_query_statistics_xml requires SQL Server 2016 SP1+ (version 13)
+         * on boxed, and VIEW SERVER PERFORMANCE STATE on Azure SQL Database regardless
+         * of tier. DB-scoped logins (e.g. D365FO) don't have the server-level grant
+         * and the DMF raises error 300 even when only called for current-DB sessions,
+         * so we disable live query plans on Azure SQL DB entirely. See #857.
+         */
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
-        var supportsLiveQueryPlan = serverStatus.SqlMajorVersion >= 13 || serverStatus.SqlMajorVersion == 0
-            || serverStatus.SqlEngineEdition == 5 || serverStatus.SqlEngineEdition == 8;
         var isAzureSqlDatabase = serverStatus.SqlEngineEdition == 5;
+        var supportsLiveQueryPlan = !isAzureSqlDatabase
+            && (serverStatus.SqlMajorVersion >= 13 || serverStatus.SqlMajorVersion == 0
+                || serverStatus.SqlEngineEdition == 8);
 
         var query = BuildQuerySnapshotsQuery(supportsLiveQueryPlan, isAzureSqlDatabase);
 

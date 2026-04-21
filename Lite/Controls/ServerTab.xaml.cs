@@ -5365,7 +5365,9 @@ public partial class ServerTab : UserControl
                 ConnectTimeout = 15
             };
 
-            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: true, isAzureSqlDatabase: _isAzureSqlDatabase);
+            // Live query plans require VIEW SERVER PERFORMANCE STATE on Azure SQL DB,
+            // which DB-scoped logins don't have — skip them there. See #857.
+            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: !_isAzureSqlDatabase, isAzureSqlDatabase: _isAzureSqlDatabase);
 
             await using var connection = new SqlConnection(builder.ConnectionString);
             await connection.OpenAsync();
