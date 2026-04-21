@@ -30,6 +30,14 @@ public partial class RemoteCollectorService
            Azure MI (edition 8) HAS dm_os_sys_memory, sql_memory_model_desc, and behaves like on-prem. */
         bool isAzureSqlDb = serverStatus.SqlEngineEdition == 5;
 
+        /*
+         * Azure SQL Database in an elastic pool (e.g. D365FO tenants) enforces
+         * VIEW SERVER PERFORMANCE STATE on sys.dm_os_schedulers regardless of
+         * the login's DB-scoped grants, so we skip the schedulers subquery on
+         * Azure SQL DB and report current_workers_count as NULL. The rest of
+         * the row — memory sizes from sys.dm_os_sys_info and the perf counters
+         * — succeeds for contained DB users. See #857.
+         */
         string query = isAzureSqlDb
             ? @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -46,7 +54,7 @@ SELECT
     buffer_pool_mb = CONVERT(decimal(18,2), pc_buffer.cntr_value / 1024.0),
     plan_cache_mb = CONVERT(decimal(18,2), pc_plan.cntr_value * 8.0 / 1024.0),
     max_workers_count = osi.max_workers_count,
-    current_workers_count = w.current_workers
+    current_workers_count = CONVERT(int, NULL)
 FROM sys.dm_os_sys_info AS osi
 CROSS JOIN
 (
@@ -73,12 +81,6 @@ CROSS JOIN
     WHERE counter_name = N'Cache Pages'
       AND object_name LIKE N'%:Plan Cache%'
 ) AS pc_plan
-CROSS JOIN
-(
-    SELECT current_workers = SUM(active_workers_count)
-    FROM sys.dm_os_schedulers
-    WHERE status = N'VISIBLE ONLINE'
-) AS w
 OPTION(RECOMPILE);"
             : @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
