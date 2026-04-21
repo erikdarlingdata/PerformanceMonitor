@@ -82,7 +82,7 @@
                           AlternatingRowBackground="{DynamicResource DataGridAlternatingRowBrush}">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Category" Binding="{Binding Category}" MinWidth="120" Width="Auto"/>
-                        <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" MinWidth="80" Width="Auto">
+                        <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" MinWidth="80" Width="Auto" SortMemberPath="SeveritySort">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Style.Triggers>
