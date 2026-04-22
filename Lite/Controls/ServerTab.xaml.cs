@@ -4959,6 +4959,109 @@ public partial class ServerTab : UserControl
         }
     }
 
+    // ── Deadlock process plan lookup ──
+
+    /* Deadlock graph XML puts sqlhandle/stmtstart/stmtend directly on the
+       <process> node, with optional <executionStack><frame sqlhandle=...>
+       children for the call stack. Try process-level first, then walk frames
+       top-down like sp_HumanEventsBlockViewer does for BPRs. */
+    private async void ViewDeadlockProcessPlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem) return;
+        var grid = FindParentDataGrid(menuItem);
+        if (grid?.CurrentItem is not DeadlockProcessDetail row) return;
+
+        var sideLabel = row.IsVictim ? "Victim" : "Deadlocker";
+        var label = $"Est Plan - {sideLabel} SPID {row.Spid}";
+
+        var frames = ExtractDeadlockProcessFrames(row.DeadlockGraphXml, row.ProcessId);
+        if (frames.Count == 0)
+        {
+            MessageBox.Show(
+                $"The process has no resolvable sql_handle in the deadlock graph. " +
+                "This usually means the query ran as dynamic SQL or a system context — " +
+                "SQL Server records a zero handle in that case and the plan can't be recovered.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        string? planXml = null;
+        try
+        {
+            var connStr = _server.GetConnectionString(_credentialService);
+            foreach (var f in frames)
+            {
+                planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
+                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
+                if (!string.IsNullOrEmpty(planXml)) break;
+            }
+        }
+        catch { }
+
+        if (!string.IsNullOrEmpty(planXml))
+        {
+            OpenPlanTab(planXml, label, row.SqlText);
+            PlanViewerTabItem.IsSelected = true;
+        }
+        else
+        {
+            MessageBox.Show(
+                $"The plan for this {sideLabel.ToLowerInvariant()} process is no longer in the plan cache on {_server.ServerName}. " +
+                "Deadlock graphs only give us a sql_handle — if that plan has been evicted, we can't recover it.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    private static IReadOnlyList<(string SqlHandle, int StmtStart, int StmtEnd)> ExtractDeadlockProcessFrames(
+        string graphXml, string processId)
+    {
+        var empty = Array.Empty<(string, int, int)>();
+        if (string.IsNullOrWhiteSpace(graphXml) || string.IsNullOrWhiteSpace(processId)) return empty;
+        try
+        {
+            var doc = System.Xml.Linq.XElement.Parse(graphXml);
+            var process = doc.Descendants("process")
+                .FirstOrDefault(p => string.Equals(p.Attribute("id")?.Value, processId, StringComparison.OrdinalIgnoreCase));
+            if (process == null) return empty;
+
+            var frames = new List<(string, int, int)>();
+
+            /* Try process-level sqlhandle first — deadlock graphs frequently put it on <process>. */
+            var procHandle = process.Attribute("sqlhandle")?.Value;
+            if (!string.IsNullOrWhiteSpace(procHandle) &&
+                !string.Equals(procHandle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase))
+            {
+                int ps = 0, pe = -1;
+                int.TryParse(process.Attribute("stmtstart")?.Value, out ps);
+                if (int.TryParse(process.Attribute("stmtend")?.Value, out var peParsed)) pe = peParsed;
+                frames.Add((procHandle!, ps, pe));
+            }
+
+            /* Then walk the executionStack frames. */
+            var stack = process.Element("executionStack");
+            if (stack != null)
+            {
+                foreach (var frame in stack.Elements("frame"))
+                {
+                    var handle = frame.Attribute("sqlhandle")?.Value;
+                    if (string.IsNullOrWhiteSpace(handle)) continue;
+                    if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    int fs = 0, fe = -1;
+                    int.TryParse(frame.Attribute("stmtstart")?.Value, out fs);
+                    if (int.TryParse(frame.Attribute("stmtend")?.Value, out var feParsed)) fe = feParsed;
+                    frames.Add((handle!, fs, fe));
+                }
+            }
+
+            return frames;
+        }
+        catch
+        {
+            return empty;
+        }
+    }
+
     // ── Active Queries Slicer ──
 
     private async System.Threading.Tasks.Task LoadActiveQueriesSlicerAsync()
