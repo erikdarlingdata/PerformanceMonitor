@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - TBD
+
+### Important
+
+- **New nonclustered indexes** on `collect.query_stats`, `collect.procedure_stats`, and `collect.query_store_data` to eliminate Eager Index Spools in Dashboard grid queries. On large installations these indexes may take several minutes to build; the upgrade script uses `ONLINE = ON` on Enterprise/Developer/Azure editions and falls back to offline on Standard/Web ([#835])
+
+### Added
+
+- **Memory Pressure Events in Lite** — the collector, chart, and `get_memory_pressure_events` MCP tool previously only in the Full Edition are now available in Lite ([#865])
+- **Grid auto-scrolling** in Lite and Dashboard ([#843]) — thanks [@ClaudioESSilva](https://github.com/ClaudioESSilva)
+
+### Changed
+
+- **PlanAnalyzer and BenefitScorer** synced with PerformanceStudio's Apr 9–16 improvements
+- **Query/Procedure/Query Store stats** refactored to a phased DECOMPRESS approach; removed unhelpful `WAITFOR DECOMPRESS` filters
+- **Query/Procedure/Query Store grids** capped to TOP 500 to prevent UI freezes on large datasets
+- **Server tabs lazy-load** — only the visible server tab loads on startup; remaining tabs load on first visit
+- **Webhook URLs** encrypted with DPAPI via Windows Credential Manager
+- **DuckDB queries hardened** — parameterized values, escaped paths, fixed `IsArchiving` race
+- **Lite chart axes and sub-tab styling** polished, then ported to Dashboard
+
+### Fixed
+
+- **Memory Pressure Events chart filter** was dropping valid rows; added MCP interpretation guidance ([#865])
+- **FinOps recommendation severity sort order** in Lite and Dashboard ([#872])
+- **Overview crosshair** disappearing after tab switches or layout passes
+- **Blocked process report plan lookup** returning the wrong plan ([#867])
+- **FinOps TDE recommendation** flagging Standard edition on SQL Server 2019+ where TDE is free ([#854])
+- **Azure SQL DB collector** falls back to single-database mode when `master` is inaccessible ([#857])
+- **Azure SQL DB query snapshots** scoped to the current database ([#857])
+- **Azure SQL DB query snapshot prefilter** — request set is narrowed into `#temp` before joining DMVs to avoid Azure-specific execution plan issues ([#857])
+- **Azure SQL DB live query plans** — now skipped gracefully instead of erroring ([#857])
+- **Azure SQL DB memory_stats collector** — dropped `sys.dm_os_schedulers` which is blocked on elastic-pool contained users regardless of DB-scoped grants ([#857])
+- **Non-transient permission denials** now stop collector retries instead of looping forever ([#857])
+
+[#835]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/835
+[#843]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/843
+[#854]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/854
+[#857]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/857
+[#865]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/865
+[#867]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/867
+[#872]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/872
+
 ## [2.7.0] - 2026-04-13
 
 ### Added
