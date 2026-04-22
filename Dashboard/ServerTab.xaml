@@ -32,6 +32,45 @@
             </MenuItem>
         </ContextMenu>
 
+        <!-- Context Menu for Blocked Process Report rows (copy/export + View Plan per side) -->
+        <ContextMenu x:Key="BlockingEventsContextMenu">
+            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem.Icon><TextBlock Text="📋"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem.Icon><TextBlock Text="📄"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem.Icon><TextBlock Text="📑"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem.Icon><TextBlock Text="📊"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="View Blocked Plan" Click="ViewBlockedSidePlan_Click"/>
+            <MenuItem Header="View Blocking Plan" Click="ViewBlockingSidePlan_Click"/>
+        </ContextMenu>
+
+        <!-- Context Menu for Deadlock rows (copy/export + View Plan) -->
+        <ContextMenu x:Key="DeadlocksContextMenu">
+            <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                <MenuItem.Icon><TextBlock Text="📋"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                <MenuItem.Icon><TextBlock Text="📄"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                <MenuItem.Icon><TextBlock Text="📑"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem.Icon><TextBlock Text="📊"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="View Plan" Click="ViewDeadlockProcessPlan_Click"/>
+        </ContextMenu>
+
         <!-- Row Styles for Visual Indicators -->
         <Style x:Key="HealthRowStyle" TargetType="DataGridRow">
             <Setter Property="ContextMenu" Value="{StaticResource DataGridContextMenu}"/>
@@ -62,6 +101,14 @@
 
         <Style x:Key="DefaultRowStyle" TargetType="DataGridRow">
             <Setter Property="ContextMenu" Value="{StaticResource DataGridContextMenu}"/>
+        </Style>
+
+        <Style x:Key="BlockingEventsPlanRowStyle" TargetType="DataGridRow">
+            <Setter Property="ContextMenu" Value="{StaticResource BlockingEventsContextMenu}"/>
+        </Style>
+
+        <Style x:Key="DeadlocksPlanRowStyle" TargetType="DataGridRow">
+            <Setter Property="ContextMenu" Value="{StaticResource DeadlocksContextMenu}"/>
         </Style>
         </ResourceDictionary>
     </UserControl.Resources>
@@ -619,7 +666,7 @@
                             <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
                         <DataGrid x:Name="BlockingEventsDataGrid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
                                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
-                                      RowStyle="{StaticResource DefaultRowStyle}"
+                                      RowStyle="{StaticResource BlockingEventsPlanRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding EventTime, Converter={StaticResource ServerTimeConverter}}" Width="150">
@@ -813,7 +860,7 @@
                             <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
                         <DataGrid x:Name="DeadlocksDataGrid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
                                       RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
-                                      RowStyle="{StaticResource DefaultRowStyle}"
+                                      RowStyle="{StaticResource DeadlocksPlanRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding EventDate, Converter={StaticResource ServerTimeConverter}}" Width="150">
