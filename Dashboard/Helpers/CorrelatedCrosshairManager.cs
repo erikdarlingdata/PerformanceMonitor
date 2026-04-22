@@ -33,7 +33,6 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     private readonly Popup _tooltip;
     private readonly TextBlock _tooltipText;
     private DateTime _lastUpdate;
-    private bool _isRefreshing;
 
     public CorrelatedCrosshairManager()
     {
@@ -144,10 +143,11 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     /// <summary>
     /// Clears data and VLines. Call before re-populating charts.
+    /// The OnMouseMove guard relies on lane.VLine == null to detect "not ready",
+    /// so this is self-healing: once ReattachVLines runs, crosshairs resume.
     /// </summary>
     public void PrepareForRefresh()
     {
-        _isRefreshing = true;
         _tooltip.IsOpen = false;
         _comparisonLabel = null;
         foreach (var lane in _lanes)
@@ -162,25 +162,54 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     /// <summary>
     /// Creates fresh VLine plottables on each lane's chart.
-    /// Must be called AFTER chart data is populated.
+    /// Must be called AFTER chart data is populated. Safe to call in a finally
+    /// block — if chart state is invalid, a failure on one lane won't prevent
+    /// the others from recovering.
     /// </summary>
     public void ReattachVLines()
     {
         foreach (var lane in _lanes)
         {
-            var vline = lane.Chart.Plot.Add.VerticalLine(0);
+            lane.VLine = CreateVLine(lane.Chart);
+        }
+    }
+
+    /// <summary>
+    /// Creates VLines only for lanes that don't already have one. Idempotent —
+    /// safe to call from a finally block as a recovery path after an exception
+    /// in the main refresh flow.
+    /// </summary>
+    public void EnsureVLinesAttached()
+    {
+        foreach (var lane in _lanes)
+        {
+            if (lane.VLine != null) continue;
+            lane.VLine = CreateVLine(lane.Chart);
+        }
+    }
+
+    private static ScottPlot.Plottables.VerticalLine? CreateVLine(ScottPlot.WPF.WpfPlot chart)
+    {
+        try
+        {
+            var vline = chart.Plot.Add.VerticalLine(0);
             vline.Color = ScottPlot.Color.FromHex("#FFFFFF").WithAlpha(100);
             vline.LineWidth = 1;
             vline.LinePattern = ScottPlot.LinePattern.Dashed;
             vline.IsVisible = false;
-            lane.VLine = vline;
+            return vline;
         }
-        _isRefreshing = false;
+        catch
+        {
+            /* If attach fails, return null so OnMouseMove skips this lane.
+               Next refresh will try again. */
+            return null;
+        }
     }
 
     private void OnMouseMove(LaneInfo sourceLane, MouseEventArgs e)
     {
-        if (_isRefreshing || sourceLane.VLine == null) return;
+        if (sourceLane.VLine == null) return;
 
         var now = DateTime.UtcNow;
         if ((now - _lastUpdate).TotalMilliseconds < 16) return;
@@ -350,7 +379,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _lanes.Clear();
     }
 
-    private class DataSeries
+    private sealed class DataSeries
     {
         public string Name { get; set; } = "";
         public string? Unit { get; set; }
@@ -359,7 +388,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public bool IsEventBased { get; set; }
     }
 
-    private class LaneInfo
+    private sealed class LaneInfo
     {
         public ScottPlot.WPF.WpfPlot Chart { get; set; } = null!;
         public string Label { get; set; } = "";

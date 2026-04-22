@@ -222,7 +222,7 @@ ORDER BY
             /* Fall back to 13 (SQL 2016) if version detection fails */
         }
 
-        bool isNew = productVersion > 13 || serverStatus.SqlEngineEdition == 5 || serverStatus.SqlEngineEdition == 8;
+        bool isNew = productVersion > 13 || serverStatus?.SqlEngineEdition == 5 || serverStatus?.SqlEngineEdition == 8;
         bool hasPlanType = productVersion >= 16;
 
         /* Build version-conditional column fragments for the Query Store query.

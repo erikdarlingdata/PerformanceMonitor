@@ -523,7 +523,7 @@ public partial class MainWindow : Window
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
-        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialService, utcOffset, status.HasMsdbAccess);
+        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialService, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition == 5);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
         {

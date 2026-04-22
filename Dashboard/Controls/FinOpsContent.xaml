@@ -44,7 +44,7 @@
                       SelectionChanged="ServerSelector_SelectionChanged"/>
         </StackPanel>
 
-        <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
+        <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
 
         <!-- Recommendations Sub-Tab -->
         <TabItem Header="Recommendations">
@@ -90,7 +90,7 @@
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding Severity}" MinWidth="80" Width="Auto">
+                        <DataGridTextColumn Binding="{Binding Severity}" SortMemberPath="SeveritySort" MinWidth="80" Width="Auto">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="FinOpsFilter_Click" Margin="0,0,4,0"/>

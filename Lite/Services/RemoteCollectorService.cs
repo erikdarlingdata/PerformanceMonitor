@@ -39,6 +39,15 @@ public class CollectorHealthEntry
     public int ConsecutiveErrors { get; set; }
     public int TotalErrors { get; set; }
     public int TotalSuccesses { get; set; }
+
+    /*
+     * Set when a collector hits a non-transient permission error
+     * (SQL errors 229 / 297 / 300). The scheduler skips the collector
+     * for the rest of the app session so we don't churn the log with
+     * identical denials every interval. Cleared on app restart — if
+     * permissions get granted later, the next launch retries once.
+     */
+    public bool IsPermissionRestricted { get; set; }
 }
 
 /// <summary>
@@ -101,6 +110,14 @@ public partial class RemoteCollectorService
     /// </summary>
     private int _logInsertFailures;
     private string? _lastLogInsertError;
+
+    /// <summary>
+    /// Per-server flag indicating that master DB enumeration has failed with an access-denied
+    /// error and should not be retried. Used on Azure SQL DB where per-database logins may not
+    /// have master access (e.g. Microsoft Dynamics 365 FO). See issue #857.
+    /// </summary>
+    private readonly Dictionary<int, bool> _azureMasterInaccessible = new();
+    private readonly object _azureMasterInaccessibleLock = new();
 
     public RemoteCollectorService(
         DuckDbInitializer duckDb,
@@ -217,9 +234,12 @@ public partial class RemoteCollectorService
             {
                 /* Permission errors are not transient — don't count as failures
                    (which would show FAILING) but don't count as success either.
-                   Record the error message so the user can see what's wrong. */
+                   Record the error message so the user can see what's wrong,
+                   and flag the collector so the scheduler stops retrying for
+                   the rest of the app session. */
                 entry.LastErrorTime = DateTime.UtcNow;
                 entry.LastErrorMessage = errorMessage;
+                entry.IsPermissionRestricted = true;
             }
             else
             {
@@ -228,6 +248,19 @@ public partial class RemoteCollectorService
                 entry.ConsecutiveErrors++;
                 entry.TotalErrors++;
             }
+        }
+    }
+
+    /// <summary>
+    /// Returns true if a collector has hit a permission denial this session
+    /// and should be skipped without re-running. See <see cref="CollectorHealthEntry.IsPermissionRestricted"/>.
+    /// </summary>
+    private bool IsCollectorPermissionRestricted(int serverId, string collectorName)
+    {
+        lock (_healthLock)
+        {
+            return _collectorHealth.TryGetValue((serverId, collectorName), out var entry)
+                && entry.IsPermissionRestricted;
         }
     }
 
@@ -372,6 +405,15 @@ public partial class RemoteCollectorService
                 return;
             }
 
+            // Skip collectors that have already hit a non-transient permission denial
+            // this session. Flag is in-memory — next app start retries once (see #857).
+            if (IsCollectorPermissionRestricted(GetServerId(server), collectorName))
+            {
+                _logger?.LogDebug("Skipping collector '{Collector}' for server '{Server}' - permission denied this session",
+                    collectorName, server.DisplayName);
+                return;
+            }
+
             _logger?.LogDebug("Running collector '{Collector}' for server '{Server}'",
                 collectorName, server.DisplayName);
 
@@ -381,6 +423,7 @@ public partial class RemoteCollectorService
                 "cpu_utilization" => await CollectCpuUtilizationAsync(server, cancellationToken),
                 "memory_stats" => await CollectMemoryStatsAsync(server, cancellationToken),
                 "memory_clerks" => await CollectMemoryClerksAsync(server, cancellationToken),
+                "memory_pressure_events" => await CollectMemoryPressureEventsAsync(server, cancellationToken),
                 "file_io_stats" => await CollectFileIoStatsAsync(server, cancellationToken),
                 "query_stats" => await CollectQueryStatsAsync(server, cancellationToken),
                 "procedure_stats" => await CollectProcedureStatsAsync(server, cancellationToken),
@@ -561,10 +604,30 @@ WHERE server_id = $3";
     /// Enumerates online databases on an Azure SQL DB logical server.
     /// HAS_DBACCESS() returns false for user databases from master on Azure SQL DB,
     /// so we skip that filter — inaccessible databases should be handled by callers via try/catch.
+    ///
+    /// On Azure SQL DB, logins are sometimes granted access only to a specific user database and
+    /// not to master (e.g. Microsoft Dynamics 365 FO). In that case, master enumeration fails with
+    /// an access/login error; we fall back to returning the connection's initial catalog as a
+    /// single-database list, and cache that decision per server so we don't retry master each cycle.
+    /// See issue #857.
     /// </summary>
     protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken)
     {
+        var serverId = GetServerId(server);
         var baseConnStr = server.GetConnectionString(_serverManager.CredentialService);
+        var targetDb = new SqlConnectionStringBuilder(baseConnStr).InitialCatalog;
+
+        bool knownInaccessible;
+        lock (_azureMasterInaccessibleLock)
+        {
+            _azureMasterInaccessible.TryGetValue(serverId, out knownInaccessible);
+        }
+
+        if (knownInaccessible)
+        {
+            return SingleDbOrEmpty(targetDb);
+        }
+
         var connStr = new SqlConnectionStringBuilder(baseConnStr)
         {
             ConnectTimeout = ConnectionTimeoutSeconds,
@@ -572,16 +635,63 @@ WHERE server_id = $3";
         }.ConnectionString;
 
         var databases = new List<string>();
-        using var conn = new SqlConnection(connStr);
-        await conn.OpenAsync(cancellationToken);
-        using var cmd = new SqlCommand(
-            "SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 ORDER BY name;",
-            conn)
-        { CommandTimeout = CommandTimeoutSeconds };
-        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-            databases.Add(reader.GetString(0));
-        return databases;
+        try
+        {
+            using var conn = new SqlConnection(connStr);
+            await conn.OpenAsync(cancellationToken);
+            using var cmd = new SqlCommand(
+                "SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 ORDER BY name;",
+                conn)
+            { CommandTimeout = CommandTimeoutSeconds };
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                databases.Add(reader.GetString(0));
+            return databases;
+        }
+        catch (SqlException ex) when (IsMasterAccessDeniedError(ex))
+        {
+            lock (_azureMasterInaccessibleLock)
+            {
+                _azureMasterInaccessible[serverId] = true;
+            }
+
+            var fallback = SingleDbOrEmpty(targetDb);
+            if (fallback.Count > 0)
+            {
+                AppLogger.Info("Collector", $"  [{server.DisplayName}] master DB inaccessible (SQL error {ex.Number}) — collecting from '{targetDb}' only.");
+            }
+            else
+            {
+                AppLogger.Warn("Collector", $"  [{server.DisplayName}] master DB inaccessible (SQL error {ex.Number}) and no target database in connection string — no data will be collected for database-scoped collectors.");
+            }
+            return fallback;
+        }
+    }
+
+    private static List<string> SingleDbOrEmpty(string? targetDb)
+    {
+        if (string.IsNullOrEmpty(targetDb) || string.Equals(targetDb, "master", StringComparison.OrdinalIgnoreCase))
+            return new List<string>();
+        return new List<string> { targetDb };
+    }
+
+    /// <summary>
+    /// Error numbers indicating the login cannot open or read from master on Azure SQL DB.
+    /// Trigger a fallback to single-database mode when we see one of these.
+    /// </summary>
+    private static bool IsMasterAccessDeniedError(SqlException ex)
+    {
+        return ex.Number switch
+        {
+            229   => true, // Permission denied on object
+            230   => true, // Permission denied on column
+            916   => true, // Server principal is not able to access the database under the current security context
+            4060  => true, // Cannot open database requested by the login
+            18456 => true, // Login failed for user
+            40613 => true, // Database 'master' on server is not currently available
+            40615 => true, // Cannot open server — login denied (firewall/auth)
+            _     => false
+        };
     }
 
     /// <summary>

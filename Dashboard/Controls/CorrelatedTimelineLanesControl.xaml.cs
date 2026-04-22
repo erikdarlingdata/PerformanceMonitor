@@ -31,7 +31,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     public CorrelatedTimelineLanesControl()
     {
         InitializeComponent();
-        Unloaded += (_, _) => _crosshairManager?.Dispose();
+        /* No Unloaded → Dispose() handler: WPF fires Unloaded for transient
+           reasons (tab virtualization, layout rebuilds) and Dispose() clears
+           the crosshair manager's lane list, permanently breaking the crosshair
+           until the ServerTab is rebuilt. The manager holds only managed state
+           (a Popup + lane references) — letting GC clean it up with the control
+           is fine. */
     }
 
     /// <summary>
@@ -68,6 +73,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         if (_dataService == null) return;
 
         _crosshairManager?.PrepareForRefresh();
+
+        try
+        {
 
         var cpuTask = _dataService.GetCpuUtilizationAsync(hoursBack, fromDate, toDate);
         var waitTask = _dataService.GetTotalWaitStatsTrendAsync(hoursBack, fromDate, toDate);
@@ -225,8 +233,18 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             _crosshairManager?.SetComparisonLabel(ComparisonLabel(comparisonRange.Value, fromDate, hoursBack));
         }
 
+        /* VLines must be re-attached before SyncXAxes so they're part of
+           the render set when the chart refreshes. */
         _crosshairManager?.ReattachVLines();
         SyncXAxes(hoursBack, fromDate, toDate);
+        }
+        finally
+        {
+            /* Safety net: if something threw between PrepareForRefresh() and the
+               ReattachVLines() call above, VLines are still null. EnsureVLinesAttached
+               creates them only for lanes where VLine is null, so it's idempotent. */
+            _crosshairManager?.EnsureVLinesAttached();
+        }
     }
 
     /// <summary>
@@ -320,7 +338,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             }
         }
 
-        BlockingChart.Plot.Axes.DateTimeTicksBottom();
+        BlockingChart.Plot.Axes.DateTimeTicksBottomDateChange();
         BlockingChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         TabHelpers.ReapplyAxisColors(BlockingChart);
 
@@ -394,7 +412,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         _crosshairManager?.SetLaneData(chart, times, values);
 
-        chart.Plot.Axes.DateTimeTicksBottom();
+        chart.Plot.Axes.DateTimeTicksBottomDateChange();
         if (chart != FileIoChart)
             chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
 

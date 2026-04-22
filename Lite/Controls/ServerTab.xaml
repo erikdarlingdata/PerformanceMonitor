@@ -32,12 +32,38 @@
                 </MenuItem>
             </ContextMenu>
 
+            <!-- Context menu for Blocked Process Reports: separate Blocked/Blocking plan
+                 actions; no Get Actual Plan because re-executing a blocked query is a foot-gun. -->
+            <ContextMenu x:Key="BlockedProcessContextMenu">
+                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
+                </MenuItem>
+                <Separator/>
+                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
+                </MenuItem>
+                <Separator/>
+                <MenuItem Header="View Blocked Plan" Click="ViewBlockedSidePlan_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="View Blocking Plan" Click="ViewBlockingSidePlan_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
+                </MenuItem>
+            </ContextMenu>
+
             <Style x:Key="GridRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource DataGridContextMenu}"/>
             </Style>
 
             <!-- Row style for blocking grid - highlight long-duration blocks -->
-            <Style x:Key="BlockingRowStyle" TargetType="DataGridRow" BasedOn="{StaticResource GridRowStyle}">
+            <Style x:Key="BlockingRowStyle" TargetType="DataGridRow">
+                <Setter Property="ContextMenu" Value="{StaticResource BlockedProcessContextMenu}"/>
                 <Style.Triggers>
                     <DataTrigger Binding="{Binding IsLongBlock}" Value="True">
                         <Setter Property="Background" Value="#33FF6B6B"/>
@@ -202,7 +228,7 @@
             <!-- Query Performance Tab -->
             <TabItem Header="Queries">
                 <Grid Margin="8">
-                    <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Performance Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -1046,7 +1072,7 @@
 
             <!-- Memory Tab -->
             <TabItem Header="Memory">
-                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0">
+                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
                         <Grid Margin="8">
@@ -1176,13 +1202,20 @@
                         </Grid>
                     </TabItem>
 
+                    <!-- Memory Pressure Events Sub-Tab -->
+                    <TabItem Header="Memory Pressure Events">
+                        <Grid>
+                            <ScottPlot:WpfPlot x:Name="MemoryPressureEventsChart" Margin="5"/>
+                        </Grid>
+                    </TabItem>
+
                 </TabControl>
             </TabItem>
 
             <!-- File I/O Tab -->
             <TabItem Header="File I/O">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <!-- File I/O Latency sub-tab -->
                         <TabItem Header="File I/O Latency">
                             <Grid>
@@ -1239,7 +1272,7 @@
             <!-- Blocking Tab -->
             <TabItem Header="Blocking">
                 <Grid Margin="8">
-                    <TabControl x:Name="BlockingSubTabControl" Background="Transparent" BorderThickness="0">
+                    <TabControl x:Name="BlockingSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -1578,7 +1611,7 @@
             <!-- Configuration Tab -->
             <TabItem Header="Configuration">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Server Configuration">
                             <DataGrid x:Name="ServerConfigGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
@@ -1802,7 +1835,7 @@
             <!-- Collection Health Tab -->
             <TabItem Header="Collection Health">
                 <Grid Margin="8">
-                    <TabControl Background="Transparent" BorderThickness="0">
+                    <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Health Summary">
                             <DataGrid x:Name="CollectionHealthGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"

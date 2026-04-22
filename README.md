@@ -103,7 +103,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-23 collectors run on independent, configurable schedules:
+24 collectors run on independent, configurable schedules:
 
 | Collector | Default | Source |
 |---|---|---|
@@ -122,6 +122,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | deadlocks | 1 min | `system_health` Extended Events session |
 | session_stats | 1 min | `sys.dm_exec_sessions` active session tracking |
 | memory_clerks | 5 min | `sys.dm_os_memory_clerks` |
+| memory_pressure_events | 5 min | `sys.dm_os_ring_buffers` RING_BUFFER_RESOURCE_MONITOR |
 | query_store | 5 min | Query Store DMVs (per database) |
 | running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
 | database_size_stats | 15 min | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
@@ -312,7 +313,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | AWS RDS for SQL Server | Supported | Supported |
 | Azure SQL Database | Not supported | Supported |
 | Multi-server from one seat | Per-server install | Built-in |
-| Collectors | 32 | 23 |
+| Collectors | 32 | 24 |
 | Agent job monitoring | Duration vs historical avg/p95 | Duration vs historical avg/p95 |
 | Data storage | SQL Server (on target) | DuckDB + Parquet (local) |
 | Execution plans | Collected and stored (can be disabled per-collector) | Download on demand |
@@ -323,7 +324,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | Dashboard | Separate app | Built-in |
 | Themes | Dark and light | Dark and light |
 | Portability | Server-bound | Single executable |
-| MCP server (LLM integration) | Built into Dashboard (63 tools) | Built-in (51 tools) |
+| MCP server (LLM integration) | Built into Dashboard (63 tools) | Built-in (52 tools) |
 
 ---
 
@@ -350,7 +351,7 @@ Plus a NOC-style landing page with server health cards (green/yellow/red severit
 | **Active Queries** | Running queries with session details, wait types, blocking, DOP, memory grants |
 | **Wait Stats** | Filterable wait statistics chart with delta calculations |
 | **CPU** | SQL Server CPU vs Other Processes over time |
-| **Memory** | Physical memory overview, SQL Server memory trend, memory clerk breakdown |
+| **Memory** | Physical memory overview, SQL Server memory trend, memory clerk breakdown, memory pressure events |
 | **Queries** | Performance trends, top queries and procedures by duration, Query Store integration, query heatmap |
 | **File I/O** | Read/write I/O trends per database file |
 | **TempDB** | Space usage breakdown and TempDB file I/O |
@@ -453,7 +454,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-Full Edition exposes 63 tools, Lite Edition exposes 51. Core tools are shared across both editions.
+Full Edition exposes 63 tools, Lite Edition exposes 52. Core tools are shared across both editions.
 
 | Category | Tools |
 |---|---|
@@ -477,7 +478,7 @@ Full Edition exposes 63 tools, Lite Edition exposes 51. Core tools are shared ac
 | Scheduler | `get_cpu_scheduler_pressure`\*\* |
 | Latch/Spinlock | `get_latch_stats`\*\*, `get_spinlock_stats`\*\* |
 | Diagnostics | `get_plan_cache_bloat`\*\*, `get_critical_issues`\*\* |
-| System Events | `get_default_trace_events`\*\*, `get_trace_analysis`\*\*, `get_memory_pressure_events`\*\* |
+| System Events | `get_default_trace_events`\*\*, `get_trace_analysis`\*\*, `get_memory_pressure_events` |
 | Health Parser | `get_health_parser_system_health`\*\*, `get_health_parser_severe_errors`\*\*, `get_health_parser_io_issues`\*\*, `get_health_parser_scheduler_issues`\*\*, `get_health_parser_memory_conditions`\*\*, `get_health_parser_cpu_tasks`\*\*, `get_health_parser_memory_broker`\*\*, `get_health_parser_memory_node_oom`\*\* |
 | Plan Analysis | `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`, `get_plan_xml` |
 | Diagnostic Analysis | `analyze_server`\*, `get_analysis_facts`\*, `compare_analysis`\*, `audit_config`\*, `get_analysis_findings`\*, `mute_analysis_finding`\* |

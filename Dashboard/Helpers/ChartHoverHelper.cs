@@ -17,6 +17,7 @@ internal sealed class ChartHoverHelper
 {
     private readonly ScottPlot.WPF.WpfPlot _chart;
     private readonly List<(ScottPlot.Plottables.Scatter Scatter, string Label)> _scatters = new();
+    private readonly List<(ScottPlot.Plottables.BarPlot BarPlot, string Label)> _barPlots = new();
     private readonly Popup _popup;
     private readonly TextBlock _text;
     private string _unit;
@@ -62,12 +63,20 @@ internal sealed class ChartHoverHelper
         _chart.MouseLeave -= OnMouseLeave;
         _popup.IsOpen = false;
         _scatters.Clear();
+        _barPlots.Clear();
     }
 
-    public void Clear() => _scatters.Clear();
+    public void Clear()
+    {
+        _scatters.Clear();
+        _barPlots.Clear();
+    }
 
     public void Add(ScottPlot.Plottables.Scatter scatter, string label) =>
         _scatters.Add((scatter, label));
+
+    public void Add(ScottPlot.Plottables.BarPlot barPlot, string label) =>
+        _barPlots.Add((barPlot, label));
 
     /// <summary>
     /// Returns the nearest series label and data-point time for the given mouse position,
@@ -75,7 +84,7 @@ internal sealed class ChartHoverHelper
     /// </summary>
     public (string Label, DateTime Time)? GetNearestSeries(Point mousePos)
     {
-        if (_scatters.Count == 0) return null;
+        if (_scatters.Count == 0 && _barPlots.Count == 0) return null;
         try
         {
             var dpi = VisualTreeHelper.GetDpi(_chart);
@@ -106,6 +115,8 @@ internal sealed class ChartHoverHelper
                 }
             }
 
+            FindNearestBar(pixel, ref bestYDistance, ref bestPoint, ref bestLabel, ref found);
+
             if (found)
                 return (bestLabel, DateTime.FromOADate(bestPoint.X));
         }
@@ -113,9 +124,36 @@ internal sealed class ChartHoverHelper
         return null;
     }
 
+    private void FindNearestBar(ScottPlot.Pixel pixel, ref double bestYDistance,
+        ref ScottPlot.DataPoint bestPoint, ref string bestLabel, ref bool found)
+    {
+        foreach (var (barPlot, label) in _barPlots)
+        {
+            foreach (var bar in barPlot.Bars)
+            {
+                var topPixel = _chart.Plot.GetPixel(new ScottPlot.Coordinates(bar.Position, bar.Value));
+                double halfWidthPx = Math.Abs(
+                    _chart.Plot.GetPixel(new ScottPlot.Coordinates(bar.Position + bar.Size / 2, bar.Value)).X
+                    - topPixel.X);
+                double dx = Math.Abs(topPixel.X - pixel.X);
+                if (dx > halfWidthPx + 4) continue;
+                double dy = Math.Abs(topPixel.Y - pixel.Y);
+                if (dy < bestYDistance)
+                {
+                    bestYDistance = dy;
+                    // For stacked bars, report the segment height (Value - ValueBase), not the top coordinate
+                    double segmentHeight = bar.Value - bar.ValueBase;
+                    bestPoint = new ScottPlot.DataPoint(new ScottPlot.Coordinates(bar.Position, segmentHeight), 0);
+                    bestLabel = label;
+                    found = true;
+                }
+            }
+        }
+    }
+
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
-        if (_scatters.Count == 0) return;
+        if (_scatters.Count == 0 && _barPlots.Count == 0) return;
         var now = DateTime.UtcNow;
         if ((now - _lastUpdate).TotalMilliseconds < 30) return;
         _lastUpdate = now;
@@ -158,10 +196,15 @@ internal sealed class ChartHoverHelper
                 }
             }
 
+            FindNearestBar(pixel, ref bestYDistance, ref bestPoint, ref bestLabel, ref found);
+
             if (found)
             {
                 var time = ServerTimeHelper.ConvertForDisplay(DateTime.FromOADate(bestPoint.X), ServerTimeHelper.CurrentDisplayMode);
-                _text.Text = $"{bestLabel}\n{bestPoint.Y:N1} {_unit}\n{time:HH:mm:ss}";
+                string valueFormatted = (bestPoint.Y == Math.Floor(bestPoint.Y))
+                    ? bestPoint.Y.ToString("N0")
+                    : bestPoint.Y.ToString("N1");
+                _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time:HH:mm:ss}";
                 _popup.HorizontalOffset = pos.X + 15;
                 _popup.VerticalOffset = pos.Y + 15;
                 _popup.IsOpen = true;

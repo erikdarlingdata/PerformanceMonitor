@@ -25,7 +25,7 @@
         </ContextMenu>
     </UserControl.Resources>
 
-    <TabControl x:Name="SubTabControl" TabStripPlacement="Top" Margin="0,5,0,0">
+    <TabControl x:Name="SubTabControl" TabStripPlacement="Top" Margin="0,5,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
         <!-- Server Trends Sub-Tab — Correlated Timeline Lanes -->
         <TabItem Header="Server Trends">
             <DockPanel>
@@ -148,7 +148,7 @@
 
         <!-- File I/O Sub-Tab -->
         <TabItem Header="File I/O">
-            <TabControl Background="Transparent" BorderThickness="0">
+            <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                 <!-- File I/O Latency sub-tab -->
                 <TabItem Header="File I/O Latency">
                     <Grid Margin="5">

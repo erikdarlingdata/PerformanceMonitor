@@ -983,6 +983,10 @@ public partial class SettingsWindow : Window
         App.SlackWebhookUrl = SlackWebhookUrlBox.Text?.Trim() ?? "";
         App.SlackProxyAddress = SlackProxyAddressBox.Text?.Trim() ?? "";
 
+        /* Save webhook URLs to Credential Manager instead of settings.json */
+        App.SaveWebhookUrl("TeamsWebhook", App.TeamsWebhookUrl);
+        App.SaveWebhookUrl("SlackWebhook", App.SlackWebhookUrl);
+
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
         {
@@ -998,11 +1002,16 @@ public partial class SettingsWindow : Window
             }
 
             root["teams_webhook_enabled"] = App.TeamsWebhookEnabled;
-            root["teams_webhook_url"] = App.TeamsWebhookUrl;
             root["teams_proxy_address"] = App.TeamsProxyAddress;
             root["slack_webhook_enabled"] = App.SlackWebhookEnabled;
-            root["slack_webhook_url"] = App.SlackWebhookUrl;
             root["slack_proxy_address"] = App.SlackProxyAddress;
+
+            /* Remove legacy plaintext webhook URLs from settings.json */
+            if (root is JsonObject obj)
+            {
+                obj.Remove("teams_webhook_url");
+                obj.Remove("slack_webhook_url");
+            }
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));

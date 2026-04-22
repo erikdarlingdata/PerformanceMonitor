@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitorLite.Models;
 
@@ -179,16 +176,24 @@ public static partial class PlanAnalyzer
                 });
             }
 
-            // Large memory grant with sort/hash guidance
+            // Large memory grant with top consumers
             if (grant.GrantedMemoryKB >= 1048576 && stmt.RootNode != null)
             {
                 var consumers = new List<string>();
                 FindMemoryConsumers(stmt.RootNode, consumers);
 
                 var grantMB = grant.GrantedMemoryKB / 1024.0;
-                var guidance = consumers.Count > 0
-                    ? $" Memory consumers: {string.Join(", ", consumers)}. Check whether these operators are processing more rows than necessary."
-                    : "";
+                var guidance = "";
+                if (consumers.Count > 0)
+                {
+                    // Show only the top 3 consumers — listing 20+ is noise
+                    var shown = consumers.Take(3);
+                    var remaining = consumers.Count - 3;
+                    guidance = $" Largest consumers: {string.Join(", ", shown)}";
+                    if (remaining > 0)
+                        guidance += $", and {remaining} more";
+                    guidance += ".";
+                }
 
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
@@ -245,7 +250,7 @@ public static partial class PlanAnalyzer
 
             if (unsnifffedParams.Count > 0)
             {
-                var hasRecompile = stmt.StatementText.Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
+                var hasRecompile = (stmt.StatementText ?? "").Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
                 if (!hasRecompile)
                 {
                     var names = string.Join(", ", unsnifffedParams.Select(p => p.Name));
@@ -517,7 +522,8 @@ public static partial class PlanAnalyzer
         // - A parent join may have chosen the wrong strategy
         // - Root nodes with no parent to harm are skipped
         // - Nodes whose only parents are Parallelism/Top/Sort (no spill) are skipped
-        if (node.HasActualStats && node.EstimateRows > 0)
+        if (node.HasActualStats && node.EstimateRows > 0
+            && !node.Lookup) // Key lookups are point lookups (1 row per execution) — per-execution estimate is misleading
         {
             if (node.ActualRows == 0)
             {
@@ -642,11 +648,29 @@ public static partial class PlanAnalyzer
                 var skewThreshold = workerThreads.Count <= 2 ? 0.80 : 0.50;
                 if (skewRatio >= skewThreshold)
                 {
+                    var message = $"Thread {maxThread.ThreadId} processed {skewRatio:P0} of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.";
+                    var severity = PlanWarningSeverity.Warning;
+
+                    // Batch mode sorts produce all output on a single thread by design
+                    // unless their parent is a batch mode Window Aggregate
+                    if (node.PhysicalOp == "Sort"
+                        && (node.ActualExecutionMode ?? node.ExecutionMode) == "Batch"
+                        && node.Parent?.PhysicalOp != "Window Aggregate")
+                    {
+                        message += " Batch mode sorts produce all output rows on a single thread by design, unless feeding a batch mode Window Aggregate.";
+                        severity = PlanWarningSeverity.Info;
+                    }
+                    else
+                    {
+                        // Add practical context — skew is often hard to fix
+                        message += " Common causes: uneven data distribution across partitions or hash buckets, or a scan/seek whose predicate sends most rows to one range. Reducing DOP or rewriting the query to avoid the skewed operation may help.";
+                    }
+
                     node.Warnings.Add(new PlanWarning
                     {
                         WarningType = "Parallel Skew",
-                        Message = $"Thread {maxThread.ThreadId} processed {skewRatio:P0} of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.",
-                        Severity = PlanWarningSeverity.Warning
+                        Message = message,
+                        Severity = severity
                     });
                 }
             }
@@ -667,18 +691,37 @@ public static partial class PlanAnalyzer
                 Severity = PlanWarningSeverity.Warning
             });
         }
-        else if (node.Lookup && !string.IsNullOrEmpty(node.Predicate))
+        else if (node.Lookup)
         {
+            var lookupMsg = "Key Lookup — SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns.";
+
+            // Show what columns the lookup is fetching
+            if (!string.IsNullOrEmpty(node.OutputColumns))
+                lookupMsg += $"\nColumns fetched: {Truncate(node.OutputColumns, 200)}";
+
+            // Only call out the predicate if it actually filters rows
+            if (!string.IsNullOrEmpty(node.Predicate))
+            {
+                var predicateFilters = node.HasActualStats && node.ActualExecutions > 0
+                    && node.ActualRows < node.ActualExecutions;
+                if (predicateFilters)
+                    lookupMsg += $"\nResidual predicate (filtered {node.ActualExecutions - node.ActualRows:N0} rows): {Truncate(node.Predicate, 200)}";
+            }
+
+            lookupMsg += "\nTo eliminate the lookup, consider adding the needed columns as INCLUDE columns on the nonclustered index. This widens the index, so weigh the read benefit against write and storage overhead.";
+
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Key Lookup",
-                Message = $"Key Lookup — SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns. Alter the nonclustered index to add the predicate column as a key column or as an INCLUDE column.\nPredicate: {Truncate(node.Predicate, 200)}",
+                Message = lookupMsg,
                 Severity = PlanWarningSeverity.Critical
             });
         }
 
         // Rule 12: Non-SARGable predicate on scan
-        var nonSargableReason = DetectNonSargablePredicate(node);
+        // Skip for 0-execution nodes — the operator never ran, so the warning is academic
+        var nonSargableReason = (node.HasActualStats && node.ActualExecutions == 0)
+            ? null : DetectNonSargablePredicate(node);
         if (nonSargableReason != null)
         {
             var nonSargableAdvice = nonSargableReason switch
@@ -707,19 +750,30 @@ public static partial class PlanAnalyzer
 
         // Rule 11: Scan with residual predicate (skip if non-SARGable already flagged)
         // A PROBE() alone is just a bitmap filter — not a real residual predicate.
+        // Skip for 0-execution nodes — the operator never ran
         if (nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
-            !IsProbeOnly(node.Predicate))
+            !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
             var details = BuildScanImpactDetails(node, stmt);
             var severity = PlanWarningSeverity.Warning;
+
+            // Elevate to Critical if the scan dominates the plan
             if (details.CostPct >= 90 || details.ElapsedPct >= 90)
                 severity = PlanWarningSeverity.Critical;
+
             var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
             if (!string.IsNullOrEmpty(details.Summary))
                 message += $" {details.Summary}";
             message += " Check that you have appropriate indexes.";
+
+            // I/O waits specifically confirm the scan is hitting disk — elevate
+            if (HasSignificantIoWaits(stmt.WaitStats) && details.CostPct >= 50
+                && severity != PlanWarningSeverity.Critical)
+                severity = PlanWarningSeverity.Critical;
+
             message += $"\nPredicate: {Truncate(displayPredicate, 200)}";
+
             node.Warnings.Add(new PlanWarning
             {
                 WarningType = "Scan With Predicate",
@@ -804,7 +858,8 @@ public static partial class PlanAnalyzer
 
         // Rule 14: Lazy Table Spool unfavorable rebind/rewind ratio
         // Rebinds = cache misses (child re-executes), rewinds = cache hits (reuse cached result)
-        if (node.LogicalOp == "Lazy Spool" && !node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
+        if (node.LogicalOp == "Lazy Spool"
+            && !node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
             var rebinds = node.HasActualStats ? (double)node.ActualRebinds : node.EstimateRebinds;
             var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
@@ -994,7 +1049,7 @@ public static partial class PlanAnalyzer
                     node.Warnings.Add(new PlanWarning
                     {
                         WarningType = "Top Above Scan",
-                        Message = $"{topLabel} reads from {scanCandidate.PhysicalOp} (Node {scanCandidate.NodeId}).{innerNote}{predInfo} An index on the ORDER BY columns could eliminate the scan and sort entirely.",
+                        Message = $"{topLabel} reads from {FormatNodeRef(scanCandidate)}.{innerNote}{predInfo} An index on the ORDER BY columns could eliminate the scan and sort entirely.",
                         Severity = onInner ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                     });
                 }
@@ -1013,19 +1068,35 @@ public static partial class PlanAnalyzer
             // tiny floating-point differences that display identically are noise
             if (reduction >= 2.0)
             {
-                node.Warnings.Add(new PlanWarning
+                // If we have actual stats, check whether the row goal prediction was correct.
+                // When actual rows <= the row goal estimate, the optimizer stopped early as planned — benign.
+                var rowGoalWorked = false;
+                if (node.HasActualStats)
                 {
-                    WarningType = "Row Goal",
-                    Message = $"Row goal active: estimate reduced from {node.EstimateRowsWithoutRowGoal:N0} to {node.EstimateRows:N0} ({reduction:N0}x reduction) due to TOP, EXISTS, IN, or FAST hint. The optimizer chose this plan shape expecting to stop reading early. If the query reads all rows anyway, the plan choice may be suboptimal.",
-                    Severity = PlanWarningSeverity.Info
-                });
+                    var executions = node.ActualExecutions > 0 ? node.ActualExecutions : 1;
+                    var actualPerExec = (double)node.ActualRows / executions;
+                    rowGoalWorked = actualPerExec <= node.EstimateRows;
+                }
+
+                if (!rowGoalWorked)
+                {
+                    // Try to identify the specific row goal cause from the statement text
+                    var cause = IdentifyRowGoalCause(stmt.StatementText);
+
+                    node.Warnings.Add(new PlanWarning
+                    {
+                        WarningType = "Row Goal",
+                        Message = $"Row goal active: estimate reduced from {node.EstimateRowsWithoutRowGoal:N0} to {node.EstimateRows:N0} ({reduction:N0}x reduction) due to {cause}. The optimizer chose this plan shape expecting to stop reading early. If the query reads all rows anyway, the plan choice may be suboptimal.",
+                        Severity = PlanWarningSeverity.Info
+                    });
+                }
             }
         }
 
         // Rule 28: Row Count Spool — NOT IN with nullable column
         // Pattern: Row Count Spool with high rewinds, child scan has IS NULL predicate,
         // and statement text contains NOT IN
-        if (node.PhysicalOp.Contains("Row Count Spool"))
+        if ((node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
         {
             var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
             if (rewinds > 10000 && HasNotInPattern(node, stmt))
@@ -1040,6 +1111,8 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 29: Enhance implicit conversion warnings — Seek Plan is more severe
+        // Skip for 0-execution nodes — the operator never ran
+        if (!(node.HasActualStats && node.ActualExecutions == 0))
         foreach (var w in node.Warnings.ToList())
         {
             if (w.WarningType == "Implicit Conversion" && w.Message.StartsWith("Seek Plan", StringComparison.Ordinal))
@@ -1268,24 +1341,36 @@ public static partial class PlanAnalyzer
     /// </summary>
     private static void FindMemoryConsumers(PlanNode node, List<string> consumers)
     {
+        // Collect all consumers first, then sort by row count descending
+        var raw = new List<(string Label, double Rows)>();
+        FindMemoryConsumersRecursive(node, raw);
+
+        foreach (var (label, _) in raw.OrderByDescending(c => c.Rows))
+            consumers.Add(label);
+    }
+
+    private static void FindMemoryConsumersRecursive(PlanNode node, List<(string Label, double Rows)> consumers)
+    {
         if (node.PhysicalOp.Contains("Sort", StringComparison.OrdinalIgnoreCase) &&
             !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase))
         {
+            var rowCount = node.HasActualStats ? node.ActualRows : node.EstimateRows;
             var rows = node.HasActualStats
                 ? $"{node.ActualRows:N0} actual rows"
                 : $"{node.EstimateRows:N0} estimated rows";
-            consumers.Add($"Sort (Node {node.NodeId}, {rows})");
+            consumers.Add(($"Sort (Node {node.NodeId}, {rows})", rowCount));
         }
         else if (node.PhysicalOp.Contains("Hash", StringComparison.OrdinalIgnoreCase))
         {
+            var rowCount = node.HasActualStats ? node.ActualRows : node.EstimateRows;
             var rows = node.HasActualStats
                 ? $"{node.ActualRows:N0} actual rows"
                 : $"{node.EstimateRows:N0} estimated rows";
-            consumers.Add($"Hash Match (Node {node.NodeId}, {rows})");
+            consumers.Add(($"Hash Match (Node {node.NodeId}, {rows})", rowCount));
         }
 
         foreach (var child in node.Children)
-            FindMemoryConsumers(child, consumers);
+            FindMemoryConsumersRecursive(child, consumers);
     }
 
     /// <summary>
@@ -1297,7 +1382,7 @@ public static partial class PlanAnalyzer
     /// Exchange operators accumulate downstream wait time (e.g. from spilling
     /// children) so their self-time is unreliable — see sql.kiwi/2021/03.
     /// </summary>
-    private static long GetOperatorOwnElapsedMs(PlanNode node)
+    internal static long GetOperatorOwnElapsedMs(PlanNode node)
     {
         if (node.ActualExecutionMode == "Batch")
             return node.ActualElapsedMs;
@@ -1536,6 +1621,37 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Returns a short label describing what a wait type means (e.g., "I/O — reading from disk").
+    /// Public for use by UI components that annotate wait stats inline.
+    /// </summary>
+    public static string GetWaitLabel(string waitType)
+    {
+        var wt = waitType.ToUpperInvariant();
+        return wt switch
+        {
+            _ when wt.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) => "I/O — reading data from disk",
+            _ when wt.Contains("IO_COMPLETION", StringComparison.Ordinal) => "I/O — spills to TempDB or eager writes",
+            _ when wt == "SOS_SCHEDULER_YIELD" => "CPU — scheduler yielding",
+            _ when wt.StartsWith("CXPACKET", StringComparison.Ordinal) || wt.StartsWith("CXCONSUMER", StringComparison.Ordinal) => "parallelism — thread skew",
+            _ when wt.StartsWith("CXSYNC", StringComparison.Ordinal) => "parallelism — exchange synchronization",
+            _ when wt == "HTBUILD" => "hash — building hash table",
+            _ when wt == "HTDELETE" => "hash — cleaning up hash table",
+            _ when wt == "HTREPARTITION" => "hash — repartitioning",
+            _ when wt.StartsWith("HT", StringComparison.Ordinal) => "hash operation",
+            _ when wt == "BPSORT" => "batch sort",
+            _ when wt == "BMPBUILD" => "bitmap filter build",
+            _ when wt.Contains("MEMORY_ALLOCATION_EXT", StringComparison.Ordinal) => "memory allocation",
+            _ when wt.StartsWith("PAGELATCH", StringComparison.Ordinal) => "page latch — in-memory contention",
+            _ when wt.StartsWith("LATCH_", StringComparison.Ordinal) => "latch contention",
+            _ when wt.StartsWith("LCK_", StringComparison.Ordinal) => "lock contention",
+            _ when wt == "LOGBUFFER" => "transaction log writes",
+            _ when wt == "ASYNC_NETWORK_IO" => "network — client not consuming results",
+            _ when wt == "SOS_PHYS_PAGE_CACHE" => "physical page cache contention",
+            _ => ""
+        };
+    }
+
+    /// <summary>
     /// Returns targeted advice based on statement-level wait stats, or null if no waits.
     /// When the dominant wait type is clear, gives specific guidance instead of generic advice.
     /// </summary>
@@ -1551,29 +1667,150 @@ public static partial class PlanAnalyzer
         var top = waits.OrderByDescending(w => w.WaitTimeMs).First();
         var topPct = (double)top.WaitTimeMs / totalMs * 100;
 
-        // Only give targeted advice if the dominant wait is >= 80% of total wait time
-        if (topPct < 80)
-            return null;
+        // Single dominant wait — give targeted advice
+        if (topPct >= 80)
+            return DescribeWaitType(top.WaitType, topPct);
 
-        var waitType = top.WaitType.ToUpperInvariant();
-        var advice = waitType switch
+        // Multiple waits — summarize the top contributors instead of guessing
+        var topWaits = waits.OrderByDescending(w => w.WaitTimeMs).Take(3)
+            .Select(w => $"{w.WaitType} ({(double)w.WaitTimeMs / totalMs * 100:N0}%)")
+            .ToList();
+        return $"Top waits: {string.Join(", ", topWaits)}.";
+    }
+
+    /// <summary>
+    /// Maps a wait type to a human-readable description with percentage context.
+    /// Covers all wait types observed in real execution plan files.
+    /// </summary>
+    private static string DescribeWaitType(string rawWaitType, double topPct)
+    {
+        var waitType = rawWaitType.ToUpperInvariant();
+        return waitType switch
         {
+            // I/O: reading/writing data pages from disk
             _ when waitType.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) =>
-                $"I/O bound — {topPct:N0}% of wait time is {top.WaitType}. Data is being read from disk rather than memory. Consider adding indexes to reduce I/O, or investigate memory pressure.",
-            _ when waitType.StartsWith("LATCH_", StringComparison.Ordinal) =>
-                $"Latch contention — {topPct:N0}% of wait time is {top.WaitType}.",
-            _ when waitType.StartsWith("LCK_", StringComparison.Ordinal) =>
-                $"Lock contention — {topPct:N0}% of wait time is {top.WaitType}. Other sessions are holding locks that this query needs.",
-            _ when waitType.StartsWith("CXPACKET", StringComparison.Ordinal) || waitType.StartsWith("CXCONSUMER", StringComparison.Ordinal) =>
-                $"Parallel thread skew — {topPct:N0}% of wait time is {top.WaitType}. Work is unevenly distributed across parallel threads.",
+                $"I/O bound — {topPct:N0}% of wait time is {rawWaitType}. Data is being read from disk rather than memory. Consider adding indexes to reduce I/O, or investigate memory pressure.",
             _ when waitType.Contains("IO_COMPLETION", StringComparison.Ordinal) =>
-                $"I/O bound — {topPct:N0}% of wait time is {top.WaitType}.",
-            _ when waitType.StartsWith("RESOURCE_SEMAPHORE", StringComparison.Ordinal) =>
-                $"Memory grant wait — {topPct:N0}% of wait time is {top.WaitType}. The query had to wait for a memory grant.",
-            _ => $"Dominant wait is {top.WaitType} ({topPct:N0}% of wait time)."
-        };
+                $"I/O bound — {topPct:N0}% of wait time is {rawWaitType}. Non-buffer I/O such as sort/hash spills to TempDB or eager writes.",
 
-        return advice;
+            // CPU: thread yielding its scheduler quantum
+            _ when waitType == "SOS_SCHEDULER_YIELD" =>
+                $"CPU bound — {topPct:N0}% of wait time is {rawWaitType}. The query is consuming significant CPU. Look for expensive operators (scans, sorts, hash builds) that could be eliminated or reduced.",
+
+            // Parallelism: exchange and synchronization waits
+            _ when waitType.StartsWith("CXPACKET", StringComparison.Ordinal) || waitType.StartsWith("CXCONSUMER", StringComparison.Ordinal) =>
+                $"Parallel thread skew — {topPct:N0}% of wait time is {rawWaitType}. Work is unevenly distributed across parallel threads.",
+            _ when waitType.StartsWith("CXSYNC", StringComparison.Ordinal) =>
+                $"Parallel synchronization — {topPct:N0}% of wait time is {rawWaitType}. Threads are waiting at exchange operators to synchronize parallel execution.",
+
+            // Hash operations
+            _ when waitType.StartsWith("HT", StringComparison.Ordinal) =>
+                $"Hash operation — {topPct:N0}% of wait time is {rawWaitType}. Time spent building, repartitioning, or cleaning up hash tables. Large hash builds may indicate missing indexes or bad row estimates.",
+
+            // Sort/bitmap batch operations
+            _ when waitType == "BPSORT" =>
+                $"Batch sort — {topPct:N0}% of wait time is {rawWaitType}. Time spent in batch-mode sort operations.",
+            _ when waitType == "BMPBUILD" =>
+                $"Bitmap build — {topPct:N0}% of wait time is {rawWaitType}. Time spent building bitmap filters for hash joins.",
+
+            // Memory allocation
+            _ when waitType.Contains("MEMORY_ALLOCATION_EXT", StringComparison.Ordinal) =>
+                $"Memory allocation — {topPct:N0}% of wait time is {rawWaitType}. Frequent memory allocations during query execution.",
+
+            // Latch contention (non-I/O)
+            _ when waitType.StartsWith("PAGELATCH", StringComparison.Ordinal) =>
+                $"Page latch contention — {topPct:N0}% of wait time is {rawWaitType}. In-memory page contention, often on TempDB or hot pages.",
+            _ when waitType.StartsWith("LATCH_", StringComparison.Ordinal) =>
+                $"Latch contention — {topPct:N0}% of wait time is {rawWaitType}.",
+
+            // Lock contention
+            _ when waitType.StartsWith("LCK_", StringComparison.Ordinal) =>
+                $"Lock contention — {topPct:N0}% of wait time is {rawWaitType}. Other sessions are holding locks that this query needs.",
+
+            // Log writes
+            _ when waitType == "LOGBUFFER" =>
+                $"Log write — {topPct:N0}% of wait time is {rawWaitType}. Waiting for transaction log buffer flushes, typically from data modifications.",
+
+            // Network
+            _ when waitType == "ASYNC_NETWORK_IO" =>
+                $"Network bound — {topPct:N0}% of wait time is {rawWaitType}. The client application is not consuming results fast enough.",
+
+            // Physical page cache
+            _ when waitType == "SOS_PHYS_PAGE_CACHE" =>
+                $"Physical page cache — {topPct:N0}% of wait time is {rawWaitType}. Contention on the physical memory page allocator.",
+
+            _ => $"Dominant wait is {rawWaitType} ({topPct:N0}% of wait time)."
+        };
+    }
+
+    /// <summary>
+    /// Returns true if the statement has significant I/O waits (PAGEIOLATCH_*, IO_COMPLETION).
+    /// Used for severity elevation decisions where I/O specifically indicates disk access.
+    /// Thresholds: I/O waits >= 20% of total wait time AND >= 100ms absolute.
+    /// </summary>
+    private static bool HasSignificantIoWaits(List<WaitStatInfo> waits)
+    {
+        if (waits.Count == 0)
+            return false;
+
+        var totalMs = waits.Sum(w => w.WaitTimeMs);
+        if (totalMs == 0)
+            return false;
+
+        long ioMs = 0;
+        foreach (var w in waits)
+        {
+            var wt = w.WaitType.ToUpperInvariant();
+            if (wt.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) || wt.Contains("IO_COMPLETION", StringComparison.Ordinal))
+                ioMs += w.WaitTimeMs;
+        }
+
+        var pct = (double)ioMs / totalMs * 100;
+        return ioMs >= 100 && pct >= 20;
+    }
+
+    /// <summary>
+    /// Formats a node reference for use in warning messages. Includes object name
+    /// for data access operators where it helps identify which table is involved.
+    /// </summary>
+    private static string FormatNodeRef(PlanNode node)
+    {
+        if (!string.IsNullOrEmpty(node.ObjectName))
+        {
+            var objRef = !string.IsNullOrEmpty(node.DatabaseName)
+                ? $"{node.DatabaseName}.{node.ObjectName}"
+                : node.ObjectName;
+            return $"{node.PhysicalOp} on {objRef} (Node {node.NodeId})";
+        }
+
+        return $"{node.PhysicalOp} (Node {node.NodeId})";
+    }
+
+    /// <summary>
+    /// Identifies the specific cause of a row goal from the statement text.
+    /// Returns a specific cause when detectable, or a generic list as fallback.
+    /// </summary>
+    private static string IdentifyRowGoalCause(string stmtText)
+    {
+        if (string.IsNullOrEmpty(stmtText))
+            return "TOP, EXISTS, IN, or FAST hint";
+
+        var text = stmtText.ToUpperInvariant();
+        var causes = new List<string>(4);
+
+        if (Regex.IsMatch(text, @"\bTOP\b"))
+            causes.Add("TOP");
+        if (Regex.IsMatch(text, @"\bEXISTS\b"))
+            causes.Add("EXISTS");
+        // IN with subquery — bare "IN (" followed by SELECT, not just "IN (1,2,3)"
+        if (Regex.IsMatch(text, @"\bIN\s*\(\s*SELECT\b"))
+            causes.Add("IN (subquery)");
+        if (Regex.IsMatch(text, @"\bFAST\b"))
+            causes.Add("FAST hint");
+
+        return causes.Count > 0
+            ? string.Join(", ", causes)
+            : "TOP, EXISTS, IN, or FAST hint";
     }
 
     /// <summary>

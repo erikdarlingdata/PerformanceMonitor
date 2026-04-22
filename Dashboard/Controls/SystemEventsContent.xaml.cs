@@ -528,7 +528,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BadPagesChart.Plot.Axes.DateTimeTicksBottom();
+            BadPagesChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BadPagesChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BadPagesChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(BadPagesChart);
@@ -557,7 +557,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            DumpRequestsChart.Plot.Axes.DateTimeTicksBottom();
+            DumpRequestsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             DumpRequestsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             DumpRequestsChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(DumpRequestsChart);
@@ -586,7 +586,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            AccessViolationsChart.Plot.Axes.DateTimeTicksBottom();
+            AccessViolationsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             AccessViolationsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             AccessViolationsChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(AccessViolationsChart);
@@ -615,7 +615,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            WriteAccessViolationsChart.Plot.Axes.DateTimeTicksBottom();
+            WriteAccessViolationsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             WriteAccessViolationsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             WriteAccessViolationsChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(WriteAccessViolationsChart);
@@ -656,7 +656,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            NonYieldingTasksChart.Plot.Axes.DateTimeTicksBottom();
+            NonYieldingTasksChart.Plot.Axes.DateTimeTicksBottomDateChange();
             NonYieldingTasksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             NonYieldingTasksChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(NonYieldingTasksChart);
@@ -685,7 +685,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            LatchWarningsChart.Plot.Axes.DateTimeTicksBottom();
+            LatchWarningsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             LatchWarningsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             LatchWarningsChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(LatchWarningsChart);
@@ -748,7 +748,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            SickSpinlocksChart.Plot.Axes.DateTimeTicksBottom();
+            SickSpinlocksChart.Plot.Axes.DateTimeTicksBottomDateChange();
             SickSpinlocksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             SickSpinlocksChart.Plot.YLabel("Backoffs");
             TabHelpers.LockChartVerticalAxis(SickSpinlocksChart);
@@ -798,7 +798,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            CpuComparisonChart.Plot.Axes.DateTimeTicksBottom();
+            CpuComparisonChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CpuComparisonChart.Plot.Axes.SetLimitsX(xMin, xMax);
             CpuComparisonChart.Plot.Axes.SetLimitsY(0, 100); // Fixed Y-axis for CPU percentage
             CpuComparisonChart.Plot.YLabel("CPU %");
@@ -899,7 +899,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            SevereErrorsChart.Plot.Axes.DateTimeTicksBottom();
+            SevereErrorsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             SevereErrorsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             SevereErrorsChart.Plot.YLabel("Event Count");
             TabHelpers.LockChartVerticalAxis(SevereErrorsChart);
@@ -1058,7 +1058,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            IOIssuesChart.Plot.Axes.DateTimeTicksBottom();
+            IOIssuesChart.Plot.Axes.DateTimeTicksBottomDateChange();
             IOIssuesChart.Plot.Axes.SetLimitsX(xMin, xMax);
             IOIssuesChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(IOIssuesChart);
@@ -1152,7 +1152,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            LongestPendingIOChart.Plot.Axes.DateTimeTicksBottom();
+            LongestPendingIOChart.Plot.Axes.DateTimeTicksBottomDateChange();
             LongestPendingIOChart.Plot.Axes.SetLimitsX(xMin, xMax);
             LongestPendingIOChart.Plot.YLabel("Duration (ms)");
             TabHelpers.LockChartVerticalAxis(LongestPendingIOChart);
@@ -1251,7 +1251,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            SchedulerIssuesChart.Plot.Axes.DateTimeTicksBottom();
+            SchedulerIssuesChart.Plot.Axes.DateTimeTicksBottomDateChange();
             SchedulerIssuesChart.Plot.Axes.SetLimitsX(xMin, xMax);
             SchedulerIssuesChart.Plot.YLabel("Total Non-Yield Time (ms)");
             TabHelpers.LockChartVerticalAxis(SchedulerIssuesChart);
@@ -1401,7 +1401,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            MemoryConditionsChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryConditionsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryConditionsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             MemoryConditionsChart.Plot.YLabel("Count");
             TabHelpers.LockChartVerticalAxis(MemoryConditionsChart);
@@ -1573,7 +1573,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            CPUTasksChart.Plot.Axes.DateTimeTicksBottom();
+            CPUTasksChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CPUTasksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             CPUTasksChart.Plot.YLabel("Workers");
             TabHelpers.LockChartVerticalAxis(CPUTasksChart);
@@ -1780,7 +1780,7 @@ namespace PerformanceMonitorDashboard.Controls
             /* Finalize both charts */
             foreach (var chart in new[] { MemoryBrokerChart, MemoryBrokerRatioChart })
             {
-                chart.Plot.Axes.DateTimeTicksBottom();
+                chart.Plot.Axes.DateTimeTicksBottomDateChange();
                 chart.Plot.Axes.SetLimitsX(xMin, xMax);
                 TabHelpers.LockChartVerticalAxis(chart);
                 chart.Refresh();
@@ -1933,7 +1933,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            MemoryNodeOOMChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryNodeOOMChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryNodeOOMChart.Plot.Axes.SetLimitsX(xMin, xMax);
             MemoryNodeOOMChart.Plot.YLabel("Event Count");
             TabHelpers.LockChartVerticalAxis(MemoryNodeOOMChart);
@@ -1983,7 +1983,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            MemoryNodeOOMUtilChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryNodeOOMUtilChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryNodeOOMUtilChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.LockChartVerticalAxis(MemoryNodeOOMUtilChart);
             MemoryNodeOOMUtilChart.Refresh();
@@ -2086,7 +2086,7 @@ namespace PerformanceMonitorDashboard.Controls
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            MemoryNodeOOMMemoryChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryNodeOOMMemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
             MemoryNodeOOMMemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
             TabHelpers.LockChartVerticalAxis(MemoryNodeOOMMemoryChart);
             MemoryNodeOOMMemoryChart.Refresh();

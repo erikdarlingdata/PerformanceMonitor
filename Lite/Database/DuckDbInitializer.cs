@@ -97,7 +97,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 24;
+    internal const int CurrentSchemaVersion = 25;
 
     private readonly string _archivePath;
 
@@ -114,8 +114,8 @@ public class DuckDbInitializer
     [
         "wait_stats", "query_stats", "procedure_stats", "query_store_stats",
         "query_snapshots", "cpu_utilization_stats", "file_io_stats", "memory_stats",
-        "memory_clerks", "tempdb_stats", "perfmon_stats", "deadlocks",
-        "blocked_process_reports", "memory_grant_stats", "waiting_tasks",
+        "memory_clerks", "memory_pressure_events", "tempdb_stats", "perfmon_stats",
+        "deadlocks", "blocked_process_reports", "memory_grant_stats", "waiting_tasks",
         "running_jobs", "database_size_stats", "server_properties",
         "session_stats", "server_config", "database_config",
         "database_scoped_config", "trace_flags", "config_alert_log",
@@ -639,6 +639,13 @@ public class DuckDbInitializer
                 throw;
             }
         }
+
+        if (fromVersion < 25)
+        {
+            /* v25: Added memory_pressure_events table for RING_BUFFER_RESOURCE_MONITOR notifications.
+                    New table only — created by GetAllTableStatements(). */
+            _logger?.LogInformation("Running migration to v25: adding memory_pressure_events table");
+        }
     }
 
     /// <summary>
@@ -651,9 +658,9 @@ public class DuckDbInitializer
         var tablesWithServerId = new[]
         {
             "servers", "collection_log", "wait_stats", "query_stats", "cpu_utilization_stats",
-            "file_io_stats", "memory_stats", "memory_clerks", "deadlocks",
-            "procedure_stats", "query_store_stats", "query_snapshots", "tempdb_stats",
-            "perfmon_stats", "server_config", "database_config",
+            "file_io_stats", "memory_stats", "memory_clerks", "memory_pressure_events",
+            "deadlocks", "procedure_stats", "query_store_stats", "query_snapshots",
+            "tempdb_stats", "perfmon_stats", "server_config", "database_config",
             "blocked_process_reports", "memory_grant_stats", "waiting_tasks"
         };
 
@@ -724,7 +731,7 @@ public class DuckDbInitializer
                 string viewSql;
                 if (hasParquetFiles)
                 {
-                    var globPath = parquetGlob.Replace("\\", "/");
+                    var globPath = EscapeSqlPath(parquetGlob.Replace("\\", "/"));
                     if (table == "config_alert_log")
                     {
                         viewSql = $@"CREATE OR REPLACE VIEW v_{table} AS
@@ -935,5 +942,9 @@ WHERE NOT EXISTS (
         await InitializeAsync();
     }
 
-
+    /// <summary>
+    /// Escapes single quotes in a file path for safe interpolation into DuckDB SQL.
+    /// DuckDB does not support parameterized paths in read_parquet() or COPY TO.
+    /// </summary>
+    internal static string EscapeSqlPath(string path) => path.Replace("'", "''");
 }

@@ -33,8 +33,14 @@ public class ArchiveService
     /// <summary>
     /// Indicates whether an archival operation is currently in progress.
     /// UI code can check this to warn users before dismiss or show a status indicator.
+    /// Volatile-backed to ensure cross-thread visibility without locking.
     /// </summary>
-    public static bool IsArchiving { get; private set; }
+    private static volatile bool s_isArchiving;
+    public static bool IsArchiving
+    {
+        get => s_isArchiving;
+        private set => s_isArchiving = value;
+    }
 
     /* Tables eligible for archival with their time column.
        IMPORTANT: Every table with time-series data must be listed here,
@@ -50,6 +56,7 @@ public class ArchiveService
         ("file_io_stats", "collection_time"),
         ("memory_stats", "collection_time"),
         ("memory_clerks", "collection_time"),
+        ("memory_pressure_events", "collection_time"),
         ("tempdb_stats", "collection_time"),
         ("perfmon_stats", "collection_time"),
         ("deadlocks", "collection_time"),
@@ -133,7 +140,8 @@ public class ArchiveService
 
                     /* Delete archived rows from hot table */
                     using var deleteCmd = connection.CreateCommand();
-                    deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < '{cutoffDate:yyyy-MM-dd HH:mm:ss}'";
+                    deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
+                    deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoffDate });
                     await deleteCmd.ExecuteNonQueryAsync();
 
                     _logger?.LogInformation("Archived {Count} rows from {Table} to {Path}", rowCount, table, parquetPath);
@@ -161,7 +169,8 @@ public class ArchiveService
     private static async Task<long> GetRowCountBeforeCutoff(DuckDBConnection connection, string table, string timeColumn, DateTime cutoff)
     {
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT COUNT(*) FROM {table} WHERE {timeColumn} < '{cutoff:yyyy-MM-dd HH:mm:ss}'";
+        cmd.CommandText = $"SELECT COUNT(*) FROM {table} WHERE {timeColumn} < $1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
         var result = await cmd.ExecuteScalarAsync();
         return Convert.ToInt64(result);
     }
@@ -171,10 +180,13 @@ public class ArchiveService
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $@"
 COPY (
-    SELECT * FROM {table} WHERE {timeColumn} < '{cutoff:yyyy-MM-dd HH:mm:ss}'
-) TO '{filePath}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+    SELECT * FROM {table} WHERE {timeColumn} < $1
+) TO '{EscapeSqlPath(filePath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
         await cmd.ExecuteNonQueryAsync();
     }
+
+    private static string EscapeSqlPath(string path) => DuckDbInitializer.EscapeSqlPath(path);
 
     /* Columns to exclude during compaction — dead weight from legacy archives */
     private static readonly Dictionary<string, string[]> CompactionExcludeColumns = new()
@@ -343,7 +355,7 @@ COPY (
                 {
                     using var schemaCon = new DuckDBConnection("DataSource=:memory:");
                     schemaCon.Open();
-                    var allPathList = string.Join(", ", sourcePaths.Select(p => $"'{p}'"));
+                    var allPathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
                     using var schemaCmd = schemaCon.CreateCommand();
                     schemaCmd.CommandText = $"SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet([{allPathList}], union_by_name=true))";
                     using var reader = schemaCmd.ExecuteReader();
@@ -368,10 +380,10 @@ COPY (
                         pragma.ExecuteNonQuery();
                     }
 
-                    var pathList = string.Join(", ", sourcePaths.Select(p => $"'{p}'"));
+                    var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
                     using var cmd = con.CreateCommand();
                     cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)) " +
-                                      $"TO '{tempPath}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)";
+                                      $"TO '{EscapeSqlPath(tempPath)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)";
                     cmd.ExecuteNonQuery();
                 }
                 else
@@ -399,10 +411,10 @@ COPY (
                             pragma.ExecuteNonQuery();
                         }
 
-                        var pairList = $"'{currentPath}', '{sorted[i]}'";
+                        var pairList = $"'{EscapeSqlPath(currentPath)}', '{EscapeSqlPath(sorted[i])}'";
                         using var cmd = con.CreateCommand();
                         cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pairList}], union_by_name=true)) " +
-                                          $"TO '{stepOutput}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)";
+                                          $"TO '{EscapeSqlPath(stepOutput)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)";
                         cmd.ExecuteNonQuery();
 
                         /* Clean up previous intermediate file */
@@ -511,7 +523,7 @@ COPY (
                             .Replace("\\", "/");
 
                         using var exportCmd = connection.CreateCommand();
-                        exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{parquetPath}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                        exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(parquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
                         await exportCmd.ExecuteNonQueryAsync();
 
                         _logger?.LogInformation("Archived {Count} rows from {Table}", rowCount, table);

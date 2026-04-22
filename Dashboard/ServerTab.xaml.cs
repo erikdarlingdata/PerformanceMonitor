@@ -51,6 +51,7 @@ namespace PerformanceMonitorDashboard
         private bool _isRefreshing;
         private DateTime _refreshStartedUtc;
         private bool _suppressPickerUpdates;
+        private readonly HashSet<string> _initializedTabs = new();
 
         // Filter state dictionaries for each DataGrid
 
@@ -424,6 +425,7 @@ namespace PerformanceMonitorDashboard
             _autoRefreshCts?.Cancel();
             _autoRefreshTimer?.Stop();
             _autoRefreshTimer = null;
+            _initializedTabs.Clear();
 
             Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
             Loaded -= ServerTab_Loaded;
@@ -549,7 +551,8 @@ namespace PerformanceMonitorDashboard
                 if (e.Key == System.Windows.Input.Key.F5)
                 {
                     e.Handled = true;
-                    await LoadDataAsync();
+                    bool fullRefresh = System.Windows.Input.Keyboard.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Control);
+                    await LoadDataAsync(fullRefresh);
                 }
                 else if (e.Key == System.Windows.Input.Key.V &&
                          System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
@@ -640,7 +643,7 @@ namespace PerformanceMonitorDashboard
                 CriticalIssuesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 DefaultTraceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
 
-                await LoadDataAsync();
+                await LoadDataAsync(fullRefresh: false);
                 SetupAutoRefresh();
             }
             catch (Exception ex)
@@ -654,7 +657,8 @@ namespace PerformanceMonitorDashboard
         {
             try
             {
-                await LoadDataAsync();
+                bool fullRefresh = System.Windows.Input.Keyboard.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Control);
+                await LoadDataAsync(fullRefresh);
             }
             catch (Exception ex)
             {
@@ -1271,7 +1275,9 @@ namespace PerformanceMonitorDashboard
         }
 
         /// <summary>
-        /// Refreshes only the currently visible tab — used on auto-refresh timer tick.
+        /// Refreshes only the currently visible tab. On first visit to a tab,
+        /// does a full refresh so all sub-tabs are populated. Subsequent visits
+        /// only refresh the active sub-tab for speed.
         /// </summary>
         private async Task RefreshVisibleTabAsync()
         {
@@ -1279,6 +1285,7 @@ namespace PerformanceMonitorDashboard
             if (selectedTab == null) return;
 
             var tabHeader = GetTabHeaderText(selectedTab);
+            bool firstVisit = _initializedTabs.Add(tabHeader);
 
             switch (tabHeader)
             {
@@ -1286,19 +1293,19 @@ namespace PerformanceMonitorDashboard
                     await RefreshOverviewTabAsync();
                     break;
                 case "Queries":
-                    await RefreshQueriesTabAsync(fullRefresh: false);
+                    await RefreshQueriesTabAsync(fullRefresh: firstVisit);
                     break;
                 case "Resource Metrics":
-                    await RefreshResourceMetricsTabAsync(fullRefresh: false);
+                    await RefreshResourceMetricsTabAsync(fullRefresh: firstVisit);
                     break;
                 case "Memory":
-                    await RefreshMemoryTabAsync(fullRefresh: false);
+                    await RefreshMemoryTabAsync(fullRefresh: firstVisit);
                     break;
                 case "Locking":
                     await RefreshLockingTabAsync();
                     break;
                 case "System Events":
-                    await RefreshSystemEventsTabAsync(fullRefresh: false);
+                    await RefreshSystemEventsTabAsync(fullRefresh: firstVisit);
                     break;
                 // Plan Viewer has no data to refresh
             }
@@ -2246,7 +2253,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsBlockingEventsChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsBlockingEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsBlockingEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsBlockingEventsChart.Plot.YLabel("Count");
             LockChartVerticalAxis(BlockingStatsBlockingEventsChart);
@@ -2275,7 +2282,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsDurationChart.Plot.YLabel("Duration (ms)");
             LockChartVerticalAxis(BlockingStatsDurationChart);
@@ -2304,7 +2311,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsDeadlocksChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsDeadlocksChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsDeadlocksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsDeadlocksChart.Plot.YLabel("Count");
             LockChartVerticalAxis(BlockingStatsDeadlocksChart);
@@ -2333,7 +2340,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelFontColor = ScottPlot.Colors.Gray;
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
-            BlockingStatsDeadlockWaitTimeChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingStatsDeadlockWaitTimeChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingStatsDeadlockWaitTimeChart.Plot.Axes.SetLimitsX(xMin, xMax);
             BlockingStatsDeadlockWaitTimeChart.Plot.YLabel("Duration (ms)");
             LockChartVerticalAxis(BlockingStatsDeadlockWaitTimeChart);
@@ -2379,7 +2386,7 @@ namespace PerformanceMonitorDashboard
                 colorIndex++;
             }
 
-            CollectorDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             TabHelpers.ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Plot.YLabel("Duration (ms)");
             CollectorDurationChart.Plot.Axes.AutoScale();
@@ -2442,7 +2449,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            LockWaitStatsChart.Plot.Axes.DateTimeTicksBottom();
+            LockWaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             LockWaitStatsChart.Plot.Axes.SetLimitsX(xMin, xMax);
             LockWaitStatsChart.Plot.YLabel("Wait Time (ms/sec)");
             _legendPanels[LockWaitStatsChart] = LockWaitStatsChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2499,7 +2506,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
             CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
             _legendPanels[CurrentWaitsDurationChart] = CurrentWaitsDurationChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2556,7 +2563,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(xMin, xMax);
             CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
             _legendPanels[CurrentWaitsBlockedChart] = CurrentWaitsBlockedChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -2896,7 +2903,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewCpuChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewCpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewCpuChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewCpuChart.Plot.Axes.SetLimitsY(0, 100);
             ResourceOverviewCpuChart.Plot.YLabel("CPU %");
@@ -2959,7 +2966,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewMemoryChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewMemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewMemoryChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewMemoryChart.Plot.YLabel("MB");
             LockChartVerticalAxis(ResourceOverviewMemoryChart);
@@ -3036,7 +3043,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewIoChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewIoChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewIoChart.Plot.Axes.AutoScaleY();
             ResourceOverviewIoChart.Plot.YLabel("Latency (ms)");
@@ -3108,7 +3115,7 @@ namespace PerformanceMonitorDashboard
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
-            ResourceOverviewWaitChart.Plot.Axes.DateTimeTicksBottom();
+            ResourceOverviewWaitChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ResourceOverviewWaitChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ResourceOverviewWaitChart.Plot.Axes.AutoScaleY();
             ResourceOverviewWaitChart.Plot.YLabel("Wait Time (ms/sec)");

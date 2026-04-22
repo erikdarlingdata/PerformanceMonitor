@@ -65,6 +65,7 @@ public partial class ServerTab : UserControl
     private Helpers.ChartHoverHelper? _memoryClerksHover;
     private Helpers.ChartHoverHelper? _memoryGrantSizingHover;
     private Helpers.ChartHoverHelper? _memoryGrantActivityHover;
+    private Helpers.ChartHoverHelper? _memoryPressureEventsHover;
     private Helpers.ChartHoverHelper? _currentWaitsDurationHover;
     private Helpers.ChartHoverHelper? _currentWaitsBlockedHover;
 
@@ -112,6 +113,7 @@ public partial class ServerTab : UserControl
 
     public int UtcOffsetMinutes { get; }
     private readonly bool _hasMsdbAccess;
+    private readonly bool _isAzureSqlDatabase;
 
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
@@ -120,7 +122,7 @@ public partial class ServerTab : UserControl
     public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
     public event Func<Task>? ManualRefreshRequested;
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0, bool hasMsdbAccess = true)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialService credentialService, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, bool isAzureSqlDatabase = false)
     {
         InitializeComponent();
 
@@ -130,10 +132,11 @@ public partial class ServerTab : UserControl
         _credentialService = credentialService;
         UtcOffsetMinutes = utcOffsetMinutes;
         _hasMsdbAccess = hasMsdbAccess;
+        _isAzureSqlDatabase = isAzureSqlDatabase;
         ServerTimeHelper.UtcOffsetMinutes = utcOffsetMinutes;
 
         ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
-        ConnectionStatusText.Text = server.ServerNameDisplay;
+        ConnectionStatusText.Text = "Connecting...";
 
         /* Apply default time range from settings */
         TimeRangeCombo.SelectedIndex = App.DefaultTimeRangeHours switch
@@ -200,6 +203,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(MemoryClerksChart);
         ApplyTheme(MemoryGrantSizingChart);
         ApplyTheme(MemoryGrantActivityChart);
+        ApplyTheme(MemoryPressureEventsChart);
         ApplyTheme(FileIoReadChart);
         ApplyTheme(FileIoWriteChart);
         ApplyTheme(FileIoReadThroughputChart);
@@ -238,6 +242,7 @@ public partial class ServerTab : UserControl
         _memoryClerksHover = new Helpers.ChartHoverHelper(MemoryClerksChart, "MB");
         _memoryGrantSizingHover = new Helpers.ChartHoverHelper(MemoryGrantSizingChart, "MB");
         _memoryGrantActivityHover = new Helpers.ChartHoverHelper(MemoryGrantActivityChart, "");
+        _memoryPressureEventsHover = new Helpers.ChartHoverHelper(MemoryPressureEventsChart, "events");
         _currentWaitsDurationHover = new Helpers.ChartHoverHelper(CurrentWaitsDurationChart, "ms");
         _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
 
@@ -839,7 +844,7 @@ public partial class ServerTab : UserControl
             }
 
             var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
-            ConnectionStatusText.Text = $"{_server.ServerNameDisplay} - Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
+            ConnectionStatusText.Text = $"Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
         }
         catch (Exception ex)
         {
@@ -916,6 +921,7 @@ public partial class ServerTab : UserControl
         var queryStoreTask = _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate);
         var memoryGrantTrendTask = _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate);
         var memoryGrantChartTask = _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate);
+        var memoryPressureEventsTask = _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate);
         var serverConfigTask = SafeQueryAsync(() => _dataService.GetLatestServerConfigAsync(_serverId));
         var databaseConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseConfigAsync(_serverId));
         var databaseScopedConfigTask = SafeQueryAsync(() => _dataService.GetLatestDatabaseScopedConfigAsync(_serverId));
@@ -929,7 +935,7 @@ public partial class ServerTab : UserControl
             snapshotsTask, cpuTask, memoryTask, memoryTrendTask,
             queryStatsTask, procStatsTask, fileIoTrendTask, fileIoThroughputTask, tempDbTask, tempDbFileIoTask,
             deadlockTask, blockedProcessTask, waitTypesTask, memoryClerkTypesTask, perfmonCountersTask,
-            queryStoreTask, memoryGrantTrendTask, memoryGrantChartTask,
+            queryStoreTask, memoryGrantTrendTask, memoryGrantChartTask, memoryPressureEventsTask,
             serverConfigTask, databaseConfigTask, databaseScopedConfigTask, traceFlagsTask,
             runningJobsTask, collectionHealthTask, collectionLogTask, dailySummaryTask);
 
@@ -1020,6 +1026,7 @@ public partial class ServerTab : UserControl
         UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result);
         UpdateExecutionCountTrendChart(executionCountTrendTask.Result);
         UpdateMemoryGrantCharts(memoryGrantChartTask.Result);
+        UpdateMemoryPressureEventsChart(memoryPressureEventsTask.Result, hoursBack, fromDate, toDate);
 
         /* Populate pickers (preserve selections) */
         PopulateWaitTypePicker(waitTypesTask.Result);
@@ -1365,6 +1372,10 @@ public partial class ServerTab : UserControl
                         var grantChart = await _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate);
                         UpdateMemoryGrantCharts(grantChart);
                         break;
+                    case 3: // Memory Pressure Events
+                        var pressureEvents = await _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate);
+                        UpdateMemoryPressureEventsChart(pressureEvents, hoursBack, fromDate, toDate);
+                        break;
                 }
                 return;
             }
@@ -1375,12 +1386,14 @@ public partial class ServerTab : UserControl
             var memoryClerkTypesTask = _dataService.GetDistinctMemoryClerkTypesAsync(_serverId, hoursBack, fromDate, toDate);
             var memoryGrantTrendTask = _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate);
             var memoryGrantChartTask = _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate);
+            var memoryPressureEventsTask = _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate);
 
-            await System.Threading.Tasks.Task.WhenAll(memoryTask, memoryTrendTask, memoryClerkTypesTask, memoryGrantTrendTask, memoryGrantChartTask);
+            await System.Threading.Tasks.Task.WhenAll(memoryTask, memoryTrendTask, memoryClerkTypesTask, memoryGrantTrendTask, memoryGrantChartTask, memoryPressureEventsTask);
 
             UpdateMemorySummary(memoryTask.Result);
             UpdateMemoryChart(memoryTrendTask.Result, memoryGrantTrendTask.Result);
             UpdateMemoryGrantCharts(memoryGrantChartTask.Result);
+            UpdateMemoryPressureEventsChart(memoryPressureEventsTask.Result, hoursBack, fromDate, toDate);
             PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             await UpdateMemoryClerksChartFromPickerAsync();
         }
@@ -1874,7 +1887,7 @@ public partial class ServerTab : UserControl
         otherPlot.Color = ScottPlot.Color.FromHex("#E57373");
         _cpuHover?.Add(otherPlot, "Other");
 
-        CpuChart.Plot.Axes.DateTimeTicksBottom();
+        CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(CpuChart);
         CpuChart.Plot.YLabel("CPU %");
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
@@ -1930,7 +1943,7 @@ public partial class ServerTab : UserControl
         grantPlot.Color = ScottPlot.Color.FromHex("#FFB74D");
         _memoryHover?.Add(grantPlot, "Memory Grants");
 
-        MemoryChart.Plot.Axes.DateTimeTicksBottom();
+        MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(MemoryChart);
         MemoryChart.Plot.YLabel("Memory (GB)");
 
@@ -1987,7 +2000,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottom();
+        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
         SetChartYLimitsWithLegendPadding(MemoryGrantSizingChart, 0, sizingMax > 0 ? sizingMax : 100);
@@ -2023,12 +2036,125 @@ public partial class ServerTab : UserControl
             }
         }
 
-        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottom();
+        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Plot.YLabel("Count");
         SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
         ShowChartLegend(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Refresh();
+    }
+
+    /// <summary>
+    /// Stacked bar chart of memory pressure events per hour, split by SQL Server (process) vs
+    /// Operating System (system) and stacked by severity (medium=indicator 2, severe=indicator >= 3).
+    /// </summary>
+    private void UpdateMemoryPressureEventsChart(List<MemoryPressureEventRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        ClearChart(MemoryPressureEventsChart);
+        _memoryPressureEventsHover?.Clear();
+        ApplyTheme(MemoryPressureEventsChart);
+
+        DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
+        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        double xMin = rangeStart.ToOADate();
+        double xMax = rangeEnd.ToOADate();
+
+        /* Only count rows where SQL Server reported actual pressure (indicator >= 2 matches sp_pressuredetector). */
+        var pressureRows = data
+            .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
+            .OrderBy(d => d.SampleTime)
+            .ToList();
+
+        bool hasData = false;
+        int maxBarCount = 0;
+
+        if (pressureRows.Count > 0)
+        {
+            var grouped = pressureRows
+                .GroupBy(d => new DateTime(d.SampleTime.Year, d.SampleTime.Month, d.SampleTime.Day, d.SampleTime.Hour, 0, 0))
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            double hourWidth = 1.0 / 24.0;
+            double barSize = hourWidth * 0.4;
+            double barOffset = hourWidth * 0.22;
+
+            var sqlMediumColor = ScottPlot.Color.FromHex("#FFB74D"); // orange 300
+            var sqlSevereColor = ScottPlot.Color.FromHex("#E65100"); // orange 900
+            var osMediumColor = ScottPlot.Color.FromHex("#E57373");  // red 300
+            var osSevereColor = ScottPlot.Color.FromHex("#B71C1C");  // red 900
+
+            var sqlMediumBars = new List<ScottPlot.Bar>();
+            var sqlSevereBars = new List<ScottPlot.Bar>();
+            var osMediumBars = new List<ScottPlot.Bar>();
+            var osSevereBars = new List<ScottPlot.Bar>();
+
+            foreach (var g in grouped)
+            {
+                int sqlMedium = g.Count(d => d.MemoryIndicatorsProcess == 2);
+                int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
+                int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
+                int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
+                double x = g.Key.AddMinutes(UtcOffsetMinutes).ToOADate();
+
+                if (sqlMedium > 0)
+                    sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
+                if (sqlSevere > 0)
+                    sqlSevereBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
+                if (osMedium > 0)
+                    osMediumBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
+                if (osSevere > 0)
+                    osSevereBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
+
+                int sqlTotal = sqlMedium + sqlSevere;
+                int osTotal = osMedium + osSevere;
+                if (sqlTotal > maxBarCount) maxBarCount = sqlTotal;
+                if (osTotal > maxBarCount) maxBarCount = osTotal;
+            }
+
+            if (sqlMediumBars.Count > 0 || sqlSevereBars.Count > 0 || osMediumBars.Count > 0 || osSevereBars.Count > 0)
+            {
+                hasData = true;
+
+                if (sqlMediumBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(sqlMediumBars);
+                    bp.LegendText = "SQL Server (medium)";
+                    _memoryPressureEventsHover?.Add(bp, "SQL Server (medium)");
+                }
+                if (sqlSevereBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(sqlSevereBars);
+                    bp.LegendText = "SQL Server (severe)";
+                    _memoryPressureEventsHover?.Add(bp, "SQL Server (severe)");
+                }
+                if (osMediumBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(osMediumBars);
+                    bp.LegendText = "Operating System (medium)";
+                    _memoryPressureEventsHover?.Add(bp, "Operating System (medium)");
+                }
+                if (osSevereBars.Count > 0)
+                {
+                    var bp = MemoryPressureEventsChart.Plot.Add.Bars(osSevereBars);
+                    bp.LegendText = "Operating System (severe)";
+                    _memoryPressureEventsHover?.Add(bp, "Operating System (severe)");
+                }
+            }
+        }
+
+        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        ReapplyAxisColors(MemoryPressureEventsChart);
+        MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
+        SetChartYLimitsWithLegendPadding(MemoryPressureEventsChart, 0, Math.Max(maxBarCount, 5));
+
+        if (hasData)
+        {
+            ShowChartLegend(MemoryPressureEventsChart);
+        }
+
+        MemoryPressureEventsChart.Refresh();
     }
 
     private void UpdateTempDbChart(List<TempDbRow> data)
@@ -2059,7 +2185,7 @@ public partial class ServerTab : UserControl
         vsPlot.Color = ScottPlot.Color.FromHex("#81C784");
         _tempDbHover?.Add(vsPlot, "Version Store");
 
-        TempDbChart.Plot.Axes.DateTimeTicksBottom();
+        TempDbChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
@@ -2105,7 +2231,7 @@ public partial class ServerTab : UserControl
             }
         }
 
-        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottom();
+        TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(TempDbFileIoChart);
         TempDbFileIoChart.Plot.YLabel("TempDB File I/O Latency (ms)");
         SetChartYLimitsWithLegendPadding(TempDbFileIoChart, 0, maxLatency > 0 ? maxLatency : 10);
@@ -2189,14 +2315,14 @@ public partial class ServerTab : UserControl
             }
         }
 
-        FileIoReadChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoReadChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoReadChart);
         FileIoReadChart.Plot.YLabel("Read Latency (ms)");
         SetChartYLimitsWithLegendPadding(FileIoReadChart, 0, readMax > 0 ? readMax : 10);
         ShowChartLegend(FileIoReadChart);
         FileIoReadChart.Refresh();
 
-        FileIoWriteChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoWriteChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoWriteChart);
         FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
@@ -2253,14 +2379,14 @@ public partial class ServerTab : UserControl
             }
         }
 
-        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
         SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
         ShowChartLegend(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Refresh();
 
-        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottom();
+        FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
         SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
@@ -2296,7 +2422,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Lock Waits";
             zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
             zeroLine.MarkerSize = 0;
-            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+            LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
             LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
             LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -2323,7 +2449,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottom();
+        LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
         LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
@@ -2360,7 +2486,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Blocking Incidents";
             zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
             zeroLine.MarkerSize = 0;
-            BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
+            BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
             BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -2402,7 +2528,7 @@ public partial class ServerTab : UserControl
         plot.MarkerSize = 0; /* No markers, just lines */
         _blockingTrendHover?.Add(plot, "Blocking Incidents");
 
-        BlockingTrendChart.Plot.Axes.DateTimeTicksBottom();
+        BlockingTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
         BlockingTrendChart.Plot.YLabel("Blocking Incidents");
@@ -2439,7 +2565,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Deadlocks";
             zeroLine.Color = ScottPlot.Color.FromHex("#FFB74D");
             zeroLine.MarkerSize = 0;
-            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
+            DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
             DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTrendChart);
             DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -2481,7 +2607,7 @@ public partial class ServerTab : UserControl
         plot.MarkerSize = 0; /* No markers, just lines */
         _deadlockTrendHover?.Add(plot, "Deadlocks");
 
-        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottom();
+        DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         DeadlockTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTrendChart);
         DeadlockTrendChart.Plot.YLabel("Deadlocks");
@@ -2518,7 +2644,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Current Waits";
             zeroLine.Color = ScottPlot.Color.FromHex("#4FC3F7");
             zeroLine.MarkerSize = 0;
-            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsDurationChart);
             CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -2548,7 +2674,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
         CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsDurationChart);
         CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
@@ -2583,7 +2709,7 @@ public partial class ServerTab : UserControl
             zeroLine.LegendText = "Blocked Sessions";
             zeroLine.Color = ScottPlot.Color.FromHex("#E57373");
             zeroLine.MarkerSize = 0;
-            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+            CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsBlockedChart);
             CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
@@ -2613,7 +2739,7 @@ public partial class ServerTab : UserControl
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottom();
+        CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomDateChange();
         CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
@@ -2640,7 +2766,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#4FC3F7");
         _queryDurationTrendHover?.Add(plot, "Query Duration");
 
-        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
+        QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(QueryDurationTrendChart);
         QueryDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
         SetChartYLimitsWithLegendPadding(QueryDurationTrendChart, 0, values.Max());
@@ -2664,7 +2790,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#81C784");
         _procDurationTrendHover?.Add(plot, "Procedure Duration");
 
-        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
+        ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(ProcDurationTrendChart);
         ProcDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
         SetChartYLimitsWithLegendPadding(ProcDurationTrendChart, 0, values.Max());
@@ -2688,7 +2814,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#FFB74D");
         _queryStoreDurationTrendHover?.Add(plot, "Query Store Duration");
 
-        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottom();
+        QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Plot.YLabel("Duration (ms/sec)");
         SetChartYLimitsWithLegendPadding(QueryStoreDurationTrendChart, 0, values.Max());
@@ -2853,7 +2979,7 @@ public partial class ServerTab : UserControl
         plot.Color = ScottPlot.Color.FromHex("#BA68C8");
         _executionCountTrendHover?.Add(plot, "Executions");
 
-        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottom();
+        ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Plot.YLabel("Executions/sec");
         SetChartYLimitsWithLegendPadding(ExecutionCountTrendChart, 0, values.Max());
@@ -3413,7 +3539,7 @@ public partial class ServerTab : UserControl
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            WaitStatsChart.Plot.Axes.DateTimeTicksBottom();
+            WaitStatsChart.Plot.Axes.DateTimeTicksBottomDateChange();
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
@@ -3577,7 +3703,7 @@ public partial class ServerTab : UserControl
                 }
             }
 
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottom();
+            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");
             SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
@@ -3771,7 +3897,7 @@ public partial class ServerTab : UserControl
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
 
-            PerfmonChart.Plot.Axes.DateTimeTicksBottom();
+            PerfmonChart.Plot.Axes.DateTimeTicksBottomDateChange();
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
@@ -3911,6 +4037,8 @@ public partial class ServerTab : UserControl
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
         chart.Plot.Axes.Left.Label.ForeColor = textColor;
+        chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
+        chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
 
         // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
         chart.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
@@ -3968,6 +4096,8 @@ public partial class ServerTab : UserControl
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
         chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
         chart.Plot.Axes.Left.Label.ForeColor = textColor;
+        chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
+        chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
     }
 
     /// <summary>
@@ -4731,6 +4861,104 @@ public partial class ServerTab : UserControl
         catch { return null; }
     }
 
+    // ── Blocked Process Report plan lookup ──
+
+    /* SQL Server writes this 42-byte all-zero handle into executionStack frames
+       for dynamic SQL / system contexts where no persistent sql_handle exists.
+       Filter matches sp_HumanEventsBlockViewer's XPath exclusion. */
+    private static readonly string ZeroSqlHandle = "0x" + new string('0', 84);
+
+    private async void ViewBlockedSidePlan_Click(object sender, RoutedEventArgs e)
+        => await ShowBlockedProcessPlanAsync(sender, blockingSide: false);
+
+    private async void ViewBlockingSidePlan_Click(object sender, RoutedEventArgs e)
+        => await ShowBlockedProcessPlanAsync(sender, blockingSide: true);
+
+    private async System.Threading.Tasks.Task ShowBlockedProcessPlanAsync(object sender, bool blockingSide)
+    {
+        if (sender is not MenuItem menuItem) return;
+        var grid = FindParentDataGrid(menuItem);
+        if (grid?.CurrentItem is not BlockedProcessReportRow row) return;
+
+        var sideLabel = blockingSide ? "Blocking" : "Blocked";
+        var spid = blockingSide ? row.BlockingSpid : row.BlockedSpid;
+        var queryText = blockingSide ? row.BlockingSqlText : row.BlockedSqlText;
+        var label = $"Est Plan - {sideLabel} SPID {spid}";
+
+        var frames = ExtractBlockedProcessFrames(row.BlockedProcessReportXml, blockingSide);
+        if (frames.Count == 0)
+        {
+            MessageBox.Show(
+                $"The {sideLabel.ToLowerInvariant()} process report has no resolvable sql_handle. " +
+                "This usually means the query ran as dynamic SQL or a system context — " +
+                "SQL Server records a zero handle in that case and the plan can't be recovered.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        string? planXml = null;
+        try
+        {
+            var connStr = _server.GetConnectionString(_credentialService);
+            foreach (var f in frames)
+            {
+                planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
+                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
+                if (!string.IsNullOrEmpty(planXml)) break;
+            }
+        }
+        catch { }
+
+        if (!string.IsNullOrEmpty(planXml))
+        {
+            OpenPlanTab(planXml, label, queryText);
+            PlanViewerTabItem.IsSelected = true;
+        }
+        else
+        {
+            MessageBox.Show(
+                $"The plan for the {sideLabel.ToLowerInvariant()} query is no longer in the plan cache on {_server.ServerName}. " +
+                "Blocked process reports only give us a sql_handle — if that plan has been evicted, we can't recover it.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    private static IReadOnlyList<(string SqlHandle, int StmtStart, int StmtEnd)> ExtractBlockedProcessFrames(
+        string bprXml, bool blockingSide)
+    {
+        var empty = Array.Empty<(string, int, int)>();
+        if (string.IsNullOrWhiteSpace(bprXml)) return empty;
+        try
+        {
+            var doc = System.Xml.Linq.XElement.Parse(bprXml);
+            var processContainer = blockingSide
+                ? doc.Element("blocking-process")
+                : doc.Element("blocked-process");
+            var stack = processContainer?.Element("process")?.Element("executionStack");
+            if (stack == null) return empty;
+
+            var frames = new List<(string, int, int)>();
+            foreach (var frame in stack.Elements("frame"))
+            {
+                var handle = frame.Attribute("sqlhandle")?.Value;
+                if (string.IsNullOrWhiteSpace(handle)) continue;
+                if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
+
+                int stmtStart = 0;
+                int stmtEnd = -1;
+                int.TryParse(frame.Attribute("stmtstart")?.Value, out stmtStart);
+                if (int.TryParse(frame.Attribute("stmtend")?.Value, out var se)) stmtEnd = se;
+
+                frames.Add((handle!, stmtStart, stmtEnd));
+            }
+            return frames;
+        }
+        catch
+        {
+            return empty;
+        }
+    }
+
     // ── Active Queries Slicer ──
 
     private async System.Threading.Tasks.Task LoadActiveQueriesSlicerAsync()
@@ -5137,7 +5365,9 @@ public partial class ServerTab : UserControl
                 ConnectTimeout = 15
             };
 
-            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: true);
+            // Live query plans require VIEW SERVER PERFORMANCE STATE on Azure SQL DB,
+            // which DB-scoped logins don't have — skip them there. See #857.
+            var query = RemoteCollectorService.BuildQuerySnapshotsQuery(supportsLiveQueryPlan: !_isAzureSqlDatabase, isAzureSqlDatabase: _isAzureSqlDatabase);
 
             await using var connection = new SqlConnection(builder.ConnectionString);
             await connection.OpenAsync();
@@ -5307,7 +5537,7 @@ public partial class ServerTab : UserControl
             colorIdx++;
         }
 
-        CollectorDurationChart.Plot.Axes.DateTimeTicksBottom();
+        CollectorDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
         ReapplyAxisColors(CollectorDurationChart);
         CollectorDurationChart.Plot.YLabel("Duration (ms)");
         CollectorDurationChart.Plot.Axes.AutoScale();
@@ -5361,6 +5591,7 @@ public partial class ServerTab : UserControl
         _memoryClerksHover?.Dispose();
         _memoryGrantSizingHover?.Dispose();
         _memoryGrantActivityHover?.Dispose();
+        _memoryPressureEventsHover?.Dispose();
         _currentWaitsDurationHover?.Dispose();
         _currentWaitsBlockedHover?.Dispose();
     }

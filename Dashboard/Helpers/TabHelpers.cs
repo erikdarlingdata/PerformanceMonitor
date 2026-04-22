@@ -200,6 +200,8 @@ namespace PerformanceMonitorDashboard.Helpers
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
             chart.Plot.Axes.Left.Label.ForeColor = textColor;
+            chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
+            chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
 
             // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
             chart.Background = new SolidColorBrush(Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
@@ -234,6 +236,8 @@ namespace PerformanceMonitorDashboard.Helpers
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
             chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
             chart.Plot.Axes.Left.Label.ForeColor = textColor;
+            chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
+            chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
         }
 
         /// <summary>

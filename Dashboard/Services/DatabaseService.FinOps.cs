@@ -1852,19 +1852,51 @@ OPTION(MAXDOP 1, RECOMPILE);";
             try
             {
                 using var editionCmd = new SqlCommand(
-                    "SELECT CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128))", connection);
+                    "SELECT CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)), " +
+                    "CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)", connection);
                 editionCmd.CommandTimeout = 30;
-                var edition = (string?)await editionCmd.ExecuteScalarAsync() ?? "";
+                using var editionReader = await editionCmd.ExecuteReaderAsync();
+                string edition = "";
+                int majorVersion = 0;
+                if (await editionReader.ReadAsync())
+                {
+                    edition = editionReader.IsDBNull(0) ? "" : editionReader.GetString(0);
+                    majorVersion = editionReader.IsDBNull(1) ? 0 : editionReader.GetInt32(1);
+                }
 
                 if (edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
                 {
-                    /*
-                    sys.dm_db_persisted_sku_features is database-scoped on all versions.
-                    Query across all online user databases for TDE usage — the only feature
-                    still Enterprise-only since 2016 SP1 (Compression, Partitioning,
-                    ColumnStoreIndex are all available in Standard).
-                    */
-                    using var featCmd = new SqlCommand(@"
+                    // SQL Server 2019 (major version 15) moved TDE to Standard Edition.
+                    // On 2019+, dm_db_persisted_sku_features won't report TDE since it's
+                    // no longer Enterprise-restricted — so we skip the TDE-specific check
+                    // and give version-appropriate guidance instead.
+                    if (majorVersion >= 15)
+                    {
+                        // 2019+: Most features that were Enterprise-only moved to Standard
+                        // in 2016 SP1, and TDE moved in 2019. Very few Enterprise-only
+                        // features remain (e.g., certain HA configurations).
+                        recommendations.Add(new FinOpsRecommendation
+                        {
+                            Category = "Licensing",
+                            Severity = "High",
+                            Confidence = "Medium",
+                            Finding = "Enterprise Edition may not be required",
+                            Detail = "Starting with SQL Server 2019, most previously Enterprise-only features " +
+                                     "(including TDE, compression, partitioning, and columnstore) are available " +
+                                     "in Standard Edition. Review whether remaining Enterprise-only features " +
+                                     "(such as Always On availability groups with multiple secondaries) are in use " +
+                                     "before considering a downgrade to Standard Edition.",
+                            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
+                        });
+                    }
+                    else
+                    {
+                        /*
+                        Pre-2019: TDE is the only commonly-used feature still restricted
+                        to Enterprise Edition since 2016 SP1. Use dm_db_persisted_sku_features
+                        to detect it — the DMV correctly reports TDE on these versions.
+                        */
+                        using var featCmd = new SqlCommand(@"
 DECLARE
     @sql nvarchar(max) = N'';
 
@@ -1883,42 +1915,42 @@ BEGIN
     SET @sql = LEFT(@sql, LEN(@sql) - 10);
     EXEC sys.sp_executesql @sql;
 END;", connection);
-                    featCmd.CommandTimeout = 30;
+                        featCmd.CommandTimeout = 30;
 
-                    var tdeDbNames = new List<string>();
-                    using var featReader = await featCmd.ExecuteReaderAsync();
-                    while (await featReader.ReadAsync())
-                    {
-                        if (!featReader.IsDBNull(0))
-                            tdeDbNames.Add(featReader.GetString(0));
-                    }
+                        var tdeDbNames = new List<string>();
+                        using var featReader = await featCmd.ExecuteReaderAsync();
+                        while (await featReader.ReadAsync())
+                        {
+                            if (!featReader.IsDBNull(0))
+                                tdeDbNames.Add(featReader.GetString(0));
+                        }
 
-                    if (tdeDbNames.Count == 0)
-                    {
-                        recommendations.Add(new FinOpsRecommendation
+                        if (tdeDbNames.Count == 0)
                         {
-                            Category = "Licensing",
-                            Severity = "High",
-                            Confidence = "High",
-                            Finding = "Enterprise Edition with no Enterprise-only features detected",
-                            Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
-                                     "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
-                                     "Review whether Standard Edition would meet workload requirements for potential license savings.",
-                            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
-                        });
-                    }
-                    else
-                    {
-                        recommendations.Add(new FinOpsRecommendation
+                            recommendations.Add(new FinOpsRecommendation
+                            {
+                                Category = "Licensing",
+                                Severity = "High",
+                                Confidence = "High",
+                                Finding = "Enterprise Edition with no Enterprise-only features detected",
+                                Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
+                                         "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
+                                         "Review whether Standard Edition would meet workload requirements for potential license savings.",
+                                EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
+                            });
+                        }
+                        else
                         {
-                            Category = "Licensing",
-                            Severity = "Low",
-                            Confidence = "High",
-                            Finding = "TDE in use — Enterprise Edition downgrade blocker",
-                            Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
-                                     (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
-                                     ". TDE must be removed before downgrading to Standard Edition."
-                        });
+                            recommendations.Add(new FinOpsRecommendation
+                            {
+                                Category = "Licensing",
+                                Severity = "Low",
+                                Confidence = "High",
+                                Finding = "TDE in use — Enterprise Edition downgrade blocker",
+                                Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
+                                         (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
+                                         ". TDE must be removed before downgrading to Standard Edition."
+                            });
 
                         // Check 10: License cost impact estimate (only when features ARE in use)
                         using var cpuInfoCmd = new SqlCommand(
@@ -1940,6 +1972,7 @@ END;", connection);
                                 EstMonthlySavings = monthlySavings
                             });
                         }
+                    }
                     }
                 }
             }
@@ -2437,7 +2470,7 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
                 Logger.Error($"[{ServerLabel}] Recommendation check failed (Reserved capacity): {ex.Message}", ex);
             }
 
-            return recommendations;
+            return recommendations.OrderBy(r => r.SeveritySort).ToList();
         }
 
         private static string FormatDuration(long seconds)
@@ -2840,6 +2873,14 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
         public string Detail { get; set; } = "";
         public decimal? EstMonthlySavings { get; set; }
         public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
+
+        public int SeveritySort => Severity switch
+        {
+            "High" => 1,
+            "Medium" => 2,
+            "Low" => 3,
+            _ => 4
+        };
     }
 
     public class FinOpsHighImpactQuery

@@ -30,6 +30,14 @@ public partial class RemoteCollectorService
            Azure MI (edition 8) HAS dm_os_sys_memory, sql_memory_model_desc, and behaves like on-prem. */
         bool isAzureSqlDb = serverStatus.SqlEngineEdition == 5;
 
+        /*
+         * Azure SQL Database in an elastic pool (e.g. D365FO tenants) enforces
+         * VIEW SERVER PERFORMANCE STATE on sys.dm_os_schedulers regardless of
+         * the login's DB-scoped grants, so we skip the schedulers subquery on
+         * Azure SQL DB and report current_workers_count as NULL. The rest of
+         * the row — memory sizes from sys.dm_os_sys_info and the perf counters
+         * — succeeds for contained DB users. See #857.
+         */
         string query = isAzureSqlDb
             ? @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -46,7 +54,7 @@ SELECT
     buffer_pool_mb = CONVERT(decimal(18,2), pc_buffer.cntr_value / 1024.0),
     plan_cache_mb = CONVERT(decimal(18,2), pc_plan.cntr_value * 8.0 / 1024.0),
     max_workers_count = osi.max_workers_count,
-    current_workers_count = w.current_workers
+    current_workers_count = CONVERT(int, NULL)
 FROM sys.dm_os_sys_info AS osi
 CROSS JOIN
 (
@@ -73,12 +81,6 @@ CROSS JOIN
     WHERE counter_name = N'Cache Pages'
       AND object_name LIKE N'%:Plan Cache%'
 ) AS pc_plan
-CROSS JOIN
-(
-    SELECT current_workers = SUM(active_workers_count)
-    FROM sys.dm_os_schedulers
-    WHERE status = N'VISIBLE ONLINE'
-) AS w
 OPTION(RECOMPILE);"
             : @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -264,6 +266,110 @@ OPTION(RECOMPILE);";
         _lastDuckDbMs = duckSw.ElapsedMilliseconds;
 
         _logger?.LogDebug("Collected {RowCount} memory clerks for server '{Server}'", rowsCollected, server.DisplayName);
+        return rowsCollected;
+    }
+
+    /// <summary>
+    /// Collects memory pressure notifications from RING_BUFFER_RESOURCE_MONITOR.
+    /// Same source as sp_pressuredetector — reports IndicatorsProcess/IndicatorsSystem
+    /// (0-1 normal, 2 medium pressure, 3+ severe) alongside the notification type.
+    /// Azure SQL DB does not expose sys.dm_os_ring_buffers, so this collector returns 0 there.
+    /// </summary>
+    private async Task<int> CollectMemoryPressureEventsAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+        bool isAzureSqlDb = serverStatus.SqlEngineEdition == 5;
+
+        _lastSqlMs = 0;
+        _lastDuckDbMs = 0;
+
+        if (isAzureSqlDb)
+        {
+            /* Ring buffer is not exposed on Azure SQL DB */
+            return 0;
+        }
+
+        const string query = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+DECLARE
+    @ms_ticks bigint,
+    @now datetime2(7) = SYSDATETIME();
+
+SELECT @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;
+
+SELECT
+    sample_time = DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now),
+    memory_notification = t.record.value('(/Record/ResourceMonitor/Notification)[1]', 'nvarchar(100)'),
+    memory_indicators_process = t.record.value('(/Record/ResourceMonitor/IndicatorsProcess)[1]', 'integer'),
+    memory_indicators_system = t.record.value('(/Record/ResourceMonitor/IndicatorsSystem)[1]', 'integer')
+FROM
+(
+    SELECT
+        dorb.timestamp,
+        record = CONVERT(xml, dorb.record)
+    FROM sys.dm_os_ring_buffers AS dorb
+    WHERE dorb.ring_buffer_type = N'RING_BUFFER_RESOURCE_MONITOR'
+) AS t
+ORDER BY t.timestamp
+OPTION(RECOMPILE);";
+
+        var serverId = GetServerId(server);
+        var collectionTime = DateTime.UtcNow;
+        var rowsCollected = 0;
+
+        /* Client-side dedup: computed sample_time cannot be filtered server-side
+           (it's derived from ms_ticks on each read). Fetch all and skip rows we already have. */
+        var lastSampleTime = await GetLastCollectedTimeAsync(
+            serverId, "memory_pressure_events", "sample_time", cancellationToken);
+
+        var sqlSw = Stopwatch.StartNew();
+        using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
+        using var command = new SqlCommand(query, sqlConnection);
+        command.CommandTimeout = CommandTimeoutSeconds;
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        sqlSw.Stop();
+        _lastSqlMs = sqlSw.ElapsedMilliseconds;
+
+        var duckSw = Stopwatch.StartNew();
+
+        using (var duckConnection = _duckDb.CreateConnection())
+        {
+            await duckConnection.OpenAsync(cancellationToken);
+
+            using (var appender = duckConnection.CreateAppender("memory_pressure_events"))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var sampleTime = reader.IsDBNull(0) ? DateTime.MinValue : reader.GetDateTime(0);
+                    if (lastSampleTime.HasValue && sampleTime <= lastSampleTime.Value)
+                        continue;
+
+                    var notification = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                    var indicatorsProcess = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+                    var indicatorsSystem = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
+
+                    var row = appender.CreateRow();
+                    row.AppendValue(GenerateCollectionId())
+                       .AppendValue(collectionTime)
+                       .AppendValue(serverId)
+                       .AppendValue(GetServerNameForStorage(server))
+                       .AppendValue(sampleTime)
+                       .AppendValue(notification)
+                       .AppendValue(indicatorsProcess)
+                       .AppendValue(indicatorsSystem)
+                       .EndRow();
+
+                    rowsCollected++;
+                }
+            }
+        }
+
+        duckSw.Stop();
+        _lastDuckDbMs = duckSw.ElapsedMilliseconds;
+
+        _logger?.LogDebug("Collected {RowCount} memory pressure events for server '{Server}'", rowsCollected, server.DisplayName);
         return rowsCollected;
     }
 }

@@ -124,6 +124,59 @@ public sealed class McpMemoryTools
         }
     }
 
+    [McpServerTool(Name = "get_memory_pressure_events"), Description(@"Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.
+
+Indicator scale (applies to both memory_indicators_process and memory_indicators_system):
+  0-1 = normal, no pressure
+  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)
+  3+  = severe pressure (aggressive buffer pool / plan cache eviction)
+
+memory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).
+memory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).
+
+Not available on Azure SQL DB (ring buffer not exposed). For actionable interpretation and suggested follow-up tools, see the 'Interpreting Memory Pressure Events' section of the server instructions.")]
+    public static async Task<string> GetMemoryPressureEvents(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24)
+    {
+        var resolved = ServerResolver.Resolve(serverManager, server_name);
+        if (resolved == null)
+        {
+            return $"Could not resolve server. Available servers:\n{ServerResolver.ListAvailableServers(serverManager)}";
+        }
+
+        try
+        {
+            var hoursError = McpHelpers.ValidateHoursBack(hours_back);
+            if (hoursError != null) return hoursError;
+
+            var rows = await dataService.GetMemoryPressureEventsAsync(resolved.Value.ServerId, hours_back);
+            if (rows.Count == 0)
+            {
+                return "No memory pressure events found in the requested time range.";
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.Value.ServerName,
+                hours_back,
+                events = rows.Select(r => new
+                {
+                    sample_time = r.SampleTime.ToString("o"),
+                    memory_notification = r.MemoryNotification,
+                    memory_indicators_process = r.MemoryIndicatorsProcess,
+                    memory_indicators_system = r.MemoryIndicatorsSystem
+                })
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_memory_pressure_events", ex);
+        }
+    }
+
     [McpServerTool(Name = "get_memory_grants"), Description("Gets resource semaphore statistics showing granted vs available workspace memory per resource pool, waiter counts, and timeout/forced grant deltas. High waiter counts or rising timeout deltas indicate memory grant pressure affecting query performance.")]
     public static async Task<string> GetMemoryGrants(
         LocalDataService dataService,
