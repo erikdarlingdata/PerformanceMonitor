@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Query/Procedure/Query Store stats** refactored to a phased DECOMPRESS approach; removed unhelpful `WAITFOR DECOMPRESS` filters
 - **Query/Procedure/Query Store grids** capped to TOP 500 to prevent UI freezes on large datasets
 - **Server tabs lazy-load** — only the visible server tab loads on startup; remaining tabs load on first visit
-- **Webhook URLs** encrypted with DPAPI via Windows Credential Manager
+- **Webhook URLs (Dashboard)** encrypted with DPAPI via Windows Credential Manager — Lite webhook URLs remain in plaintext settings for now
 - **DuckDB queries hardened** — parameterized values, escaped paths, fixed `IsArchiving` race
 - **Lite chart axes and sub-tab styling** polished, then ported to Dashboard
 
