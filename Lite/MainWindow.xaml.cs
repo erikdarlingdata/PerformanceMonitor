@@ -909,6 +909,25 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OpenLogFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        var logDir = AppLogger.GetLogDirectory();
+        try
+        {
+            System.IO.Directory.CreateDirectory(logDir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = logDir,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not open log folder: {ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void ImportSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFolderDialog
