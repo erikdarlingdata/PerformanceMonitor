@@ -57,6 +57,30 @@
                 </MenuItem>
             </ContextMenu>
 
+            <!-- Context menu for Deadlocks: one row per process, so "View Plan"
+                 resolves to THIS row's process via sql_handle in the graph XML.
+                 No Get Actual Plan — re-running a mid-transaction query that just
+                 deadlocked is a foot-gun. -->
+            <ContextMenu x:Key="DeadlockContextMenu">
+                <MenuItem Header="Copy Cell" Click="CopyCell_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Copy Row" Click="CopyRow_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Copy All Rows" Click="CopyAllRows_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
+                </MenuItem>
+                <Separator/>
+                <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
+                </MenuItem>
+                <Separator/>
+                <MenuItem Header="View Plan" Click="ViewDeadlockProcessPlan_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
+                </MenuItem>
+            </ContextMenu>
+
             <Style x:Key="GridRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource DataGridContextMenu}"/>
             </Style>
@@ -69,6 +93,11 @@
                         <Setter Property="Background" Value="#33FF6B6B"/>
                     </DataTrigger>
                 </Style.Triggers>
+            </Style>
+
+            <!-- Row style for deadlock grid - View Plan context menu -->
+            <Style x:Key="DeadlockRowStyle" TargetType="DataGridRow">
+                <Setter Property="ContextMenu" Value="{StaticResource DeadlockContextMenu}"/>
             </Style>
 
             <!-- Row style for wait stats - highlight high-wait types -->
@@ -1421,7 +1450,7 @@
                                 <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
                             <DataGrid x:Name="DeadlockGrid" Grid.Row="1"
                                       AutoGenerateColumns="False" IsReadOnly="True"
-                                      RowStyle="{StaticResource GridRowStyle}"
+                                      RowStyle="{StaticResource DeadlockRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
