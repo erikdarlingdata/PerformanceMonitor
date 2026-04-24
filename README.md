@@ -56,7 +56,7 @@ All release binaries are digitally signed via [SignPath](https://signpath.io) �
 
 ## What You Get
 
-🔍 **32 specialized T-SQL collectors** running on configurable schedules with named presets (Aggressive, Balanced, Low-Impact) — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments.
+🔍 **32 specialized T-SQL collectors** running on configurable schedules with named presets (Off, Aggressive, Balanced, Low-Impact) — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments. Switch presets with a pair of SQL Agent jobs to get quiet-hours / overnight windows without writing any code.
 
 🚨 **Real-time alerts** for blocking, deadlocks, and high CPU — system tray notifications, styled HTML emails with full XML attachments, and webhook notifications for external integrations
 

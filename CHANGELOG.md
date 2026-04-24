@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Memory Pressure Events in Lite** — the collector, chart, and `get_memory_pressure_events` MCP tool previously only in the Full Edition are now available in Lite ([#865])
 - **Grid auto-scrolling** in Lite and Dashboard ([#843]) — thanks [@ClaudioESSilva](https://github.com/ClaudioESSilva)
+- **`Off` collection preset** — `config.apply_collection_preset @preset_name = N'Off'` disables every collector in one call. Pair it with a second Agent job that applies a non-`Off` preset at the start of your active window to get overnight / quiet-hours scoping without writing scheduler code. Non-`Off` presets now also set `enabled = 1` across the board so the switch reliably resumes collection ([#888])
 
 ### Changed
 
@@ -47,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#865]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/865
 [#867]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/867
 [#872]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/872
+[#888]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/888
 
 ## [2.7.0] - 2026-04-13
 

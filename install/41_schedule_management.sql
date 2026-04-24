@@ -142,10 +142,18 @@ GO
 
 /*
 Apply a named collection preset
-Changes all scheduled collector frequencies in one operation.
-Does not modify enabled/disabled state or daily/on-load collectors.
 
-Valid preset names: Aggressive, Balanced, Low-Impact
+Valid preset names: Off, Aggressive, Balanced, Low-Impact
+
+Off sets enabled = 0 on every row in config.collection_schedule and changes
+nothing else — no frequency edits. The other three set enabled = 1 on every
+row (so switching back from Off reliably reactivates collection) and update
+frequency_minutes for the collectors they list. Daily/on-load collectors
+that aren't in the preset keep their existing frequency.
+
+Heads up: applying a non-Off preset overrides any manual
+UPDATE config.collection_schedule SET enabled = 0 on a specific collector.
+If that matters in your environment, re-disable it after switching presets.
 */
 IF OBJECT_ID(N'config.apply_collection_preset', N'P') IS NULL
 BEGIN
@@ -169,9 +177,33 @@ BEGIN
         @rows_updated bigint = 0;
 
     BEGIN TRY
-        IF @preset_name NOT IN (N'Aggressive', N'Balanced', N'Low-Impact')
+        IF @preset_name NOT IN (N'Off', N'Aggressive', N'Balanced', N'Low-Impact')
         BEGIN
-            RAISERROR(N'Invalid preset name "%s". Valid presets: Aggressive, Balanced, Low-Impact', 16, 1, @preset_name);
+            RAISERROR(N'Invalid preset name "%s". Valid presets: Off, Aggressive, Balanced, Low-Impact', 16, 1, @preset_name);
+            RETURN;
+        END;
+
+        /*
+        Off disables every collector and exits. No frequency table needed.
+        Pair with a second Agent job that applies a non-Off preset at the
+        start of your active window to resume collection.
+        */
+        IF @preset_name = N'Off'
+        BEGIN
+            UPDATE
+                config.collection_schedule
+            SET
+                enabled = 0,
+                modified_date = SYSDATETIME();
+
+            SET @rows_updated = ROWCOUNT_BIG();
+
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Applied "Off" preset — %I64d collectors disabled', 0, 1, @rows_updated) WITH NOWAIT;
+            END;
+
+            PRINT 'Applied "Off" collection preset (' + CONVERT(varchar(10), @rows_updated) + ' collectors disabled)';
             RETURN;
         END;
 
@@ -303,20 +335,27 @@ BEGIN
         END;
 
         /*
-        Apply the preset to all matching collectors.
-        Only updates frequency - does not change enabled/disabled state.
-        Skips daily/on-load collectors not in the preset.
+        Re-enable every collector first so a switch from Off → named preset
+        reliably resumes collection, including daily/on-load collectors that
+        aren't in the preset frequency table.
+        */
+        UPDATE
+            config.collection_schedule
+        SET
+            enabled = 1,
+            modified_date = SYSDATETIME()
+        WHERE
+            enabled = 0;
+
+        /*
+        Apply the preset frequencies to the collectors it lists.
+        Daily/on-load collectors not in the preset keep their existing frequency.
         */
         UPDATE
             cs
         SET
             cs.frequency_minutes = p.frequency_minutes,
-            cs.next_run_time =
-                CASE
-                    WHEN cs.enabled = 1
-                    THEN SYSDATETIME()
-                    ELSE cs.next_run_time
-                END,
+            cs.next_run_time = SYSDATETIME(),
             cs.modified_date = SYSDATETIME()
         FROM config.collection_schedule AS cs
         JOIN @preset AS p
@@ -416,11 +455,12 @@ PRINT '';
 PRINT 'Available procedures:';
 PRINT '- config.update_collector_frequency - Change frequency for specific collector';
 PRINT '- config.set_collector_enabled - Enable/disable specific collector';
-PRINT '- config.apply_collection_preset - Apply a named preset (Aggressive, Balanced, Low-Impact)';
+PRINT '- config.apply_collection_preset - Apply a named preset (Off, Aggressive, Balanced, Low-Impact)';
 PRINT '- config.show_collection_schedule - Display current schedule';
 PRINT '';
 PRINT 'Examples:';
 PRINT '  EXECUTE config.apply_collection_preset @preset_name = N''Aggressive'', @debug = 1;';
 PRINT '  EXECUTE config.apply_collection_preset @preset_name = N''Balanced'';';
 PRINT '  EXECUTE config.apply_collection_preset @preset_name = N''Low-Impact'';';
+PRINT '  EXECUTE config.apply_collection_preset @preset_name = N''Off'';  -- disables all collectors';
 GO
