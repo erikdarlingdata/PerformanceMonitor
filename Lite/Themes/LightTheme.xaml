@@ -735,8 +735,30 @@
         <Setter Property="Background" Value="#BBDEFB"/>
     </Style>
 
+    <!-- Foreground to use on selected rows (dark text on the light accent background) -->
+    <SolidColorBrush x:Key="GridSelectionForegroundBrush" Color="#1A1D23"/>
+
+    <!-- Override WPF system selection brushes so all controls (DataGrid, ListBox, etc.)
+         use the theme accent and the matching readable text color. -->
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"                    Color="{StaticResource AccentColor}"/>
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                Color="#1A1D23"/>
+    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"   Color="{StaticResource AccentColor}"/>
+    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="#1A1D23"/>
+
+    <!-- Named base style for DataGridTextColumn ElementStyles that must set an explicit
+         Foreground.  BasedOn this style; keep the unselected Foreground setter in the
+         derived style and let this base trigger override it during row selection. -->
+    <Style x:Key="DataGridCellText" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow, AncestorLevel=1}, FallbackValue=False}" Value="True">
+                <Setter Property="Foreground" Value="{DynamicResource GridSelectionForegroundBrush}"/>
+            </DataTrigger>
+        </Style.Triggers>
+    </Style>
+
     <!-- Right-aligned text style for numeric DataGrid columns -->
-    <Style x:Key="NumericCell" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+    <Style x:Key="NumericCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
         <Setter Property="TextAlignment" Value="Right"/>
     </Style>
 
@@ -758,7 +780,7 @@
         <Style.Triggers>
             <Trigger Property="IsSelected" Value="True">
                 <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
-                <Setter Property="Foreground" Value="#E4E6EB"/>
+                <Setter Property="Foreground" Value="#1A1D23"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -768,6 +790,7 @@
         <Style.Triggers>
             <Trigger Property="IsSelected" Value="True">
                 <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+                <Setter Property="Foreground" Value="{StaticResource GridSelectionForegroundBrush}"/>
             </Trigger>
             <Trigger Property="IsMouseOver" Value="True">
                 <Setter Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
@@ -1241,5 +1264,20 @@
         <Setter Property="Padding" Value="10,8"/>
     </Style>
 
+
+    <!-- ============================================ -->
+    <!-- Plan Viewer Resources                        -->
+    <!-- ============================================ -->
+    <SolidColorBrush x:Key="PlanTooltipBgBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="PlanTooltipBorderBrush" Color="{StaticResource BorderColor}"/>
+    <SolidColorBrush x:Key="PlanPanelTextBrush" Color="{StaticResource ForegroundColor}"/>
+    <SolidColorBrush x:Key="PlanPanelMutedBrush" Color="{StaticResource ForegroundMutedColor}"/>
+    <SolidColorBrush x:Key="PlanSectionHeaderBrush" Color="{StaticResource AccentPressedColor}"/>
+    <SolidColorBrush x:Key="PlanPropSeparatorBrush" Color="{StaticResource BorderColor}"/>
+    <SolidColorBrush x:Key="PlanMissingIndexBgBrush" Color="#FFF8E1"/>
+    <SolidColorBrush x:Key="PlanMissingIndexBorderBrush" Color="#FFD54F"/>
+    <SolidColorBrush x:Key="PlanMissingIndexHeaderBrush" Color="#E65100"/>
+    <SolidColorBrush x:Key="PlanWaitStatsBgBrush" Color="#E3F2FD"/>
+    <SolidColorBrush x:Key="PlanWaitStatsHeaderBrush" Color="#1565C0"/>
 
 </ResourceDictionary>
