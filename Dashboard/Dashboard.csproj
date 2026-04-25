@@ -35,7 +35,8 @@
   <ItemGroup>
     <PackageReference Include="CredentialManagement" Version="1.0.2" />
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.7" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.7" />
     <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />

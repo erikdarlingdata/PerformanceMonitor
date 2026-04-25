@@ -19,7 +19,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
   </ItemGroup>
 
   <!-- Embed SQL scripts as assembly resources for Dashboard consumption -->

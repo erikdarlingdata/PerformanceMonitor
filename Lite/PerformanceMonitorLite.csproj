@@ -41,7 +41,8 @@
     <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.2" />
 
     <!-- SQL Server connectivity -->
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
 
     <!-- Charting -->
     <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
