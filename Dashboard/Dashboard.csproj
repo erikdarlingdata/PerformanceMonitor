@@ -40,8 +40,8 @@
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.7" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.7" />
     <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
-    <PackageReference Include="ModelContextProtocol" Version="0.7.0-preview.1" />
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.7.0-preview.1" />
+    <PackageReference Include="ModelContextProtocol" Version="1.2.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.2.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
     <PackageReference Include="Velopack" Version="0.0.1298" />
   </ItemGroup>
