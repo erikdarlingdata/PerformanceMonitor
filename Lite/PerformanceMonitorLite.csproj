@@ -37,8 +37,8 @@
 
   <ItemGroup>
     <!-- DuckDB for local data storage -->
-    <PackageReference Include="DuckDB.NET.Data" Version="1.5.0" />
-    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.0" />
+    <PackageReference Include="DuckDB.NET.Data" Version="1.5.2" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.2" />
 
     <!-- SQL Server connectivity -->
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
