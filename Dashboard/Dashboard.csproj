@@ -36,12 +36,12 @@
     <PackageReference Include="CredentialManagement" Version="1.0.2" />
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.5" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.5" />
-    <PackageReference Include="ScottPlot.WPF" Version="5.1.57" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.7" />
+    <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
     <PackageReference Include="ModelContextProtocol" Version="0.7.0-preview.1" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.7.0-preview.1" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
     <PackageReference Include="Velopack" Version="0.0.1298" />
   </ItemGroup>
 
