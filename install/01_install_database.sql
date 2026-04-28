@@ -735,6 +735,32 @@ END;
 GO
 
 /*
+Create per-database exclusions table
+User-configurable list of databases to skip in per-database collectors
+(query_store, file_io_stats, database_size_stats, etc.). System databases
+are always skipped by the collectors themselves and are not represented here.
+*/
+IF OBJECT_ID(N'config.collector_database_exclusions', N'U') IS NULL
+BEGIN
+    CREATE TABLE
+        config.collector_database_exclusions
+    (
+        database_name sysname NOT NULL,
+        excluded_at datetime2(7) NOT NULL DEFAULT SYSDATETIME(),
+        excluded_by sysname NULL DEFAULT SUSER_SNAME(),
+        CONSTRAINT
+            PK_collector_database_exclusions
+        PRIMARY KEY CLUSTERED
+            (database_name)
+        WITH
+            (DATA_COMPRESSION = PAGE)
+    );
+
+    PRINT 'Created config.collector_database_exclusions table';
+END;
+GO
+
+/*
 Create installation history table
 */
 IF OBJECT_ID(N'config.installation_history', N'U') IS NULL

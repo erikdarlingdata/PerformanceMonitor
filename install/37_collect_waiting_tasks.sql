@@ -183,6 +183,13 @@ BEGIN
               WHERE iwt.wait_type = wt.wait_type
               AND   iwt.is_enabled = 1
         )
+        AND   NOT EXISTS
+        (
+              SELECT
+                  1/0
+              FROM config.collector_database_exclusions AS e
+              WHERE e.database_name = d.name
+        )
         OPTION(RECOMPILE);
 
         SET @rows_collected = ROWCOUNT_BIG();

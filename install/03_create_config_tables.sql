@@ -629,6 +629,45 @@ BEGIN
               );
           END;
 
+          /*
+          Create config.collector_database_exclusions
+          User-configurable list of databases to skip in per-database collectors.
+          System databases (master/tempdb/model/msdb) are filtered by the collectors
+          themselves and aren't represented here.
+          */
+          IF OBJECT_ID(N'config.collector_database_exclusions', N'U') IS NULL
+          BEGIN
+              IF @debug = 1
+              BEGIN
+                  RAISERROR(N'Creating config.collector_database_exclusions table', 0, 1) WITH NOWAIT;
+              END;
+
+              CREATE TABLE
+                  config.collector_database_exclusions
+              (
+                  database_name sysname NOT NULL,
+                  excluded_at datetime2(7) NOT NULL DEFAULT SYSDATETIME(),
+                  excluded_by sysname NULL DEFAULT SUSER_SNAME(),
+                  CONSTRAINT PK_collector_database_exclusions PRIMARY KEY CLUSTERED (database_name) WITH (DATA_COMPRESSION = PAGE)
+              );
+
+              SET @tables_created = @tables_created + 1;
+
+              INSERT INTO
+                  config.collection_log
+              (
+                  collector_name,
+                  collection_status,
+                  error_message
+              )
+              VALUES
+              (
+                  N'ensure_config_tables',
+                  N'TABLE_CREATED',
+                  N'Created config.collector_database_exclusions table'
+              );
+          END;
+
         /*
         Create config.installation_history
         */

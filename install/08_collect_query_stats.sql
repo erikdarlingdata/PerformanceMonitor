@@ -406,6 +406,13 @@ BEGIN
             DB_ID(N'PerformanceMonitor')
         )
         AND   pa.dbid < 32761 /*exclude contained AG system databases*/
+        AND   NOT EXISTS
+        (
+            SELECT
+                1/0
+            FROM config.collector_database_exclusions AS e
+            WHERE e.database_name = d.name
+        )
         OPTION(RECOMPILE);
 
         /*

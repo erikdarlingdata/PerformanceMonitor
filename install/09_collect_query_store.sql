@@ -351,6 +351,13 @@ BEGIN
                 drs.database_id IS NULL          /*not in any AG*/
                 OR drs.is_primary_replica = 1    /*primary replica*/
             )
+            AND NOT EXISTS
+            (
+                SELECT
+                    1/0
+                FROM config.collector_database_exclusions AS e
+                WHERE e.database_name = d.name
+            )
             OPTION(RECOMPILE);
 
         OPEN @db_check_cursor;
