@@ -297,6 +297,73 @@ namespace PerformanceMonitorDashboard
             }
         }
 
+        private async void PurgeNow_Click(object sender, RoutedEventArgs e)
+        {
+            if (ServersDataGrid.SelectedItem is not ServerConnection server)
+            {
+                MessageBox.Show(
+                    "Please select a server to purge.",
+                    "No Server Selected",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var dialog = new PurgeNowDialog(server.DisplayNameWithIntent) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+
+            Cursor = System.Windows.Input.Cursors.Wait;
+            try
+            {
+                var result = await _serverManager.RunDataRetentionAsync(
+                    server,
+                    dialog.RetentionDaysOverride);
+
+                bool wasTruncate = dialog.RetentionDaysOverride == 0;
+                string body;
+                if (wasTruncate)
+                {
+                    body = $"All collector tables truncated.\n\n" +
+                           $"Rows wiped: {result.RowsDeleted:N0}\n" +
+                           $"Tables affected: {result.TableCount}\n" +
+                           $"Status: {result.Status}\n" +
+                           $"Duration: {result.DurationMs} ms";
+                }
+                else
+                {
+                    body = $"Purge complete.\n\n" +
+                           $"Rows deleted: {result.RowsDeleted:N0}\n" +
+                           $"Tables touched: {result.TableCount}\n" +
+                           $"Status: {result.Status}\n" +
+                           $"Duration: {result.DurationMs} ms";
+                }
+
+                if (!string.Equals(result.Status, "SUCCESS", StringComparison.Ordinal) &&
+                    !string.IsNullOrEmpty(result.Message))
+                {
+                    body += $"\n\nMessage: {result.Message}";
+                }
+
+                MessageBox.Show(this, body, "Purge Complete",
+                    MessageBoxButton.OK,
+                    string.Equals(result.Status, "SUCCESS", StringComparison.Ordinal)
+                        ? MessageBoxImage.Information
+                        : MessageBoxImage.Warning);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Failed to run purge on '{server.DisplayNameWithIntent}':\n\n{ex.Message}",
+                    "Purge Failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            finally
+            {
+                Cursor = null;
+            }
+        }
+
         private void CopyCell_Click(object sender, RoutedEventArgs e)
         {
             if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)

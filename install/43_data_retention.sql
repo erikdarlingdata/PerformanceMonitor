@@ -35,7 +35,7 @@ GO
 ALTER PROCEDURE
     config.data_retention
 (
-    @retention_days integer = 30, /*Fallback retention for tables without a collection_schedule entry*/
+    @retention_days integer = NULL, /*NULL = use per-collector retention from config.collection_schedule (30-day fallback). 0 = TRUNCATE every collect.* table. N > 0 = override every table's cutoff to N days.*/
     @batch_size integer = 10000, /*Number of rows to delete per batch to avoid blocking*/
     @debug bit = 0 /*Print debugging information*/
 )
@@ -45,8 +45,16 @@ BEGIN
     SET NOCOUNT ON;
     SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+    /*
+    NULL @retention_days means "respect per-collector schedule" with a 30-day fallback for unscheduled tables.
+    Non-NULL means "use this value as the cutoff everywhere" — schedule overrides are skipped.
+    */
     DECLARE
-        @retention_date datetime2(7) = DATEADD(DAY, -@retention_days, SYSDATETIME()),
+        @apply_schedule_override bit = CASE WHEN @retention_days IS NULL THEN 1 ELSE 0 END,
+        @effective_retention_days integer = ISNULL(@retention_days, 30);
+
+    DECLARE
+        @retention_date datetime2(7) = DATEADD(DAY, -@effective_retention_days, SYSDATETIME()),
         @total_deleted bigint = 0,
         @start_time datetime2(7) = SYSDATETIME(),
         @table_name sysname,
@@ -60,15 +68,139 @@ BEGIN
         /*
         Parameter validation
         */
-        IF @retention_days < 1
+        IF @retention_days IS NOT NULL AND @retention_days < 0
         BEGIN
-            RAISERROR(N'@retention_days must be at least 1', 16, 1);
+            RAISERROR(N'@retention_days must be 0 or greater', 16, 1);
             RETURN;
         END;
 
         IF @batch_size < 1000 OR @batch_size > 100000
         BEGIN
             RAISERROR(N'@batch_size must be between 1000 and 100000', 16, 1);
+            RETURN;
+        END;
+
+        /*
+        Purge-all branch: TRUNCATE every collect.* table when @retention_days = 0.
+        No FKs, schema-bound views, or indexed views reference collect.* so this is safe.
+        Config tables (including config.collection_log) are intentionally left alone.
+        */
+        IF @retention_days = 0
+        BEGIN
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Starting purge-all: TRUNCATE every collect.* table', 0, 1) WITH NOWAIT;
+            END;
+
+            DECLARE
+                @truncate_table_name sysname,
+                @truncate_sql nvarchar(max),
+                @truncate_table_count integer = 0,
+                @truncate_error_count integer = 0,
+                @truncate_rows_before bigint = 0,
+                @truncate_cursor cursor;
+
+            /*
+            Snapshot total row count across collect.* before truncating so we can report
+            how many rows the user actually wiped. TRUNCATE doesn't return a count.
+            */
+            SELECT
+                @truncate_rows_before = ISNULL(SUM(p.rows), 0)
+            FROM sys.tables AS t
+            JOIN sys.schemas AS s
+              ON s.schema_id = t.schema_id
+            JOIN sys.partitions AS p
+              ON p.object_id = t.object_id
+              AND p.index_id IN (0, 1)
+            WHERE s.name = N'collect'
+            AND   t.is_ms_shipped = 0;
+
+            SET @truncate_cursor = CURSOR LOCAL FAST_FORWARD FOR
+                SELECT
+                    t.name
+                FROM sys.tables AS t
+                JOIN sys.schemas AS s
+                  ON s.schema_id = t.schema_id
+                WHERE s.name = N'collect'
+                AND   t.is_ms_shipped = 0
+                ORDER BY
+                    t.name;
+
+            OPEN @truncate_cursor;
+            FETCH NEXT FROM @truncate_cursor INTO @truncate_table_name;
+
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                BEGIN TRY
+                    SET @truncate_sql = N'TRUNCATE TABLE collect.' + QUOTENAME(@truncate_table_name) + N';';
+
+                    IF @debug = 1
+                    BEGIN
+                        RAISERROR(N'  %s', 0, 1, @truncate_sql) WITH NOWAIT;
+                    END;
+
+                    EXECUTE sys.sp_executesql @truncate_sql;
+                    SET @truncate_table_count = @truncate_table_count + 1;
+                END TRY
+                BEGIN CATCH
+                    SET @truncate_error_count = @truncate_error_count + 1;
+                    SET @message = N'TRUNCATE failed for collect.' + QUOTENAME(@truncate_table_name) + N': ' + ERROR_MESSAGE();
+
+                    IF @debug = 1
+                    BEGIN
+                        RAISERROR(@message, 0, 1) WITH NOWAIT;
+                    END;
+
+                    INSERT INTO
+                        config.collection_log
+                    (
+                        collector_name,
+                        collection_status,
+                        error_message
+                    )
+                    VALUES
+                    (
+                        N'data_retention',
+                        N'ERROR',
+                        @message
+                    );
+                END CATCH;
+
+                FETCH NEXT FROM @truncate_cursor INTO @truncate_table_name;
+            END;
+
+            CLOSE @truncate_cursor;
+
+            INSERT INTO
+                config.collection_log
+            (
+                collector_name,
+                collection_status,
+                rows_collected,
+                duration_ms,
+                error_message
+            )
+            VALUES
+            (
+                N'data_retention',
+                CASE WHEN @truncate_error_count = 0 THEN N'SUCCESS' ELSE N'WARNING' END,
+                /*rows_collected is INT; clamp the bigint snapshot to int range*/
+                CONVERT(integer, CASE WHEN @truncate_rows_before > 2147483647 THEN 2147483647 ELSE @truncate_rows_before END),
+                DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
+                N'TRUNCATE all: ' + CONVERT(nvarchar(10), @truncate_table_count) + N' tables truncated, '
+                + CONVERT(nvarchar(20), @truncate_rows_before) + N' rows wiped'
+                + CASE WHEN @truncate_error_count > 0
+                       THEN N', ' + CONVERT(nvarchar(10), @truncate_error_count) + N' errors'
+                       ELSE N''
+                  END
+            );
+
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Purge-all completed: %d tables truncated, %I64d rows wiped, %d errors', 0, 1,
+                    @truncate_table_count, @truncate_rows_before, @truncate_error_count) WITH NOWAIT;
+            END;
+
             RETURN;
         END;
 
@@ -247,42 +379,48 @@ BEGIN
 
         /*
         Override retention_date per-collector from config.collection_schedule.
-        Direct match: strip _collector/_analyzer suffix and match table name prefix.
+        Skipped when @retention_days was supplied — caller wants a flat cutoff across every table.
         */
-        UPDATE ttc
-        SET ttc.retention_date = DATEADD(DAY, -cs.retention_days, SYSDATETIME())
-        FROM #tables_to_clean AS ttc
-        JOIN config.collection_schedule AS cs
-          ON ttc.table_name LIKE REPLACE(REPLACE(cs.collector_name, N'_collector', N''), N'_analyzer', N'') + N'%';
+        IF @apply_schedule_override = 1
+        BEGIN
+            /*
+            Direct match: strip _collector/_analyzer suffix and match table name prefix.
+            */
+            UPDATE ttc
+            SET ttc.retention_date = DATEADD(DAY, -cs.retention_days, SYSDATETIME())
+            FROM #tables_to_clean AS ttc
+            JOIN config.collection_schedule AS cs
+              ON ttc.table_name LIKE REPLACE(REPLACE(cs.collector_name, N'_collector', N''), N'_analyzer', N'') + N'%';
+
+            /*
+            Special mappings for tables whose names don't match their collector:
+            - HealthParser_* tables -> system_health_collector
+            - blocking_BlockedProcessReport -> process_blocked_process_xml
+            - deadlocks (sp_BlitzLock output) -> process_deadlock_xml
+            */
+            UPDATE ttc
+            SET ttc.retention_date = DATEADD(DAY, -cs.retention_days, SYSDATETIME())
+            FROM #tables_to_clean AS ttc
+            CROSS JOIN config.collection_schedule AS cs
+            WHERE
+            (
+                ttc.table_name LIKE N'HealthParser%'
+                AND cs.collector_name = N'system_health_collector'
+            )
+            OR
+            (
+                ttc.table_name = N'blocking_BlockedProcessReport'
+                AND cs.collector_name = N'process_blocked_process_xml'
+            )
+            OR
+            (
+                ttc.table_name = N'deadlocks'
+                AND cs.collector_name = N'process_deadlock_xml'
+            );
+        END;
 
         /*
-        Special mappings for tables whose names don't match their collector:
-        - HealthParser_* tables -> system_health_collector
-        - blocking_BlockedProcessReport -> process_blocked_process_xml
-        - deadlocks (sp_BlitzLock output) -> process_deadlock_xml
-        */
-        UPDATE ttc
-        SET ttc.retention_date = DATEADD(DAY, -cs.retention_days, SYSDATETIME())
-        FROM #tables_to_clean AS ttc
-        CROSS JOIN config.collection_schedule AS cs
-        WHERE
-        (
-            ttc.table_name LIKE N'HealthParser%'
-            AND cs.collector_name = N'system_health_collector'
-        )
-        OR
-        (
-            ttc.table_name = N'blocking_BlockedProcessReport'
-            AND cs.collector_name = N'process_blocked_process_xml'
-        )
-        OR
-        (
-            ttc.table_name = N'deadlocks'
-            AND cs.collector_name = N'process_deadlock_xml'
-        );
-
-        /*
-        Special handling for config.collection_log - keep 2x longer
+        Special handling for config.collection_log - keep 2x longer than the effective retention
         */
         INSERT INTO
             #tables_to_clean
@@ -296,7 +434,7 @@ BEGIN
             schema_name = N'config',
             table_name = N'collection_log',
             time_column_name = N'collection_time',
-            retention_date = DATEADD(DAY, -(@retention_days * 2), SYSDATETIME())
+            retention_date = DATEADD(DAY, -(@effective_retention_days * 2), SYSDATETIME())
         WHERE EXISTS
         (
             SELECT
@@ -486,13 +624,19 @@ GO
 
 PRINT 'Data retention procedure created successfully (DYNAMIC VERSION)';
 PRINT 'Use config.data_retention to automatically purge old monitoring data';
-PRINT 'Uses per-collector retention from config.collection_schedule when available';
-PRINT 'Falls back to @retention_days parameter for unmatched tables';
+PRINT '';
+PRINT '  @retention_days = NULL (default): respect per-collector retention in config.collection_schedule';
+PRINT '                                    (30-day fallback for unscheduled tables)';
+PRINT '  @retention_days = 0            : TRUNCATE every collect.* table';
+PRINT '  @retention_days = N (N > 0)    : override every table''s cutoff to N days';
 PRINT '';
 PRINT 'Examples:';
 PRINT '  -- Use per-collector retention (default)';
 PRINT '  EXECUTE config.data_retention @debug = 1;';
 PRINT '';
-PRINT '  -- Override fallback to 90 days for tables without schedule entries';
-PRINT '  EXECUTE config.data_retention @retention_days = 90;';
+PRINT '  -- Override every table to 7-day retention';
+PRINT '  EXECUTE config.data_retention @retention_days = 7;';
+PRINT '';
+PRINT '  -- Purge all collected data (TRUNCATE every collect.* table)';
+PRINT '  EXECUTE config.data_retention @retention_days = 0;';
 GO

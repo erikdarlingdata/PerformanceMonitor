@@ -196,6 +196,94 @@ namespace PerformanceMonitorDashboard.Services
             Logger.Info($"Dropped PerformanceMonitor database and Agent jobs on '{server.DisplayName}'");
         }
 
+        public class PurgeResult
+        {
+            public int RowsDeleted { get; set; }
+            public int TableCount { get; set; }
+            public int DurationMs { get; set; }
+            public string Status { get; set; } = "";
+            public string? Message { get; set; }
+        }
+
+        /// <summary>
+        /// Runs config.data_retention against the PerformanceMonitor database on the given server.
+        /// </summary>
+        /// <param name="retentionDaysOverride">
+        /// null = use per-collector retention from config.collection_schedule.
+        /// 0 = TRUNCATE every collect.* table.
+        /// N > 0 = override every table's cutoff to N days.
+        /// </param>
+        public async Task<PurgeResult> RunDataRetentionAsync(
+            ServerConnection server,
+            int? retentionDaysOverride)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "PerformanceMonitor",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using (var cmd = new SqlCommand("config.data_retention", connection))
+            {
+                cmd.CommandType = System.Data.CommandType.StoredProcedure;
+                cmd.CommandTimeout = 600;
+
+                if (retentionDaysOverride.HasValue)
+                {
+                    cmd.Parameters.Add(new SqlParameter("@retention_days", System.Data.SqlDbType.Int) { Value = retentionDaysOverride.Value });
+                }
+
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            using var readCmd = new SqlCommand(@"
+SELECT TOP (1)
+    cl.collection_status,
+    cl.rows_collected,
+    cl.duration_ms,
+    cl.error_message
+FROM config.collection_log AS cl
+WHERE cl.collector_name = N'data_retention'
+ORDER BY cl.collection_time DESC;", connection);
+            readCmd.CommandTimeout = 30;
+
+            using var reader = await readCmd.ExecuteReaderAsync();
+            var result = new PurgeResult();
+
+            if (await reader.ReadAsync())
+            {
+                result.Status = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                result.RowsDeleted = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+                result.DurationMs = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+                result.Message = reader.IsDBNull(3) ? null : reader.GetString(3);
+
+                if (result.Message is not null && result.Message.StartsWith("Cleaned ", StringComparison.Ordinal))
+                {
+                    int spaceIdx = result.Message.IndexOf(' ', 8);
+                    if (spaceIdx > 8 && int.TryParse(result.Message.AsSpan(8, spaceIdx - 8), out int tableCount))
+                    {
+                        result.TableCount = tableCount;
+                    }
+                }
+                else if (result.Message is not null && result.Message.StartsWith("TRUNCATE all: ", StringComparison.Ordinal))
+                {
+                    int spaceIdx = result.Message.IndexOf(' ', 14);
+                    if (spaceIdx > 14 && int.TryParse(result.Message.AsSpan(14, spaceIdx - 14), out int tableCount))
+                    {
+                        result.TableCount = tableCount;
+                    }
+                }
+            }
+
+            Logger.Info($"Ran data_retention on '{server.DisplayName}': status={result.Status}, rowsDeleted={result.RowsDeleted}, tables={result.TableCount}, durationMs={result.DurationMs}");
+
+            return result;
+        }
+
         public void UpdateLastConnected(string id)
         {
             lock (_serversLock)
