@@ -32,7 +32,7 @@ public partial class RemoteCollectorService
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
         bool isAzureSqlDb = serverStatus?.SqlEngineEdition == 5;
 
-        const string onPremDbQuery = @"
+        string onPremDbQuery = @"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -60,6 +60,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
         drs.database_id IS NULL          /*not in any AG*/
         OR drs.is_primary_replica = 1    /*primary replica*/
     )
+    /*EXCLUSION_FILTER*/
     OPTION(RECOMPILE);
 
 OPEN db_check;
@@ -103,7 +104,7 @@ FROM @result
 ORDER BY
     name;";
 
-        const string azureDbQuery = @"
+        string azureDbQuery = @"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -123,6 +124,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
     AND   d.name <> N'PerformanceMonitor'
+    /*EXCLUSION_FILTER*/
     OPTION(RECOMPILE);
 
 OPEN db_check;
@@ -165,6 +167,10 @@ SELECT
 FROM @result
 ORDER BY
     name;";
+
+        var (exclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        onPremDbQuery = onPremDbQuery.Replace("/*EXCLUSION_FILTER*/", exclusionClause);
+        azureDbQuery = azureDbQuery.Replace("/*EXCLUSION_FILTER*/", exclusionClause);
 
         string dbQuery = isAzureSqlDb ? azureDbQuery : onPremDbQuery;
 
@@ -187,6 +193,8 @@ ORDER BY
         using (var dbCommand = new SqlCommand(dbQuery, sqlConnection))
         {
             dbCommand.CommandTimeout = CommandTimeoutSeconds;
+            var (_, exclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+            foreach (var p in exclusionParams) dbCommand.Parameters.Add(p);
             using var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken);
             while (await dbReader.ReadAsync(cancellationToken))
             {

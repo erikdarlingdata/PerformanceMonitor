@@ -24,7 +24,7 @@ public partial class RemoteCollectorService
     /// </summary>
     private async Task<int> CollectWaitingTasksAsync(ServerConnection server, CancellationToken cancellationToken)
     {
-        const string query = @"
+        string query = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
@@ -42,7 +42,11 @@ WHERE wt.session_id >= 50
 AND   wt.session_id <> @@SPID
 AND   wt.wait_type IS NOT NULL
 AND   er.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+/*EXCLUSION_FILTER*/
 OPTION(RECOMPILE);";
+
+        var (exclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        query = query.Replace("/*EXCLUSION_FILTER*/", exclusionClause);
 
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
@@ -54,6 +58,8 @@ OPTION(RECOMPILE);";
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
         using var command = new SqlCommand(query, sqlConnection);
         command.CommandTimeout = CommandTimeoutSeconds;
+        var (_, exclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        foreach (var p in exclusionParams) command.Parameters.Add(p);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         sqlSw.Stop();

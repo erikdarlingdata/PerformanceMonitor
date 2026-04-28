@@ -70,6 +70,25 @@ public partial class ManageServersWindow : Window
         }
     }
 
+    private void EditMenuItem_Click(object sender, RoutedEventArgs e) => EditSelected();
+
+    private void DeleteMenuItem_Click(object sender, RoutedEventArgs e) => DeleteButton_Click(sender, e);
+
+    private void ExcludedDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServersGrid.SelectedItem is not ServerConnection selected)
+        {
+            return;
+        }
+
+        var dialog = new ExcludedDatabasesDialog(_serverManager, selected) { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
+        {
+            ServersChanged = true;
+            RefreshGrid();
+        }
+    }
+
     private void DeleteButton_Click(object sender, RoutedEventArgs e)
     {
         if (ServersGrid.SelectedItem is not ServerConnection selected)

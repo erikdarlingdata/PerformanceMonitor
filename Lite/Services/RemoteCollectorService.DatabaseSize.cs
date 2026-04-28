@@ -30,7 +30,7 @@ public partial class RemoteCollectorService
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
         bool isAzureSqlDb = serverStatus?.SqlEngineEdition == 5;
 
-        const string onPremQuery = @"
+        string onPremQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET NOCOUNT ON;
 
@@ -52,6 +52,7 @@ DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
     WHERE d.state_desc = N'ONLINE'
     AND   d.database_id > 0
     AND   HAS_DBACCESS(d.name) = 1
+    /*EXCLUSION_FILTER_CURSOR*/
     ORDER BY
         d.name;
 
@@ -131,10 +132,18 @@ LEFT JOIN #file_space AS fs
   ON  fs.database_id = mf.database_id
   AND fs.file_id = mf.file_id
 WHERE d.state_desc = N'ONLINE'
+/*EXCLUSION_FILTER_OUTER*/
 ORDER BY
     d.name,
     mf.file_id
 OPTION(RECOMPILE);";
+
+        /* Both filter sites (cursor SELECT and final SELECT) are in outer T-SQL, not nested dynamic SQL,
+           so parameter bindings work fine and the same @excl_db_N can be referenced twice. */
+        var (dbSizeExclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        onPremQuery = onPremQuery
+            .Replace("/*EXCLUSION_FILTER_CURSOR*/", dbSizeExclusionClause)
+            .Replace("/*EXCLUSION_FILTER_OUTER*/", dbSizeExclusionClause);
 
         const string azureSqlDbQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -231,6 +240,8 @@ OPTION(RECOMPILE);";
             using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
             using var command = new SqlCommand(onPremQuery, sqlConnection);
             command.CommandTimeout = CommandTimeoutSeconds;
+            var (_, dbSizeExclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+            foreach (var p in dbSizeExclusionParams) command.Parameters.Add(p);
 
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))

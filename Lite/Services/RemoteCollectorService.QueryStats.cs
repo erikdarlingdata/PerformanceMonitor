@@ -31,7 +31,7 @@ public partial class RemoteCollectorService
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
         bool isAzureSqlDb = serverStatus.SqlEngineEdition == 5;
 
-        const string standardQuery = @"
+        string standardQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */ TOP (200)
@@ -106,9 +106,13 @@ INNER JOIN sys.databases AS d
 WHERE pa.dbid NOT IN (1, 2, 3, 4, 32761, 32767, ISNULL(DB_ID(N'PerformanceMonitor'), 0))
 AND   st.text NOT LIKE N'%PerformanceMonitorLite%'
 AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+/*EXCLUSION_FILTER*/
 ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
+
+        var (exclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        standardQuery = standardQuery.Replace("/*EXCLUSION_FILTER*/", exclusionClause);
 
         /* Azure SQL DB: skip plan_attributes, use DB_NAME() for the single database context */
         const string azureSqlDbQuery = @"
@@ -229,6 +233,11 @@ OPTION(RECOMPILE);";
                 {
                 using var command = new SqlCommand(query, sqlConnection);
                 command.CommandTimeout = CommandTimeoutSeconds;
+                if (!isAzureSqlDb)
+                {
+                    var (_, freshParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+                    foreach (var p in freshParams) command.Parameters.Add(p);
+                }
 
                 using var reader = await command.ExecuteReaderAsync(cancellationToken);
 

@@ -83,7 +83,12 @@ LEFT JOIN sys.databases AS d
 WHERE (vfs.database_id > 4 OR vfs.database_id = 2)
 AND   vfs.database_id < 32761
 AND   vfs.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+/*EXCLUSION_FILTER*/
 OPTION(RECOMPILE);";
+
+        /* Azure path filters via GetAzureDatabaseListAsync; on-prem path injects here */
+        var (fileIoExclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        query = query.Replace("/*EXCLUSION_FILTER*/", isAzureSqlDb ? string.Empty : fileIoExclusionClause);
 
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
@@ -125,6 +130,8 @@ OPTION(RECOMPILE);";
         {
             using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
             using var command = new SqlCommand(query, sqlConnection) { CommandTimeout = CommandTimeoutSeconds };
+            var (_, fileIoExclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+            foreach (var p in fileIoExclusionParams) command.Parameters.Add(p);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
                 fileStats.Add(ReadFileIoRow(reader));

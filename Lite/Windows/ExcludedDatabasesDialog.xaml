@@ -1,0 +1,50 @@
+<Window x:Class="PerformanceMonitorLite.Windows.ExcludedDatabasesDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Excluded Databases"
+        Height="500" Width="500"
+        WindowStartupLocation="CenterOwner"
+        Icon="/EDD.ico"
+        ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource BackgroundBrush}">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" x:Name="HeaderText" FontWeight="Bold" FontSize="14"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11"
+                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,12"
+                   Text="Databases marked here are skipped by per-database collectors (query_store, file_io_stats, etc.) on this server. System databases (master/tempdb/model/msdb) are always excluded."/>
+
+        <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8">
+                <ItemsControl x:Name="DatabasesItemsControl">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox Content="{Binding DisplayName}"
+                                      IsChecked="{Binding IsExcluded, Mode=TwoWay}"
+                                      IsEnabled="{Binding IsEnabled}"
+                                      Foreground="{Binding ForegroundBrush}"
+                                      Margin="2,3"/>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <TextBlock Grid.Row="3" x:Name="StatusText" FontSize="10" FontStyle="Italic"
+                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,8,0,0"/>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Save" Width="80" Height="28" Margin="0,0,8,0" Click="Save_Click" Style="{StaticResource AccentButton}"/>
+            <Button Content="Cancel" Width="80" Height="28" Click="Cancel_Click" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

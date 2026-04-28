@@ -232,6 +232,18 @@ DROP TABLE #req;
 
         var query = BuildQuerySnapshotsQuery(supportsLiveQueryPlan, isAzureSqlDatabase);
 
+        /* Append the per-database exclusion filter to the WHERE clause. The base query joins
+           sys.databases AS d, so we filter on d.name. When ExcludedDatabases is empty the
+           clause is "" so nothing changes. */
+        var (qsExclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        if (!string.IsNullOrEmpty(qsExclusionClause))
+        {
+            /* Inject just before the OPTION clause so it lands inside the WHERE. */
+            query = query.Replace(
+                "ORDER BY der.cpu_time DESC",
+                qsExclusionClause + "\nORDER BY der.cpu_time DESC");
+        }
+
         var serverId = GetServerId(server);
         var collectionTime = DateTime.UtcNow;
         var rowsCollected = 0;
@@ -242,6 +254,8 @@ DROP TABLE #req;
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
         using var command = new SqlCommand(query, sqlConnection);
         command.CommandTimeout = CommandTimeoutSeconds;
+        var (_, qsExclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        foreach (var p in qsExclusionParams) command.Parameters.Add(p);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         sqlSw.Stop();

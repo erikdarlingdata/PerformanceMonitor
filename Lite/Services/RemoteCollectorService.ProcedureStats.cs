@@ -32,7 +32,7 @@ public partial class RemoteCollectorService
         /* total_spills/min_spills/max_spills exist in dm_exec_procedure_stats and dm_exec_trigger_stats
            on all supported versions, but do NOT exist in dm_exec_function_stats on any version.
            Use dynamic SQL to handle this. */
-        const string standardQuery = @"
+        string standardQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
@@ -81,6 +81,7 @@ INNER JOIN sys.databases AS d
 WHERE d.state = 0
 AND   pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+/*EXCLUSION_FILTER*/
 
 UNION ALL
 
@@ -136,6 +137,7 @@ INNER JOIN sys.databases AS d
 WHERE d.state = 0
 AND   pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+/*EXCLUSION_FILTER*/
 
 UNION ALL
 
@@ -178,6 +180,7 @@ INNER JOIN sys.databases AS d
 WHERE d.state = 0
 AND   pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor''), 0))
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+/*EXCLUSION_FILTER*/
 ) AS combined
 ORDER BY total_elapsed_time DESC
 OPTION(RECOMPILE);' AS nvarchar(max));
@@ -220,8 +223,18 @@ SELECT /* PerformanceMonitorLite */ TOP (150)
 FROM sys.dm_exec_procedure_stats AS s
 WHERE s.database_id = DB_ID()
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+/*EXCLUSION_FILTER*/
 ORDER BY s.total_elapsed_time DESC
 OPTION(RECOMPILE);";
+
+        /* Standard query is dynamic SQL (built into @sql then passed to sp_executesql), so the
+           exclusion filter is interpolated as literal N'...' values rather than parameter bindings.
+           Names come from a user-picked checklist of existing DBs, escaped against single-quote
+           injection. forNestedDynamicSql=true doubles the escape because @sql is itself a
+           single-quoted T-SQL string at the outer layer. */
+        string standardExclusionClause = BuildDatabaseExclusionLiteralClause(
+            server.ExcludedDatabases, "d.name", forNestedDynamicSql: true);
+        standardQuery = standardQuery.Replace("/*EXCLUSION_FILTER*/", standardExclusionClause);
 
         string query = isAzureSqlDb ? azureSqlDbQuery : standardQuery;
 
