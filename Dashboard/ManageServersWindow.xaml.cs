@@ -297,6 +297,25 @@ namespace PerformanceMonitorDashboard
             }
         }
 
+        private void ExcludedDatabases_Click(object sender, RoutedEventArgs e)
+        {
+            if (ServersDataGrid.SelectedItem is not ServerConnection server)
+            {
+                MessageBox.Show(
+                    "Please select a server to configure excluded databases.",
+                    "No Server Selected",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var dialog = new ExcludedDatabasesDialog(_serverManager, server) { Owner = this };
+            if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
+            {
+                ServersModified = true;
+            }
+        }
+
         private async void PurgeNow_Click(object sender, RoutedEventArgs e)
         {
             if (ServersDataGrid.SelectedItem is not ServerConnection server)

@@ -176,6 +176,13 @@ BEGIN
             DB_ID(N'msdb')     /*4*/
         )
         AND   vfs.database_id < 32761 /*exclude resource database and contained AG system databases*/
+        AND   NOT EXISTS
+        (
+            SELECT
+                1/0
+            FROM config.collector_database_exclusions AS e
+            WHERE e.database_name = d.name
+        )
         OPTION(RECOMPILE);
 
         SET @rows_collected = ROWCOUNT_BIG();

@@ -284,6 +284,115 @@ ORDER BY cl.collection_time DESC;", connection);
             return result;
         }
 
+        /// <summary>
+        /// Returns user database names (excluding system DBs and PerformanceMonitor) on the target server,
+        /// for use in the Excluded Databases dialog.
+        /// </summary>
+        public async Task<List<string>> GetUserDatabasesAsync(ServerConnection server)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "master",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var cmd = new SqlCommand(@"
+SELECT d.name
+FROM sys.databases AS d
+WHERE d.database_id > 4
+AND   d.state_desc = N'ONLINE'
+AND   d.name <> N'PerformanceMonitor'
+AND   d.database_id < 32761 /*exclude contained AG system databases*/
+ORDER BY d.name;", connection);
+            cmd.CommandTimeout = 30;
+
+            var names = new List<string>();
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                names.Add(reader.GetString(0));
+            }
+            return names;
+        }
+
+        /// <summary>
+        /// Returns the current per-database exclusion list from config.collector_database_exclusions on the target.
+        /// </summary>
+        public async Task<List<string>> GetCollectorDatabaseExclusionsAsync(ServerConnection server)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "PerformanceMonitor",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var cmd = new SqlCommand(@"
+SELECT e.database_name
+FROM config.collector_database_exclusions AS e
+ORDER BY e.database_name;", connection);
+            cmd.CommandTimeout = 30;
+
+            var names = new List<string>();
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                names.Add(reader.GetString(0));
+            }
+            return names;
+        }
+
+        /// <summary>
+        /// Replaces the contents of config.collector_database_exclusions with the supplied list, transactionally.
+        /// </summary>
+        public async Task SaveCollectorDatabaseExclusionsAsync(ServerConnection server, IEnumerable<string> databaseNames)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "PerformanceMonitor",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var transaction = connection.BeginTransaction();
+            try
+            {
+                using (var deleteCmd = new SqlCommand("DELETE FROM config.collector_database_exclusions;", connection, transaction))
+                {
+                    deleteCmd.CommandTimeout = 30;
+                    await deleteCmd.ExecuteNonQueryAsync();
+                }
+
+                foreach (var name in databaseNames.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    using var insertCmd = new SqlCommand(
+                        "INSERT INTO config.collector_database_exclusions (database_name) VALUES (@name);",
+                        connection, transaction);
+                    insertCmd.CommandTimeout = 30;
+                    insertCmd.Parameters.Add(new SqlParameter("@name", System.Data.SqlDbType.NVarChar, 128) { Value = name });
+                    await insertCmd.ExecuteNonQueryAsync();
+                }
+
+                transaction.Commit();
+                Logger.Info($"Saved collector database exclusions on '{server.DisplayName}'");
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
+
         public void UpdateLastConnected(string id)
         {
             lock (_serversLock)

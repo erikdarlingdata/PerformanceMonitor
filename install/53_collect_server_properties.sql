@@ -136,6 +136,13 @@ BEGIN
                 WHERE d.state = 0 /*ONLINE only — skip RESTORING databases (mirroring/AG secondary)*/
                 AND   d.database_id > 4 /*Skip system databases*/
                 AND   HAS_DBACCESS(d.name) = 1
+                AND   NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM config.collector_database_exclusions AS e
+                    WHERE e.database_name = d.name
+                )
                 ORDER BY
                     d.database_id;
 
