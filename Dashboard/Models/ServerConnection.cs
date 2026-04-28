@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorDashboard.Interfaces;
@@ -14,7 +15,7 @@ using PerformanceMonitorDashboard.Services;
 
 namespace PerformanceMonitorDashboard.Models
 {
-    public class ServerConnection
+    public class ServerConnection : INotifyPropertyChanged
     {
         public string Id { get; set; } = Guid.NewGuid().ToString();
         public string ServerName { get; set; } = string.Empty;
@@ -87,6 +88,28 @@ namespace PerformanceMonitorDashboard.Models
         /// </summary>
         [JsonIgnore]
         public string DisplayNameWithIntent => ReadOnlyIntent ? $"{DisplayName} (Read-Only)" : DisplayName;
+
+        private string? _installedVersion;
+
+        /// <summary>
+        /// Installed PerformanceMonitor version on this server. Populated asynchronously
+        /// by the Manage Servers window. Not persisted — runtime-only display field.
+        /// Conventional values: null (not yet probed), a 3-part version like "2.9.0",
+        /// "Not installed", or "Unavailable" when the probe fails.
+        /// </summary>
+        [JsonIgnore]
+        public string? InstalledVersion
+        {
+            get => _installedVersion;
+            set
+            {
+                if (_installedVersion == value) return;
+                _installedVersion = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstalledVersion)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
 
         /// <summary>
         /// Display-only property for showing authentication type in UI.

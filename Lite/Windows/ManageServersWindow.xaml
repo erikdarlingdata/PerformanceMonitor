@@ -55,6 +55,7 @@
                 <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayNameWithIntent}" Width="150"/>
                 <DataGridTextColumn Header="Server" Binding="{Binding ServerNameDisplay}" Width="200"/>
                 <DataGridTextColumn Header="Auth" Binding="{Binding AuthenticationDisplay}" Width="100"/>
+                <DataGridTextColumn Header="Installed Version" Binding="{Binding InstalledVersion}" Width="130"/>
                 <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="80"/>
                 <DataGridTextColumn Header="Monthly Cost ($)" Binding="{Binding MonthlyCostUsd, StringFormat='{}{0:N0}'}" Width="120">
                     <DataGridTextColumn.ElementStyle>

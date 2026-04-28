@@ -7,13 +7,14 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Models;
 
-public class ServerConnection
+public class ServerConnection : INotifyPropertyChanged
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public string ServerName { get; set; } = string.Empty;
@@ -163,6 +164,27 @@ public class ServerConnection
     /// </summary>
     [JsonIgnore]
     public string StatusDisplay => IsEnabled ? "Enabled" : "Disabled";
+
+    private string? _installedVersion;
+
+    /// <summary>
+    /// PerformanceMonitor Lite app version monitoring this server (e.g., "2.9.0").
+    /// Populated by the Manage Servers window. Not persisted — runtime-only display field.
+    /// Same value for every row since one Lite process monitors all servers.
+    /// </summary>
+    [JsonIgnore]
+    public string? InstalledVersion
+    {
+        get => _installedVersion;
+        set
+        {
+            if (_installedVersion == value) return;
+            _installedVersion = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstalledVersion)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 
     /// <summary>
     /// Builds and returns a connection string for this server.

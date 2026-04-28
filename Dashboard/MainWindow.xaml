@@ -88,47 +88,75 @@
                           BorderThickness="0">
                     <ListView.ItemTemplate>
                         <DataTemplate>
-                            <Border BorderBrush="{DynamicResource BorderBrush}" 
-                                    BorderThickness="1" 
-                                    CornerRadius="4" 
-                                    Padding="8,6" 
+                            <Border BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Padding="8,6"
                                     Margin="2">
-                                <StackPanel>
-                                    <!-- Server Name Row with Status Icon -->
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="{Binding StatusIcon}"
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Status Indicator (back-ported from Lite: Ellipse + DataTriggers) -->
+                                    <Ellipse Grid.Column="0"
+                                             Width="10" Height="10"
+                                             Margin="0,6,8,0"
+                                             VerticalAlignment="Top"
+                                             ToolTip="{Binding Status.ErrorMessage}">
+                                        <Ellipse.Style>
+                                            <Style TargetType="Ellipse">
+                                                <Setter Property="Fill" Value="{DynamicResource ForegroundMutedBrush}"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding DotStatus}" Value="Online">
+                                                        <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding DotStatus}" Value="Offline">
+                                                        <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding DotStatus}" Value="Warning">
+                                                        <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Ellipse.Style>
+                                    </Ellipse>
+
+                                    <!-- Server detail stack -->
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="13" Foreground="{DynamicResource ForegroundBrush}"/>
+                                        <TextBlock Text="{Binding ServerName}" FontSize="13" Foreground="{DynamicResource AccentBrush}" Margin="0,-2,0,0" />
+                                        <TextBlock Text="{Binding Description}" FontSize="10" Foreground="{DynamicResource ForegroundDimBrush}"
+                                                   TextWrapping="Wrap" Margin="0,-1,0,0"/>
+                                        <!-- Status Duration (Online for X / Offline for X) -->
+                                        <TextBlock Text="{Binding StatusDurationDisplay, Mode=OneWay}"
+                                                   FontSize="13"
+                                                   FontWeight="SemiBold"
                                                    Foreground="{Binding StatusColor}"
-                                                   FontSize="14"
-                                                   FontWeight="Bold"
-                                                   VerticalAlignment="Center"
-                                                   Margin="0,0,4,0"
-                                                   ToolTip="{Binding Status.ErrorMessage}"/>
-                                        <TextBlock Text="&#x2605;" FontSize="13" Foreground="#FFD700" Margin="0,0,4,0"
-                                                   VerticalAlignment="Center"
-                                                   Visibility="{Binding IsFavorite, Converter={StaticResource BoolToVisibilityConverter}}"/>
-                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="13" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                                   Margin="0,-1,0,0"
+                                                   Visibility="{Binding HasBeenChecked, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                        <!-- Monitor Version -->
+                                        <TextBlock Text="{Binding MonitorVersionDisplay, Mode=OneWay}"
+                                                   FontSize="11"
+                                                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                                                   Margin="0,-1,0,0"
+                                                   Visibility="{Binding HasBeenChecked, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                        <!-- Last Checked Timestamp -->
+                                        <TextBlock FontSize="12" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,-1,0,0">
+                                            <Run Text="{Binding LastCheckedDisplay, Mode=OneWay}"/>
+                                        </TextBlock>
                                     </StackPanel>
-                                    <TextBlock Text="{Binding ServerName}" FontSize="13" Foreground="{DynamicResource AccentBrush}" Margin="0,-2,0,0" />
-                                    <TextBlock Text="{Binding Description}" FontSize="10" Foreground="{DynamicResource ForegroundDimBrush}"
-                                               TextWrapping="Wrap" Margin="0,-1,0,0"/>
-                                    <!-- Status Duration (Online for X / Offline for X) -->
-                                    <TextBlock Text="{Binding StatusDurationDisplay, Mode=OneWay}"
-                                               FontSize="13"
-                                               FontWeight="SemiBold"
-                                               Foreground="{Binding StatusColor}"
-                                               Margin="0,-1,0,0"
-                                               Visibility="{Binding HasBeenChecked, Converter={StaticResource BoolToVisibilityConverter}}"/>
-                                    <!-- Monitor Version -->
-                                    <TextBlock Text="{Binding MonitorVersionDisplay, Mode=OneWay}"
-                                               FontSize="11"
-                                               Foreground="{DynamicResource ForegroundMutedBrush}"
-                                               Margin="0,-1,0,0"
-                                               Visibility="{Binding HasBeenChecked, Converter={StaticResource BoolToVisibilityConverter}}"/>
-                                    <!-- Last Checked Timestamp -->
-                                    <TextBlock FontSize="12" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,-1,0,0">
-                                        <Run Text="{Binding LastCheckedDisplay, Mode=OneWay}"/>
-                                    </TextBlock>
-                                </StackPanel>
+
+                                    <!-- Favorite Star (right-aligned, back-ported from Lite) -->
+                                    <TextBlock Grid.Column="2"
+                                               Text="&#x2605;" FontSize="16"
+                                               VerticalAlignment="Top"
+                                               Foreground="#FFD700"
+                                               Margin="4,2,0,0"
+                                               Visibility="{Binding IsFavorite, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                </Grid>
                             </Border>
                         </DataTemplate>
                     </ListView.ItemTemplate>
