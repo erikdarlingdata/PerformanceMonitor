@@ -9,6 +9,13 @@
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
         <ContextMenu x:Key="DataGridContextMenu">
+            <MenuItem Header="Edit..." Click="EditServer_Click"/>
+            <MenuItem Header="Toggle Favorite" Click="ToggleFavorite_Click"/>
+            <MenuItem Header="Check Server Version" Click="CheckForUpdates_Click"/>
+            <MenuItem Header="Purge Now" Click="PurgeNow_Click"/>
+            <MenuItem Header="Remove" Click="RemoveServer_Click"
+                      Foreground="{DynamicResource ErrorBrush}"/>
+            <Separator/>
             <MenuItem Header="Copy Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
@@ -91,6 +98,7 @@
                 <Button Content="Edit..." Width="80" Height="30" Margin="0,0,8,0" Click="EditServer_Click"/>
                 <Button x:Name="ToggleFavoriteButton" Content="Toggle Favorite" Width="110" Height="30" Margin="0,0,8,0" Click="ToggleFavorite_Click"/>
                 <Button x:Name="CheckUpdatesButton" Content="Check Server Version" Width="140" Height="30" Margin="0,0,8,0" Click="CheckForUpdates_Click"/>
+                <Button Content="Purge Now" Width="100" Height="30" Margin="0,0,8,0" Click="PurgeNow_Click"/>
                 <Button Content="Remove" Width="80" Height="30" Margin="0,0,8,0" Click="RemoveServer_Click"
                         Foreground="{DynamicResource ErrorBrush}"/>
             </StackPanel>
