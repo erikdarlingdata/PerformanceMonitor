@@ -96,6 +96,13 @@ public class ServerConnection
     public bool MultiSubnetFailover { get; set; } = false;
 
     /// <summary>
+    /// User databases to skip in per-database collectors (query_store, file_io_stats, etc.).
+    /// System databases (master/tempdb/model/msdb) and the connection database itself are always
+    /// excluded by the collectors and aren't represented here.
+    /// </summary>
+    public System.Collections.Generic.List<string> ExcludedDatabases { get; set; } = new();
+
+    /// <summary>
     /// Server name with "(Read-Only)" suffix when ReadOnlyIntent is enabled.
     /// Used for sidebar subtitle and status text.
     /// </summary>
