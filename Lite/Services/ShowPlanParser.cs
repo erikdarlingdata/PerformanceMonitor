@@ -665,8 +665,10 @@ public static class ShowPlanParser
             node.PhysicalOp = "Lazy " + node.PhysicalOp;
         }
 
-        // Map to icon
-        node.IconName = PlanIconMapper.GetIconName(node.PhysicalOp);
+        // Icon mapping is deferred until after StorageType and LogicalOp are
+        // parsed below, so columnstore scans (Clustered/Index Scan with
+        // Storage="ColumnStore") and Parallelism subtypes route to their
+        // specific icons.
 
         // Handle operator-specific element
         var physicalOpEl = GetOperatorElement(relOpEl);
@@ -1364,6 +1366,11 @@ public static class ShowPlanParser
                 });
             }
         }
+
+        // Map to icon — done here so columnstore scans (Clustered/Index Scan
+        // with Storage="ColumnStore") and Parallelism subtypes (which depend on
+        // LogicalOp) can be routed to their specific icons.
+        node.IconName = PlanIconMapper.GetIconName(node.PhysicalOp, node.StorageType, node.LogicalOp);
 
         // Recurse into child RelOps
         foreach (var childRelOp in FindChildRelOps(relOpEl))
