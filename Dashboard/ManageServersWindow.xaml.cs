@@ -7,12 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using Installer.Core;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 
@@ -29,11 +30,45 @@ namespace PerformanceMonitorDashboard
             _serverManager = serverManager;
             ServersModified = false;
             LoadServers();
+            _ = LoadInstalledVersionsAsync();
         }
 
         private void LoadServers()
         {
             ServersDataGrid.ItemsSource = _serverManager.GetAllServers();
+        }
+
+        private async Task LoadInstalledVersionsAsync()
+        {
+            if (ServersDataGrid.ItemsSource is not IEnumerable<ServerConnection> source) return;
+
+            /* Snapshot the list so subsequent LoadServers() calls don't race us. */
+            var servers = source.ToList();
+
+            /* Probe in parallel — each call opens its own SqlConnection to master. */
+            var tasks = servers.Select(async s =>
+            {
+                try
+                {
+                    string? version = await _serverManager.GetInstalledVersionAsync(s);
+                    s.InstalledVersion = string.IsNullOrEmpty(version) ? "Not installed" : NormalizeVersion(version);
+                }
+                catch
+                {
+                    s.InstalledVersion = "Unavailable";
+                }
+            });
+
+            await Task.WhenAll(tasks);
+        }
+
+        private static string NormalizeVersion(string version)
+        {
+            int plusIndex = version.IndexOf('+');
+            string trimmed = plusIndex >= 0 ? version[..plusIndex] : version;
+            return Version.TryParse(trimmed, out var v)
+                ? new Version(v.Major, v.Minor, v.Build).ToString()
+                : trimmed;
         }
 
         private void ServersDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
