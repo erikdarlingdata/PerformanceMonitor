@@ -17,6 +17,14 @@ using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite;
 
+public enum CpuAlertMode
+{
+    /// <summary>sql_server_cpu + other_process_cpu — matches OS user+system, "is the box in trouble".</summary>
+    Total,
+    /// <summary>SQL Server scheduler ProcessUtilization only.</summary>
+    SqlOnly
+}
+
 public partial class App : Application
 {
     [DllImport("shell32.dll", SetLastError = true)]
@@ -71,6 +79,8 @@ public partial class App : Application
     public static bool NotifyConnectionChanges { get; set; } = true;
     public static bool AlertCpuEnabled { get; set; } = true;
     public static int AlertCpuThreshold { get; set; } = 80;
+    /// <summary>Which CPU metric the alert evaluates against. Total = sql_server_cpu + other_process_cpu (matches OS user+system). SqlOnly = SQL Server scheduler %.</summary>
+    public static CpuAlertMode AlertCpuMode { get; set; } = CpuAlertMode.Total;
     public static bool AlertBlockingEnabled { get; set; } = true;
     public static int AlertBlockingThreshold { get; set; } = 1;
     public static bool AlertDeadlockEnabled { get; set; } = true;
@@ -323,6 +333,8 @@ public partial class App : Application
             if (root.TryGetProperty("notify_connection_changes", out v)) NotifyConnectionChanges = v.GetBoolean();
             if (root.TryGetProperty("alert_cpu_enabled", out v)) AlertCpuEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.GetInt32();
+            if (root.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.GetString(), out var mode))
+                AlertCpuMode = mode;
             if (root.TryGetProperty("alert_blocking_enabled", out v)) AlertBlockingEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.GetInt32();
             if (root.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.GetBoolean();

@@ -576,6 +576,7 @@ public partial class SettingsWindow : Window
         NotifyConnectionCheckBox.IsChecked = App.NotifyConnectionChanges;
         AlertCpuCheckBox.IsChecked = App.AlertCpuEnabled;
         AlertCpuThresholdBox.Text = App.AlertCpuThreshold.ToString();
+        AlertCpuModeBox.SelectedIndex = App.AlertCpuMode == CpuAlertMode.SqlOnly ? 1 : 0;
         AlertBlockingCheckBox.IsChecked = App.AlertBlockingEnabled;
         AlertBlockingThresholdBox.Text = App.AlertBlockingThreshold.ToString();
         AlertDeadlockCheckBox.IsChecked = App.AlertDeadlockEnabled;
@@ -615,6 +616,7 @@ public partial class SettingsWindow : Window
         App.AlertCpuEnabled = AlertCpuCheckBox.IsChecked == true;
         if (int.TryParse(AlertCpuThresholdBox.Text, out var cpu) && cpu > 0 && cpu <= 100)
             App.AlertCpuThreshold = cpu;
+        App.AlertCpuMode = AlertCpuModeBox.SelectedIndex == 1 ? CpuAlertMode.SqlOnly : CpuAlertMode.Total;
         App.AlertBlockingEnabled = AlertBlockingCheckBox.IsChecked == true;
         if (int.TryParse(AlertBlockingThresholdBox.Text, out var blocking) && blocking > 0)
             App.AlertBlockingThreshold = blocking;
@@ -675,6 +677,7 @@ public partial class SettingsWindow : Window
             root["notify_connection_changes"] = App.NotifyConnectionChanges;
             root["alert_cpu_enabled"] = App.AlertCpuEnabled;
             root["alert_cpu_threshold"] = App.AlertCpuThreshold;
+            root["alert_cpu_mode"] = App.AlertCpuMode.ToString();
             root["alert_blocking_enabled"] = App.AlertBlockingEnabled;
             root["alert_blocking_threshold"] = App.AlertBlockingThreshold;
             root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
@@ -728,6 +731,7 @@ public partial class SettingsWindow : Window
     private void RestoreAlertDefaultsButton_Click(object sender, RoutedEventArgs e)
     {
         AlertCpuThresholdBox.Text = "80";
+        AlertCpuModeBox.SelectedIndex = 0; // Total
         AlertBlockingThresholdBox.Text = "1";
         AlertDeadlockThresholdBox.Text = "1";
         AlertPoisonWaitThresholdBox.Text = "500";
@@ -753,7 +757,10 @@ public partial class SettingsWindow : Window
         var parts = new System.Collections.Generic.List<string>();
 
         if (AlertCpuCheckBox.IsChecked == true)
-            parts.Add($"CPU > {AlertCpuThresholdBox.Text}%");
+        {
+            string cpuLabel = AlertCpuModeBox.SelectedIndex == 1 ? "SQL CPU" : "Total CPU";
+            parts.Add($"{cpuLabel} > {AlertCpuThresholdBox.Text}%");
+        }
         if (AlertBlockingCheckBox.IsChecked == true)
             parts.Add($"blocking >= {AlertBlockingThresholdBox.Text}");
         if (AlertDeadlockCheckBox.IsChecked == true)
@@ -778,6 +785,7 @@ public partial class SettingsWindow : Window
         NotifyConnectionCheckBox.IsEnabled = enabled;
         AlertCpuCheckBox.IsEnabled = enabled;
         AlertCpuThresholdBox.IsEnabled = enabled;
+        AlertCpuModeBox.IsEnabled = enabled;
         AlertBlockingCheckBox.IsEnabled = enabled;
         AlertBlockingThresholdBox.IsEnabled = enabled;
         AlertDeadlockCheckBox.IsEnabled = enabled;

@@ -24,16 +24,18 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
 
         double? cpuPercent = null;
+        double? otherProcessCpuPercent = null;
         double? memoryMb = null;
         int blockingCount = 0;
         int deadlockCount = 0;
         DateTime? lastCollection = null;
 
-        /* Latest CPU */
+        /* Latest CPU — read both SQL Server CPU and other-process CPU so the UI can surface
+           total non-idle CPU alongside the SQL-only number. */
         using (var cmd = connection.CreateCommand())
         {
             cmd.CommandText = @"
-SELECT sqlserver_cpu_utilization, sample_time
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY sample_time DESC
@@ -43,7 +45,8 @@ LIMIT 1";
             if (await reader.ReadAsync())
             {
                 cpuPercent = reader.IsDBNull(0) ? null : ToDouble(reader.GetValue(0));
-                lastCollection = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                otherProcessCpuPercent = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1));
+                lastCollection = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
             }
         }
 
@@ -112,6 +115,7 @@ WHERE server_id = $1";
             DisplayName = displayName,
             ServerId = serverId,
             CpuPercent = cpuPercent,
+            OtherProcessCpuPercent = otherProcessCpuPercent,
             MemoryMb = memoryMb,
             BlockingCount = blockingCount,
             DeadlockCount = deadlockCount,
@@ -128,13 +132,34 @@ public class ServerSummaryItem
     public bool? IsOnline { get; set; }
     /// <summary>True when the server is reachable but one or more collectors have consecutive errors.</summary>
     public bool HasCollectorErrors { get; set; }
+    /// <summary>SQL Server scheduler ProcessUtilization from sys.dm_os_ring_buffers. NULL on Azure SQL DB.</summary>
     public double? CpuPercent { get; set; }
+    /// <summary>Non-SQL-Server CPU on the host (computed as 100 - SystemIdle - ProcessUtilization). NULL on Azure SQL DB.</summary>
+    public double? OtherProcessCpuPercent { get; set; }
+    /// <summary>Total non-idle CPU on the host = sql_server + other_process. Tracks closer to OS user+system counters.</summary>
+    public double? TotalCpuPercent =>
+        CpuPercent.HasValue ? CpuPercent.Value + (OtherProcessCpuPercent ?? 0) : null;
+    /// <summary>The CPU value the alert evaluator and headline display use. Driven by App.AlertCpuMode.</summary>
+    public double? CpuPercentForAlert =>
+        App.AlertCpuMode == CpuAlertMode.Total ? (TotalCpuPercent ?? CpuPercent) : CpuPercent;
     public double? MemoryMb { get; set; }
     public int BlockingCount { get; set; }
     public int DeadlockCount { get; set; }
     public DateTime? LastCollectionTime { get; set; }
 
-    public string CpuDisplay => CpuPercent.HasValue ? $"{CpuPercent:F0}%" : "--";
+    /// <summary>
+    /// Headline CPU display. Shows total non-idle CPU prominently with the SQL-only number alongside,
+    /// e.g. "64% (SQL 60%)". Falls back to a single number when only one value is available.
+    /// </summary>
+    public string CpuDisplay
+    {
+        get
+        {
+            if (!CpuPercent.HasValue) return "--";
+            if (!OtherProcessCpuPercent.HasValue) return $"{CpuPercent:F0}%";
+            return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
+        }
+    }
     public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
     public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
     public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
@@ -158,14 +183,21 @@ public class ServerSummaryItem
     public bool IsOffline => IsOnline == false;
 
     /* Color coding */
-    public SolidColorBrush CpuBrush => MakeBrush(CpuPercent >= 80 ? "#E57373" : CpuPercent >= 50 ? "#FFB74D" : "#81C784");
+    public SolidColorBrush CpuBrush
+    {
+        get
+        {
+            var v = CpuPercentForAlert;
+            return MakeBrush(v >= 80 ? "#E57373" : v >= 50 ? "#FFB74D" : "#81C784");
+        }
+    }
     public SolidColorBrush BlockingBrush => MakeBrush(BlockingCount > 0 ? "#FFB74D" : "#81C784");
     public SolidColorBrush DeadlockBrush => MakeBrush(DeadlockCount > 0 ? "#E57373" : "#81C784");
     public SolidColorBrush CardBorderBrush => MakeBrush(
         IsOnline == false ? "#E57373" :
         DeadlockCount > 0 ? "#E57373" :
         BlockingCount > 0 ? "#FFB74D" :
-        CpuPercent >= 80 ? "#FFB74D" :
+        CpuPercentForAlert >= 80 ? "#FFB74D" :
         HasCollectorErrors ? "#FFD54F" :   // amber border when collectors are failing
         "#2a2d35");
 
