@@ -97,6 +97,9 @@
                                         <DataTrigger Binding="{Binding Severity}" Value="Low">
                                             <Setter Property="Foreground" Value="#27AE60"/>
                                         </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow, AncestorLevel=1}, FallbackValue=False}" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource GridSelectionForegroundBrush}"/>
+                                        </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
                             </DataGridTextColumn.ElementStyle>
@@ -374,6 +377,9 @@
                                             <DataTrigger Binding="{Binding Status}" Value="UNDER_PROVISIONED">
                                                 <Setter Property="Foreground" Value="#E74C3C"/>
                                                 <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow, AncestorLevel=1}, FallbackValue=False}" Value="True">
+                                                <Setter Property="Foreground" Value="{DynamicResource GridSelectionForegroundBrush}"/>
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>

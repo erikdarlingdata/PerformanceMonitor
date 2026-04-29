@@ -192,6 +192,44 @@ BEGIN
                         ),
                         0
                     );
+
+            /*
+            Resume detection: if this collector hasn't successfully run in a long time
+            (Off preset, Agent stoppage, server reboot, manual disable), skip the
+            historical sweep so we don't dump the entire Query Store window into our deltas.
+            Note: @last_collection_time above tracks the latest captured query execution time,
+            not the collector's run time, so we need a separate lookup against config.collection_log.
+            Threshold: 5x the configured frequency, floored at 30 minutes.
+            */
+            DECLARE
+                @last_successful_run_time datetime2(7),
+                @resume_threshold_minutes integer;
+
+            SELECT
+                @last_successful_run_time = MAX(cl.collection_time)
+            FROM config.collection_log AS cl
+            WHERE cl.collector_name = N'query_store_collector'
+            AND   cl.collection_status = N'SUCCESS';
+
+            SET @resume_threshold_minutes =
+                CASE
+                    WHEN ISNULL(@collection_interval_minutes, 0) <= 0 THEN 30
+                    WHEN @collection_interval_minutes * 5 > 30 THEN @collection_interval_minutes * 5
+                    ELSE 30
+                END;
+
+            IF @last_successful_run_time IS NOT NULL
+            AND DATEDIFF(MINUTE, @last_successful_run_time, SYSDATETIME()) > @resume_threshold_minutes
+            BEGIN
+                IF @debug = 1
+                BEGIN
+                    DECLARE @gap_minutes integer = DATEDIFF(MINUTE, @last_successful_run_time, SYSDATETIME());
+                    RAISERROR(N'Resume detected: %d-minute gap exceeds %d-minute threshold. Skipping historical sweep.', 0, 1,
+                              @gap_minutes, @resume_threshold_minutes) WITH NOWAIT;
+                END;
+
+                SET @cutoff_time = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
+            END;
         END;
 
         IF @debug = 1
@@ -312,6 +350,13 @@ BEGIN
             (
                 drs.database_id IS NULL          /*not in any AG*/
                 OR drs.is_primary_replica = 1    /*primary replica*/
+            )
+            AND NOT EXISTS
+            (
+                SELECT
+                    1/0
+                FROM config.collector_database_exclusions AS e
+                WHERE e.database_name = d.name
             )
             OPTION(RECOMPILE);
 

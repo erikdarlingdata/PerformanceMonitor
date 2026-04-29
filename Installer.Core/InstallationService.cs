@@ -432,7 +432,7 @@ END;";
                     batchNumber++;
 
                     using var command = new SqlCommand(trimmedBatch, connection);
-                    command.CommandTimeout = StandardTimeoutSeconds;
+                    command.CommandTimeout = UpgradeTimeoutSeconds;
 
                     try
                     {

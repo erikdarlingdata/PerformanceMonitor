@@ -144,6 +144,13 @@ BEGIN
         AND   d.name != DB_NAME()
         AND   d.state_desc = N'ONLINE'
         AND   d.database_id < 32761 /*exclude contained AG system databases*/
+        AND   NOT EXISTS
+        (
+            SELECT
+                1/0
+            FROM config.collector_database_exclusions AS e
+            WHERE e.database_name = d.name
+        )
         OPTION (RECOMPILE);
 
         IF @debug = 1
@@ -172,6 +179,13 @@ BEGIN
             (
                 drs.database_id IS NULL          /*not in any AG*/
                 OR drs.is_primary_replica = 1    /*primary replica*/
+            )
+            AND NOT EXISTS
+            (
+                SELECT
+                    1/0
+                FROM config.collector_database_exclusions AS e
+                WHERE e.database_name = d.name
             )
             ORDER BY
                 d.name

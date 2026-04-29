@@ -7,10 +7,10 @@
     <RootNamespace>Installer.Core</RootNamespace>
     <AssemblyName>Installer.Core</AssemblyName>
     <Product>SQL Server Performance Monitor Installer Core</Product>
-    <Version>2.8.0</Version>
-    <AssemblyVersion>2.8.0.0</AssemblyVersion>
-    <FileVersion>2.8.0.0</FileVersion>
-    <InformationalVersion>2.8.0</InformationalVersion>
+    <Version>2.9.0</Version>
+    <AssemblyVersion>2.9.0.0</AssemblyVersion>
+    <FileVersion>2.9.0.0</FileVersion>
+    <InformationalVersion>2.9.0</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright (c) 2026 Darling Data, LLC</Copyright>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
@@ -19,7 +19,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
   </ItemGroup>
 
   <!-- Embed SQL scripts as assembly resources for Dashboard consumption -->

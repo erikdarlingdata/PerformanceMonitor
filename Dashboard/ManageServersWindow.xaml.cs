@@ -7,12 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using Installer.Core;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 
@@ -29,11 +30,45 @@ namespace PerformanceMonitorDashboard
             _serverManager = serverManager;
             ServersModified = false;
             LoadServers();
+            _ = LoadInstalledVersionsAsync();
         }
 
         private void LoadServers()
         {
             ServersDataGrid.ItemsSource = _serverManager.GetAllServers();
+        }
+
+        private async Task LoadInstalledVersionsAsync()
+        {
+            if (ServersDataGrid.ItemsSource is not IEnumerable<ServerConnection> source) return;
+
+            /* Snapshot the list so subsequent LoadServers() calls don't race us. */
+            var servers = source.ToList();
+
+            /* Probe in parallel — each call opens its own SqlConnection to master. */
+            var tasks = servers.Select(async s =>
+            {
+                try
+                {
+                    string? version = await _serverManager.GetInstalledVersionAsync(s);
+                    s.InstalledVersion = string.IsNullOrEmpty(version) ? "Not installed" : NormalizeVersion(version);
+                }
+                catch
+                {
+                    s.InstalledVersion = "Unavailable";
+                }
+            });
+
+            await Task.WhenAll(tasks);
+        }
+
+        private static string NormalizeVersion(string version)
+        {
+            int plusIndex = version.IndexOf('+');
+            string trimmed = plusIndex >= 0 ? version[..plusIndex] : version;
+            return Version.TryParse(trimmed, out var v)
+                ? new Version(v.Major, v.Minor, v.Build).ToString()
+                : trimmed;
         }
 
         private void ServersDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -294,6 +329,92 @@ namespace PerformanceMonitorDashboard
             {
                 CheckUpdatesButton.IsEnabled = true;
                 CheckUpdatesButton.Content = "Check Server Version";
+            }
+        }
+
+        private void ExcludedDatabases_Click(object sender, RoutedEventArgs e)
+        {
+            if (ServersDataGrid.SelectedItem is not ServerConnection server)
+            {
+                MessageBox.Show(
+                    "Please select a server to configure excluded databases.",
+                    "No Server Selected",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var dialog = new ExcludedDatabasesDialog(_serverManager, server) { Owner = this };
+            if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
+            {
+                ServersModified = true;
+            }
+        }
+
+        private async void PurgeNow_Click(object sender, RoutedEventArgs e)
+        {
+            if (ServersDataGrid.SelectedItem is not ServerConnection server)
+            {
+                MessageBox.Show(
+                    "Please select a server to purge.",
+                    "No Server Selected",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var dialog = new PurgeNowDialog(server.DisplayNameWithIntent) { Owner = this };
+            if (dialog.ShowDialog() != true) return;
+
+            Cursor = System.Windows.Input.Cursors.Wait;
+            try
+            {
+                var result = await _serverManager.RunDataRetentionAsync(
+                    server,
+                    dialog.RetentionDaysOverride);
+
+                bool wasTruncate = dialog.RetentionDaysOverride == 0;
+                string body;
+                if (wasTruncate)
+                {
+                    body = $"All collector tables truncated.\n\n" +
+                           $"Rows wiped: {result.RowsDeleted:N0}\n" +
+                           $"Tables affected: {result.TableCount}\n" +
+                           $"Status: {result.Status}\n" +
+                           $"Duration: {result.DurationMs} ms";
+                }
+                else
+                {
+                    body = $"Purge complete.\n\n" +
+                           $"Rows deleted: {result.RowsDeleted:N0}\n" +
+                           $"Tables touched: {result.TableCount}\n" +
+                           $"Status: {result.Status}\n" +
+                           $"Duration: {result.DurationMs} ms";
+                }
+
+                if (!string.Equals(result.Status, "SUCCESS", StringComparison.Ordinal) &&
+                    !string.IsNullOrEmpty(result.Message))
+                {
+                    body += $"\n\nMessage: {result.Message}";
+                }
+
+                MessageBox.Show(this, body, "Purge Complete",
+                    MessageBoxButton.OK,
+                    string.Equals(result.Status, "SUCCESS", StringComparison.Ordinal)
+                        ? MessageBoxImage.Information
+                        : MessageBoxImage.Warning);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Failed to run purge on '{server.DisplayNameWithIntent}':\n\n{ex.Message}",
+                    "Purge Failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            finally
+            {
+                Cursor = null;
             }
         }
 

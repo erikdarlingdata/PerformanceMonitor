@@ -909,6 +909,25 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OpenLogFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        var logDir = AppLogger.GetLogDirectory();
+        try
+        {
+            System.IO.Directory.CreateDirectory(logDir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = logDir,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not open log folder: {ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void ImportSettingsButton_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFolderDialog
@@ -1269,10 +1288,12 @@ public partial class MainWindow : Window
         /* Skip popup/email alerts if user has acknowledged or silenced this server */
         bool suppressPopups = !_alertStateService.ShouldShowAlerts(key);
 
-        /* CPU alerts */
+        /* CPU alerts — uses the metric the user selected (Total non-idle CPU by default, or SQL Server only). */
+        var alertCpuValue = summary.CpuPercentForAlert;
+        string cpuMetricLabel = App.AlertCpuMode == CpuAlertMode.Total ? "Total CPU" : "SQL CPU";
         bool cpuExceeded = App.AlertCpuEnabled
-            && summary.CpuPercent.HasValue
-            && summary.CpuPercent.Value >= App.AlertCpuThreshold;
+            && alertCpuValue.HasValue
+            && alertCpuValue.Value >= App.AlertCpuThreshold;
 
         if (cpuExceeded)
         {
@@ -1287,16 +1308,16 @@ public partial class MainWindow : Window
                 {
                     _trayService.ShowNotification(
                         "High CPU",
-                        $"{summary.DisplayName}: CPU at {summary.CpuPercent:F0}% (threshold: {App.AlertCpuThreshold}%)",
+                        $"{summary.DisplayName}: {cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {App.AlertCpuThreshold}%)",
                         Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
                 }
 
-                var cpuDetailText = $"  CPU: {summary.CpuPercent:F0}%\n  Threshold: {App.AlertCpuThreshold}%";
+                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {App.AlertCpuThreshold}%";
 
                 await _emailAlertService.TrySendAlertEmailAsync(
                     "High CPU",
                     summary.DisplayName,
-                    $"{summary.CpuPercent:F0}%",
+                    $"{alertCpuValue:F0}%",
                     $"{App.AlertCpuThreshold}%",
                     summary.ServerId,
                     muted: isMuted,
@@ -1308,7 +1329,7 @@ public partial class MainWindow : Window
             _activeCpuAlert[key] = false;
             _trayService.ShowNotification(
                 "CPU Resolved",
-                $"{summary.DisplayName}: CPU back to {summary.CpuPercent:F0}%",
+                $"{summary.DisplayName}: {cpuMetricLabel} back to {alertCpuValue:F0}%",
                 Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
         }
 

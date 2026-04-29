@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Reflection;
 using System.Windows;
 using System.Windows.Input;
 using PerformanceMonitorLite.Models;
@@ -32,7 +33,27 @@ public partial class ManageServersWindow : Window
     private void RefreshGrid()
     {
         ServersGrid.ItemsSource = null;
-        ServersGrid.ItemsSource = _serverManager.GetAllServers();
+        var servers = _serverManager.GetAllServers();
+        string appVersion = GetAppVersion();
+        foreach (var s in servers)
+        {
+            s.InstalledVersion = appVersion;
+        }
+        ServersGrid.ItemsSource = servers;
+    }
+
+    private static string GetAppVersion()
+    {
+        string raw = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+            ?? "0.0.0";
+
+        int plusIndex = raw.IndexOf('+');
+        string trimmed = plusIndex >= 0 ? raw[..plusIndex] : raw;
+        return System.Version.TryParse(trimmed, out var v)
+            ? new System.Version(v.Major, v.Minor, v.Build).ToString()
+            : trimmed;
     }
 
     private void AddButton_Click(object sender, RoutedEventArgs e)
@@ -64,6 +85,25 @@ public partial class ManageServersWindow : Window
 
         var dialog = new AddServerDialog(_serverManager, selected) { Owner = this };
         if (dialog.ShowDialog() == true)
+        {
+            ServersChanged = true;
+            RefreshGrid();
+        }
+    }
+
+    private void EditMenuItem_Click(object sender, RoutedEventArgs e) => EditSelected();
+
+    private void DeleteMenuItem_Click(object sender, RoutedEventArgs e) => DeleteButton_Click(sender, e);
+
+    private void ExcludedDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServersGrid.SelectedItem is not ServerConnection selected)
+        {
+            return;
+        }
+
+        var dialog = new ExcludedDatabasesDialog(_serverManager, selected) { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
         {
             ServersChanged = true;
             RefreshGrid();

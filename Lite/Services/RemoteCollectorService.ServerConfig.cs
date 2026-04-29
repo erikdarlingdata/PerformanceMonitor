@@ -149,6 +149,8 @@ OPTION(RECOMPILE);";
     is_optimized_locking_on = d.is_optimized_locking_on";
         }
 
+        var (dbConfigExclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+
         var query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -158,6 +160,7 @@ FROM sys.databases AS d
 WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
+{dbConfigExclusionClause}
 ORDER BY d.name
 OPTION(RECOMPILE);";
 
@@ -173,6 +176,8 @@ OPTION(RECOMPILE);";
         using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
         using var command = new SqlCommand(query, sqlConnection);
         command.CommandTimeout = CommandTimeoutSeconds;
+        var (_, dbConfigExclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        foreach (var p in dbConfigExclusionParams) command.Parameters.Add(p);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -329,7 +334,7 @@ OPTION(RECOMPILE);";
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
         bool isAzureSqlDb = serverStatus?.SqlEngineEdition == 5;
 
-        const string onPremDbQuery = @"
+        string onPremDbQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
@@ -347,10 +352,11 @@ AND
     drs.database_id IS NULL          /*not in any AG*/
     OR drs.is_primary_replica = 1    /*primary replica*/
 )
+/*EXCLUSION_FILTER*/
 ORDER BY d.name
 OPTION(RECOMPILE);";
 
-        const string azureDbQuery = @"
+        string azureDbQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
@@ -360,8 +366,13 @@ WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
 AND   d.state_desc = N'ONLINE'
+/*EXCLUSION_FILTER*/
 ORDER BY d.name
 OPTION(RECOMPILE);";
+
+        var (scopedExclusionClause, _) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+        onPremDbQuery = onPremDbQuery.Replace("/*EXCLUSION_FILTER*/", scopedExclusionClause);
+        azureDbQuery = azureDbQuery.Replace("/*EXCLUSION_FILTER*/", scopedExclusionClause);
 
         string dbQuery = isAzureSqlDb ? azureDbQuery : onPremDbQuery;
 
@@ -379,6 +390,8 @@ OPTION(RECOMPILE);";
         using (var dbCommand = new SqlCommand(dbQuery, sqlConnection))
         {
             dbCommand.CommandTimeout = CommandTimeoutSeconds;
+            var (_, scopedExclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "d.name");
+            foreach (var p in scopedExclusionParams) dbCommand.Parameters.Add(p);
             using var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken);
             while (await dbReader.ReadAsync(cancellationToken))
             {

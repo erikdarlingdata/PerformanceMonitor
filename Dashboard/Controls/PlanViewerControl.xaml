@@ -77,15 +77,15 @@
 
                     <!-- Missing Indexes (center) -->
                     <Border Grid.Column="1" Padding="10,4,10,8"
-                            Background="#3D2A0E"
-                            BorderBrush="#7A5A1E" BorderThickness="0,0,1,0">
+                            Background="{DynamicResource PlanMissingIndexBgBrush}"
+                            BorderBrush="{DynamicResource PlanMissingIndexBorderBrush}" BorderThickness="0,0,1,0">
                         <ScrollViewer VerticalScrollBarVisibility="Auto"
                                       HorizontalScrollBarVisibility="Disabled">
                             <StackPanel>
                                 <TextBlock x:Name="MissingIndexHeader"
                                            Text="Missing Index Suggestions"
                                            FontSize="13"
-                                           FontWeight="SemiBold" Foreground="#FFB347"
+                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanMissingIndexHeaderBrush}"
                                            Margin="0,0,0,6"/>
                                 <StackPanel x:Name="MissingIndexContent"/>
                                 <TextBlock x:Name="MissingIndexEmpty"
@@ -98,14 +98,14 @@
 
                     <!-- Wait Stats (right, fills remaining space) -->
                     <Border Grid.Column="2" Padding="10,4,10,8"
-                            Background="#1A2A3D">
+                            Background="{DynamicResource PlanWaitStatsBgBrush}">
                         <ScrollViewer VerticalScrollBarVisibility="Auto"
                                       HorizontalScrollBarVisibility="Disabled">
                             <StackPanel>
                                 <TextBlock x:Name="WaitStatsHeader"
                                            Text="Wait Stats"
                                            FontSize="13"
-                                           FontWeight="SemiBold" Foreground="#4FA3FF"
+                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanWaitStatsHeaderBrush}"
                                            Margin="0,0,0,6"/>
                                 <StackPanel x:Name="WaitStatsContent"/>
                                 <TextBlock x:Name="WaitStatsEmpty"

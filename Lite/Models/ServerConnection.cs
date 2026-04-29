@@ -7,13 +7,14 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Models;
 
-public class ServerConnection
+public class ServerConnection : INotifyPropertyChanged
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public string ServerName { get; set; } = string.Empty;
@@ -96,6 +97,13 @@ public class ServerConnection
     public bool MultiSubnetFailover { get; set; } = false;
 
     /// <summary>
+    /// User databases to skip in per-database collectors (query_store, file_io_stats, etc.).
+    /// System databases (master/tempdb/model/msdb) and the connection database itself are always
+    /// excluded by the collectors and aren't represented here.
+    /// </summary>
+    public System.Collections.Generic.List<string> ExcludedDatabases { get; set; } = new();
+
+    /// <summary>
     /// Server name with "(Read-Only)" suffix when ReadOnlyIntent is enabled.
     /// Used for sidebar subtitle and status text.
     /// </summary>
@@ -156,6 +164,27 @@ public class ServerConnection
     /// </summary>
     [JsonIgnore]
     public string StatusDisplay => IsEnabled ? "Enabled" : "Disabled";
+
+    private string? _installedVersion;
+
+    /// <summary>
+    /// PerformanceMonitor Lite app version monitoring this server (e.g., "2.9.0").
+    /// Populated by the Manage Servers window. Not persisted — runtime-only display field.
+    /// Same value for every row since one Lite process monitors all servers.
+    /// </summary>
+    [JsonIgnore]
+    public string? InstalledVersion
+    {
+        get => _installedVersion;
+        set
+        {
+            if (_installedVersion == value) return;
+            _installedVersion = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstalledVersion)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 
     /// <summary>
     /// Builds and returns a connection string for this server.

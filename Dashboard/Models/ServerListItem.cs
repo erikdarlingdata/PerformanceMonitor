@@ -44,6 +44,7 @@ namespace PerformanceMonitorDashboard.Models
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(StatusIcon));
                     OnPropertyChanged(nameof(StatusColor));
+                    OnPropertyChanged(nameof(DotStatus));
                     OnPropertyChanged(nameof(LastCheckedDisplay));
                     OnPropertyChanged(nameof(StatusDurationDisplay));
                     OnPropertyChanged(nameof(IsOnline));
@@ -69,6 +70,20 @@ namespace PerformanceMonitorDashboard.Models
         /// Status icon: ✓ for online, ✗ for offline, ? for unknown.
         /// </summary>
         public string StatusIcon => _status.StatusIcon;
+
+        /// <summary>
+        /// Symbolic status used by the sidebar Ellipse indicator's DataTriggers.
+        /// Returns "Online", "Offline", or "Unknown".
+        /// </summary>
+        public string DotStatus
+        {
+            get
+            {
+                if (!_status.LastChecked.HasValue)
+                    return "Unknown";
+                return _status.IsOnline == true ? "Online" : "Offline";
+            }
+        }
 
         /// <summary>
         /// Color for the status icon: green for online, red for offline, gray for unknown.

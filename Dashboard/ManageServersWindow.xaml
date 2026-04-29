@@ -2,13 +2,21 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Manage Servers"
-        Height="450" Width="780"
+        Height="450" Width="960"
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResizeWithGrip"
         Background="{DynamicResource BackgroundBrush}">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
         <ContextMenu x:Key="DataGridContextMenu">
+            <MenuItem Header="Edit..." Click="EditServer_Click"/>
+            <MenuItem Header="Toggle Favorite" Click="ToggleFavorite_Click"/>
+            <MenuItem Header="Check Server Version" Click="CheckForUpdates_Click"/>
+            <MenuItem Header="Excluded Databases" Click="ExcludedDatabases_Click"/>
+            <MenuItem Header="Purge Now" Click="PurgeNow_Click"/>
+            <MenuItem Header="Remove" Click="RemoveServer_Click"
+                      Foreground="{DynamicResource ErrorBrush}"/>
+            <Separator/>
             <MenuItem Header="Copy Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
             </MenuItem>
@@ -66,6 +74,7 @@
                     <DataGridTextColumn Header="Display Name" Binding="{Binding DisplayName}" Width="150"/>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="180"/>
                     <DataGridTextColumn Header="Authentication" Binding="{Binding AuthenticationDisplay}" Width="120"/>
+                    <DataGridTextColumn Header="Installed Version" Binding="{Binding InstalledVersion}" Width="130"/>
                     <DataGridTextColumn Header="Monthly Cost ($)" Binding="{Binding MonthlyCostUsd, StringFormat='{}{0:N0}'}" Width="120">
                         <DataGridTextColumn.ElementStyle>
                             <Style TargetType="TextBlock">
@@ -91,6 +100,8 @@
                 <Button Content="Edit..." Width="80" Height="30" Margin="0,0,8,0" Click="EditServer_Click"/>
                 <Button x:Name="ToggleFavoriteButton" Content="Toggle Favorite" Width="110" Height="30" Margin="0,0,8,0" Click="ToggleFavorite_Click"/>
                 <Button x:Name="CheckUpdatesButton" Content="Check Server Version" Width="140" Height="30" Margin="0,0,8,0" Click="CheckForUpdates_Click"/>
+                <Button Content="Excluded Databases" Width="140" Height="30" Margin="0,0,8,0" Click="ExcludedDatabases_Click"/>
+                <Button Content="Purge Now" Width="100" Height="30" Margin="0,0,8,0" Click="PurgeNow_Click"/>
                 <Button Content="Remove" Width="80" Height="30" Margin="0,0,8,0" Click="RemoveServer_Click"
                         Foreground="{DynamicResource ErrorBrush}"/>
             </StackPanel>

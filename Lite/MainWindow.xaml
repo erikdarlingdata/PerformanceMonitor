@@ -191,6 +191,13 @@
                                 <TextBlock Text="View Log" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
+                        <Button Click="OpenLogFolderButton_Click" Margin="0,8,0,0"
+                                ToolTip="Open the log folder in Explorer (for grabbing logs to attach to bug reports)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="Open Log Folder" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="SettingsButton" Click="SettingsButton_Click" Margin="0,8,0,0">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>

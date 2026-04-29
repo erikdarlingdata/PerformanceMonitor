@@ -31,17 +31,26 @@ public partial class PlanViewerControl : UserControl
     private Border? _selectedNodeBorder;
     private Brush? _selectedNodeOriginalBorder;
     private Thickness _selectedNodeOriginalThickness;
+    private PlanNode? _selectedNode;
 
-    // Brushes
+    // Brushes — accent/neutral tones that suit every theme
     private static readonly SolidColorBrush SelectionBrush = new(Color.FromRgb(0x4F, 0xA3, 0xFF));
-    private static readonly SolidColorBrush TooltipBgBrush = new(Color.FromRgb(0x1A, 0x1D, 0x23));
-    private static readonly SolidColorBrush TooltipBorderBrush = new(Color.FromRgb(0x3A, 0x3D, 0x45));
-    private static readonly SolidColorBrush TooltipFgBrush = new(Color.FromRgb(0xE4, 0xE6, 0xEB));
-    private static readonly SolidColorBrush MutedBrush = new(Color.FromRgb(0xE4, 0xE6, 0xEB));
     private static readonly SolidColorBrush EdgeBrush = new(Color.FromRgb(0x6B, 0x72, 0x80));
-    private static readonly SolidColorBrush SectionHeaderBrush = new(Color.FromRgb(0x4F, 0xA3, 0xFF));
-    private static readonly SolidColorBrush PropSeparatorBrush = new(Color.FromRgb(0x2A, 0x2D, 0x35));
     private static readonly SolidColorBrush OrangeBrush = new(Color.FromRgb(0xFF, 0xB3, 0x47));
+
+    // Theme-aware brushes resolved at call time from Application.Resources
+    private SolidColorBrush TooltipBgBrush =>
+        (TryFindResource("PlanTooltipBgBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x1A, 0x1D, 0x23));
+    private SolidColorBrush TooltipBorderBrush =>
+        (TryFindResource("PlanTooltipBorderBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x3A, 0x3D, 0x45));
+    private SolidColorBrush TooltipFgBrush =>
+        (TryFindResource("PlanPanelTextBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xE4, 0xE6, 0xEB));
+    private SolidColorBrush MutedBrush =>
+        (TryFindResource("PlanPanelMutedBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xE4, 0xE6, 0xEB));
+    private SolidColorBrush SectionHeaderBrush =>
+        (TryFindResource("PlanSectionHeaderBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x4F, 0xA3, 0xFF));
+    private SolidColorBrush PropSeparatorBrush =>
+        (TryFindResource("PlanPropSeparatorBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x2A, 0x2D, 0x35));
 
     // Current property section for collapsible groups
     private StackPanel? _currentPropertySection;
@@ -55,6 +64,28 @@ public partial class PlanViewerControl : UserControl
     public PlanViewerControl()
     {
         InitializeComponent();
+        Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+        Unloaded += (_, _) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+    }
+
+    private void OnThemeChanged(string _)
+    {
+        if (_currentStatement == null) return;
+
+        var nodeToRestore = _selectedNode;
+        RenderStatement(_currentStatement);
+
+        if (nodeToRestore == null) return;
+
+        // Find the re-created border for the previously selected node and reopen properties
+        foreach (var child in PlanCanvas.Children)
+        {
+            if (child is Border b && b.Tag == nodeToRestore)
+            {
+                SelectNode(b, nodeToRestore);
+                break;
+            }
+        }
     }
 
     public void LoadPlan(string planXml, string label, string? queryText = null)
@@ -488,14 +519,14 @@ public partial class PlanViewerControl : UserControl
             var lbl = new TextBlock
             {
                 Text = label,
-                Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+                Foreground = MutedBrush,
                 FontSize = 12,
                 Margin = new Thickness(0, 1, 12, 1)
             };
             var val = new TextBlock
             {
                 Text = value,
-                Foreground = new SolidColorBrush(Colors.White),
+                Foreground = TooltipFgBrush,
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Right,
@@ -528,8 +559,8 @@ public partial class PlanViewerControl : UserControl
 
         return new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x2E)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x5A)),
+            Background = TooltipBgBrush,
+            BorderBrush = TooltipBorderBrush,
             BorderThickness = new Thickness(1),
             Padding = new Thickness(10, 6, 10, 6),
             CornerRadius = new CornerRadius(4),
@@ -571,6 +602,7 @@ public partial class PlanViewerControl : UserControl
         _selectedNodeOriginalBorder = border.BorderBrush;
         _selectedNodeOriginalThickness = border.BorderThickness;
         _selectedNodeBorder = border;
+        _selectedNode = node;
         border.BorderBrush = SelectionBrush;
         border.BorderThickness = new Thickness(2);
 
@@ -1504,7 +1536,7 @@ public partial class PlanViewerControl : UserControl
             Margin = new Thickness(0, 2, 0, 0),
             Padding = new Thickness(0),
             Foreground = SectionHeaderBrush,
-            Background = new SolidColorBrush(Color.FromArgb(0x18, 0x4F, 0xA3, 0xFF)),
+            Background = (TryFindResource("BackgroundLighterBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromArgb(0x18, 0x4F, 0xA3, 0xFF)),
             BorderBrush = PropSeparatorBrush,
             BorderThickness = new Thickness(0, 0, 0, 1)
         };
@@ -1568,6 +1600,7 @@ public partial class PlanViewerControl : UserControl
             _selectedNodeBorder.BorderThickness = _selectedNodeOriginalThickness;
             _selectedNodeBorder = null;
         }
+        _selectedNode = null;
     }
 
     #endregion
@@ -1780,7 +1813,7 @@ public partial class PlanViewerControl : UserControl
         return tip;
     }
 
-    private static void AddTooltipSection(StackPanel parent, string title)
+    private void AddTooltipSection(StackPanel parent, string title)
     {
         parent.Children.Add(new TextBlock
         {
@@ -1792,7 +1825,7 @@ public partial class PlanViewerControl : UserControl
         });
     }
 
-    private static void AddTooltipRow(StackPanel parent, string label, string value, bool isCode = false)
+    private void AddTooltipRow(StackPanel parent, string label, string value, bool isCode = false)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 1, 0, 1) };
         row.Children.Add(new TextBlock
@@ -1835,19 +1868,19 @@ public partial class PlanViewerControl : UserControl
                 {
                     Text = mi.Table,
                     FontWeight = FontWeights.SemiBold,
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                    Foreground = TooltipFgBrush,
                     FontSize = 12
                 });
                 headerRow.Children.Add(new TextBlock
                 {
                     Text = $" \u2014 Impact: ",
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                    Foreground = MutedBrush,
                     FontSize = 12
                 });
                 headerRow.Children.Add(new TextBlock
                 {
                     Text = $"{mi.Impact:F1}%",
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFB347")),
+                    Foreground = OrangeBrush,
                     FontSize = 12
                 });
                 itemPanel.Children.Add(headerRow);
@@ -1859,7 +1892,7 @@ public partial class PlanViewerControl : UserControl
                         Text = mi.CreateStatement,
                         FontFamily = new FontFamily("Consolas"),
                         FontSize = 11,
-                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                        Foreground = TooltipFgBrush,
                         Background = Brushes.Transparent,
                         BorderThickness = new Thickness(0),
                         IsReadOnly = true,
@@ -1932,7 +1965,7 @@ public partial class PlanViewerControl : UserControl
             {
                 Text = w.WaitType,
                 FontSize = 12,
-                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                Foreground = TooltipFgBrush,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 2, 10, 2)
             };
@@ -1958,7 +1991,7 @@ public partial class PlanViewerControl : UserControl
             {
                 Text = $"{w.WaitTimeMs:N0}ms ({w.WaitCount:N0} waits)",
                 FontSize = 12,
-                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")),
+                Foreground = TooltipFgBrush,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 2, 0, 2)
             };
@@ -2014,8 +2047,8 @@ public partial class PlanViewerControl : UserControl
     {
         RuntimeSummaryContent.Children.Clear();
 
-        var labelColor = "#E4E6EB";
-        var valueColor = "#E4E6EB";
+        var labelBrush = MutedBrush;
+        var valueBrush = TooltipFgBrush;
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -2030,7 +2063,7 @@ public partial class PlanViewerControl : UserControl
             {
                 Text = label,
                 FontSize = 11,
-                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(labelColor)),
+                Foreground = labelBrush,
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Margin = new Thickness(0, 1, 8, 1)
             };
@@ -2042,7 +2075,7 @@ public partial class PlanViewerControl : UserControl
             {
                 Text = value,
                 FontSize = 11,
-                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(valueColor)),
+                Foreground = valueBrush,
                 Margin = new Thickness(0, 1, 0, 1)
             };
             Grid.SetRow(valueText, rowIndex);

@@ -5,7 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.8.0] - TBD
+## [2.9.0] - TBD
+
+### Important
+
+- **Breaking change to `config.data_retention`** — the `@truncate_all` parameter has been removed. Pass `@retention_days = 0` for the same behavior. `@retention_days = NULL` (default) respects per-collector retention from `config.collection_schedule` with a 30-day fallback for unscheduled tables; `@retention_days = N > 0` overrides every table to N days. Any existing Agent jobs or scripts calling `data_retention @truncate_all = 1` need to be updated ([#900])
+- **New `config.collector_database_exclusions` table** for per-database collector exclusions. Eight per-database collectors filter against this table; system databases remain hard-skipped by the collectors themselves. Existing installs get the table on the next upgrade — `install/01_install_database.sql` and `config.ensure_config_tables` both create it under an `IF OBJECT_ID … IS NULL` guard ([#887])
+
+### Added
+
+- **Per-database collector exclusions** — exclude noisy or unimportant databases from per-database collectors. Dashboard side adds `config.collector_database_exclusions` and filters 8 collectors (`query_stats`, `query_store`, `procedure_stats`, `file_io_stats`, `waiting_tasks`, `database_configuration`, `database_size_stats`, `server_properties`). Lite side adds an `ExcludedDatabases` list per server in `servers.json` and filters 9 collectors ([#887])
+- **`Off` collection preset** — `EXECUTE config.apply_collection_preset @preset_name = N'Off'` disables every collector in one call. Pair with a second Agent job that applies a non-`Off` preset at the start of your active window for overnight / quiet-hours scoping. Non-`Off` presets now also set `enabled = 1` across the board so the switch from `Off → Balanced` reliably resumes collection ([#888])
+- **Purge Now action** in Manage Servers — confirm dialog with a mode picker (Use configured / 1 / 3 / 7 / Custom / All) drives `config.data_retention`; right-click menu on the Manage Servers grid mirrors every per-row action (Edit, Toggle Favorite, Check Server Version, Purge Now, Remove) ([#900])
+- **Total non-idle CPU on Lite Overview** — headline value shows total CPU with the SQL-only value alongside (e.g. `64% (SQL 60%)`); new `CpuAlertMode` dropdown in Settings → Alerts (Total / SqlOnly) drives both the alert evaluator and headline color; tray notifications and email alerts label the value as "Total CPU" or "SQL CPU" ([#899])
+- **Resume gap detection** — `query_stats`, `procedure_stats`, and `query_store` collectors skip the historical sweep on first run after an Off preset, Agent stoppage, or server reboot. When the last successful run is older than 5× the configured `frequency_minutes` (floored at 30 minutes), the cutoff clamps to `SYSDATETIME()` so only forward-going data is collected on resume — preventing the tempdb blowout that hit the original reporter ([#892])
+- **Right-click View Plan** on Dashboard Blocked Process Reports (View Blocked Plan + View Blocking Plan), Dashboard Deadlocks, and Lite Deadlocks grids. Plan lookup hits `sys.dm_exec_query_stats` + `sys.dm_exec_text_query_plan` on the monitored server, falling back to `executionStack/frame` entries when the process-level `sql_handle` is empty or evicted ([#880])
+- **Open Log Folder** sidebar button in Lite — opens `%LocalAppData%\PerformanceMonitorLite\logs\` in Explorer for grabbing historical logs to attach to bug reports. Sits below View Log, which retains its existing behavior of opening today's log file ([#873])
+- **Installed Version column** in the Manage Servers grid for both Dashboard and Lite. Dashboard shows the PerformanceMonitor database version on each server (probed in parallel via `GetInstalledVersionAsync`, with `Not installed` / `Unavailable` fallbacks). Lite shows the running app's own version on every row, mirroring Full's column header for consistency.
+- **Lite-style server card indicators in Full** — back-ported the Ellipse-with-DataTriggers status dot (Online/Offline/Warning/Unknown) and the right-aligned favorite star from Lite to the Full Dashboard's server list, matching Lite's visual treatment.
+- **Architecture overview** at `docs/how-collection-works.md` covering the minute loop, dispatcher, collector shape, `config.collection_schedule`, retention, and the Dashboard read path
+
+### Changed
+
+- **PlanIconMapper synced** with PerformanceStudio v1.9.0 improvements — columnstore storage type on scan/delete/insert/update/merge operators routes to `columnstore_index_*` icons (covers CCI and NCCI); `Parallelism` operator subtypes (Repartition Streams, Distribute Streams, Gather Streams) get their own icons
+- **`Microsoft.Data.SqlClient` 6.1.4 → 7.0.1** — major-version bump. Azure/Entra dependencies were split out of the core package in 7.0; `Microsoft.Data.SqlClient.Extensions.Azure 1.0.0` added to Dashboard, Lite, and Installer.Core for `ActiveDirectoryInteractive` connections
+- **`ModelContextProtocol` 0.7.0-preview.1 → 1.2.0** — off the preview tag and onto stable 1.x in Dashboard and Lite
+- **`DuckDB.NET` 1.5.0 → 1.5.2** in Lite — fixes unbounded row group growth on indexed tables under repeated load+insert cycles, memory leaks and race conditions in prepared statements, WAL checkpoint marking, and Windows UTF-8/UTF-16 handling
+- **`Microsoft.Extensions.*` 10.0.5 → 10.0.7**, **`System.Text.Json` 10.0.5 → 10.0.7**, **`ScottPlot.WPF` 5.1.57 → 5.1.58** — patch-level bumps with no expected behavioral change
+- **Theme polish** on grids and plan viewer in Dashboard and Lite — thanks [@ClaudioESSilva](https://github.com/ClaudioESSilva) ([#889])
+
+### Fixed
+
+- **Install loop timeout** raised from 5 minutes to 1 hour. `install/98_validate_installation.sql` runs every enabled collector with `@debug = 1` in a single batch; on large databases (reporter had 7.2M rows in `collect.query_stats`, 4.4M in `collect.query_store_data`) this took ~9 minutes and was blowing the 5-minute timeout, failing the install or upgrade ([#884])
+
+[#873]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/873
+[#880]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/880
+[#884]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/884
+[#887]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/887
+[#888]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/888
+[#889]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/889
+[#892]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/892
+[#899]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/899
+[#900]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/900
+
+## [2.8.0] - 2026-04-22
 
 ### Important
 

@@ -8,10 +8,10 @@
     <AssemblyName>PerformanceMonitorLite</AssemblyName>
     <RootNamespace>PerformanceMonitorLite</RootNamespace>
     <Product>SQL Server Performance Monitor Lite</Product>
-    <Version>2.8.0</Version>
-    <AssemblyVersion>2.8.0.0</AssemblyVersion>
-    <FileVersion>2.8.0.0</FileVersion>
-    <InformationalVersion>2.8.0</InformationalVersion>
+    <Version>2.9.0</Version>
+    <AssemblyVersion>2.9.0.0</AssemblyVersion>
+    <FileVersion>2.9.0.0</FileVersion>
+    <InformationalVersion>2.9.0</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <Description>Lightweight SQL Server performance monitoring - no installation required on target servers</Description>
@@ -37,33 +37,34 @@
 
   <ItemGroup>
     <!-- DuckDB for local data storage -->
-    <PackageReference Include="DuckDB.NET.Data" Version="1.5.0" />
-    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.0" />
+    <PackageReference Include="DuckDB.NET.Data" Version="1.5.2" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.2" />
 
     <!-- SQL Server connectivity -->
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
 
     <!-- Charting -->
-    <PackageReference Include="ScottPlot.WPF" Version="5.1.57" />
+    <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
 
     <!-- Windows Credential Manager for secure credential storage -->
     <PackageReference Include="CredentialManagement" Version="1.0.2" />
 
     <!-- Background service hosting -->
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
 
     <!-- Logging -->
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.7" />
 
     <!-- System tray -->
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
 
     <!-- JSON configuration -->
-    <PackageReference Include="System.Text.Json" Version="10.0.5" />
+    <PackageReference Include="System.Text.Json" Version="10.0.7" />
 
     <!-- MCP server for LLM tool access -->
-    <PackageReference Include="ModelContextProtocol" Version="0.7.0-preview.1" />
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.7.0-preview.1" />
+    <PackageReference Include="ModelContextProtocol" Version="1.2.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.2.0" />
     <PackageReference Include="Velopack" Version="0.0.1298" />
   </ItemGroup>
 

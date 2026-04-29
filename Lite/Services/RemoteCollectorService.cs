@@ -634,15 +634,18 @@ WHERE server_id = $3";
             InitialCatalog = "master"
         }.ConnectionString;
 
+        var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "name");
+
         var databases = new List<string>();
         try
         {
             using var conn = new SqlConnection(connStr);
             await conn.OpenAsync(cancellationToken);
             using var cmd = new SqlCommand(
-                "SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 ORDER BY name;",
+                $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
                 conn)
             { CommandTimeout = CommandTimeoutSeconds };
+            foreach (var p in exclusionParams) cmd.Parameters.Add(p);
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
                 databases.Add(reader.GetString(0));
@@ -666,6 +669,54 @@ WHERE server_id = $3";
             }
             return fallback;
         }
+    }
+
+    /// <summary>
+    /// Builds a SQL fragment and matching SqlParameters for excluding the supplied database names.
+    /// When the list is empty, returns ("", []) so callers can splice without effect.
+    /// Each name is parameterized — works on every supported SQL Server version (no STRING_SPLIT/OPENJSON
+    /// compatibility-level dependency).
+    /// </summary>
+    /// <param name="excludedDatabaseNames">Names from server.ExcludedDatabases.</param>
+    /// <param name="columnExpression">SQL column to filter, e.g. "d.name".</param>
+    internal static (string Clause, List<SqlParameter> Parameters) BuildDatabaseExclusionFilter(
+        IList<string>? excludedDatabaseNames, string columnExpression)
+    {
+        if (excludedDatabaseNames is null || excludedDatabaseNames.Count == 0)
+            return (string.Empty, new List<SqlParameter>());
+
+        var paramNames = new List<string>(excludedDatabaseNames.Count);
+        var sqlParams = new List<SqlParameter>(excludedDatabaseNames.Count);
+        for (int i = 0; i < excludedDatabaseNames.Count; i++)
+        {
+            string p = $"@excl_db_{i}";
+            paramNames.Add(p);
+            sqlParams.Add(new SqlParameter(p, System.Data.SqlDbType.NVarChar, 128) { Value = excludedDatabaseNames[i] });
+        }
+        return ($"AND {columnExpression} NOT IN ({string.Join(", ", paramNames)})", sqlParams);
+    }
+
+    /// <summary>
+    /// Builds a SQL fragment with database names interpolated as literal N'...' values.
+    /// Use this for dynamic SQL paths where parameter binding is awkward (e.g. inside
+    /// a string passed to sp_executesql). Names come from user-picked checklists of
+    /// existing databases, so literal interpolation with single-quote escaping is safe.
+    /// When forNestedDynamicSql=true, doubles the escape for use inside an outer T-SQL
+    /// string that itself becomes a dynamic-SQL @sql variable.
+    /// </summary>
+    internal static string BuildDatabaseExclusionLiteralClause(
+        IList<string>? excludedDatabaseNames, string columnExpression, bool forNestedDynamicSql = false)
+    {
+        if (excludedDatabaseNames is null || excludedDatabaseNames.Count == 0)
+            return string.Empty;
+
+        string escapedQuote = forNestedDynamicSql ? "''" : "'";
+        string Escape(string s) => forNestedDynamicSql
+            ? s.Replace("'", "''''")
+            : s.Replace("'", "''");
+
+        var quoted = excludedDatabaseNames.Select(n => $"N{escapedQuote}{Escape(n)}{escapedQuote}");
+        return $"AND {columnExpression} NOT IN ({string.Join(", ", quoted)})";
     }
 
     private static List<string> SingleDbOrEmpty(string? targetDb)

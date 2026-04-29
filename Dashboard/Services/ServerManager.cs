@@ -196,6 +196,203 @@ namespace PerformanceMonitorDashboard.Services
             Logger.Info($"Dropped PerformanceMonitor database and Agent jobs on '{server.DisplayName}'");
         }
 
+        public class PurgeResult
+        {
+            public int RowsDeleted { get; set; }
+            public int TableCount { get; set; }
+            public int DurationMs { get; set; }
+            public string Status { get; set; } = "";
+            public string? Message { get; set; }
+        }
+
+        /// <summary>
+        /// Runs config.data_retention against the PerformanceMonitor database on the given server.
+        /// </summary>
+        /// <param name="retentionDaysOverride">
+        /// null = use per-collector retention from config.collection_schedule.
+        /// 0 = TRUNCATE every collect.* table.
+        /// N > 0 = override every table's cutoff to N days.
+        /// </param>
+        public async Task<PurgeResult> RunDataRetentionAsync(
+            ServerConnection server,
+            int? retentionDaysOverride)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "PerformanceMonitor",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using (var cmd = new SqlCommand("config.data_retention", connection))
+            {
+                cmd.CommandType = System.Data.CommandType.StoredProcedure;
+                cmd.CommandTimeout = 600;
+
+                if (retentionDaysOverride.HasValue)
+                {
+                    cmd.Parameters.Add(new SqlParameter("@retention_days", System.Data.SqlDbType.Int) { Value = retentionDaysOverride.Value });
+                }
+
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            using var readCmd = new SqlCommand(@"
+SELECT TOP (1)
+    cl.collection_status,
+    cl.rows_collected,
+    cl.duration_ms,
+    cl.error_message
+FROM config.collection_log AS cl
+WHERE cl.collector_name = N'data_retention'
+ORDER BY cl.collection_time DESC;", connection);
+            readCmd.CommandTimeout = 30;
+
+            using var reader = await readCmd.ExecuteReaderAsync();
+            var result = new PurgeResult();
+
+            if (await reader.ReadAsync())
+            {
+                result.Status = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                result.RowsDeleted = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+                result.DurationMs = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+                result.Message = reader.IsDBNull(3) ? null : reader.GetString(3);
+
+                if (result.Message is not null && result.Message.StartsWith("Cleaned ", StringComparison.Ordinal))
+                {
+                    int spaceIdx = result.Message.IndexOf(' ', 8);
+                    if (spaceIdx > 8 && int.TryParse(result.Message.AsSpan(8, spaceIdx - 8), out int tableCount))
+                    {
+                        result.TableCount = tableCount;
+                    }
+                }
+                else if (result.Message is not null && result.Message.StartsWith("TRUNCATE all: ", StringComparison.Ordinal))
+                {
+                    int spaceIdx = result.Message.IndexOf(' ', 14);
+                    if (spaceIdx > 14 && int.TryParse(result.Message.AsSpan(14, spaceIdx - 14), out int tableCount))
+                    {
+                        result.TableCount = tableCount;
+                    }
+                }
+            }
+
+            Logger.Info($"Ran data_retention on '{server.DisplayName}': status={result.Status}, rowsDeleted={result.RowsDeleted}, tables={result.TableCount}, durationMs={result.DurationMs}");
+
+            return result;
+        }
+
+        /// <summary>
+        /// Returns user database names (excluding system DBs and PerformanceMonitor) on the target server,
+        /// for use in the Excluded Databases dialog.
+        /// </summary>
+        public async Task<List<string>> GetUserDatabasesAsync(ServerConnection server)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "master",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var cmd = new SqlCommand(@"
+SELECT d.name
+FROM sys.databases AS d
+WHERE d.database_id > 4
+AND   d.state_desc = N'ONLINE'
+AND   d.name <> N'PerformanceMonitor'
+AND   d.database_id < 32761 /*exclude contained AG system databases*/
+ORDER BY d.name;", connection);
+            cmd.CommandTimeout = 30;
+
+            var names = new List<string>();
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                names.Add(reader.GetString(0));
+            }
+            return names;
+        }
+
+        /// <summary>
+        /// Returns the current per-database exclusion list from config.collector_database_exclusions on the target.
+        /// </summary>
+        public async Task<List<string>> GetCollectorDatabaseExclusionsAsync(ServerConnection server)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "PerformanceMonitor",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var cmd = new SqlCommand(@"
+SELECT e.database_name
+FROM config.collector_database_exclusions AS e
+ORDER BY e.database_name;", connection);
+            cmd.CommandTimeout = 30;
+
+            var names = new List<string>();
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                names.Add(reader.GetString(0));
+            }
+            return names;
+        }
+
+        /// <summary>
+        /// Replaces the contents of config.collector_database_exclusions with the supplied list, transactionally.
+        /// </summary>
+        public async Task SaveCollectorDatabaseExclusionsAsync(ServerConnection server, IEnumerable<string> databaseNames)
+        {
+            var connectionString = server.GetConnectionString(_credentialService);
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "PerformanceMonitor",
+                ConnectTimeout = 10
+            };
+
+            using var connection = new SqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+
+            using var transaction = connection.BeginTransaction();
+            try
+            {
+                using (var deleteCmd = new SqlCommand("DELETE FROM config.collector_database_exclusions;", connection, transaction))
+                {
+                    deleteCmd.CommandTimeout = 30;
+                    await deleteCmd.ExecuteNonQueryAsync();
+                }
+
+                foreach (var name in databaseNames.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    using var insertCmd = new SqlCommand(
+                        "INSERT INTO config.collector_database_exclusions (database_name) VALUES (@name);",
+                        connection, transaction);
+                    insertCmd.CommandTimeout = 30;
+                    insertCmd.Parameters.Add(new SqlParameter("@name", System.Data.SqlDbType.NVarChar, 128) { Value = name });
+                    await insertCmd.ExecuteNonQueryAsync();
+                }
+
+                transaction.Commit();
+                Logger.Info($"Saved collector database exclusions on '{server.DisplayName}'");
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
+
         public void UpdateLastConnected(string id)
         {
             lock (_serversLock)
