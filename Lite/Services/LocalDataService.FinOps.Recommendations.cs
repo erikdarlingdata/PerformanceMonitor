@@ -193,23 +193,55 @@ END;", sqlConn);
         // 3. Memory right-sizing score (from DuckDB)
         try
         {
+            /* Use P95 of total_server_memory_mb (perfmon "Total Server Memory" — the
+               full set of memory SQL has committed) over 7 days, not a single-sample
+               snapshot of buffer_pool_mb (data cache only). The earlier version
+               could fire right after a service restart or on servers where plan
+               cache / workspace memory dominates, falsely showing "buffer pool 0%". */
             var util = await GetUtilizationEfficiencyAsync(serverId);
             if (util != null && util.PhysicalMemoryMb > 8192)
             {
-                var bpRatio = util.PhysicalMemoryMb > 0 ? (decimal)util.BufferPoolMb / util.PhysicalMemoryMb : 0m;
-                if (bpRatio < 0.50m)
+                int p95Mb = 0;
+                long sampleCount = 0;
+                using (var conn = await OpenConnectionAsync())
+                using (var cmd = conn.CreateCommand())
                 {
-                    var targetMb = Math.Max(8192, util.BufferPoolMb * 2);
-                    recommendations.Add(new RecommendationRow
+                    cmd.CommandText = @"
+SELECT
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
+    COUNT(*) AS sample_count
+FROM v_memory_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+                    cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+                    cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+
+                    using var reader = await cmd.ExecuteReaderAsync();
+                    if (await reader.ReadAsync())
                     {
-                        Category = "Memory",
-                        Severity = bpRatio < 0.30m ? "High" : "Medium",
-                        Confidence = "Medium",
-                        Finding = $"Memory over-provisioned (buffer pool uses {bpRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                        Detail = $"Buffer pool is {util.BufferPoolMb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({bpRatio:P0} utilization). " +
-                                 $"Consider reducing to ~{targetMb / 1024}GB.",
-                        EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
-                    });
+                        p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                        sampleCount = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+                    }
+                }
+
+                // Need at least ~1 day of samples (one per minute baseline) to trust the P95
+                if (sampleCount >= 500)
+                {
+                    var memRatio = (decimal)p95Mb / util.PhysicalMemoryMb;
+                    if (memRatio < 0.50m)
+                    {
+                        var targetMb = Math.Max(8192, p95Mb * 2);
+                        recommendations.Add(new RecommendationRow
+                        {
+                            Category = "Memory",
+                            Severity = memRatio < 0.30m ? "High" : "Medium",
+                            Confidence = "Medium",
+                            Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
+                            Detail = $"P95 SQL Server memory over 7 days is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                                     $"Consider reducing to ~{targetMb / 1024}GB.",
+                            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
+                        });
+                    }
                 }
             }
         }
@@ -439,11 +471,16 @@ LIMIT 10";
             var vmUtil = await GetUtilizationEfficiencyAsync(serverId);
             if (vmUtil != null)
             {
-                // CPU data comes from 24-hour window in GetUtilizationEfficiencyAsync.
-                // For a 7-day P95 we query DuckDB directly.
+                /* Memory side previously read util.BufferPoolMb (a single snapshot
+                   of perfmon "Database Cache Memory") — only the data-cache slice
+                   of the buffer pool, ignoring plan cache / workspace / locks /
+                   CLR — and could trigger right after a service restart. Now use
+                   7-day P95 of total_server_memory_mb from v_memory_stats, the
+                   same signal the Utilization tab shows. */
                 decimal p95Cpu7d = vmUtil.P95CpuPct;
                 int cpuCount = vmUtil.CpuCount;
-                int bpMb = vmUtil.BufferPoolMb;
+                int p95MemMb = 0;
+                long memSampleCount = 0;
                 int physMb = vmUtil.PhysicalMemoryMb;
 
                 // Try 7-day P95 from DuckDB for better accuracy
@@ -466,6 +503,29 @@ AND   collection_time >= $2";
                     }
                 }
                 catch { /* fall back to 24-hour P95 */ }
+
+                try
+                {
+                    using var memConn = await OpenConnectionAsync();
+                    using var memCmd = memConn.CreateCommand();
+                    memCmd.CommandText = @"
+SELECT
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
+    COUNT(*) AS sample_count
+FROM v_memory_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+                    memCmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+                    memCmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+
+                    using var memReader = await memCmd.ExecuteReaderAsync();
+                    if (await memReader.ReadAsync())
+                    {
+                        p95MemMb = memReader.IsDBNull(0) ? 0 : Convert.ToInt32(memReader.GetValue(0));
+                        memSampleCount = memReader.IsDBNull(1) ? 0L : ToInt64(memReader.GetValue(1));
+                    }
+                }
+                catch { /* if we cannot get 7-day P95 memory, skip the memory prescription */ }
 
                 // CPU prescription: only if >= 4 cores
                 if (cpuCount >= 4)
@@ -493,14 +553,14 @@ AND   collection_time >= $2";
                     }
                 }
 
-                // Memory prescription: only if >= 4096 MB
-                if (physMb >= 4096 && physMb > 0)
+                // Memory prescription: needs >= 4 GB physical and at least ~1 day of samples
+                if (physMb >= 4096 && physMb > 0 && memSampleCount >= 500)
                 {
-                    var bpRatio = (decimal)bpMb / physMb;
+                    var memRatio = (decimal)p95MemMb / physMb;
                     int targetMb = 0;
-                    if (bpRatio < 0.25m)
+                    if (memRatio < 0.25m)
                         targetMb = Math.Max(4096, physMb / 4);
-                    else if (bpRatio < 0.40m)
+                    else if (memRatio < 0.40m)
                         targetMb = Math.Max(4096, physMb / 2);
 
                     if (targetMb > 0 && targetMb < physMb)
@@ -510,8 +570,8 @@ AND   collection_time >= $2";
                             Category = "Hardware",
                             Severity = "Medium",
                             Confidence = "Medium",
-                            Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (buffer pool uses {bpRatio:P0})",
-                            Detail = $"Buffer pool is using {bpMb:N0} MB of {physMb:N0} MB physical RAM ({bpRatio:P0}). " +
+                            Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
+                            Detail = $"P95 SQL Server memory over 7 days is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
