@@ -20,8 +20,4 @@
   <ItemGroup>
     <ProjectReference Include="..\Lite\PerformanceMonitorLite.csproj" />
   </ItemGroup>
-
-  <ItemGroup>
-    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
 </Project>
