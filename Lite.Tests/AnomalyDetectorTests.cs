@@ -15,6 +15,7 @@ namespace PerformanceMonitorLite.Tests;
 /// methods (batch requests, sessions, query duration, memory), per-metric thresholds,
 /// and baseline context metadata.
 /// </summary>
+[Collection(BaselineProviderCollection.Name)]
 public class AnomalyDetectorTests : IDisposable
 {
     private readonly string _tempDir;
