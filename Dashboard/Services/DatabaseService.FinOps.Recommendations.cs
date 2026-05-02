@@ -235,8 +235,11 @@ OPTION(MAXDOP 1);", connection);
                     var sampleCount = memReader.IsDBNull(1) ? 0L : Convert.ToInt64(memReader.GetValue(1));
                     var physMb = memReader.IsDBNull(2) ? 0 : Convert.ToInt32(memReader.GetValue(2));
 
-                    // Need at least ~1 day of samples (one per minute baseline) to trust the P95
-                    if (physMb > 0 && sampleCount >= 500)
+                    // Need a handful of samples to compute a meaningful P95 — single
+                    // readings can be misleading, but ~16 samples is enough to smooth
+                    // out a single-point anomaly without delaying the recommendation
+                    // for hours after a fresh install.
+                    if (physMb > 0 && sampleCount >= 16)
                     {
                         var memRatio = (decimal)p95Mb / physMb;
                         if (memRatio < 0.50m && physMb > 8192)
@@ -531,8 +534,8 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
                         }
                     }
 
-                    // Memory prescription: needs >= 4 GB physical and at least ~1 day of samples
-                    if (physMb >= 4096 && physMb > 0 && memSampleCount >= 500)
+                    // Memory prescription: needs >= 4 GB physical and a handful of samples
+                    if (physMb >= 4096 && physMb > 0 && memSampleCount >= 16)
                     {
                         var memRatio = (decimal)p95Mb / physMb;
                         int targetMb = 0;

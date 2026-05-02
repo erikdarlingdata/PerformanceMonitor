@@ -885,7 +885,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     }
 
     /// <summary>
-    /// Seeds memory_stats with physical memory, buffer pool, and target memory values.
+    /// Seeds memory_stats with physical memory, buffer pool, and target memory values
+    /// across 16 collection points so 7-day P95 queries (used by FinOps memory
+    /// recommendations) have enough samples to fire.
     /// </summary>
     internal async Task SeedMemoryStatsAsync(double totalPhysicalMb, double bufferPoolMb, double targetMb)
     {
@@ -893,25 +895,29 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
 
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
+        for (var i = 0; i < 16; i++)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
 INSERT INTO memory_stats
     (collection_id, collection_time, server_id, server_name,
      total_physical_memory_mb, available_physical_memory_mb,
      target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
 
-        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
-        cmd.Parameters.Add(new DuckDBParameter { Value = TestPeriodEnd });
-        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = totalPhysicalMb });
-        cmd.Parameters.Add(new DuckDBParameter { Value = totalPhysicalMb - bufferPoolMb }); // available = total - used
-        cmd.Parameters.Add(new DuckDBParameter { Value = targetMb });
-        cmd.Parameters.Add(new DuckDBParameter { Value = bufferPoolMb });
-        cmd.Parameters.Add(new DuckDBParameter { Value = bufferPoolMb });
+            var t = TestPeriodStart.AddMinutes(i * 15);
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = t });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = totalPhysicalMb });
+            cmd.Parameters.Add(new DuckDBParameter { Value = totalPhysicalMb - bufferPoolMb }); // available = total - used
+            cmd.Parameters.Add(new DuckDBParameter { Value = targetMb });
+            cmd.Parameters.Add(new DuckDBParameter { Value = bufferPoolMb });
+            cmd.Parameters.Add(new DuckDBParameter { Value = bufferPoolMb });
 
-        await cmd.ExecuteNonQueryAsync();
+            await cmd.ExecuteNonQueryAsync();
+        }
     }
 
     /// <summary>
