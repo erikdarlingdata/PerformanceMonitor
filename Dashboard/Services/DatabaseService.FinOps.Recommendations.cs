@@ -211,35 +211,44 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
             // 3. Memory right-sizing score
             try
             {
+                /* Use P95 of total_memory_mb (buffer pool + plan cache + other clerks)
+                   over 7 days, not a single-sample snapshot. The earlier version read
+                   only buffer_pool_mb at a single instant, which understated usage on
+                   servers where plan cache / workspace / locks dominate, and could
+                   trigger right after a service restart when the cache was cold. */
                 using var memCmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT TOP (1)
-    ms.buffer_pool_mb,
-    (SELECT CAST(SERVERPROPERTY('PhysicalMemoryInMB') AS INT)) AS physical_memory_mb
+    p95_total_memory_mb = PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ms.total_memory_mb)
+                          OVER (),
+    sample_count = COUNT_BIG(*) OVER (),
+    physical_memory_mb = (SELECT CAST(SERVERPROPERTY('PhysicalMemoryInMB') AS INT))
 FROM collect.memory_stats AS ms
-ORDER BY ms.collection_time DESC
+WHERE ms.collection_time >= DATEADD(DAY, -7, SYSDATETIME())
 OPTION(MAXDOP 1);", connection);
                 memCmd.CommandTimeout = 30;
 
                 using var memReader = await memCmd.ExecuteReaderAsync();
                 if (await memReader.ReadAsync())
                 {
-                    var bpMb = memReader.IsDBNull(0) ? 0 : Convert.ToInt32(memReader.GetValue(0));
-                    var physMb = memReader.IsDBNull(1) ? 0 : Convert.ToInt32(memReader.GetValue(1));
+                    var p95Mb = memReader.IsDBNull(0) ? 0 : Convert.ToInt32(memReader.GetValue(0));
+                    var sampleCount = memReader.IsDBNull(1) ? 0L : Convert.ToInt64(memReader.GetValue(1));
+                    var physMb = memReader.IsDBNull(2) ? 0 : Convert.ToInt32(memReader.GetValue(2));
 
-                    if (physMb > 0)
+                    // Need at least ~1 day of samples (one per minute baseline) to trust the P95
+                    if (physMb > 0 && sampleCount >= 500)
                     {
-                        var bpRatio = (decimal)bpMb / physMb;
-                        if (bpRatio < 0.50m && physMb > 8192)
+                        var memRatio = (decimal)p95Mb / physMb;
+                        if (memRatio < 0.50m && physMb > 8192)
                         {
-                            var targetMb = Math.Max(8192, bpMb * 2);
+                            var targetMb = Math.Max(8192, p95Mb * 2);
                             recommendations.Add(new FinOpsRecommendation
                             {
                                 Category = "Memory",
-                                Severity = bpRatio < 0.30m ? "High" : "Medium",
+                                Severity = memRatio < 0.30m ? "High" : "Medium",
                                 Confidence = "Medium",
-                                Finding = $"Memory over-provisioned (buffer pool uses {bpRatio:P0} of {physMb / 1024}GB RAM)",
-                                Detail = $"Buffer pool is {bpMb:N0} MB out of {physMb:N0} MB physical RAM ({bpRatio:P0} utilization). " +
+                                Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {physMb / 1024}GB RAM)",
+                                Detail = $"P95 SQL Server memory over 7 days is {p95Mb:N0} MB out of {physMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
                                          $"Consider reducing to ~{targetMb / 1024}GB.",
                                 EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m : null
                             });
@@ -464,6 +473,12 @@ ORDER BY SUM(CAST(is_running_long AS int)) DESC", connection);
             // 12. VM right-sizing — prescriptive core/memory targets
             try
             {
+                /* Memory side previously read live perfmon "Database Cache Memory (KB)",
+                   which is only the data-cache slice of the buffer pool — it ignores
+                   plan cache, workspace memory, locks, CLR — and was sampled instantly,
+                   so a cold cache after a restart triggered "reduce memory" even on
+                   servers under genuine pressure. Now uses 7-day P95 of total_memory_mb
+                   from collect.memory_stats, the same signal the Utilization tab shows. */
                 using var vmCmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT
@@ -471,10 +486,12 @@ SELECT
                FROM collect.cpu_utilization_stats AS cus
                WHERE cus.collection_time >= DATEADD(DAY, -7, SYSDATETIME())),
     cpu_count = (SELECT si.cpu_count FROM sys.dm_os_sys_info AS si),
-    buffer_pool_mb = (SELECT pc.cntr_value / 1024
-                      FROM sys.dm_os_performance_counters AS pc
-                      WHERE pc.counter_name = N'Database Cache Memory (KB)'
-                      AND   pc.object_name LIKE N'%Buffer Manager%'),
+    p95_total_memory_mb = (SELECT TOP (1) PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ms.total_memory_mb) OVER ()
+                           FROM collect.memory_stats AS ms
+                           WHERE ms.collection_time >= DATEADD(DAY, -7, SYSDATETIME())),
+    memory_sample_count = (SELECT COUNT_BIG(*)
+                           FROM collect.memory_stats AS ms
+                           WHERE ms.collection_time >= DATEADD(DAY, -7, SYSDATETIME())),
     physical_memory_mb = (SELECT si.physical_memory_kb / 1024 FROM sys.dm_os_sys_info AS si)
 OPTION(MAXDOP 1, RECOMPILE);", connection);
                 vmCmd.CommandTimeout = 60;
@@ -484,8 +501,9 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
                 {
                     var p95Cpu = vmReader.IsDBNull(0) ? 0m : Convert.ToDecimal(vmReader.GetValue(0));
                     var cpuCount = vmReader.IsDBNull(1) ? 0 : Convert.ToInt32(vmReader.GetValue(1));
-                    var bpMb = vmReader.IsDBNull(2) ? 0 : Convert.ToInt32(vmReader.GetValue(2));
-                    var physMb = vmReader.IsDBNull(3) ? 0 : Convert.ToInt32(vmReader.GetValue(3));
+                    var p95Mb = vmReader.IsDBNull(2) ? 0 : Convert.ToInt32(vmReader.GetValue(2));
+                    var memSampleCount = vmReader.IsDBNull(3) ? 0L : Convert.ToInt64(vmReader.GetValue(3));
+                    var physMb = vmReader.IsDBNull(4) ? 0 : Convert.ToInt32(vmReader.GetValue(4));
 
                     // CPU prescription: only if >= 4 cores
                     if (cpuCount >= 4)
@@ -513,14 +531,14 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
                         }
                     }
 
-                    // Memory prescription: only if >= 4096 MB
-                    if (physMb >= 4096 && physMb > 0)
+                    // Memory prescription: needs >= 4 GB physical and at least ~1 day of samples
+                    if (physMb >= 4096 && physMb > 0 && memSampleCount >= 500)
                     {
-                        var bpRatio = (decimal)bpMb / physMb;
+                        var memRatio = (decimal)p95Mb / physMb;
                         int targetMb = 0;
-                        if (bpRatio < 0.25m)
+                        if (memRatio < 0.25m)
                             targetMb = Math.Max(4096, physMb / 4);
-                        else if (bpRatio < 0.40m)
+                        else if (memRatio < 0.40m)
                             targetMb = Math.Max(4096, physMb / 2);
 
                         if (targetMb > 0 && targetMb < physMb)
@@ -530,8 +548,8 @@ OPTION(MAXDOP 1, RECOMPILE);", connection);
                                 Category = "Hardware",
                                 Severity = "Medium",
                                 Confidence = "Medium",
-                                Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (buffer pool uses {bpRatio:P0})",
-                                Detail = $"Buffer pool is using {bpMb:N0} MB of {physMb:N0} MB physical RAM ({bpRatio:P0}). " +
+                                Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
+                                Detail = $"P95 SQL Server memory over 7 days is {p95Mb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                          $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                                 EstMonthlySavings = monthlyCost > 0
                                     ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
