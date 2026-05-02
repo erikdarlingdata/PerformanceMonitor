@@ -74,8 +74,27 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         chart.MouseMove += (s, e) => OnMouseMove(lane, e);
         chart.MouseLeave += (s, e) => OnMouseLeave();
 
+        /* Tab switching can leave the popup wedged: WPF unloads the parent TabItem
+           without firing MouseLeave, so IsOpen stays true with a stale anchor.
+           When a chart becomes visible again, OnMouseMove sets IsOpen = true but
+           it is already true, so the popup never re-anchors. Force-close on every
+           visibility/load transition for any lane so the next mouse move re-opens
+           cleanly. */
+        chart.IsVisibleChanged += OnLaneVisibilityChanged;
+        chart.Unloaded += OnLaneUnloaded;
+        chart.Loaded += OnLaneLoaded;
+
         _lanes.Add(lane);
     }
+
+    private void OnLaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) =>
+        _tooltip.IsOpen = false;
+
+    private void OnLaneUnloaded(object sender, RoutedEventArgs e) =>
+        _tooltip.IsOpen = false;
+
+    private void OnLaneLoaded(object sender, RoutedEventArgs e) =>
+        _tooltip.IsOpen = false;
 
     /// <summary>
     /// Sets the expected baseline range for a lane (upper/lower bounds).
@@ -287,6 +306,11 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _tooltip.PlacementTarget = sourceLane.Chart;
         _tooltip.HorizontalOffset = pos.X + 15;
         _tooltip.VerticalOffset = pos.Y + 15;
+        /* Toggle if already open so WPF re-evaluates the placement target.
+           Without this, a popup that was IsOpen = true when its TabItem was
+           unloaded stays "open" with a stale anchor and never appears on
+           return — the assignment below is a no-op. */
+        if (_tooltip.IsOpen) _tooltip.IsOpen = false;
         _tooltip.IsOpen = true;
     }
 
@@ -373,6 +397,9 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _tooltip.IsOpen = false;
         foreach (var lane in _lanes)
         {
+            lane.Chart.IsVisibleChanged -= OnLaneVisibilityChanged;
+            lane.Chart.Unloaded -= OnLaneUnloaded;
+            lane.Chart.Loaded -= OnLaneLoaded;
             lane.Series.Clear();
             lane.VLine = null;
         }
