@@ -15,13 +15,28 @@ namespace PerformanceMonitorLite.Tests;
 /// Each test seeds a specific server profile into DuckDB, runs the recommendation or
 /// scoring engine, and validates the output (categories, findings, severity, savings).
 /// </summary>
-public class FinOpsTests : IClassFixture<FinOpsDuckDbFixture>
+public class FinOpsTests : IDisposable
 {
+    private readonly string _tempDir;
+    private readonly string _dbPath;
     private readonly DuckDbInitializer _duckDb;
 
-    public FinOpsTests(FinOpsDuckDbFixture fixture)
+    public FinOpsTests()
     {
-        _duckDb = fixture.DuckDb;
+        _tempDir = Path.Combine(Path.GetTempPath(), "FinOpsTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(_tempDir);
+        _dbPath = Path.Combine(_tempDir, "test.duckdb");
+        _duckDb = new DuckDbInitializer(_dbPath);
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (Directory.Exists(_tempDir))
+                Directory.Delete(_tempDir, recursive: true);
+        }
+        catch { /* Best-effort cleanup */ }
     }
 
     /* ── Over-Provisioned Enterprise ── */

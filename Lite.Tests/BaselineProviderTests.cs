@@ -13,7 +13,6 @@ namespace PerformanceMonitorLite.Tests;
 /// Tests for BaselineProvider: time-bucketed baseline computation, bucket collapse
 /// with hysteresis, restart poisoning exclusion, and division-by-zero handling.
 /// </summary>
-[Collection(BaselineProviderCollection.Name)]
 public class BaselineProviderTests : IDisposable
 {
     private readonly string _tempDir;
