@@ -25,6 +25,11 @@ jobs:
         if: github.event_name != 'release'
         uses: dorny/paths-filter@v3
         with:
+          # On push events, compare against the previous commit on this branch
+          # (github.event.before). Without this, the action defaults to comparing
+          # against the default branch on non-default branch pushes, which would
+          # match every accumulated change and defeat the filter.
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
           filters: |
             lite_analysis:
               - 'Lite/Analysis/**'
