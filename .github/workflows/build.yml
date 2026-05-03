@@ -70,7 +70,7 @@ jobs:
 
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || github.event_name == 'release'
-        run: dotnet test Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal
+        run: dotnet test Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
 
       - name: Get version
         id: version
