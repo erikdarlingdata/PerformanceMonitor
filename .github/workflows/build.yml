@@ -20,6 +20,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name != 'release'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            lite_analysis:
+              - 'Lite/Analysis/**'
+              - 'Lite/Services/**'
+              - 'Lite/DuckDb/**'
+              - 'Lite/Models/**'
+              - 'Lite.Tests/**'
+              - 'Lite/PerformanceMonitorLite.csproj'
+            installer:
+              - 'Installer/**'
+              - 'Installer.Core/**'
+              - 'Installer.Tests/**'
+              - 'install/**'
+              - 'upgrades/**'
+
       - name: Setup .NET 8.0
         uses: actions/setup-dotnet@v4
         with:
@@ -33,12 +53,24 @@ jobs:
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Installer/PerformanceMonitorInstaller.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+          dotnet restore Installer.Tests/Installer.Tests.csproj --locked-mode
 
       - name: Build Lite.Tests
         run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
-      - name: Run Lite tests
-        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal
+      - name: Build Installer.Tests
+        run: dotnet build Installer.Tests/Installer.Tests.csproj -c Release --no-restore
+
+      - name: Run Lite fast tests
+        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~AnomalyDetectorTests&FullyQualifiedName!~FactCollectorTests&FullyQualifiedName!~FactCollectorMiseryTests&FullyQualifiedName!~BaselineProviderTests&FullyQualifiedName!~InferenceEngineTests&FullyQualifiedName!~ScenarioTests&FullyQualifiedName!~AnalysisServiceTests"
+
+      - name: Run Lite analysis-heavy tests
+        if: steps.filter.outputs.lite_analysis == 'true' || github.event_name == 'release'
+        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName~AnomalyDetectorTests|FullyQualifiedName~FactCollectorTests|FullyQualifiedName~FactCollectorMiseryTests|FullyQualifiedName~BaselineProviderTests|FullyQualifiedName~InferenceEngineTests|FullyQualifiedName~ScenarioTests|FullyQualifiedName~AnalysisServiceTests"
+
+      - name: Run Installer tests
+        if: steps.filter.outputs.installer == 'true' || github.event_name == 'release'
+        run: dotnet test Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
 
       - name: Get version
         id: version
