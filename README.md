@@ -539,7 +539,7 @@ Common issues:
 2. **Query Store tab empty** — Query Store must be enabled on the target database (`ALTER DATABASE [YourDB] SET QUERY_STORE = ON`).
 3. **Blocked process reports empty** — Both editions attempt to auto-configure the blocked process threshold to 5 seconds via `sp_configure`. On **AWS RDS**, `sp_configure` is not available — you must set `blocked process threshold (s)` through an RDS Parameter Group (see "AWS RDS Parameter Group Configuration" above). On **Azure SQL Database**, the threshold is fixed at 20 seconds and cannot be changed. If you still see no data on other platforms, verify the login has `ALTER SETTINGS` permission.
 4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has the required [permissions](#permissions). For Azure SQL Database, use a contained database user with `VIEW DATABASE STATE`.
-5. **FinOps Index Analysis hangs or times out** — `sp_IndexCleanup` runs against each user database under your dashboard/Lite login. If that login has no user mapping in a target database, the procedure can hang at 100% CPU instead of erroring. See [FinOps Index Analysis](#finops-index-analysis-per-database-grants) below for the per-database grants that fix this.
+5. **FinOps Index Analysis hangs, times out, or returns `Msg 229` on `sql_expression_dependencies`** — `sp_IndexCleanup` runs against each user database under your dashboard/Lite login. If that login has no user mapping in a target database, the procedure can hang at 100% CPU instead of erroring; if it is mapped but missing `SELECT` on `sys.sql_expression_dependencies`, it errors immediately on databases that have UDF-bound computed columns or check constraints. See [FinOps Index Analysis](#finops-index-analysis-per-database-grants) below for the full per-database grant set that fixes both.
 
 ---
 
@@ -592,15 +592,18 @@ ALTER ROLE [SQLAgentReaderRole] ADD MEMBER [YourLogin];
 
 ### FinOps Index Analysis (per-database grants)
 
-Applies to **both editions**. The FinOps Index Analysis tab runs `sp_IndexCleanup` against each user database you ask it to inspect, executing as your dashboard/Lite login. The grants above (`VIEW SERVER STATE`, `db_owner` on `PerformanceMonitor`, `SQLAgentReaderRole` on `msdb`) are *not* sufficient on their own — the login also needs a user mapping in every user database it will analyze, plus `VIEW DATABASE STATE` and `VIEW DEFINITION` in each.
+Applies to **both editions**. The FinOps Index Analysis tab runs `sp_IndexCleanup` against each user database you ask it to inspect, executing as your dashboard/Lite login. The grants above (`VIEW SERVER STATE`, `db_owner` on `PerformanceMonitor`, `SQLAgentReaderRole` on `msdb`) are *not* sufficient on their own — the login also needs a user mapping in every user database it will analyze, plus `VIEW DATABASE STATE`, `VIEW DEFINITION`, and `SELECT` on `sys.sql_expression_dependencies` in each.
+
+The third grant is the easy one to miss: by default only members of `db_owner` have `SELECT` on `sys.sql_expression_dependencies`, and `VIEW DEFINITION` does not include it. `sp_IndexCleanup` queries that catalog view (via three-part name to the target database) when checking for computed columns and check constraints that reference UDFs, so the failure only surfaces on databases that actually have those — which is why a smoke-test database may pass and a real workload database fails with `Msg 229`.
 
 For each target user database:
 
 ```sql
 USE [YourTargetDatabase];
 CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
-GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
-GRANT VIEW DEFINITION    TO [SQLServerPerfMon];
+GRANT VIEW DATABASE STATE                       TO [SQLServerPerfMon];
+GRANT VIEW DEFINITION                           TO [SQLServerPerfMon];
+GRANT SELECT ON sys.sql_expression_dependencies TO [SQLServerPerfMon];
 ```
 
 Or apply broadly with `sp_MSforeachdb`:
@@ -612,12 +615,18 @@ IF DB_ID() > 4 AND DATABASEPROPERTYEX(DB_NAME(), ''Updateability'') = ''READ_WRI
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ''SQLServerPerfMon'')
         CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
-    GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
-    GRANT VIEW DEFINITION    TO [SQLServerPerfMon];
+    GRANT VIEW DATABASE STATE                       TO [SQLServerPerfMon];
+    GRANT VIEW DEFINITION                           TO [SQLServerPerfMon];
+    GRANT SELECT ON sys.sql_expression_dependencies TO [SQLServerPerfMon];
 END';
 ```
 
-**Symptom if missing.** Without these grants, `sp_IndexCleanup` can hang at 100% CPU with no waits and never return — instead of failing fast with `Msg 916` like every other catalog DMV. The hang isn't a deadlock or a long-running scan; it's a SQL Server engine bug where a permission check at execute time gets misclassified as "this plan needs to be recompiled," producing an infinite recompile loop. Reproduces on SQL Server 2016 SP3 through 2025 CU4. Adding the grants above eliminates the hang. See issue [#915](https://github.com/erikdarlingdata/PerformanceMonitor/issues/915) for the full diagnosis.
+**Symptoms if missing.** There are two distinct failure modes depending on which grant is absent:
+
+- *No user mapping in the target database* — `sp_IndexCleanup` can hang at 100% CPU with no waits and never return, instead of failing fast with `Msg 916` like every other catalog DMV. The hang isn't a deadlock or a long-running scan; it's a SQL Server engine bug where a permission check at execute time gets misclassified as "this plan needs to be recompiled," producing an infinite recompile loop. Reproduces on SQL Server 2016 SP3 through 2025 CU4.
+- *User is mapped with `VIEW DATABASE STATE` + `VIEW DEFINITION` but no `SELECT` on `sys.sql_expression_dependencies`* — fails fast with `Msg 229, Level 14, State 5: The SELECT permission was denied on the object 'sql_expression_dependencies', database 'mssqlsystemresource', schema 'sys'` the moment a database with a UDF-bound computed column or check constraint is reached.
+
+Adding all three grants above eliminates both. See issue [#915](https://github.com/erikdarlingdata/PerformanceMonitor/issues/915) for the full diagnosis.
 
 ### Azure SQL Database (Lite Only)
 
