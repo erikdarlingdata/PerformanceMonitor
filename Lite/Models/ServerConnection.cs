@@ -168,7 +168,7 @@ public class ServerConnection : INotifyPropertyChanged
     private string? _installedVersion;
 
     /// <summary>
-    /// PerformanceMonitor Lite app version monitoring this server (e.g., "2.9.0").
+    /// PerformanceMonitor Lite app version monitoring this server (e.g., "2.10.0").
     /// Populated by the Manage Servers window. Not persisted — runtime-only display field.
     /// Same value for every row since one Lite process monitors all servers.
     /// </summary>
