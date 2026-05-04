@@ -455,6 +455,17 @@ public partial class App : Application
     private void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
         var exception = e.ExceptionObject as Exception;
+
+        /* Silently swallow Hardcodet TrayToolTip race condition (issue #422) when it
+           escapes the Dispatcher path — happens during tray-Exit shutdown when the
+           Dispatcher's exception hooks are torn down before the tray library finishes. */
+        if (exception != null && IsTrayToolTipCrash(exception))
+        {
+            AppLogger.Warn("AppDomain", "Suppressed Hardcodet TrayToolTip crash (issue #422)");
+            AppLogger.Flush();
+            return;
+        }
+
         AppLogger.Error("AppDomain", "Unhandled exception (terminating=" + e.IsTerminating + ")", exception);
         AppLogger.Flush();
 

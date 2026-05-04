@@ -53,6 +53,16 @@ internal sealed class ChartHoverHelper
 
         chart.MouseMove += OnMouseMove;
         chart.MouseLeave += OnMouseLeave;
+
+        /* Tab switching can leave the popup wedged: WPF unloads the parent TabItem
+           without firing MouseLeave, so IsOpen stays true with a stale anchor.
+           When the chart becomes visible again, OnMouseMove sets IsOpen = true
+           but it is already true, so the popup never re-anchors and never shows.
+           Force-close on every visibility/load transition so the next mouse move
+           re-opens cleanly. */
+        chart.IsVisibleChanged += OnChartVisibilityChanged;
+        chart.Unloaded += OnChartUnloaded;
+        chart.Loaded += OnChartLoaded;
     }
 
     public string Unit { get => _unit; set => _unit = value; }
@@ -61,10 +71,22 @@ internal sealed class ChartHoverHelper
     {
         _chart.MouseMove -= OnMouseMove;
         _chart.MouseLeave -= OnMouseLeave;
+        _chart.IsVisibleChanged -= OnChartVisibilityChanged;
+        _chart.Unloaded -= OnChartUnloaded;
+        _chart.Loaded -= OnChartLoaded;
         _popup.IsOpen = false;
         _scatters.Clear();
         _barPlots.Clear();
     }
+
+    private void OnChartVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) =>
+        _popup.IsOpen = false;
+
+    private void OnChartUnloaded(object sender, RoutedEventArgs e) =>
+        _popup.IsOpen = false;
+
+    private void OnChartLoaded(object sender, RoutedEventArgs e) =>
+        _popup.IsOpen = false;
 
     public void Clear()
     {
@@ -193,6 +215,11 @@ internal sealed class ChartHoverHelper
             _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time:HH:mm:ss}";
             _popup.HorizontalOffset = pos.X + 15;
             _popup.VerticalOffset = pos.Y + 15;
+            /* Toggle if already open so WPF re-evaluates the placement target.
+               Without this, a popup that was IsOpen = true when its TabItem was
+               unloaded stays "open" with a stale anchor and never appears on
+               return — the assignment below is a no-op. */
+            if (_popup.IsOpen) _popup.IsOpen = false;
             _popup.IsOpen = true;
         }
         else

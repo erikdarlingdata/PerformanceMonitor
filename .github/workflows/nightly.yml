@@ -46,6 +46,8 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
 
       - name: Set nightly version
         id: version
@@ -59,10 +61,10 @@ jobs:
 
       - name: Restore dependencies
         run: |
-          dotnet restore Dashboard/Dashboard.csproj
-          dotnet restore Lite/PerformanceMonitorLite.csproj
-          dotnet restore Installer/PerformanceMonitorInstaller.csproj
-          dotnet restore Lite.Tests/Lite.Tests.csproj
+          dotnet restore Dashboard/Dashboard.csproj --locked-mode
+          dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
+          dotnet restore Installer/PerformanceMonitorInstaller.csproj --locked-mode
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
 
       - name: Run tests
         run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --verbosity normal
