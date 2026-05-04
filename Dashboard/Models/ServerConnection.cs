@@ -94,7 +94,7 @@ namespace PerformanceMonitorDashboard.Models
         /// <summary>
         /// Installed PerformanceMonitor version on this server. Populated asynchronously
         /// by the Manage Servers window. Not persisted — runtime-only display field.
-        /// Conventional values: null (not yet probed), a 3-part version like "2.9.0",
+        /// Conventional values: null (not yet probed), a 3-part version like "2.10.0",
         /// "Not installed", or "Unavailable" when the probe fails.
         /// </summary>
         [JsonIgnore]

@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.9.0] - TBD
+## [2.10.0] - TBD
+
+### Fixed
+
+- **Memory tab tooltip** stops working after switching away and returning to the tab. Both Dashboard and Lite Memory tab crosshair tooltip handlers now reattach correctly on tab re-entry; the same popup-wedge fix is also applied to `CorrelatedCrosshairManager` ([#916])
+- **FinOps memory recommendation** now bases sizing on a 7-day P95 of memory samples instead of a single snapshot, so recommendations no longer swing based on instantaneous workload state. Applied in both Dashboard and Lite ([#917])
+
+### Changed
+
+- **Per-database grants for FinOps Index Analysis** documented in the README — sp_IndexCleanup-backed Index Analysis requires per-database `EXECUTE` grants on each user database you want to analyze ([#915])
+
+[#915]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/915
+[#916]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/916
+[#917]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/917
+
+## [2.9.0] - 2026-04-29
 
 ### Important
 
