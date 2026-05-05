@@ -369,6 +369,15 @@ BEGIN
         AND   ft.StartTime >= @cutoff_time
         AND   ISNULL(ft.DatabaseID, 0) NOT IN (DB_ID(N'PerformanceMonitor'), 1, 3, 4)
         AND   ISNULL(ft.DatabaseID, 0) < 32761 /*exclude contained AG system databases*/
+        AND   NOT EXISTS
+        (
+            SELECT
+                1/0
+            FROM config.collector_database_exclusions AS e
+            JOIN sys.databases AS d
+              ON d.name = e.database_name
+            WHERE d.database_id = ISNULL(ft.DatabaseID, 0)
+        )
         /*
         Filter for useful system events, excluding login failures
         */
