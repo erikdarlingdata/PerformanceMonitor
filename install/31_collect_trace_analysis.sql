@@ -284,6 +284,13 @@ BEGIN
                 AND   trc.DatabaseName NOT IN (N'master', N'msdb', N'model', N'tempdb', N'PerformanceMonitor')
                 AND   trc.DatabaseName NOT LIKE N'%[_]master' /*exclude contained AG system databases*/
                 AND   trc.DatabaseName NOT LIKE N'%[_]msdb' /*exclude contained AG system databases*/
+                AND   NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM config.collector_database_exclusions AS e
+                    WHERE e.database_name = trc.DatabaseName
+                )
                 ORDER BY
                     trc.StartTime DESC;
 
