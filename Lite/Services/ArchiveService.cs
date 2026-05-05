@@ -322,6 +322,14 @@ COPY (
         var totalMerged = 0;
         var totalRemoved = 0;
 
+        /* Spill directory for the in-memory compaction connections. Without this,
+           the memory_limit pragma is a hard wall — DuckDB has nowhere to spill and
+           OOMs the moment the cap is hit. Co-locating with the archive keeps the
+           write on the same volume the parquet files already live on. */
+        var spillDir = Path.Combine(_archivePath, "duckdb_tmp");
+        Directory.CreateDirectory(spillDir);
+        var spillDirSql = spillDir.Replace("\\", "/");
+
         foreach (var ((month, table), files) in groups)
         {
             /* If there's exactly one file and it's already in monthly format, skip */
@@ -376,7 +384,7 @@ COPY (
                     con.Open();
                     using (var pragma = con.CreateCommand())
                     {
-                        pragma.CommandText = "SET memory_limit = '4GB'; SET preserve_insertion_order = false;";
+                        pragma.CommandText = $"SET memory_limit = '4GB'; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
                         pragma.ExecuteNonQuery();
                     }
 
@@ -407,7 +415,7 @@ COPY (
                         con.Open();
                         using (var pragma = con.CreateCommand())
                         {
-                            pragma.CommandText = "SET memory_limit = '4GB'; SET preserve_insertion_order = false;";
+                            pragma.CommandText = $"SET memory_limit = '4GB'; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
                             pragma.ExecuteNonQuery();
                         }
 
