@@ -241,8 +241,10 @@ namespace PerformanceMonitorDashboard.Controls
             _qsRegressionsUnfilteredData = null;
             _lrqPatternsUnfilteredData = null;
 
-            DisposeChartHelpers();
-            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+            /* WPF fires Unloaded on every TabControl tab switch, not just on destruction.
+               Tearing down chart hover helpers or unsubscribing ThemeManager here breaks
+               tooltips and theme refresh after a tab switch (#916). Final cleanup happens
+               via ServerTab.CleanupOnClose → DisposeChartHelpers. */
         }
 
         public void DisposeChartHelpers()
@@ -251,6 +253,7 @@ namespace PerformanceMonitorDashboard.Controls
             _procDurationHover?.Dispose();
             _qsDurationHover?.Dispose();
             _execTrendsHover?.Dispose();
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
         private void OnThemeChanged(string _)

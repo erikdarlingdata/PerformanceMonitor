@@ -175,19 +175,39 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void OnUnloaded(object sender, RoutedEventArgs e)
         {
-            /* Unsubscribe from filter popup events to prevent memory leaks */
+            /* WPF fires Unloaded on every TabControl tab switch, not just on destruction.
+               Unsubscribing ThemeManager or filter-popup events here breaks them on
+               return to the tab (#916 family). Final cleanup happens via
+               ServerTab.CleanupOnClose → DisposeChartHelpers. */
+        }
+
+        public void DisposeChartHelpers()
+        {
+            _badPagesHover?.Dispose();
+            _dumpRequestsHover?.Dispose();
+            _accessViolationsHover?.Dispose();
+            _writeAccessViolationsHover?.Dispose();
+            _nonYieldingTasksHover?.Dispose();
+            _latchWarningsHover?.Dispose();
+            _sickSpinlocksHover?.Dispose();
+            _cpuComparisonHover?.Dispose();
+            _severeErrorsHover?.Dispose();
+            _ioIssuesHover?.Dispose();
+            _longestPendingIoHover?.Dispose();
+            _schedulerIssuesHover?.Dispose();
+            _memoryConditionsHover?.Dispose();
+            _cpuTasksHover?.Dispose();
+            _memoryBrokerHover?.Dispose();
+            _memoryBrokerRatioHover?.Dispose();
+            _memoryNodeOomHover?.Dispose();
+            _memoryNodeOomUtilHover?.Dispose();
+            _memoryNodeOomMemoryHover?.Dispose();
+
             if (_filterPopupContent != null)
             {
                 _filterPopupContent.FilterApplied -= FilterPopup_FilterApplied;
                 _filterPopupContent.FilterCleared -= FilterPopup_FilterCleared;
             }
-
-            /* Clear large data collections to free memory */
-            _systemHealthUnfilteredData = null;
-            _severeErrorsUnfilteredData = null;
-            _ioIssuesUnfilteredData = null;
-            _memoryBrokerUnfilteredData = null;
-            _memoryNodeOOMUnfilteredData = null;
 
             Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
         }

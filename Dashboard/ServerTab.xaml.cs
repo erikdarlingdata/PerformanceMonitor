@@ -275,6 +275,7 @@ namespace PerformanceMonitorDashboard
             MemoryTab.DisposeChartHelpers();
             ResourceMetricsContent.DisposeChartHelpers();
             PerformanceTab.DisposeChartHelpers();
+            SystemEventsContent.DisposeChartHelpers();
         }
 
         public void RefreshAutoRefreshSettings()

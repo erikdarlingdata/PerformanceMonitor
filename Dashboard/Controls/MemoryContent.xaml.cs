@@ -106,11 +106,10 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartContextMenus();
             Loaded += OnLoaded;
             Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
-            Unloaded += (_, _) =>
-            {
-                Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
-                DisposeChartHelpers();
-            };
+            /* WPF fires Unloaded on every TabControl tab switch, not just on destruction.
+               Tearing down chart hover helpers here unsubscribes their MouseMove handlers
+               and they are never re-registered when the user returns — this is the
+               root cause of #916. Final disposal happens via ServerTab.CleanupOnClose. */
 
             // Apply dark theme immediately so charts don't flash white before data loads
             TabHelpers.ApplyThemeToChart(MemoryStatsOverviewChart);
@@ -136,6 +135,7 @@ namespace PerformanceMonitorDashboard.Controls
             _memoryClerksHover?.Dispose();
             _planCacheHover?.Dispose();
             _memoryPressureEventsHover?.Dispose();
+            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
