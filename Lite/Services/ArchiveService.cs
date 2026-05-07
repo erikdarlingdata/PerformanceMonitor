@@ -42,6 +42,16 @@ public class ArchiveService
         private set => s_isArchiving = value;
     }
 
+    /* Config tables that must be preserved through ArchiveAllAndResetAsync.
+       These hold user configuration (not time-series) and must survive when the
+       size threshold trips a database reset. Issue #938 — permanent mute rules
+       were silently lost because ResetDatabaseAsync deletes monitor.duckdb. */
+    private static readonly string[] PreservedConfigTables =
+    [
+        "config_mute_rules",
+        "dismissed_archive_alerts"
+    ];
+
     /* Tables eligible for archival with their time column.
        IMPORTANT: Every table with time-series data must be listed here,
        or it will grow unbounded and push the DB past the 512 MB reset threshold. */
@@ -502,11 +512,15 @@ COPY (
         }
 
         IsArchiving = true;
+        var preserveDir = Path.Combine(Path.GetTempPath(), $"pm_preserve_{Guid.NewGuid():N}");
+        var preservedFiles = new Dictionary<string, string>();
         try
         {
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
             _logger?.LogInformation("Archiving ALL data to Parquet (prefix: {Timestamp}) and resetting database", timestamp);
+
+            Directory.CreateDirectory(preserveDir);
 
             /* Export everything under write lock */
             using (_duckDb.AcquireWriteLock())
@@ -541,6 +555,32 @@ COPY (
                         _logger?.LogError(ex, "Failed to archive table {Table}", table);
                     }
                 }
+
+                /* Preserve config tables that must survive the reset (issue #938).
+                   Written to a temp dir, not the archive dir — these are restored
+                   into the new database, not exposed via archive views. */
+                foreach (var table in PreservedConfigTables)
+                {
+                    try
+                    {
+                        using var countCmd = connection.CreateCommand();
+                        countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+                        var rowCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+                        if (rowCount == 0) continue;
+
+                        var preservePath = Path.Combine(preserveDir, $"{table}.parquet").Replace("\\", "/");
+                        using var exportCmd = connection.CreateCommand();
+                        exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' (FORMAT PARQUET)";
+                        await exportCmd.ExecuteNonQueryAsync();
+                        preservedFiles[table] = preservePath;
+
+                        _logger?.LogInformation("Preserved {Count} rows from {Table} for restoration after reset", rowCount, table);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogError(ex, "Failed to preserve {Table} before reset — rows will be lost", table);
+                    }
+                }
             }
 
             /* Compact per-cycle files into monthly parquet files before reset.
@@ -553,11 +593,56 @@ COPY (
             _logger?.LogInformation("Deleting and reinitializing database");
             await _duckDb.ResetDatabaseAsync();
 
+            /* Restore preserved config rows into the freshly initialized tables. */
+            var allRestoresSucceeded = true;
+            if (preservedFiles.Count > 0)
+            {
+                using (_duckDb.AcquireWriteLock())
+                {
+                    using var connection = _duckDb.CreateConnection();
+                    await connection.OpenAsync();
+                    foreach (var (table, path) in preservedFiles)
+                    {
+                        try
+                        {
+                            using var insertCmd = connection.CreateCommand();
+                            insertCmd.CommandText = $"INSERT INTO {table} SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
+                            await insertCmd.ExecuteNonQueryAsync();
+                            _logger?.LogInformation("Restored rows to {Table} after database reset", table);
+                        }
+                        catch (Exception ex)
+                        {
+                            allRestoresSucceeded = false;
+                            _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
+                        }
+                    }
+                }
+            }
+
             _logger?.LogInformation("Database reset complete — archive views now serve all historical data from Parquet");
+
+            /* Clean up temp preservation dir only if every restore succeeded.
+               On failure, leave the parquet files so the user can recover manually. */
+            if (allRestoresSucceeded)
+            {
+                try
+                {
+                    if (Directory.Exists(preserveDir))
+                        Directory.Delete(preserveDir, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "Could not clean up preservation temp dir {Dir}", preserveDir);
+                }
+            }
+            else
+            {
+                _logger?.LogWarning("Preservation files retained at {Dir} for manual recovery", preserveDir);
+            }
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Archive-all-and-reset failed");
+            _logger?.LogError(ex, "Archive-all-and-reset failed — preservation files (if any) retained at {Dir}", preserveDir);
         }
         finally
         {
