@@ -394,14 +394,14 @@ COPY (
                     con.Open();
                     using (var pragma = con.CreateCommand())
                     {
-                        pragma.CommandText = $"SET memory_limit = '4GB'; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
+                        pragma.CommandText = $"SET memory_limit = '1GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
                         pragma.ExecuteNonQuery();
                     }
 
                     var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
                     using var cmd = con.CreateCommand();
                     cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)) " +
-                                      $"TO '{EscapeSqlPath(tempPath)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)";
+                                      $"TO '{EscapeSqlPath(tempPath)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 8192)";
                     cmd.ExecuteNonQuery();
                 }
                 else
@@ -425,14 +425,14 @@ COPY (
                         con.Open();
                         using (var pragma = con.CreateCommand())
                         {
-                            pragma.CommandText = $"SET memory_limit = '4GB'; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
+                            pragma.CommandText = $"SET memory_limit = '1GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
                             pragma.ExecuteNonQuery();
                         }
 
                         var pairList = $"'{EscapeSqlPath(currentPath)}', '{EscapeSqlPath(sorted[i])}'";
                         using var cmd = con.CreateCommand();
                         cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pairList}], union_by_name=true)) " +
-                                          $"TO '{EscapeSqlPath(stepOutput)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)";
+                                          $"TO '{EscapeSqlPath(stepOutput)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 8192)";
                         cmd.ExecuteNonQuery();
 
                         /* Clean up previous intermediate file */
