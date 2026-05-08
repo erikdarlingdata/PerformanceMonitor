@@ -24,6 +24,7 @@ namespace PerformanceMonitorLite.Services;
 public class WebhookAlertService
 {
     private const string EditionName = "Performance Monitor Lite";
+    private const string SnoozeHint = "To silence this alert: open Performance Monitor Lite → Settings → Manage Mute Rules";
     private static readonly JsonSerializerOptions s_jsonOptions = new() { PropertyNamingPolicy = null };
 
     private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
@@ -221,6 +222,11 @@ public class WebhookAlertService
             }
         };
 
+        if (!isTest)
+        {
+            sections.Add(new { text = SnoozeHint });
+        }
+
         var card = new
         {
             @type = "MessageCard",
@@ -346,13 +352,19 @@ public class WebhookAlertService
             }
         }
 
+        var contextElements = new List<object>
+        {
+            new { type = "mrkdwn", text = $"Sent by {EditionName}" }
+        };
+        if (!isTest)
+        {
+            contextElements.Add(new { type = "mrkdwn", text = SnoozeHint });
+        }
+
         blocks.Add(new
         {
             type = "context",
-            elements = new object[]
-            {
-                new { type = "mrkdwn", text = $"Sent by {EditionName}" }
-            }
+            elements = contextElements
         });
 
         var payload = new
