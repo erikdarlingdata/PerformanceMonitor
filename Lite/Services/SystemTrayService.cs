@@ -12,6 +12,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
+using PerformanceMonitorLite.Controls;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -157,6 +158,26 @@ public class SystemTrayService : IDisposable
     public void ShowNotification(string title, string message, BalloonIcon icon)
     {
         _trayIcon?.ShowBalloonTip(title, message, icon);
+    }
+
+    /// <summary>
+    /// Shows a custom interactive balloon with snooze buttons that create a temporary
+    /// mute rule scoped to <paramref name="serverName"/> + <paramref name="metricName"/>.
+    /// Falls back to a plain balloon if the tray icon hasn't been initialized.
+    /// </summary>
+    public void ShowSnoozableNotification(
+        string title,
+        string message,
+        BalloonIcon icon,
+        string serverName,
+        string metricName,
+        MuteRuleService muteRuleService)
+    {
+        if (_trayIcon == null)
+            return;
+
+        var balloon = new SnoozeBalloon(title, message, icon, serverName, metricName, muteRuleService);
+        _trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 15000);
     }
 
     public void Dispose()

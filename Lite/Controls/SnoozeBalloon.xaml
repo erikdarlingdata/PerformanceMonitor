@@ -1,0 +1,60 @@
+<UserControl x:Class="PerformanceMonitorLite.Controls.SnoozeBalloon"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Width="360"
+             FontFamily="Segoe UI">
+    <Border Background="{DynamicResource BackgroundBrush}"
+            BorderBrush="{DynamicResource BorderBrush}"
+            BorderThickness="1"
+            CornerRadius="6"
+            TextElement.FontFamily="Segoe UI">
+        <StackPanel Margin="14,12,14,12">
+            <DockPanel Margin="0,0,0,4">
+                <TextBlock x:Name="SeverityIcon"
+                           Text="!"
+                           FontSize="16"
+                           FontWeight="Bold"
+                           VerticalAlignment="Center"
+                           Margin="0,0,8,0"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <TextBlock x:Name="TitleText"
+                           Text="Alert"
+                           FontWeight="SemiBold"
+                           FontSize="13"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           VerticalAlignment="Center"/>
+            </DockPanel>
+
+            <TextBlock x:Name="MessageText"
+                       Text=""
+                       TextWrapping="Wrap"
+                       FontSize="12"
+                       Foreground="{DynamicResource ForegroundBrush}"
+                       Margin="0,0,0,10"/>
+
+            <DockPanel>
+                <Button x:Name="DismissButton"
+                        Content="Dismiss"
+                        DockPanel.Dock="Right"
+                        Padding="10,4"
+                        Click="DismissButton_Click"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                    <Button x:Name="Snooze15Button"
+                            Content="Snooze 15m"
+                            Padding="8,4"
+                            Margin="0,0,4,0"
+                            Click="Snooze15Button_Click"/>
+                    <Button x:Name="Snooze1hButton"
+                            Content="Snooze 1h"
+                            Padding="8,4"
+                            Margin="0,0,4,0"
+                            Click="Snooze1hButton_Click"/>
+                    <Button x:Name="Snooze4hButton"
+                            Content="Snooze 4h"
+                            Padding="8,4"
+                            Click="Snooze4hButton_Click"/>
+                </StackPanel>
+            </DockPanel>
+        </StackPanel>
+    </Border>
+</UserControl>

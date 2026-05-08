@@ -1306,10 +1306,13 @@ public partial class MainWindow : Window
 
                 if (!isMuted)
                 {
-                    _trayService.ShowNotification(
+                    _trayService.ShowSnoozableNotification(
                         "High CPU",
                         $"{summary.DisplayName}: {cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {App.AlertCpuThreshold}%)",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
+                        summary.DisplayName,
+                        "High CPU",
+                        _muteRuleService);
                 }
 
                 var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {App.AlertCpuThreshold}%";
@@ -1366,10 +1369,13 @@ public partial class MainWindow : Window
 
                 if (!isMuted)
                 {
-                    _trayService.ShowNotification(
+                    _trayService.ShowSnoozableNotification(
                         "Blocking Detected",
                         $"{summary.DisplayName}: {effectiveBlockingCount} blocking session(s)",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
+                        summary.DisplayName,
+                        "Blocking Detected",
+                        _muteRuleService);
                 }
 
                 var blockingContext = await BuildBlockingContextAsync(summary.ServerId);
@@ -1426,10 +1432,13 @@ public partial class MainWindow : Window
 
                 if (!isMuted)
                 {
-                    _trayService.ShowNotification(
+                    _trayService.ShowSnoozableNotification(
                         "Deadlocks Detected",
                         $"{summary.DisplayName}: {effectiveDeadlockCount} deadlock(s) in the last hour",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
+                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error,
+                        summary.DisplayName,
+                        "Deadlocks Detected",
+                        _muteRuleService);
                 }
 
                 var deadlockContext = await BuildDeadlockContextAsync(summary.ServerId);
@@ -1481,10 +1490,13 @@ public partial class MainWindow : Window
 
                         if (!isMuted)
                         {
-                            _trayService.ShowNotification(
+                            _trayService.ShowSnoozableNotification(
                                 "Poison Wait",
                                 $"{summary.DisplayName}: {worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error,
+                                summary.DisplayName,
+                                "Poison Wait",
+                                _muteRuleService);
                         }
 
                         var poisonContext = BuildPoisonWaitContext(triggered);
@@ -1556,10 +1568,13 @@ public partial class MainWindow : Window
 
                         if (!isMuted)
                         {
-                            _trayService.ShowNotification(
+                            _trayService.ShowSnoozableNotification(
                                 "Long-Running Query",
                                 $"{summary.DisplayName}: Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
+                                summary.DisplayName,
+                                "Long-Running Query",
+                                _muteRuleService);
                         }
 
                         var lrqContext = BuildLongRunningQueryContext(longRunning);
@@ -1611,10 +1626,13 @@ public partial class MainWindow : Window
 
                         if (!isMuted)
                         {
-                            _trayService.ShowNotification(
+                            _trayService.ShowSnoozableNotification(
                                 "TempDB Space",
                                 $"{summary.DisplayName}: TempDB {tempDb.UsedPercent:F0}% used",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
+                                summary.DisplayName,
+                                "TempDB Space",
+                                _muteRuleService);
                         }
 
                         var tempDbContext = BuildTempDbSpaceContext(tempDb);
@@ -1672,10 +1690,13 @@ public partial class MainWindow : Window
 
                         if (!isMuted)
                         {
-                            _trayService.ShowNotification(
+                            _trayService.ShowSnoozableNotification(
                                 "Long-Running Job",
                                 $"{summary.DisplayName}: {worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
+                                summary.DisplayName,
+                                "Long-Running Job",
+                                _muteRuleService);
                         }
 
                         var jobContext = BuildAnomalousJobContext(anomalousJobs);
