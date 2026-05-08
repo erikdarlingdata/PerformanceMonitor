@@ -20,6 +20,7 @@ internal static class EmailTemplateBuilder
 {
     private const string EditionName = "Performance Monitor Lite";
     private const string FontStack = "-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+    private const string SnoozeHint = "To silence this alert: open Performance Monitor Lite → Settings → Manage Mute Rules";
 
     /// <summary>
     /// Builds both HTML and plain-text bodies for an alert email.
@@ -174,6 +175,10 @@ internal static class EmailTemplateBuilder
             sb.Append($" &middot; {emailCooldownMinutes}-minute cooldown between repeat alerts");
         }
         sb.Append("</span>");
+        if (!isTest)
+        {
+            sb.Append($"<br><span style=\"font-family:{FontStack};font-size:11px;color:#B0B0B0;\">{WebUtility.HtmlEncode(SnoozeHint)}</span>");
+        }
         sb.Append("</td></tr>");
 
         /* Close inner table */
@@ -281,6 +286,8 @@ internal static class EmailTemplateBuilder
         {
             sb.Append($"\r\nAttached: {context.AttachmentFileName}\r\n");
         }
+
+        sb.Append($"\r\n{SnoozeHint}\r\n");
 
         return sb.ToString();
     }
