@@ -174,11 +174,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     $"Comparison: refFrom={refFrom:o}, refTo={refTo:o}, shift={timeShift.TotalHours:F1}h, " +
                     $"cpuRows={refCpuTask.Result?.Count ?? 0}, waitRows={refWaitTask.Result?.Count ?? 0}");
 
-                if (refCpuTask.IsCompletedSuccessfully)
+                if (refCpuTask.IsCompletedSuccessfully && refCpuTask.Result != null)
                     AddGhostLine(CpuChart, refCpuTask.Result
                         .Select(d => (d.SampleTime.Add(timeShift).ToOADate(), (double)d.SqlServerCpu)).ToList(), "#4FC3F7");
 
-                if (refWaitTask.IsCompletedSuccessfully)
+                if (refWaitTask.IsCompletedSuccessfully && refWaitTask.Result != null)
                     AddGhostLine(WaitStatsChart, refWaitTask.Result
                         .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.WaitTimeMsPerSecond)).ToList(), "#FFB74D");
 

@@ -341,7 +341,7 @@ namespace PerformanceMonitorDashboard
 
                     int stmtStart = 0;
                     int stmtEnd = -1;
-                    int.TryParse(frame.Attribute("stmtstart")?.Value, out stmtStart);
+                    _ = int.TryParse(frame.Attribute("stmtstart")?.Value, out stmtStart);
                     if (int.TryParse(frame.Attribute("stmtend")?.Value, out var se)) stmtEnd = se;
 
                     frames.Add((handle!, stmtStart, stmtEnd));
@@ -426,7 +426,7 @@ namespace PerformanceMonitorDashboard
                     !string.Equals(procHandle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase))
                 {
                     int ps = 0, pe = -1;
-                    int.TryParse(process.Attribute("stmtstart")?.Value, out ps);
+                    _ = int.TryParse(process.Attribute("stmtstart")?.Value, out ps);
                     if (int.TryParse(process.Attribute("stmtend")?.Value, out var peParsed)) pe = peParsed;
                     frames.Add((procHandle!, ps, pe));
                 }
@@ -441,7 +441,7 @@ namespace PerformanceMonitorDashboard
                         if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
 
                         int fs = 0, fe = -1;
-                        int.TryParse(frame.Attribute("stmtstart")?.Value, out fs);
+                        _ = int.TryParse(frame.Attribute("stmtstart")?.Value, out fs);
                         if (int.TryParse(frame.Attribute("stmtend")?.Value, out var feParsed)) fe = feParsed;
                         frames.Add((handle!, fs, fe));
                     }
