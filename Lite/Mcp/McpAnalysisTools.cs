@@ -840,7 +840,7 @@ internal static class ToolRecommendations
     /// Formats baseline context from anomaly fact metadata into a human-readable object
     /// for MCP output. Example: "4.1σ above baseline for Tue 14:00, mean 68.2"
     /// </summary>
-    private static object? FormatBaselineContext(Dictionary<string, double> metadata)
+    private static Dictionary<string, object>? FormatBaselineContext(Dictionary<string, double> metadata)
     {
         var result = new Dictionary<string, object>();
 

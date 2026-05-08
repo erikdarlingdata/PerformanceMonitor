@@ -1,0 +1,13 @@
+root = true
+
+[*.cs]
+
+# CA1873: Avoid potentially expensive logging
+#
+# This rule fires on any non-literal argument to a logging method (including
+# trivial field accesses like `_logger.LogInformation("X: {Path}", _path)`),
+# on the theory that the argument might be expensive to evaluate when the
+# level is disabled. In this codebase the cost is consistently negligible —
+# the proper fix is migrating to LoggerMessage source generators, which is
+# a larger separate effort. Until then, this rule is pure noise.
+dotnet_diagnostic.CA1873.severity = none
