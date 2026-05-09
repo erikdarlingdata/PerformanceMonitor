@@ -182,7 +182,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     AddGhostLine(WaitStatsChart, refWaitTask.Result
                         .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.WaitTimeMsPerSecond)).ToList(), "#FFB74D");
 
-                if (refBlockingTask.IsCompletedSuccessfully)
+                if (refBlockingTask.IsCompletedSuccessfully && refBlockingTask.Result != null)
                 {
                     var refBlocking = refBlockingTask.Result
                         .Select(d => (d.Time.AddMinutes(utcOffset).Add(timeShift).ToOADate(), (double)d.Count)).ToList();
@@ -190,11 +190,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                         AddGhostLine(BlockingChart, refBlocking, "#E57373");
                 }
 
-                if (refMemoryTask.IsCompletedSuccessfully)
+                if (refMemoryTask.IsCompletedSuccessfully && refMemoryTask.Result != null)
                     AddGhostLine(MemoryChart, refMemoryTask.Result
                         .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.BufferPoolMb)).ToList(), "#CE93D8");
 
-                if (refIoTask.IsCompletedSuccessfully)
+                if (refIoTask.IsCompletedSuccessfully && refIoTask.Result != null)
                 {
                     var refIo = refIoTask.Result
                         .GroupBy(d => d.CollectionTime)
