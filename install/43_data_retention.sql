@@ -557,6 +557,191 @@ WHERE ' + QUOTENAME(@time_column_name) + N' < @retention_date_param;';
         /*Cursor variables don't require DEALLOCATE*/
 
         /*
+        Issue #951: clean up Monitor_LongQueries_*.trc files left in the SQL Server
+        error log directory by collect.trace_management_collector. xp_delete_file
+        skips files that are currently open, so the running trace is safe.
+
+        Retention source mirrors the table-cleanup logic above:
+        - @apply_schedule_override = 1 (caller passed @retention_days = NULL):
+          read retention_days from config.collection_schedule for
+          trace_management_collector, falling back to 30 days.
+        - @apply_schedule_override = 0 (caller passed a flat @retention_days):
+          use @effective_retention_days as the cutoff.
+        */
+        BEGIN TRY
+            DECLARE
+                @trace_retention_days integer,
+                @trace_cutoff_string varchar(23),
+                @trace_error_log_path nvarchar(4000),
+                @trace_file_pattern nvarchar(4000);
+
+            IF @apply_schedule_override = 1
+            BEGIN
+                SELECT
+                    @trace_retention_days = cs.retention_days
+                FROM config.collection_schedule AS cs
+                WHERE cs.collector_name = N'trace_management_collector';
+
+                SET @trace_retention_days = ISNULL(@trace_retention_days, 30);
+            END
+            ELSE
+            BEGIN
+                SET @trace_retention_days = @effective_retention_days;
+            END;
+
+            /*
+            xp_delete_file takes the cutoff as an ISO 8601 string ('YYYY-MM-DDTHH:MM:SS.SSS').
+            */
+            SET @trace_cutoff_string =
+                CONVERT(varchar(23), DATEADD(DAY, -@trace_retention_days, SYSDATETIME()), 126);
+
+            /*
+            Derive the SQL Server error log directory the same way
+            collect.trace_management_collector does.
+            */
+            SELECT @trace_error_log_path =
+                LEFT
+                (
+                    CONVERT(nvarchar(4000), SERVERPROPERTY('ErrorLogFileName')),
+                    LEN(CONVERT(nvarchar(4000), SERVERPROPERTY('ErrorLogFileName'))) -
+                    CHARINDEX('\', REVERSE(CONVERT(nvarchar(4000), SERVERPROPERTY('ErrorLogFileName')))) + 1
+                );
+
+            SET @trace_file_pattern = @trace_error_log_path + N'Monitor_LongQueries_*.trc';
+
+            /*
+            Pre-check via xp_dirtree so we only call xp_delete_file when matching
+            files actually exist. Without this, xp_delete_file prints a noisy
+            "Msg 22049, 'system cannot find the file specified'" to client/Agent
+            job output on every run that finds nothing to delete.
+            */
+            DECLARE
+                @trace_dir_listing TABLE
+                (
+                    subdirectory nvarchar(512) NOT NULL,
+                    depth integer NOT NULL,
+                    is_file bit NOT NULL
+                );
+
+            INSERT INTO
+                @trace_dir_listing
+            (
+                subdirectory,
+                depth,
+                is_file
+            )
+            EXECUTE master.sys.xp_dirtree
+                @trace_error_log_path,
+                1,
+                1;
+
+            DECLARE
+                @trace_files_present integer =
+                (
+                    SELECT
+                        COUNT_BIG(*)
+                    FROM @trace_dir_listing AS d
+                    WHERE d.is_file = 1
+                    AND   d.subdirectory LIKE N'Monitor_LongQueries[_]%.trc'
+                );
+
+            IF @debug = 1
+            BEGIN
+                SET @message =
+                    N'Found ' + CONVERT(nvarchar(10), @trace_files_present)
+                    + N' Monitor_LongQueries_*.trc file(s) in ' + @trace_error_log_path
+                    + N'; cutoff=' + @trace_cutoff_string;
+                RAISERROR(@message, 0, 1) WITH NOWAIT;
+            END;
+
+            IF @trace_files_present > 0
+            BEGIN
+                /*
+                xp_delete_file argument 1 = 1 means "delete files matching the pattern
+                older than the cutoff date". It returns no row count.
+                */
+                EXECUTE master.dbo.xp_delete_file
+                    1,
+                    @trace_file_pattern,
+                    N'trc',
+                    @trace_cutoff_string;
+            END;
+
+            INSERT INTO
+                config.collection_log
+            (
+                collector_name,
+                collection_status,
+                error_message
+            )
+            VALUES
+            (
+                N'data_retention',
+                N'SUCCESS',
+                N'Trace file cleanup: pattern=' + @trace_file_pattern
+                + N', cutoff=' + @trace_cutoff_string
+                + N', files_present=' + CONVERT(nvarchar(10), @trace_files_present)
+            );
+        END TRY
+        BEGIN CATCH
+            /*
+            Error 22049 from xp_delete_file means "no files matched the pattern"
+            (the Windows ERROR_FILE_NOT_FOUND surfaced as SQL Msg 22049). Older
+            SQL versions raise this as a catchable error; SQL 2022 only prints
+            it as an info message. Treat as benign — there was simply nothing
+            old enough to delete.
+            */
+            IF ERROR_NUMBER() = 22049
+            BEGIN
+                IF @debug = 1
+                BEGIN
+                    SET @message =
+                        N'No trace files older than ' + @trace_cutoff_string
+                        + N' matched ' + @trace_file_pattern;
+                    RAISERROR(@message, 0, 1) WITH NOWAIT;
+                END;
+
+                INSERT INTO
+                    config.collection_log
+                (
+                    collector_name,
+                    collection_status,
+                    error_message
+                )
+                VALUES
+                (
+                    N'data_retention',
+                    N'SUCCESS',
+                    N'Trace file cleanup: no files older than ' + @trace_cutoff_string
+                    + N' matched ' + @trace_file_pattern
+                );
+            END
+            ELSE
+            BEGIN
+                SET @message = N'Error cleaning trace files: ' + ERROR_MESSAGE();
+
+                IF @debug = 1
+                BEGIN
+                    RAISERROR(@message, 0, 1) WITH NOWAIT;
+                END;
+
+                INSERT INTO
+                    config.collection_log
+                (
+                    collector_name,
+                    collection_status,
+                    error_message
+                )
+                VALUES
+                (
+                    N'data_retention',
+                    N'ERROR',
+                    @message
+                );
+            END;
+        END CATCH;
+
+        /*
         Log retention operation
         */
         INSERT INTO
