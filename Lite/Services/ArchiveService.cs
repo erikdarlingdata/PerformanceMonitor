@@ -332,10 +332,14 @@ COPY (
         var totalMerged = 0;
         var totalRemoved = 0;
 
-        /* Spill directory for the in-memory compaction connections. Without this,
-           the memory_limit pragma is a hard wall — DuckDB has nowhere to spill and
-           OOMs the moment the cap is hit. Co-locating with the archive keeps the
-           write on the same volume the parquet files already live on. */
+        /* Spill directory for the in-memory compaction connections. Set per #935
+           so DuckDB has somewhere to page if it chooses to. In practice (see #933)
+           the parquet COPY path uses allocations that bypass the buffer manager
+           and never actually spill — DuckDB's own OOM guide warns about this. We
+           keep the dir set for any code path that *can* spill, but memory_limit
+           below has to leave real headroom on top of those un-spillable allocs.
+           Co-locating with the archive keeps the write on the same volume the
+           parquet files already live on. */
         var spillDir = Path.Combine(_archivePath, "duckdb_tmp");
         Directory.CreateDirectory(spillDir);
         var spillDirSql = spillDir.Replace("\\", "/");
@@ -389,12 +393,26 @@ COPY (
 
                 if (sourcePaths.Count <= 2)
                 {
-                    /* Small group — single-pass merge */
+                    /* Small group — single-pass merge.
+
+                       Pragma tuning (history per #933):
+                         - memory_limit = 4GB: parquet COPY does allocations that
+                           bypass the buffer manager and can't be spilled. The cap
+                           is effectively a hard ceiling for those, not a spill
+                           trigger. At 1GB (the prior value) the reproducer dies
+                           at ~900/953 MiB used before any rows are read. 4GB
+                           leaves enough headroom for query_snapshots-shaped data
+                           (wide VARCHAR plan XML) and aligns with DuckDB's OOM
+                           guide recommendation of 50-60% of system RAM.
+                         - threads = 2: fewer per-thread row-group buffers in flight.
+                         - ROW_GROUP_SIZE 8192: smaller buffered batch per group.
+                         - preserve_insertion_order = false: lets DuckDB stream.
+                       See tools/CompactionRepro for the stress reproducer. */
                     using var con = new DuckDBConnection("DataSource=:memory:");
                     con.Open();
                     using (var pragma = con.CreateCommand())
                     {
-                        pragma.CommandText = $"SET memory_limit = '1GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
+                        pragma.CommandText = $"SET memory_limit = '4GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
                         pragma.ExecuteNonQuery();
                     }
 
@@ -425,7 +443,7 @@ COPY (
                         con.Open();
                         using (var pragma = con.CreateCommand())
                         {
-                            pragma.CommandText = $"SET memory_limit = '1GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
+                            pragma.CommandText = $"SET memory_limit = '4GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
                             pragma.ExecuteNonQuery();
                         }
 
