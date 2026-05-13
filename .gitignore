@@ -21,6 +21,12 @@ packages/
 # SQLite databases
 *.sqlite
 
+# Headless runtime data
+Headless/data/
+*.duckdb
+*.duckdb.wal
+*.parquet
+
 # Lock files
 *.lock
 

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>PerformanceMonitor.Headless</RootNamespace>
+    <AssemblyName>PerformanceMonitor.Headless</AssemblyName>
+    <Product>SQL Server Performance Monitor Headless</Product>
+    <Version>2.10.0</Version>
+    <AssemblyVersion>2.10.0.0</AssemblyVersion>
+    <FileVersion>2.10.0.0</FileVersion>
+    <InformationalVersion>2.10.0-headless</InformationalVersion>
+    <Company>Darling Data, LLC</Company>
+    <Copyright>Copyright (c) 2026 Darling Data, LLC</Copyright>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <NoWarn>CA1001;CA1305;CA1845;CA1848;CA1861;CA2007;CA2100</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="DuckDB.NET.Data" Version="1.5.2" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.2" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>

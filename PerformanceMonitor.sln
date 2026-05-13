@@ -15,6 +15,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Installer.Tests", "Installe
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Installer.Core", "Installer.Core\Installer.Core.csproj", "{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PerformanceMonitor.Headless", "Headless\PerformanceMonitor.Headless.csproj", "{63C17106-FAE5-4417-974B-3C11AA8404B4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -45,6 +47,10 @@ Global
 		{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{AFA0BA1D-42D6-4E01-9D6C-B7E327E1B7D3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{63C17106-FAE5-4417-974B-3C11AA8404B4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{63C17106-FAE5-4417-974B-3C11AA8404B4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{63C17106-FAE5-4417-974B-3C11AA8404B4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{63C17106-FAE5-4417-974B-3C11AA8404B4}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

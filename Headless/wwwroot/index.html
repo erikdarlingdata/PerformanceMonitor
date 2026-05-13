@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Performance Monitor Estate</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>Performance Monitor Estate</h1>
+        <p id="storage-paths"></p>
+      </div>
+      <div class="header-actions">
+        <button id="notify-button" type="button">Enable Notifications</button>
+        <button id="refresh-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="status-grid" aria-label="Estate summary">
+        <article class="metric green">
+          <span>Green</span>
+          <strong id="metric-green">0</strong>
+        </article>
+        <article class="metric yellow">
+          <span>Yellow</span>
+          <strong id="metric-yellow">0</strong>
+        </article>
+        <article class="metric red">
+          <span>Red</span>
+          <strong id="metric-red">0</strong>
+        </article>
+        <article class="metric muted">
+          <span>Disabled</span>
+          <strong id="metric-disabled">0</strong>
+        </article>
+      </section>
+
+      <section class="panel overview-panel">
+        <div class="panel-header">
+          <h2>Estate Traffic Lights</h2>
+          <span id="generated-at"></span>
+        </div>
+        <div id="server-card-grid" class="server-card-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Server Inventory</h2>
+          <span id="server-count"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Server</th>
+                <th>Edition</th>
+                <th>Version</th>
+                <th>Last Seen</th>
+                <th>Last Error</th>
+              </tr>
+            </thead>
+            <tbody id="server-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="detail-grid">
+        <article class="panel">
+          <div class="panel-header">
+            <h2 id="selected-server-title">Server Detail</h2>
+            <span id="selected-server-subtitle">Select a server row</span>
+          </div>
+          <div class="chart-card">
+            <div class="chart-title">CPU</div>
+            <canvas id="cpu-chart" width="760" height="180"></canvas>
+          </div>
+          <div class="wait-list" id="wait-list"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Collector Log</h2>
+            <span>Latest 50</span>
+          </div>
+          <div id="collector-log" class="log-list"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
