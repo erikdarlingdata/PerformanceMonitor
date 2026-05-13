@@ -60,6 +60,7 @@ Recommended pattern: keep secrets out of JSON and point each server at an enviro
       {
         "Id": "dev-sql-01",
         "DisplayName": "DEV-SQL-01",
+        "Purpose": "Development",
         "ConnectionStringEnvironmentVariable": "PM_DEV_SQL_01",
         "Enabled": true
       }
@@ -80,7 +81,7 @@ SQL auth example:
 $env:PM_DEV_SQL_02 = "Server=DEV-SQL-02;Database=master;User ID=pm_reader;Password=<password>;Encrypt=Mandatory;TrustServerCertificate=true"
 ```
 
-For dozens of servers, use stable `Id` values. Those ids become the partition key in DuckDB and API URLs.
+For dozens of servers, use stable `Id` values. Those ids become the partition key in DuckDB and API URLs. Set `Purpose` to values such as `Development`, `Staging`, or `Production` so the dashboard can group and filter the estate.
 
 ## Run Locally
 

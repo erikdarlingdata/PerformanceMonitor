@@ -40,7 +40,7 @@ body {
   padding: 8px 0 18px;
 }
 
-h1, h2, p {
+h1, h2, h3, p {
   margin: 0;
 }
 
@@ -58,7 +58,6 @@ h2 {
   letter-spacing: 0;
 }
 
-#storage-paths,
 .panel-header span,
 td,
 .log-row,
@@ -67,12 +66,8 @@ td,
   font-size: 13px;
 }
 
-#storage-paths {
-  color: var(--muted);
-  margin-top: 7px;
-}
-
-button {
+button,
+select {
   border: 1px solid var(--border);
   background: var(--panel-3);
   color: var(--text);
@@ -85,13 +80,19 @@ button {
   box-shadow: 0 2px 10px rgba(0, 0, 0, .24);
 }
 
+select {
+  min-height: 34px;
+  padding: 0 30px 0 10px;
+}
+
 .header-actions {
   display: flex;
   gap: 8px;
   align-items: center;
 }
 
-button:hover {
+button:hover,
+select:hover {
   border-color: #465364;
   background: #242b35;
 }
@@ -176,15 +177,51 @@ button:hover {
   color: var(--muted);
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .overview-panel {
   margin-bottom: 14px;
 }
 
 .server-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 14px;
   padding: 14px;
+}
+
+.purpose-section {
+  display: grid;
+  gap: 10px;
+}
+
+.purpose-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.purpose-heading h3 {
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 800;
+  color: #d9e2ee;
+}
+
+.purpose-heading span {
+  font-size: 12px;
+}
+
+.server-card-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 14px;
 }
 
 .server-card {

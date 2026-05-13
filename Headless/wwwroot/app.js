@@ -1,6 +1,7 @@
 const state = {
   selectedServerId: null,
   activeTab: "stats",
+  purposeFilter: "all",
   servers: [],
   logs: [],
   alerts: [],
@@ -17,7 +18,7 @@ const els = {
   disabled: document.getElementById("metric-disabled"),
   generatedAt: document.getElementById("generated-at"),
   alertCount: document.getElementById("alert-count"),
-  storagePaths: document.getElementById("storage-paths"),
+  purposeFilter: document.getElementById("purpose-filter"),
   serverCardGrid: document.getElementById("server-card-grid"),
   alertList: document.getElementById("alert-list"),
   collectorLog: document.getElementById("collector-log"),
@@ -34,6 +35,10 @@ const els = {
 
 els.refresh.addEventListener("click", () => loadAll());
 els.back.addEventListener("click", () => navigateOverview());
+els.purposeFilter.addEventListener("change", () => {
+  state.purposeFilter = els.purposeFilter.value;
+  renderServerCards();
+});
 document.querySelectorAll(".server-menu button").forEach(button => {
   button.addEventListener("click", () => {
     if (!state.selectedServerId) return;
@@ -66,9 +71,8 @@ async function fetchJson(url) {
 }
 
 async function loadAll() {
-  const [summary, storage, logs] = await Promise.all([
+  const [summary, logs] = await Promise.all([
     fetchJson("/api/summary"),
-    fetchJson("/api/storage"),
     fetchJson("/api/collection-log?limit=50")
   ]);
 
@@ -82,8 +86,8 @@ async function loadAll() {
   }
 
   renderSummary(summary);
-  renderStorage(storage);
-  renderServerCards(state.servers);
+  renderPurposeOptions(state.servers);
+  renderServerCards();
   renderAlerts(state.alerts);
   handleHealthNotifications(state.servers);
   state.loadedOnce = true;
@@ -99,49 +103,159 @@ function renderSummary(summary) {
   els.generatedAt.textContent = `Updated ${formatDate(summary.generatedAt)}`;
 }
 
-function renderStorage(storage) {
-  els.storagePaths.textContent = `DuckDB ${storage.duckdb} | Parquet ${storage.parquet}`;
+function renderPurposeOptions(servers) {
+  const purposes = [...new Set(servers.map(server => normalizePurpose(server.purpose)))].sort(sortPurposes);
+  const options = ["all", ...purposes];
+  const current = options.includes(state.purposeFilter) ? state.purposeFilter : "all";
+  state.purposeFilter = current;
+  els.purposeFilter.innerHTML = options
+    .map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value === "all" ? "All" : value)}</option>`)
+    .join("");
+  els.purposeFilter.value = current;
 }
 
-function renderServerCards(servers) {
+function renderServerCards() {
+  const visibleServers = state.servers.filter(server => {
+    return state.purposeFilter === "all" || normalizePurpose(server.purpose) === state.purposeFilter;
+  });
+
   els.serverCardGrid.innerHTML = "";
-  if (!servers.length) {
-    els.serverCardGrid.innerHTML = `<div class="empty-state">No servers configured yet.</div>`;
+  if (!visibleServers.length) {
+    els.serverCardGrid.innerHTML = `<div class="empty-state">No servers.</div>`;
     return;
   }
 
-  for (const server of servers) {
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = `server-card health-${server.healthState || "yellow"} ${server.serverId === state.selectedServerId ? "selected" : ""}`;
-    card.addEventListener("click", () => navigateServer(server.serverId, "stats"));
-
-    const title = server.displayName || server.serverId;
-    const platform = server.edition ? "SQL Server" : "SQL Server";
-    const os = server.productVersion ? `v${server.productVersion}` : "Windows";
-    const health = server.healthState || "yellow";
-
-    card.innerHTML = `
-      <div class="server-card-top">
-        <span class="server-icon" aria-hidden="true"></span>
-        <div>
-          <strong>${escapeHtml(title)}</strong>
-          <small>${escapeHtml(platform)} / ${escapeHtml(os)}</small>
-        </div>
-        <span class="card-menu" aria-hidden="true">...</span>
+  for (const group of groupServersByPurpose(visibleServers)) {
+    const section = document.createElement("section");
+    section.className = "purpose-section";
+    section.innerHTML = `
+      <div class="purpose-heading">
+        <h3>${escapeHtml(group.purpose)}</h3>
+        <span>${group.servers.length}</span>
       </div>
-      <div class="mini-stats">
-        <span><b>${server.latestSqlCpuUtilization ?? "--"}${server.latestSqlCpuUtilization == null ? "" : "%"}</b><small>CPU</small></span>
-        <span><b>${escapeHtml(compactWait(server.topWaitType))}</b><small>Wait</small></span>
-        <span><b>${server.activeAlertCount ?? 0}</b><small>Alerts</small></span>
-        <span><b>${compactSeen(server.lastSeenTime)}</b><small>Seen</small></span>
-      </div>
-      <div class="server-card-ribbon ${health}">
-        <span class="ribbon-dot"></span>
-        <span>${escapeHtml(server.healthReason || "All good")}</span>
-      </div>
+      <div class="server-card-row"></div>
     `;
-    els.serverCardGrid.appendChild(card);
+
+    const row = section.querySelector(".server-card-row");
+    for (const server of group.servers) {
+      row.appendChild(createServerCard(server));
+    }
+
+    els.serverCardGrid.appendChild(section);
+  }
+}
+
+function createServerCard(server) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = `server-card health-${server.healthState || "yellow"} ${server.serverId === state.selectedServerId ? "selected" : ""}`;
+  card.addEventListener("click", () => navigateServer(server.serverId, "stats"));
+
+  const title = server.displayName || server.serverId;
+  const platform = "SQL Server";
+  const os = server.productVersion ? `v${server.productVersion}` : "Windows";
+  const health = server.healthState || "yellow";
+
+  card.innerHTML = `
+    <div class="server-card-top">
+      <span class="server-icon" aria-hidden="true"></span>
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(platform)} / ${escapeHtml(os)}</small>
+      </div>
+      <span class="card-menu" aria-hidden="true">...</span>
+    </div>
+    <div class="mini-stats">
+      <span><b>${server.latestSqlCpuUtilization ?? "--"}${server.latestSqlCpuUtilization == null ? "" : "%"}</b><small>CPU</small></span>
+      <span><b>${escapeHtml(compactWait(server.topWaitType))}</b><small>Wait</small></span>
+      <span><b>${server.activeAlertCount ?? 0}</b><small>Alerts</small></span>
+      <span><b>${compactSeen(server.lastSeenTime)}</b><small>Seen</small></span>
+    </div>
+    <div class="server-card-ribbon ${health}">
+      <span class="ribbon-dot"></span>
+      <span>${escapeHtml(server.healthReason || "All good")}</span>
+    </div>
+  `;
+
+  return card;
+}
+
+function groupServersByPurpose(servers) {
+  const groups = new Map();
+  for (const server of servers) {
+    const purpose = normalizePurpose(server.purpose);
+    if (!groups.has(purpose)) {
+      groups.set(purpose, []);
+    }
+
+    groups.get(purpose).push(server);
+  }
+
+  return [...groups.entries()]
+    .sort(([left], [right]) => sortPurposes(left, right))
+    .map(([purpose, groupedServers]) => ({
+      purpose,
+      servers: groupedServers.sort((left, right) => {
+        const leftHealth = healthRank(left.healthState);
+        const rightHealth = healthRank(right.healthState);
+        if (leftHealth !== rightHealth) return leftHealth - rightHealth;
+        return (left.displayName || left.serverId).localeCompare(right.displayName || right.serverId);
+      })
+    }));
+}
+
+function normalizePurpose(value) {
+  const purpose = String(value || "").trim();
+  if (!purpose) return "Unassigned";
+
+  switch (purpose.toLowerCase()) {
+    case "prod":
+      return "Production";
+    case "stage":
+      return "Staging";
+    case "dev":
+      return "Development";
+    default:
+      return purpose;
+  }
+}
+
+function sortPurposes(left, right) {
+  const rank = purpose => {
+    switch (purpose.toLowerCase()) {
+      case "production":
+        return 1;
+      case "staging":
+        return 2;
+      case "development":
+        return 3;
+      case "test":
+        return 4;
+      case "unassigned":
+        return 99;
+      default:
+        return 20;
+    }
+  };
+
+  const leftRank = rank(left);
+  const rightRank = rank(right);
+  if (leftRank !== rightRank) return leftRank - rightRank;
+  return left.localeCompare(right);
+}
+
+function healthRank(health) {
+  switch ((health || "").toLowerCase()) {
+    case "red":
+      return 1;
+    case "yellow":
+      return 2;
+    case "green":
+      return 3;
+    case "disabled":
+      return 4;
+    default:
+      return 5;
   }
 }
 
@@ -188,8 +302,7 @@ function renderAlerts(alerts) {
   if (!alerts.length) {
     els.alertList.innerHTML = `
       <div class="alert-empty">
-        <strong>No active alerts</strong>
-        <span>Green panels stay quiet here.</span>
+        <strong>No alerts</strong>
       </div>
     `;
     return;
@@ -250,7 +363,7 @@ function applyRoute() {
   state.activeTab = "overview";
   els.overviewView.classList.remove("hidden");
   els.serverView.classList.add("hidden");
-  renderServerCards(state.servers);
+  renderServerCards();
 }
 
 function navigateOverview() {
@@ -283,7 +396,7 @@ async function loadSelectedServer() {
   }
 
   els.selectedTitle.textContent = server.displayName || server.serverId;
-  els.selectedSubtitle.textContent = `${(server.healthState || "yellow").toUpperCase()} / ${server.healthReason || server.serverId}`;
+  els.selectedSubtitle.textContent = `${normalizePurpose(server.purpose)} / ${(server.healthState || "yellow").toUpperCase()} / ${server.healthReason || ""}`;
   renderServerStats(server);
   renderServerLog(server.serverId);
 
@@ -310,7 +423,7 @@ function renderServerStats(server) {
     <article class="stat-tile"><span>Top Wait</span><strong>${escapeHtml(compactWait(server.topWaitType))}</strong><small>Latest snapshot</small></article>
     <article class="stat-tile"><span>Alerts</span><strong>${server.activeAlertCount ?? 0}</strong><small>Last 15 minutes</small></article>
     <article class="stat-tile wide"><span>Edition</span><strong>${escapeHtml(server.edition || "Unknown")}</strong><small>${escapeHtml(server.productVersion || "No version collected")}</small></article>
-    <article class="stat-tile wide"><span>Last Contact</span><strong>${formatDate(server.lastSeenTime) || "Never"}</strong><small>${escapeHtml(server.serverId)}</small></article>
+    <article class="stat-tile wide"><span>Last Contact</span><strong>${formatDate(server.lastSeenTime) || "Never"}</strong><small>${escapeHtml(normalizePurpose(server.purpose))}</small></article>
   `;
 }
 
@@ -319,7 +432,7 @@ function renderServerLog(serverId) {
   els.collectorLog.innerHTML = "";
 
   if (!rows.length) {
-    els.collectorLog.innerHTML = `<div class="empty-state">No collector log entries for this server yet.</div>`;
+    els.collectorLog.innerHTML = `<div class="empty-state">No log entries.</div>`;
     return;
   }
 
@@ -341,7 +454,7 @@ function renderServerLog(serverId) {
 function renderWaits(waits) {
   els.waitList.innerHTML = "";
   if (!waits.length) {
-    els.waitList.innerHTML = `<div class="empty-state">No wait deltas yet.</div>`;
+    els.waitList.innerHTML = `<div class="empty-state">No waits.</div>`;
     return;
   }
 
@@ -383,7 +496,7 @@ function drawCpuChart(samples) {
   if (!samples.length) {
     ctx.fillStyle = cssVar("--muted", "#9ca8b8");
     ctx.font = "13px Segoe UI, sans-serif";
-    ctx.fillText("No CPU samples yet", 12, 28);
+    ctx.fillText("No CPU samples", 12, 28);
     return;
   }
 

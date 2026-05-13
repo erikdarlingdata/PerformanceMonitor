@@ -4,15 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Performance Monitor Estate</title>
-  <link rel="stylesheet" href="/styles.css?v=overview-2">
+  <title>Dashboard</title>
+  <link rel="stylesheet" href="/styles.css?v=overview-3">
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div>
-        <h1>Performance Monitor Estate</h1>
-        <p id="storage-paths"></p>
+        <h1>Dashboard</h1>
       </div>
       <div class="header-actions">
         <button id="notify-button" type="button">Enable Notifications</button>
@@ -23,7 +22,7 @@
     <main>
       <section id="overview-view" class="overview-layout">
         <div class="overview-main">
-          <section class="status-grid" aria-label="Estate summary">
+          <section class="status-grid" aria-label="Summary">
             <article class="metric green">
               <span>Green</span>
               <strong id="metric-green">0</strong>
@@ -44,8 +43,11 @@
 
           <section class="panel overview-panel">
             <div class="panel-header">
-              <h2>Estate Traffic Lights</h2>
-              <span id="generated-at"></span>
+              <h2>Dashboard</h2>
+              <div class="panel-actions">
+                <select id="purpose-filter" aria-label="Purpose"></select>
+                <span id="generated-at"></span>
+              </div>
             </div>
             <div id="server-card-grid" class="server-card-grid"></div>
           </section>
@@ -62,7 +64,7 @@
 
       <section id="server-view" class="server-view hidden">
         <div class="server-view-header">
-          <button id="back-button" type="button">Back To Estate</button>
+          <button id="back-button" type="button">Dashboard</button>
           <div>
             <h2 id="selected-server-title">Server Detail</h2>
             <span id="selected-server-subtitle"></span>
@@ -87,10 +89,10 @@
           </article>
           <article class="panel">
             <div class="panel-header">
-              <h2>Query Workload</h2>
-              <span>Coming from query collectors</span>
+              <h2>Queries</h2>
+              <span>Not available</span>
             </div>
-            <div class="empty-state">Query detail will appear here when the query stats and query store collectors are ported.</div>
+            <div class="empty-state">Not available yet.</div>
           </article>
         </section>
 
@@ -110,9 +112,9 @@
           <article class="panel">
             <div class="panel-header">
               <h2>Queries</h2>
-              <span>Not collected yet</span>
+              <span>Not available</span>
             </div>
-            <div class="empty-state">This submenu is reserved for query stats, query store regressions, plans, and expensive query drilldowns.</div>
+            <div class="empty-state">Not available yet.</div>
           </article>
         </section>
 
@@ -130,6 +132,6 @@
   </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/app.js?v=overview-2"></script>
+  <script src="/app.js?v=overview-3"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@ namespace PerformanceMonitor.Headless.Models;
 public sealed record ServerHealthDto(
     string ServerId,
     string DisplayName,
+    string Purpose,
     bool IsEnabled,
     DateTime? LastSeenTime,
     string LastStatus,

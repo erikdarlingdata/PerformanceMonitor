@@ -56,15 +56,17 @@ public sealed class HeadlessStore
             {
                 await using var insert = connection.CreateCommand();
                 insert.CommandText = @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, last_status)
-VALUES ($1, $2, $3, $4, 'UNKNOWN')
+INSERT INTO servers (server_id, server_name, display_name, purpose, is_enabled, last_status)
+VALUES ($1, $2, $3, $4, $5, 'UNKNOWN')
 ON CONFLICT(server_id) DO UPDATE
 SET server_name = excluded.server_name,
     display_name = excluded.display_name,
+    purpose = excluded.purpose,
     is_enabled = excluded.is_enabled";
                 insert.Parameters.Add(new DuckDBParameter { Value = server.Id });
                 insert.Parameters.Add(new DuckDBParameter { Value = server.ServerNameForStorage });
                 insert.Parameters.Add(new DuckDBParameter { Value = server.DisplayName });
+                insert.Parameters.Add(new DuckDBParameter { Value = server.PurposeForDisplay });
                 insert.Parameters.Add(new DuckDBParameter { Value = server.Enabled });
                 await insert.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -295,6 +297,7 @@ VALUES
 SELECT
     s.server_id,
     s.display_name,
+    COALESCE(NULLIF(TRIM(s.purpose), ''), 'Unassigned') AS purpose,
     s.is_enabled,
     s.last_seen_time,
     s.last_status,
@@ -333,29 +336,43 @@ SELECT
         LIMIT 1
     ) AS top_wait_type
 FROM servers AS s
-ORDER BY s.is_enabled DESC, s.display_name";
+ORDER BY
+    s.is_enabled DESC,
+    CASE LOWER(COALESCE(NULLIF(TRIM(s.purpose), ''), 'unassigned'))
+        WHEN 'production' THEN 1
+        WHEN 'prod' THEN 1
+        WHEN 'staging' THEN 2
+        WHEN 'stage' THEN 2
+        WHEN 'development' THEN 3
+        WHEN 'dev' THEN 3
+        WHEN 'test' THEN 4
+        ELSE 5
+    END,
+    s.display_name";
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddMinutes(-15) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetString(0);
             var displayName = reader.IsDBNull(1) ? serverId : reader.GetString(1);
-            var isEnabled = reader.GetBoolean(2);
-            var lastSeenTime = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-            var lastStatus = reader.IsDBNull(4) ? "UNKNOWN" : reader.GetString(4);
-            var lastError = reader.IsDBNull(5) ? null : reader.GetString(5);
-            var productVersion = reader.IsDBNull(6) ? null : reader.GetString(6);
-            var edition = reader.IsDBNull(7) ? null : reader.GetString(7);
-            var sqlMajorVersion = reader.IsDBNull(8) ? (int?)null : reader.GetInt32(8);
-            var activeAlertCount = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetInt64(9));
-            var recentAlert = reader.IsDBNull(10) ? null : reader.GetString(10);
-            var latestSqlCpu = reader.IsDBNull(11) ? (int?)null : reader.GetInt32(11);
-            var topWaitType = reader.IsDBNull(12) ? null : reader.GetString(12);
+            var purpose = reader.IsDBNull(2) ? "Unassigned" : reader.GetString(2);
+            var isEnabled = reader.GetBoolean(3);
+            var lastSeenTime = reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4);
+            var lastStatus = reader.IsDBNull(5) ? "UNKNOWN" : reader.GetString(5);
+            var lastError = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var productVersion = reader.IsDBNull(7) ? null : reader.GetString(7);
+            var edition = reader.IsDBNull(8) ? null : reader.GetString(8);
+            var sqlMajorVersion = reader.IsDBNull(9) ? (int?)null : reader.GetInt32(9);
+            var activeAlertCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetInt64(10));
+            var recentAlert = reader.IsDBNull(11) ? null : reader.GetString(11);
+            var latestSqlCpu = reader.IsDBNull(12) ? (int?)null : reader.GetInt32(12);
+            var topWaitType = reader.IsDBNull(13) ? null : reader.GetString(13);
             var (healthState, healthReason) = ComputeHealth(isEnabled, lastSeenTime, lastStatus, lastError, activeAlertCount, recentAlert);
 
             servers.Add(new ServerHealthDto(
                 serverId,
                 displayName,
+                purpose,
                 isEnabled,
                 lastSeenTime,
                 lastStatus,
@@ -599,6 +616,7 @@ TO '{archiveFileSql}'
             server_id VARCHAR PRIMARY KEY,
             server_name VARCHAR NOT NULL,
             display_name VARCHAR,
+            purpose VARCHAR NOT NULL DEFAULT 'Unassigned',
             is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
             last_seen_time TIMESTAMP,
             last_status VARCHAR NOT NULL DEFAULT 'UNKNOWN',
@@ -610,6 +628,8 @@ TO '{archiveFileSql}'
             created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
+        "ALTER TABLE servers ADD COLUMN IF NOT EXISTS purpose VARCHAR DEFAULT 'Unassigned'",
+        "UPDATE servers SET purpose = 'Unassigned' WHERE purpose IS NULL OR TRIM(purpose) = ''",
         """
         CREATE TABLE IF NOT EXISTS collection_log (
             log_id BIGINT PRIMARY KEY,
