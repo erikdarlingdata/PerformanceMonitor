@@ -1,16 +1,18 @@
 :root {
-  color-scheme: light;
-  --bg: #f6f8fb;
-  --panel: #ffffff;
-  --panel-2: #f9fbfd;
-  --text: #111827;
-  --muted: #64748b;
-  --border: #d9e1ea;
-  --online: #169b62;
-  --warning: #c2410c;
-  --offline: #9f1239;
-  --accent: #2563eb;
-  --shadow: 0 12px 30px rgba(15, 23, 42, .08);
+  color-scheme: dark;
+  --bg: #0d1014;
+  --panel: #171b22;
+  --panel-2: #11161c;
+  --panel-3: #1d232c;
+  --text: #edf2f7;
+  --muted: #9ca8b8;
+  --border: #2a313c;
+  --online: #2dd681;
+  --yellow: #eab949;
+  --warning: #ff7a57;
+  --offline: #ff5f72;
+  --accent: #62b6ff;
+  --shadow: 0 16px 40px rgba(0, 0, 0, .34);
 }
 
 * {
@@ -72,7 +74,7 @@ td,
 
 button {
   border: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--panel-3);
   color: var(--text);
   border-radius: 6px;
   min-height: 34px;
@@ -80,7 +82,7 @@ button {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, .06);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .24);
 }
 
 .header-actions {
@@ -90,7 +92,8 @@ button {
 }
 
 button:hover {
-  border-color: #b9c5d4;
+  border-color: #465364;
+  background: #242b35;
 }
 
 .status-grid {
@@ -125,7 +128,7 @@ button:hover {
 }
 
 .metric.yellow strong {
-  color: #b7791f;
+  color: var(--yellow);
 }
 
 .metric.red strong {
@@ -184,8 +187,8 @@ button:hover {
 
 .server-card:hover,
 .server-card.selected {
-  border-color: #94a3b8;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, .10);
+  border-color: #5e6d80;
+  box-shadow: 0 0 0 3px rgba(98, 182, 255, .14);
 }
 
 .server-card strong {
@@ -200,7 +203,7 @@ button:hover {
 }
 
 .server-card small {
-  color: rgba(17, 24, 39, .72);
+  color: rgba(237, 242, 247, .72);
 }
 
 .card-status {
@@ -208,24 +211,24 @@ button:hover {
 }
 
 .server-card.health-green {
-  background: #eaf8f1;
-  border-color: #a8dec2;
+  background: #10251b;
+  border-color: #276746;
 }
 
 .server-card.health-yellow {
-  background: #fff7df;
-  border-color: #f3d27a;
+  background: #29220f;
+  border-color: #876922;
 }
 
 .server-card.health-red {
-  background: #fff0ed;
-  border-color: #f3a38f;
+  background: #31171a;
+  border-color: #8e3440;
 }
 
 .server-card.health-disabled {
-  background: #f1f5f9;
-  border-color: #cbd5e1;
-  color: #64748b;
+  background: #151a21;
+  border-color: #303846;
+  color: #808b9a;
 }
 
 .table-wrap {
@@ -253,7 +256,7 @@ td {
   padding: 11px 14px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
-  color: #243044;
+  color: #d8e0ea;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -264,11 +267,11 @@ tbody tr {
 }
 
 tbody tr:hover {
-  background: #f4f8ff;
+  background: #1d2530;
 }
 
 tbody tr.selected {
-  background: #eef5ff;
+  background: #202b39;
 }
 
 .traffic {
@@ -293,8 +296,8 @@ tbody tr.selected {
 }
 
 .traffic.yellow::before {
-  background: #d69e2e;
-  box-shadow: 0 0 0 4px rgba(214, 158, 46, .14);
+  background: var(--yellow);
+  box-shadow: 0 0 0 4px rgba(234, 185, 73, .16);
 }
 
 .traffic.red::before {
@@ -350,7 +353,7 @@ canvas {
 .bar-track {
   height: 8px;
   border-radius: 999px;
-  background: #e6edf5;
+  background: #25303d;
   overflow: hidden;
 }
 
@@ -371,7 +374,7 @@ canvas {
   gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
-  color: #243044;
+  color: #d8e0ea;
 }
 
 .log-row .status {
@@ -409,17 +412,17 @@ canvas {
 }
 
 .toast.green {
-  border-color: #a8dec2;
+  border-color: #276746;
 }
 
 .toast.yellow {
-  border-color: #f3d27a;
-  background: #fff7df;
+  border-color: #876922;
+  background: #29220f;
 }
 
 .toast.red {
-  border-color: #f3a38f;
-  background: #fff0ed;
+  border-color: #8e3440;
+  background: #31171a;
 }
 
 @media (max-width: 900px) {

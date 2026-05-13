@@ -245,7 +245,7 @@ function drawCpuChart(samples) {
   ctx.scale(ratio, ratio);
   ctx.clearRect(0, 0, rect.width, rect.height);
 
-  ctx.strokeStyle = "#d9e1ea";
+  ctx.strokeStyle = cssVar("--border", "#2a313c");
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = 12 + (rect.height - 24) * i / 4;
@@ -256,7 +256,7 @@ function drawCpuChart(samples) {
   }
 
   if (!samples.length) {
-    ctx.fillStyle = "#64748b";
+    ctx.fillStyle = cssVar("--muted", "#9ca8b8");
     ctx.font = "13px Segoe UI, sans-serif";
     ctx.fillText("No CPU samples yet", 12, 28);
     return;
@@ -267,7 +267,7 @@ function drawCpuChart(samples) {
     y: 10 + (100 - Math.min(100, Math.max(0, sample.sqlServerCpuUtilization))) * (rect.height - 20) / 100
   }));
 
-  ctx.strokeStyle = "#2563eb";
+  ctx.strokeStyle = cssVar("--accent", "#62b6ff");
   ctx.lineWidth = 2;
   ctx.beginPath();
   points.forEach((point, index) => {
@@ -277,9 +277,13 @@ function drawCpuChart(samples) {
   ctx.stroke();
 
   const latest = samples[samples.length - 1];
-  ctx.fillStyle = "#111827";
+  ctx.fillStyle = cssVar("--text", "#edf2f7");
   ctx.font = "700 13px Segoe UI, sans-serif";
   ctx.fillText(`${latest.sqlServerCpuUtilization}% SQL CPU`, 12, 22);
+}
+
+function cssVar(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 function formatDate(value) {
