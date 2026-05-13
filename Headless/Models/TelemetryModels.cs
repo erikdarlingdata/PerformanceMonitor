@@ -27,6 +27,15 @@ public sealed record CollectionLogDto(
     int DurationMs,
     string? ErrorMessage);
 
+public sealed record ActiveAlertDto(
+    DateTime RaisedAt,
+    string ServerId,
+    string ServerName,
+    string Source,
+    string Severity,
+    string Message,
+    string TargetTab);
+
 public sealed record TopWaitDto(
     string WaitType,
     long WaitTimeDeltaMs,
@@ -46,7 +55,8 @@ public sealed record EstateSummaryDto(
     int ErrorCount,
     int DisabledCount,
     DateTime GeneratedAt,
-    IReadOnlyList<ServerHealthDto> Servers);
+    IReadOnlyList<ServerHealthDto> Servers,
+    IReadOnlyList<ActiveAlertDto> ActiveAlerts);
 
 public sealed record ServerPropertiesSnapshot(
     string MachineName,

@@ -28,6 +28,9 @@ app.MapGet("/api/summary", async (HeadlessStore store, CancellationToken cancell
 app.MapGet("/api/servers", async (HeadlessStore store, CancellationToken cancellationToken)
     => Results.Ok(await store.GetServersAsync(cancellationToken)));
 
+app.MapGet("/api/alerts", async (HeadlessStore store, CancellationToken cancellationToken)
+    => Results.Ok(await store.GetActiveAlertsAsync(cancellationToken)));
+
 app.MapGet("/api/collection-log", async (HeadlessStore store, int? limit, CancellationToken cancellationToken)
     => Results.Ok(await store.GetCollectionLogAsync(limit ?? 200, cancellationToken)));
 

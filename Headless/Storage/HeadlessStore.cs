@@ -307,20 +307,50 @@ SELECT
     s.sql_major_version,
     (
         SELECT COUNT(*)
-        FROM collection_log AS cl
-        WHERE cl.server_id = s.server_id
-        AND   cl.collection_time >= $1
-        AND   cl.status IN ('ERROR', 'PERMISSIONS')
+        FROM
+        (
+            SELECT
+                cl.status,
+                ROW_NUMBER() OVER (PARTITION BY cl.collector_name ORDER BY cl.collection_time DESC, cl.log_id DESC) AS rn
+            FROM collection_log AS cl
+            WHERE cl.server_id = s.server_id
+        ) AS latest
+        WHERE latest.rn = 1
+        AND   latest.status IN ('ERROR', 'PERMISSIONS')
     ) AS active_alert_count,
     (
-        SELECT cl.error_message
-        FROM collection_log AS cl
-        WHERE cl.server_id = s.server_id
-        AND   cl.collection_time >= $1
-        AND   cl.status IN ('ERROR', 'PERMISSIONS')
-        ORDER BY cl.collection_time DESC
+        SELECT COALESCE(NULLIF(latest.error_message, ''), latest.status)
+        FROM
+        (
+            SELECT
+                cl.error_message,
+                cl.status,
+                cl.collection_time,
+                ROW_NUMBER() OVER (PARTITION BY cl.collector_name ORDER BY cl.collection_time DESC, cl.log_id DESC) AS rn
+            FROM collection_log AS cl
+            WHERE cl.server_id = s.server_id
+        ) AS latest
+        WHERE latest.rn = 1
+        AND   latest.status IN ('ERROR', 'PERMISSIONS')
+        ORDER BY CASE WHEN latest.status = 'ERROR' THEN 1 ELSE 2 END, latest.collection_time DESC
         LIMIT 1
     ) AS recent_alert,
+    (
+        SELECT CASE WHEN latest.status = 'ERROR' THEN 'red' ELSE 'yellow' END
+        FROM
+        (
+            SELECT
+                cl.status,
+                cl.collection_time,
+                ROW_NUMBER() OVER (PARTITION BY cl.collector_name ORDER BY cl.collection_time DESC, cl.log_id DESC) AS rn
+            FROM collection_log AS cl
+            WHERE cl.server_id = s.server_id
+        ) AS latest
+        WHERE latest.rn = 1
+        AND   latest.status IN ('ERROR', 'PERMISSIONS')
+        ORDER BY CASE WHEN latest.status = 'ERROR' THEN 1 ELSE 2 END, latest.collection_time DESC
+        LIMIT 1
+    ) AS active_alert_severity,
     (
         SELECT cu.sqlserver_cpu_utilization
         FROM cpu_utilization_stats AS cu
@@ -349,7 +379,6 @@ ORDER BY
         ELSE 5
     END,
     s.display_name";
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddMinutes(-15) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -365,9 +394,10 @@ ORDER BY
             var sqlMajorVersion = reader.IsDBNull(9) ? (int?)null : reader.GetInt32(9);
             var activeAlertCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetInt64(10));
             var recentAlert = reader.IsDBNull(11) ? null : reader.GetString(11);
-            var latestSqlCpu = reader.IsDBNull(12) ? (int?)null : reader.GetInt32(12);
-            var topWaitType = reader.IsDBNull(13) ? null : reader.GetString(13);
-            var (healthState, healthReason) = ComputeHealth(isEnabled, lastSeenTime, lastStatus, lastError, activeAlertCount, recentAlert);
+            var activeAlertSeverity = reader.IsDBNull(12) ? null : reader.GetString(12);
+            var latestSqlCpu = reader.IsDBNull(13) ? (int?)null : reader.GetInt32(13);
+            var topWaitType = reader.IsDBNull(14) ? null : reader.GetString(14);
+            var (healthState, healthReason) = ComputeHealth(isEnabled, lastSeenTime, lastStatus, lastError, activeAlertCount, recentAlert, activeAlertSeverity);
 
             servers.Add(new ServerHealthDto(
                 serverId,
@@ -393,6 +423,7 @@ ORDER BY
     public async Task<EstateSummaryDto> GetEstateSummaryAsync(CancellationToken cancellationToken)
     {
         var servers = await GetServersAsync(cancellationToken);
+        var activeAlerts = await GetActiveAlertsAsync(cancellationToken);
         return new EstateSummaryDto(
             servers.Count,
             servers.Count(s => string.Equals(s.HealthState, "green", StringComparison.OrdinalIgnoreCase)),
@@ -401,7 +432,8 @@ ORDER BY
             servers.Count(s => s.IsEnabled && string.Equals(s.LastStatus, "ERROR", StringComparison.OrdinalIgnoreCase)),
             servers.Count(s => !s.IsEnabled),
             DateTime.UtcNow,
-            servers);
+            servers,
+            activeAlerts);
     }
 
     private (string HealthState, string HealthReason) ComputeHealth(
@@ -410,7 +442,8 @@ ORDER BY
         string lastStatus,
         string? lastError,
         int activeAlertCount,
-        string? recentAlert)
+        string? recentAlert,
+        string? activeAlertSeverity)
     {
         if (!isEnabled)
         {
@@ -424,7 +457,8 @@ ORDER BY
 
         if (activeAlertCount > 0)
         {
-            return ("red", recentAlert ?? $"{activeAlertCount} collector alert(s) in the last 15 minutes");
+            var severity = string.Equals(activeAlertSeverity, "yellow", StringComparison.OrdinalIgnoreCase) ? "yellow" : "red";
+            return (severity, recentAlert ?? $"{activeAlertCount} active collector alert(s)");
         }
 
         if (!lastSeenTime.HasValue)
@@ -439,6 +473,58 @@ ORDER BY
         }
 
         return ("green", "All good");
+    }
+
+    public async Task<IReadOnlyList<ActiveAlertDto>> GetActiveAlertsAsync(CancellationToken cancellationToken)
+    {
+        var alerts = new List<ActiveAlertDto>();
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+WITH latest_collector AS
+(
+    SELECT
+        cl.collection_time,
+        cl.server_id,
+        cl.server_name,
+        cl.collector_name,
+        cl.status,
+        cl.error_message,
+        ROW_NUMBER() OVER (PARTITION BY cl.server_id, cl.collector_name ORDER BY cl.collection_time DESC, cl.log_id DESC) AS rn
+    FROM collection_log AS cl
+)
+SELECT
+    lc.collection_time,
+    lc.server_id,
+    COALESCE(NULLIF(s.display_name, ''), lc.server_name) AS server_name,
+    lc.collector_name,
+    CASE WHEN lc.status = 'ERROR' THEN 'red' ELSE 'yellow' END AS severity,
+    COALESCE(NULLIF(lc.error_message, ''), lc.status) AS message,
+    CASE WHEN lc.status = 'PERMISSIONS' THEN 'stats' ELSE 'logs' END AS target_tab
+FROM latest_collector AS lc
+LEFT JOIN servers AS s
+    ON s.server_id = lc.server_id
+WHERE lc.rn = 1
+AND   lc.status IN ('ERROR', 'PERMISSIONS')
+AND   COALESCE(s.is_enabled, TRUE) = TRUE
+ORDER BY
+    CASE WHEN lc.status = 'ERROR' THEN 1 ELSE 2 END,
+    lc.collection_time DESC";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            alerts.Add(new ActiveAlertDto(
+                reader.GetDateTime(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6)));
+        }
+
+        return alerts;
     }
 
     public async Task<IReadOnlyList<CollectionLogDto>> GetCollectionLogAsync(int limit, CancellationToken cancellationToken)
@@ -688,6 +774,7 @@ TO '{archiveFileSql}'
         """,
         "CREATE INDEX IF NOT EXISTS idx_servers_status ON servers(is_enabled, last_status)",
         "CREATE INDEX IF NOT EXISTS idx_collection_log_time ON collection_log(collection_time)",
+        "CREATE INDEX IF NOT EXISTS idx_collection_log_server_collector_time ON collection_log(server_id, collector_name, collection_time)",
         "CREATE INDEX IF NOT EXISTS idx_wait_stats_time ON wait_stats(server_id, collection_time)",
         "CREATE INDEX IF NOT EXISTS idx_cpu_time ON cpu_utilization_stats(server_id, sample_time)",
         "CREATE INDEX IF NOT EXISTS idx_server_properties_time ON server_properties(server_id, collection_time)"

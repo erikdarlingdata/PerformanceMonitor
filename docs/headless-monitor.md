@@ -108,6 +108,7 @@ http://localhost:5155
 ```text
 GET /api/summary
 GET /api/servers
+GET /api/alerts
 GET /api/storage
 GET /api/collection-log?limit=200
 GET /api/servers/{serverId}/waits?hours=1&limit=20
@@ -125,7 +126,7 @@ The overview cards are intended to work like an estate traffic-light board:
 
 The browser page raises an in-page toast when a server enters red or yellow. If browser notifications are enabled with the button in the header, the same state change also raises a native browser notification.
 
-For the current thin slice, "alert-worthy" means connection failures or collector statuses of `ERROR` or `PERMISSIONS` in the last 15 minutes. As more collectors are ported, SQL performance alerts should feed the same red/yellow state so the panel color changes whenever something needs checking.
+For the current thin slice, "alert-worthy" means connection failures or collector statuses where the latest run for that server/collector is `ERROR` or `PERMISSIONS`. A later successful collector run clears that alert automatically, so the server panel colour returns to the next-worst current state instead of holding onto stale failures. As more collectors are ported, SQL performance alerts should feed the same red/yellow state so the panel color changes whenever something needs checking.
 
 ## Storage
 

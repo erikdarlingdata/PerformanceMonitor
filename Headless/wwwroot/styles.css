@@ -61,8 +61,7 @@ h2 {
 .panel-header span,
 td,
 .log-row,
-.wait-row,
-.metric span {
+.wait-row {
   font-size: 13px;
 }
 
@@ -97,13 +96,6 @@ select:hover {
   background: #242b35;
 }
 
-.status-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
 .hidden {
   display: none !important;
 }
@@ -117,42 +109,6 @@ select:hover {
 
 .overview-main {
   min-width: 0;
-}
-
-.metric {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 14px;
-  box-shadow: var(--shadow);
-}
-
-.metric span {
-  color: var(--muted);
-  display: block;
-  margin-bottom: 8px;
-}
-
-.metric strong {
-  display: block;
-  font-size: 32px;
-  line-height: 1;
-}
-
-.metric.green strong {
-  color: var(--online);
-}
-
-.metric.yellow strong {
-  color: var(--yellow);
-}
-
-.metric.red strong {
-  color: var(--warning);
-}
-
-.metric.muted strong {
-  color: var(--muted);
 }
 
 .panel {
@@ -418,18 +374,23 @@ select:hover {
   gap: 5px;
   text-align: left;
   border-radius: 6px;
-  padding: 10px;
+  border-left-width: 5px;
+  padding: 10px 10px 10px 13px;
   box-shadow: none;
+  position: relative;
+  overflow: hidden;
 }
 
 .alert-item.red {
   border-color: #8e3440;
   background: #251418;
+  border-left-color: var(--offline);
 }
 
 .alert-item.yellow {
   border-color: #876922;
   background: #211d10;
+  border-left-color: var(--yellow);
 }
 
 .alert-item strong,
@@ -755,7 +716,6 @@ canvas {
     flex: 1;
   }
 
-  .status-grid,
   .detail-grid,
   .overview-layout,
   .stats-grid {

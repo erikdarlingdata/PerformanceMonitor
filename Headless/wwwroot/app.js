@@ -12,10 +12,6 @@ const state = {
 const els = {
   overviewView: document.getElementById("overview-view"),
   serverView: document.getElementById("server-view"),
-  green: document.getElementById("metric-green"),
-  yellow: document.getElementById("metric-yellow"),
-  red: document.getElementById("metric-red"),
-  disabled: document.getElementById("metric-disabled"),
   generatedAt: document.getElementById("generated-at"),
   alertCount: document.getElementById("alert-count"),
   purposeFilter: document.getElementById("purpose-filter"),
@@ -78,7 +74,7 @@ async function loadAll() {
 
   state.servers = summary.servers || [];
   state.logs = logs || [];
-  state.alerts = buildAlerts(state.servers, state.logs);
+  state.alerts = buildAlerts(state.servers, summary.activeAlerts || []);
 
   if (!state.selectedServerId && state.servers.length > 0) {
     const firstActive = state.servers.find(s => s.isEnabled) || state.servers[0];
@@ -96,10 +92,6 @@ async function loadAll() {
 }
 
 function renderSummary(summary) {
-  els.green.textContent = summary.greenCount;
-  els.yellow.textContent = summary.yellowCount;
-  els.red.textContent = summary.redCount;
-  els.disabled.textContent = summary.disabledCount;
   els.generatedAt.textContent = `Updated ${formatDate(summary.generatedAt)}`;
 }
 
@@ -259,17 +251,33 @@ function healthRank(health) {
   }
 }
 
-function buildAlerts(servers, logs) {
+function buildAlerts(servers, activeAlerts) {
   const alerts = [];
+
+  for (const alert of activeAlerts) {
+    alerts.push({
+      serverId: alert.serverId,
+      serverName: alert.serverName,
+      state: alert.severity || "red",
+      title: `${alert.serverName} / ${alert.source}`,
+      body: alert.message || "Needs attention",
+      targetTab: alert.targetTab || "logs",
+      time: alert.raisedAt
+    });
+  }
 
   for (const server of servers) {
     const health = server.healthState || "yellow";
-    if (health === "red" || health === "yellow") {
+    const status = (server.lastStatus || "").toUpperCase();
+    const hasCollectorAlerts = (server.activeAlertCount || 0) > 0;
+    const isServerLevelAlert = server.isEnabled && (health === "red" || health === "yellow") && (!hasCollectorAlerts || status === "ERROR");
+
+    if (isServerLevelAlert) {
       alerts.push({
         serverId: server.serverId,
         serverName: server.displayName || server.serverId,
         state: health,
-        title: `${server.displayName || server.serverId} is ${health.toUpperCase()}`,
+        title: `${server.displayName || server.serverId} / Server`,
         body: server.healthReason || "Server needs attention",
         targetTab: "stats",
         time: server.lastSeenTime || null
@@ -277,22 +285,11 @@ function buildAlerts(servers, logs) {
     }
   }
 
-  for (const log of logs) {
-    const status = (log.status || "").toUpperCase();
-    if (status === "ERROR" || status === "PERMISSIONS") {
-      alerts.push({
-        serverId: log.serverId,
-        serverName: log.serverName,
-        state: status === "PERMISSIONS" ? "yellow" : "red",
-        title: `${log.serverName} / ${log.collectorName}`,
-        body: log.errorMessage || status,
-        targetTab: "logs",
-        time: log.collectionTime
-      });
-    }
-  }
-
-  return alerts.slice(0, 30);
+  return alerts.sort((left, right) => {
+    const severityDelta = healthRank(left.state) - healthRank(right.state);
+    if (severityDelta !== 0) return severityDelta;
+    return new Date(right.time || 0).getTime() - new Date(left.time || 0).getTime();
+  }).slice(0, 30);
 }
 
 function renderAlerts(alerts) {
