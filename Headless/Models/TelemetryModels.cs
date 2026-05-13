@@ -12,7 +12,9 @@ public sealed record ServerHealthDto(
     int? SqlMajorVersion,
     string HealthState,
     string HealthReason,
-    int ActiveAlertCount);
+    int ActiveAlertCount,
+    int? LatestSqlCpuUtilization,
+    string? TopWaitType);
 
 public sealed record CollectionLogDto(
     DateTime CollectionTime,

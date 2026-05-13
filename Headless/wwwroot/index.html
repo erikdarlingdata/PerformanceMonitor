@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Performance Monitor Estate</title>
-  <link rel="stylesheet" href="/styles.css?v=dark-1">
+  <link rel="stylesheet" href="/styles.css?v=overview-2">
 </head>
 <body>
   <div class="app-shell">
@@ -21,80 +21,115 @@
     </header>
 
     <main>
-      <section class="status-grid" aria-label="Estate summary">
-        <article class="metric green">
-          <span>Green</span>
-          <strong id="metric-green">0</strong>
-        </article>
-        <article class="metric yellow">
-          <span>Yellow</span>
-          <strong id="metric-yellow">0</strong>
-        </article>
-        <article class="metric red">
-          <span>Red</span>
-          <strong id="metric-red">0</strong>
-        </article>
-        <article class="metric muted">
-          <span>Disabled</span>
-          <strong id="metric-disabled">0</strong>
-        </article>
-      </section>
+      <section id="overview-view" class="overview-layout">
+        <div class="overview-main">
+          <section class="status-grid" aria-label="Estate summary">
+            <article class="metric green">
+              <span>Green</span>
+              <strong id="metric-green">0</strong>
+            </article>
+            <article class="metric yellow">
+              <span>Yellow</span>
+              <strong id="metric-yellow">0</strong>
+            </article>
+            <article class="metric red">
+              <span>Red</span>
+              <strong id="metric-red">0</strong>
+            </article>
+            <article class="metric muted">
+              <span>Disabled</span>
+              <strong id="metric-disabled">0</strong>
+            </article>
+          </section>
 
-      <section class="panel overview-panel">
-        <div class="panel-header">
-          <h2>Estate Traffic Lights</h2>
-          <span id="generated-at"></span>
+          <section class="panel overview-panel">
+            <div class="panel-header">
+              <h2>Estate Traffic Lights</h2>
+              <span id="generated-at"></span>
+            </div>
+            <div id="server-card-grid" class="server-card-grid"></div>
+          </section>
         </div>
-        <div id="server-card-grid" class="server-card-grid"></div>
-      </section>
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Server Inventory</h2>
-          <span id="server-count"></span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>Server</th>
-                <th>Edition</th>
-                <th>Version</th>
-                <th>Last Seen</th>
-                <th>Last Error</th>
-              </tr>
-            </thead>
-            <tbody id="server-rows"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="detail-grid">
-        <article class="panel">
+        <aside class="panel alerts-panel" aria-label="Alerts">
           <div class="panel-header">
+            <h2>Alerts</h2>
+            <span id="alert-count">0 active</span>
+          </div>
+          <div id="alert-list" class="alert-list"></div>
+        </aside>
+      </section>
+
+      <section id="server-view" class="server-view hidden">
+        <div class="server-view-header">
+          <button id="back-button" type="button">Back To Estate</button>
+          <div>
             <h2 id="selected-server-title">Server Detail</h2>
-            <span id="selected-server-subtitle">Select a server row</span>
+            <span id="selected-server-subtitle"></span>
           </div>
-          <div class="chart-card">
-            <div class="chart-title">CPU</div>
-            <canvas id="cpu-chart" width="760" height="180"></canvas>
-          </div>
-          <div class="wait-list" id="wait-list"></div>
-        </article>
+        </div>
 
-        <article class="panel">
-          <div class="panel-header">
-            <h2>Collector Log</h2>
-            <span>Latest 50</span>
-          </div>
-          <div id="collector-log" class="log-list"></div>
-        </article>
+        <nav class="server-menu" aria-label="Server menu">
+          <button type="button" data-tab="stats">Stats</button>
+          <button type="button" data-tab="cpu">CPU</button>
+          <button type="button" data-tab="queries">Queries</button>
+          <button type="button" data-tab="logs">Logs</button>
+        </nav>
+
+        <section id="tab-stats" class="server-tab">
+          <div class="stats-grid" id="server-stats-grid"></div>
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Top Waits</h2>
+              <span>Last hour</span>
+            </div>
+            <div class="wait-list" id="wait-list"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Query Workload</h2>
+              <span>Coming from query collectors</span>
+            </div>
+            <div class="empty-state">Query detail will appear here when the query stats and query store collectors are ported.</div>
+          </article>
+        </section>
+
+        <section id="tab-cpu" class="server-tab hidden">
+          <article class="panel">
+            <div class="panel-header">
+              <h2>CPU</h2>
+              <span>Last hour</span>
+            </div>
+            <div class="chart-card">
+              <canvas id="cpu-chart" width="760" height="220"></canvas>
+            </div>
+          </article>
+        </section>
+
+        <section id="tab-queries" class="server-tab hidden">
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Queries</h2>
+              <span>Not collected yet</span>
+            </div>
+            <div class="empty-state">This submenu is reserved for query stats, query store regressions, plans, and expensive query drilldowns.</div>
+          </article>
+        </section>
+
+        <section id="tab-logs" class="server-tab hidden">
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Collector Log</h2>
+              <span>Latest 50</span>
+            </div>
+            <div id="collector-log" class="log-list"></div>
+          </article>
+        </section>
       </section>
     </main>
   </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/app.js?v=dark-1"></script>
+  <script src="/app.js?v=overview-2"></script>
 </body>
 </html>

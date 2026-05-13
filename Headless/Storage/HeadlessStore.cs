@@ -317,7 +317,21 @@ SELECT
         AND   cl.status IN ('ERROR', 'PERMISSIONS')
         ORDER BY cl.collection_time DESC
         LIMIT 1
-    ) AS recent_alert
+    ) AS recent_alert,
+    (
+        SELECT cu.sqlserver_cpu_utilization
+        FROM cpu_utilization_stats AS cu
+        WHERE cu.server_id = s.server_id
+        ORDER BY cu.sample_time DESC
+        LIMIT 1
+    ) AS latest_sql_cpu,
+    (
+        SELECT ws.wait_type
+        FROM wait_stats AS ws
+        WHERE ws.server_id = s.server_id
+        ORDER BY ws.collection_time DESC, ws.wait_time_ms DESC
+        LIMIT 1
+    ) AS top_wait_type
 FROM servers AS s
 ORDER BY s.is_enabled DESC, s.display_name";
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddMinutes(-15) });
@@ -335,6 +349,8 @@ ORDER BY s.is_enabled DESC, s.display_name";
             var sqlMajorVersion = reader.IsDBNull(8) ? (int?)null : reader.GetInt32(8);
             var activeAlertCount = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetInt64(9));
             var recentAlert = reader.IsDBNull(10) ? null : reader.GetString(10);
+            var latestSqlCpu = reader.IsDBNull(11) ? (int?)null : reader.GetInt32(11);
+            var topWaitType = reader.IsDBNull(12) ? null : reader.GetString(12);
             var (healthState, healthReason) = ComputeHealth(isEnabled, lastSeenTime, lastStatus, lastError, activeAlertCount, recentAlert);
 
             servers.Add(new ServerHealthDto(
@@ -349,7 +365,9 @@ ORDER BY s.is_enabled DESC, s.display_name";
                 sqlMajorVersion,
                 healthState,
                 healthReason,
-                activeAlertCount));
+                activeAlertCount,
+                latestSqlCpu,
+                topWaitType));
         }
 
         return servers;

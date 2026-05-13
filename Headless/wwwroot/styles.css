@@ -103,6 +103,21 @@ button:hover {
   margin-bottom: 14px;
 }
 
+.hidden {
+  display: none !important;
+}
+
+.overview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 14px;
+  align-items: start;
+}
+
+.overview-main {
+  min-width: 0;
+}
+
 .metric {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -167,22 +182,24 @@ button:hover {
 
 .server-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 14px;
   padding: 14px;
 }
 
 .server-card {
   appearance: none;
   text-align: left;
-  border-radius: 8px;
+  border-radius: 5px;
   border: 1px solid var(--border);
-  min-height: 124px;
-  padding: 13px;
-  display: grid;
-  gap: 8px;
+  min-height: 140px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
   box-shadow: none;
   background: var(--panel-2);
+  overflow: hidden;
 }
 
 .server-card:hover,
@@ -191,23 +208,135 @@ button:hover {
   box-shadow: 0 0 0 3px rgba(98, 182, 255, .14);
 }
 
-.server-card strong {
-  font-size: 15px;
-  line-height: 1.25;
+.server-card-top {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  align-items: start;
+  gap: 8px;
+  padding: 10px 11px 6px;
 }
 
-.server-card span,
+.server-icon {
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--text);
+  border-radius: 2px;
+  position: relative;
+  margin-top: 1px;
+}
+
+.server-icon::before,
+.server-icon::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 1px;
+  background: currentColor;
+}
+
+.server-icon::before {
+  top: 4px;
+}
+
+.server-icon::after {
+  top: 8px;
+}
+
+.server-card strong {
+  display: block;
+  font-size: 14px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
 .server-card small {
+  display: block;
   font-size: 12px;
   line-height: 1.25;
+  color: var(--muted);
 }
 
-.server-card small {
-  color: rgba(237, 242, 247, .72);
-}
-
-.card-status {
+.card-menu {
+  color: var(--muted);
   font-weight: 800;
+  text-align: right;
+  line-height: 1;
+}
+
+.mini-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 8px 10px 9px;
+  gap: 7px;
+  flex: 1;
+}
+
+.mini-stats span {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  text-align: center;
+}
+
+.mini-stats b {
+  font-size: 13px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-stats small {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.server-card-ribbon {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #06120d;
+}
+
+.server-card-ribbon.green {
+  background: #16c466;
+}
+
+.server-card-ribbon.yellow {
+  background: #eab949;
+  color: #171201;
+}
+
+.server-card-ribbon.red {
+  background: #ff5f72;
+  color: #1b0508;
+}
+
+.server-card-ribbon.disabled {
+  background: #566273;
+  color: #f2f5f8;
+}
+
+.ribbon-dot {
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .9);
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.ribbon-dot::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: inherit;
+  background: currentColor;
 }
 
 .server-card.health-green {
@@ -229,6 +358,74 @@ button:hover {
   background: #151a21;
   border-color: #303846;
   color: #808b9a;
+}
+
+.alerts-panel {
+  position: sticky;
+  top: 14px;
+}
+
+.alert-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+
+.alert-item {
+  appearance: none;
+  width: 100%;
+  min-height: 88px;
+  display: grid;
+  gap: 5px;
+  text-align: left;
+  border-radius: 6px;
+  padding: 10px;
+  box-shadow: none;
+}
+
+.alert-item.red {
+  border-color: #8e3440;
+  background: #251418;
+}
+
+.alert-item.yellow {
+  border-color: #876922;
+  background: #211d10;
+}
+
+.alert-item strong,
+.alert-item span,
+.alert-item small {
+  overflow-wrap: anywhere;
+}
+
+.alert-severity {
+  font-size: 11px;
+  font-weight: 900;
+  color: var(--muted);
+}
+
+.alert-item strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.alert-item span,
+.alert-item small,
+.alert-empty span {
+  font-size: 12px;
+  line-height: 1.25;
+  color: var(--muted);
+}
+
+.alert-empty {
+  min-height: 120px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  color: var(--muted);
 }
 
 .table-wrap {
@@ -316,12 +513,91 @@ tbody tr.selected {
   margin-top: 14px;
 }
 
+.server-view {
+  display: grid;
+  gap: 14px;
+}
+
+.server-view-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: var(--shadow);
+}
+
+.server-view-header span {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.server-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.server-menu button.active {
+  border-color: var(--accent);
+  background: #14314b;
+}
+
+.server-tab {
+  display: grid;
+  gap: 14px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.stat-tile {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 13px;
+  box-shadow: var(--shadow);
+  min-height: 100px;
+}
+
+.stat-tile.wide {
+  grid-column: span 2;
+}
+
+.stat-tile span,
+.stat-tile small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stat-tile strong {
+  display: block;
+  font-size: 20px;
+  line-height: 1.2;
+  margin: 7px 0 5px;
+  overflow-wrap: anywhere;
+}
+
 .chart-card {
   margin: 16px;
   padding: 12px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+.empty-state {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .chart-title {
@@ -443,11 +719,17 @@ canvas {
   }
 
   .status-grid,
-  .detail-grid {
+  .detail-grid,
+  .overview-layout,
+  .stats-grid {
     grid-template-columns: 1fr;
   }
 
-  table {
-    min-width: 820px;
+  .alerts-panel {
+    position: static;
+  }
+
+  .server-view-header {
+    grid-template-columns: 1fr;
   }
 }
