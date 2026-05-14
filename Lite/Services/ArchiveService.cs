@@ -204,6 +204,35 @@ COPY (
         ["query_store_stats"] = ["query_plan_text"]
     };
 
+    /* Build the SELECT clause for a compaction COPY, excluding only the
+       CompactionExcludeColumns actually present in THIS set of files.
+       Detection must be per-merge-set, not global: archive files predating a
+       schema change lack the column, so a globally-computed "* EXCLUDE (col)"
+       fails the binder on a pair where neither file has it. query_plan_text
+       was added to query_store_stats in migration v13 (2026-02-23), so a
+       reporter's pre-v13 archives don't carry it. (#933) */
+    private static string BuildSelectClause(string table, IReadOnlyList<string> paths)
+    {
+        if (!CompactionExcludeColumns.TryGetValue(table, out var excludeCols))
+        {
+            return "*";
+        }
+
+        using var schemaCon = new DuckDBConnection("DataSource=:memory:");
+        schemaCon.Open();
+        var pathList = string.Join(", ", paths.Select(p => $"'{EscapeSqlPath(p)}'"));
+        using var schemaCmd = schemaCon.CreateCommand();
+        schemaCmd.CommandText = $"SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet([{pathList}], union_by_name=true))";
+        using var reader = schemaCmd.ExecuteReader();
+        var existingCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (reader.Read()) existingCols.Add(reader.GetString(0));
+
+        var colsToExclude = excludeCols.Where(c => existingCols.Contains(c)).ToArray();
+        return colsToExclude.Length > 0
+            ? $"* EXCLUDE ({string.Join(", ", colsToExclude)})"
+            : "*";
+    }
+
     /// <summary>
     /// Compacts all per-cycle parquet files into monthly files (YYYYMM_tablename.parquet).
     /// This keeps the archive directory small (~75 files for 3 months of 25 tables)
@@ -371,26 +400,6 @@ COPY (
                     .Select(f => Path.Combine(_archivePath, f).Replace("\\", "/"))
                     .ToList();
 
-                /* Determine column exclusions up front using all source files */
-                var selectClause = "*";
-                if (CompactionExcludeColumns.TryGetValue(table, out var excludeCols))
-                {
-                    using var schemaCon = new DuckDBConnection("DataSource=:memory:");
-                    schemaCon.Open();
-                    var allPathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
-                    using var schemaCmd = schemaCon.CreateCommand();
-                    schemaCmd.CommandText = $"SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet([{allPathList}], union_by_name=true))";
-                    using var reader = schemaCmd.ExecuteReader();
-                    var existingCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    while (reader.Read()) existingCols.Add(reader.GetString(0));
-
-                    var colsToExclude = excludeCols.Where(c => existingCols.Contains(c)).ToArray();
-                    if (colsToExclude.Length > 0)
-                    {
-                        selectClause = $"* EXCLUDE ({string.Join(", ", colsToExclude)})";
-                    }
-                }
-
                 if (sourcePaths.Count <= 2)
                 {
                     /* Small group — single-pass merge.
@@ -416,6 +425,7 @@ COPY (
                         pragma.ExecuteNonQuery();
                     }
 
+                    var selectClause = BuildSelectClause(table, sourcePaths);
                     var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
                     using var cmd = con.CreateCommand();
                     cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)) " +
@@ -447,6 +457,7 @@ COPY (
                             pragma.ExecuteNonQuery();
                         }
 
+                        var selectClause = BuildSelectClause(table, new[] { currentPath, sorted[i] });
                         var pairList = $"'{EscapeSqlPath(currentPath)}', '{EscapeSqlPath(sorted[i])}'";
                         using var cmd = con.CreateCommand();
                         cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pairList}], union_by_name=true)) " +
