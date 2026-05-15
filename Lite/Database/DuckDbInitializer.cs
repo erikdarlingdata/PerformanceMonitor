@@ -124,10 +124,17 @@ public class DuckDbInitializer
 
     /// <summary>
     /// Gets the connection string for the DuckDB database.
-    /// Disables automatic WAL checkpoints to prevent 2-3s stop-the-world stalls
-    /// during collector writes. Manual CHECKPOINT runs between collection cycles instead.
+    /// - checkpoint_threshold=1GB: disables automatic WAL checkpoints to prevent
+    ///   2-3s stop-the-world stalls during collector writes. Manual CHECKPOINT
+    ///   runs between collection cycles instead.
+    /// - memory_limit=1GB: caps the resting buffer pool so it doesn't grow
+    ///   unbounded as the archive directory fills with parquet files (the
+    ///   ".tmp dir caching" path is the actual driver of #933's titled
+    ///   complaint — uncapped, buffer pool grows toward 80% of system RAM).
+    ///   ArchiveService raises this temporarily for parquet COPY operations,
+    ///   which need more headroom due to a DuckDB pre-reservation behavior.
     /// </summary>
-    public string ConnectionString => $"Data Source={_databasePath};checkpoint_threshold=1GB";
+    public string ConnectionString => $"Data Source={_databasePath};memory_limit=1GB;checkpoint_threshold=1GB";
 
     /// <summary>
     /// Ensures the database exists and all tables are created.
