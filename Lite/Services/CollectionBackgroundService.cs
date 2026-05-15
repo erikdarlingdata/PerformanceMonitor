@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
@@ -114,6 +115,13 @@ public class CollectionBackgroundService : BackgroundService
 
                 /* Periodic retention cleanup */
                 RunRetentionIfDue();
+
+                /* Log process memory at the end of each cycle. Lets bug reporters
+                   self-report memory without Task Manager, gives us a continuous
+                   memory trace for diagnosis, and surfaces regressions in the log
+                   that would otherwise need external sampling to detect. Three
+                   property reads — negligible overhead at 1-minute cadence. */
+                LogProcessMemory();
             }
 
             try
@@ -179,6 +187,24 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Retention cleanup failed");
+        }
+    }
+
+    private void LogProcessMemory()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            var wsMb = process.WorkingSet64 / 1024 / 1024;
+            var privMb = process.PrivateMemorySize64 / 1024 / 1024;
+            var gcMb = GC.GetTotalMemory(forceFullCollection: false) / 1024 / 1024;
+            _logger?.LogInformation(
+                "Process memory: WS={WorkingSetMb} MB, Private={PrivateMb} MB, GC heap={GcMb} MB",
+                wsMb, privMb, gcMb);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Failed to read process memory stats");
         }
     }
 
