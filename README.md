@@ -90,7 +90,7 @@ All release binaries are digitally signed via [SignPath](https://signpath.io) â€
 
 ## Quick Start â€” Lite Edition
 
-1. Download and extract **[PerformanceMonitorLite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** (requires [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0))
+1. Download and extract **[PerformanceMonitorLite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** (requires [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0))
 2. Run `PerformanceMonitorLite.exe`
 3. Click **+ Add Server**, enter connection details, test, save
 4. Double-click the server in the sidebar to connect
@@ -673,7 +673,7 @@ Monitor/
 
 ## Building from Source
 
-All projects target .NET 8.0.
+All projects target .NET 10.0.
 
 ```
 # Full Edition Dashboard
