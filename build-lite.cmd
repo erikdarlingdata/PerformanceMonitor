@@ -23,15 +23,26 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-:: Lite ships via Setup.exe (Velopack), not a portable ZIP — see .github/workflows/build.yml.
-:: Local dev iterates against publish\Lite\ directly.
+:: Portable ZIP for advanced / air-gapped users. README points end users at Setup.exe (Velopack)
+:: because that registers shortcuts + Apps & Features; this is the explicit fallback.
+echo.
+echo Creating ZIP package...
+set ZIPNAME=PerformanceMonitorLite-%VERSION%.zip
+
+if exist "releases\%ZIPNAME%" del "releases\%ZIPNAME%"
+if not exist "releases" mkdir releases
+
+powershell -Command "Compress-Archive -Path 'publish\Lite\*' -DestinationPath 'releases\%ZIPNAME%' -Force"
 
 echo.
 echo ========================================
 echo  Build Complete!
 echo ========================================
 echo.
-echo Output: publish\Lite\  (run PerformanceMonitorLite.exe directly for dev)
+echo Output: releases\%ZIPNAME%
 echo.
+
+:: Show size
+for %%A in ("releases\%ZIPNAME%") do echo Size: %%~zA bytes
 
 endlocal

@@ -108,9 +108,13 @@ jobs:
           $version = "${{ steps.version.outputs.VERSION }}"
           New-Item -ItemType Directory -Force -Path releases
 
-          # Dashboard and Lite ship via Velopack Setup.exe only (see "Create Velopack release" step).
-          # The portable ZIPs were removed because they skipped Start Menu shortcuts and
-          # Apps & Features registration, leaving testers unable to find the app after install.
+          # Dashboard ZIP — portable artifact for advanced/air-gapped users.
+          # The README points end users at Setup.exe (Velopack) because it sets up Start Menu
+          # shortcuts and Apps & Features registration; this ZIP is the explicit fallback.
+          Compress-Archive -Path 'publish/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
+
+          # Lite ZIP — same rationale.
+          Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
           # Installer ZIP (CLI + SQL scripts) — still shipped for server-side install
           $instDir = 'publish/Installer'
@@ -127,6 +131,22 @@ jobs:
 
           Compress-Archive -Path 'publish/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 
+      - name: Upload Dashboard for signing
+        if: github.event_name == 'release'
+        id: upload-dashboard
+        uses: actions/upload-artifact@v6
+        with:
+          name: Dashboard-unsigned
+          path: publish/Dashboard/
+
+      - name: Upload Lite for signing
+        if: github.event_name == 'release'
+        id: upload-lite
+        uses: actions/upload-artifact@v6
+        with:
+          name: Lite-unsigned
+          path: publish/Lite/
+
       - name: Upload Installer for signing
         if: github.event_name == 'release'
         id: upload-installer
@@ -134,6 +154,32 @@ jobs:
         with:
           name: Installer-unsigned
           path: publish/Installer/
+
+      - name: Sign Dashboard
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'Dashboard'
+          github-artifact-id: '${{ steps.upload-dashboard.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Dashboard'
+
+      - name: Sign Lite
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'Lite'
+          github-artifact-id: '${{ steps.upload-lite.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Lite'
 
       - name: Sign Installer
         if: github.event_name == 'release'
@@ -153,6 +199,11 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
+          # Re-zip signed files into release archives
+          Remove-Item "releases/PerformanceMonitorDashboard-$version.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
+          Remove-Item "releases/PerformanceMonitorLite-$version.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
           Remove-Item "releases/PerformanceMonitorInstaller-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Installer/*' -DestinationPath "releases/PerformanceMonitorInstaller-$version.zip" -Force
 

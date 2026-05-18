@@ -18,7 +18,7 @@ if not exist "releases" mkdir releases
 :: ----------------------------------------
 :: Dashboard
 :: ----------------------------------------
-echo [1/2] Publishing Dashboard...
+echo [1/3] Publishing Dashboard...
 dotnet publish Dashboard\Dashboard.csproj -c Release -o publish\Dashboard
 
 if %ERRORLEVEL% neq 0 (
@@ -27,14 +27,18 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-:: Dashboard ships via Setup.exe (Velopack), not a portable ZIP — see .github/workflows/build.yml.
-:: Local dev iterates against publish\Dashboard\ directly.
+:: Portable ZIP for advanced / air-gapped users. README points end users at Setup.exe (Velopack)
+:: because that registers shortcuts + Apps & Features; this is the explicit fallback.
+echo Creating Dashboard ZIP...
+set DASH_ZIP=PerformanceMonitorDashboard-%VERSION%.zip
+if exist "releases\%DASH_ZIP%" del "releases\%DASH_ZIP%"
+powershell -Command "Compress-Archive -Path 'publish\Dashboard\*' -DestinationPath 'releases\%DASH_ZIP%' -Force"
 echo.
 
 :: ----------------------------------------
 :: CLI Installer
 :: ----------------------------------------
-echo [2/2] Publishing CLI Installer...
+echo [2/3] Publishing CLI Installer...
 dotnet publish Installer\PerformanceMonitorInstaller.csproj -c Release
 
 if %ERRORLEVEL% neq 0 (
@@ -71,10 +75,11 @@ echo  Build Complete!
 echo ========================================
 echo.
 echo Output:
-echo   publish\Dashboard\        (run PerformanceMonitorDashboard.exe directly for dev)
+echo   releases\%DASH_ZIP%       (portable Dashboard ZIP)
 echo   releases\%INST_ZIP%       (CLI installer + SQL scripts)
 echo.
 
+for %%A in ("releases\%DASH_ZIP%") do echo Dashboard size:  %%~zA bytes
 for %%A in ("releases\%INST_ZIP%") do echo Installer size:  %%~zA bytes
 
 endlocal
