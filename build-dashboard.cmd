@@ -56,7 +56,7 @@ mkdir "%INST_DIR%"
 mkdir "%INST_DIR%\install"
 mkdir "%INST_DIR%\upgrades"
 
-copy "Installer\bin\Release\net8.0\win-x64\publish\PerformanceMonitorInstaller.exe" "%INST_DIR%\" >nul
+copy "Installer\bin\Release\net10.0\win-x64\publish\PerformanceMonitorInstaller.exe" "%INST_DIR%\" >nul
 copy "install\*.sql" "%INST_DIR%\install\" >nul
 xcopy "upgrades" "%INST_DIR%\upgrades\" /E /I /Q >nul 2>&1
 if exist README.md copy README.md "%INST_DIR%\" >nul

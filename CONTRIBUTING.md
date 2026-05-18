@@ -40,7 +40,7 @@ This repository contains two editions of the SQL Server Performance Monitor:
 ### Prerequisites
 
 - **Windows 10/11** (required for WPF)
-- **.NET 8.0 SDK** ([download](https://dotnet.microsoft.com/download/dotnet/8.0))
+- **.NET 10.0 SDK** ([download](https://dotnet.microsoft.com/download/dotnet/10.0))
 - **Visual Studio 2022** or **VS Code** with C# extension
 - **SQL Server** (2016 or later) for testing
 - **Git** for version control
@@ -67,11 +67,11 @@ dotnet publish Installer/PerformanceMonitorInstaller.csproj -c Release
 
 **Full Dashboard:**
 1. Install the database on a SQL Server instance using the installer
-2. Run `Dashboard/bin/Debug/net8.0-windows/Dashboard.exe`
+2. Run `Dashboard/bin/Debug/net10.0-windows/Dashboard.exe`
 3. Add your server connection and start monitoring
 
 **Lite Edition:**
-1. Run `Lite/bin/Debug/net8.0-windows/PerformanceMonitorLite.exe`
+1. Run `Lite/bin/Debug/net10.0-windows/PerformanceMonitorLite.exe`
 2. Add a SQL Server connection (requires VIEW SERVER STATE permission)
 3. Data collection begins automatically
 

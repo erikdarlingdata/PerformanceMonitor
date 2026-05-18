@@ -45,10 +45,10 @@ jobs:
               - 'install/**'
               - 'upgrades/**'
 
-      - name: Setup .NET 8.0
+      - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -120,7 +120,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$instDir/install"
           New-Item -ItemType Directory -Force -Path "$instDir/upgrades"
 
-          Copy-Item 'Installer/bin/Release/net8.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
+          Copy-Item 'Installer/bin/Release/net10.0/win-x64/publish/PerformanceMonitorInstaller.exe' $instDir
           Copy-Item 'install/*.sql' "$instDir/install/"
           if (Test-Path 'upgrades') { Copy-Item 'upgrades/*' "$instDir/upgrades/" -Recurse -ErrorAction SilentlyContinue }
           if (Test-Path 'README.md') { Copy-Item 'README.md' $instDir }
