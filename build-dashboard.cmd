@@ -27,6 +27,8 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+:: Portable ZIP for advanced / air-gapped users. README points end users at Setup.exe (Velopack)
+:: because that registers shortcuts + Apps & Features; this is the explicit fallback.
 echo Creating Dashboard ZIP...
 set DASH_ZIP=PerformanceMonitorDashboard-%VERSION%.zip
 if exist "releases\%DASH_ZIP%" del "releases\%DASH_ZIP%"
@@ -36,7 +38,7 @@ echo.
 :: ----------------------------------------
 :: CLI Installer
 :: ----------------------------------------
-echo [2/2] Publishing CLI Installer...
+echo [2/3] Publishing CLI Installer...
 dotnet publish Installer\PerformanceMonitorInstaller.csproj -c Release
 
 if %ERRORLEVEL% neq 0 (
@@ -73,8 +75,8 @@ echo  Build Complete!
 echo ========================================
 echo.
 echo Output:
-echo   releases\%DASH_ZIP%
-echo   releases\%INST_ZIP%
+echo   releases\%DASH_ZIP%       (portable Dashboard ZIP)
+echo   releases\%INST_ZIP%       (CLI installer + SQL scripts)
 echo.
 
 for %%A in ("releases\%DASH_ZIP%") do echo Dashboard size:  %%~zA bytes

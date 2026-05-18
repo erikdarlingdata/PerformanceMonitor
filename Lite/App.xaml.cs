@@ -9,6 +9,8 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -60,9 +62,19 @@ public partial class App : Application
     public static string DatabasePath { get; private set; } = string.Empty;
 
     /// <summary>
-    /// Gets the config directory path.
+    /// Gets the per-user config directory path. Holds settings.json, schedules, and
+    /// other per-user preferences. Stays in %LOCALAPPDATA% so Velopack updates can
+    /// replace the app directory without losing data.
     /// </summary>
     public static string ConfigDirectory { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// Gets the machine-wide config directory under %ProgramData% used for files that
+    /// should be shared across Windows users on the same machine — currently just
+    /// servers.json (the list of monitored servers). Credentials remain per-user in
+    /// Windows Credential Manager.
+    /// </summary>
+    public static string SharedConfigDirectory { get; private set; } = string.Empty;
 
     /// <summary>
     /// Gets the archive directory path for Parquet files.
@@ -274,6 +286,9 @@ public partial class App : Application
         // Initialize logging
         var logDirectory = Path.Combine(appDataRoot, "logs");
         AppLogger.Initialize(logDirectory);
+
+        // Resolve shared (machine-wide) config directory AFTER logger init so migration/ACL events are logged
+        SharedConfigDirectory = ResolveSharedConfigDirectory(ConfigDirectory);
         Helpers.MethodProfiler.Initialize(logDirectory);
         Helpers.QueryLogger.Initialize(logDirectory);
         AppLogger.Info("App", $"Starting PerformanceMonitorLite v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}");
@@ -301,6 +316,81 @@ public partial class App : Application
         _singleInstanceMutex?.Dispose();
 
         base.OnExit(e);
+    }
+
+    /// <summary>
+    /// Resolves the machine-wide config directory under %ProgramData% (currently used
+    /// only for servers.json) so multiple Windows users on the same machine see the
+    /// same server list. On first directory creation, grants Authenticated Users
+    /// Modify so any user can edit the file. One-time migrates an existing
+    /// per-user servers.json from <paramref name="perUserConfigDirectory"/> if no
+    /// shared servers.json exists yet; the old file is left in place as a backup.
+    /// Credentials remain per-user in Windows Credential Manager.
+    /// </summary>
+    private static string ResolveSharedConfigDirectory(string perUserConfigDirectory)
+    {
+        string sharedDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "PerformanceMonitorLite",
+            "config");
+
+        bool directoryCreated = !Directory.Exists(sharedDir);
+        Directory.CreateDirectory(sharedDir);
+
+        if (directoryCreated)
+        {
+            TryGrantAuthenticatedUsersModify(sharedDir);
+        }
+
+        string sharedServers = Path.Combine(sharedDir, "servers.json");
+        if (!File.Exists(sharedServers))
+        {
+            string legacyServers = Path.Combine(perUserConfigDirectory, "servers.json");
+            if (File.Exists(legacyServers))
+            {
+                try
+                {
+                    File.Copy(legacyServers, sharedServers);
+                    AppLogger.Info("App",
+                        $"Migrated servers.json from '{legacyServers}' to '{sharedServers}'. " +
+                        "The old file was left in place as a backup. " +
+                        "Passwords in Windows Credential Manager remain per-user — other users on this machine will need to re-enter SQL passwords for each server.");
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Warn("App",
+                        $"Failed to migrate servers.json from '{legacyServers}': {ex.Message}");
+                }
+            }
+        }
+
+        return sharedDir;
+    }
+
+    private static void TryGrantAuthenticatedUsersModify(string directoryPath)
+    {
+        try
+        {
+            var dirInfo = new DirectoryInfo(directoryPath);
+            var security = dirInfo.GetAccessControl();
+            var authenticatedUsers = new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
+
+            security.AddAccessRule(new FileSystemAccessRule(
+                authenticatedUsers,
+                FileSystemRights.Modify | FileSystemRights.Synchronize,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+
+            dirInfo.SetAccessControl(security);
+            AppLogger.Info("App",
+                $"Granted Authenticated Users Modify on '{directoryPath}' so other Windows users on this machine can edit the shared server list.");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("App",
+                $"Could not set shared ACL on '{directoryPath}': {ex.Message}. Other Windows users may be unable to edit the server list until permissions are fixed manually.");
+        }
     }
 
     private static void LoadDefaultTimeRange()

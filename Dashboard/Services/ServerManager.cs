@@ -11,6 +11,8 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
@@ -38,18 +40,85 @@ namespace PerformanceMonitorDashboard.Services
 
         public ServerManager()
         {
-            string appDataPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "PerformanceMonitorDashboard"
-            );
-
-            Directory.CreateDirectory(appDataPath);
-            _configFilePath = Path.Combine(appDataPath, "servers.json");
+            _configFilePath = ResolveSharedServersJsonPath();
             _credentialService = new CredentialService();
             _servers = new List<ServerConnection>();
             _connectionStatuses = new ConcurrentDictionary<string, ServerConnectionStatus>();
 
             LoadServers();
+        }
+
+        /// <summary>
+        /// Resolves the path to the machine-wide servers.json under %ProgramData% so multiple
+        /// Windows users on the same machine see the same server list. On first directory
+        /// creation, grants Authenticated Users Modify so any user can edit the file.
+        /// One-time migrates an existing per-user %APPDATA% servers.json if no shared file
+        /// is present yet (the old file is left in place as a backup).
+        /// Credentials remain per-user in Windows Credential Manager.
+        /// </summary>
+        private static string ResolveSharedServersJsonPath()
+        {
+            string sharedDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "PerformanceMonitorDashboard");
+            string sharedPath = Path.Combine(sharedDir, "servers.json");
+
+            bool directoryCreated = !Directory.Exists(sharedDir);
+            Directory.CreateDirectory(sharedDir);
+
+            if (directoryCreated)
+            {
+                TryGrantAuthenticatedUsersModify(sharedDir);
+            }
+
+            if (!File.Exists(sharedPath))
+            {
+                string legacyPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "PerformanceMonitorDashboard",
+                    "servers.json");
+
+                if (File.Exists(legacyPath))
+                {
+                    try
+                    {
+                        File.Copy(legacyPath, sharedPath);
+                        Logger.Info($"Migrated servers.json from '{legacyPath}' to '{sharedPath}'. " +
+                                    "The old file was left in place as a backup. " +
+                                    "Passwords in Windows Credential Manager remain per-user — other users on this machine will need to re-enter SQL passwords for each server.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warning($"Failed to migrate servers.json from '{legacyPath}': {ex.Message}");
+                    }
+                }
+            }
+
+            return sharedPath;
+        }
+
+        private static void TryGrantAuthenticatedUsersModify(string directoryPath)
+        {
+            try
+            {
+                var dirInfo = new DirectoryInfo(directoryPath);
+                var security = dirInfo.GetAccessControl();
+                var authenticatedUsers = new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
+
+                security.AddAccessRule(new FileSystemAccessRule(
+                    authenticatedUsers,
+                    FileSystemRights.Modify | FileSystemRights.Synchronize,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+
+                dirInfo.SetAccessControl(security);
+                Logger.Info($"Granted Authenticated Users Modify on '{directoryPath}' so other Windows users on this machine can edit the shared server list.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Could not set shared ACL on '{directoryPath}': {ex.Message}. Other Windows users may be unable to edit the server list until permissions are fixed manually.");
+            }
         }
 
         public List<ServerConnection> GetAllServers()

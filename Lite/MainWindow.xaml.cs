@@ -70,7 +70,7 @@ public partial class MainWindow : Window
         _databaseInitializer = new DuckDbInitializer(App.DatabasePath, new AppLoggerAdapter<DuckDbInitializer>());
         _emailAlertService = new EmailAlertService(_databaseInitializer);
         _muteRuleService = new MuteRuleService(_databaseInitializer);
-        _serverManager = new ServerManager(App.ConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
+        _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
         _scheduleManager = new ScheduleManager(App.ConfigDirectory);
 
         // Status bar update timer

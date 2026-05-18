@@ -23,7 +23,8 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-:: Create ZIP
+:: Portable ZIP for advanced / air-gapped users. README points end users at Setup.exe (Velopack)
+:: because that registers shortcuts + Apps & Features; this is the explicit fallback.
 echo.
 echo Creating ZIP package...
 set ZIPNAME=PerformanceMonitorLite-%VERSION%.zip

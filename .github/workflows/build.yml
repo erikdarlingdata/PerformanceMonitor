@@ -108,13 +108,15 @@ jobs:
           $version = "${{ steps.version.outputs.VERSION }}"
           New-Item -ItemType Directory -Force -Path releases
 
-          # Dashboard ZIP
+          # Dashboard ZIP — portable artifact for advanced/air-gapped users.
+          # The README points end users at Setup.exe (Velopack) because it sets up Start Menu
+          # shortcuts and Apps & Features registration; this ZIP is the explicit fallback.
           Compress-Archive -Path 'publish/Dashboard/*' -DestinationPath "releases/PerformanceMonitorDashboard-$version.zip" -Force
 
-          # Lite ZIP
+          # Lite ZIP — same rationale.
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
-          # Installer ZIP (CLI + SQL scripts)
+          # Installer ZIP (CLI + SQL scripts) — still shipped for server-side install
           $instDir = 'publish/Installer'
           New-Item -ItemType Directory -Force -Path $instDir
           New-Item -ItemType Directory -Force -Path "$instDir/install"
