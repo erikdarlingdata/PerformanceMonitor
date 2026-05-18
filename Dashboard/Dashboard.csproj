@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
     <StartupObject>PerformanceMonitorDashboard.Program</StartupObject>
@@ -24,7 +24,7 @@
          CA1508: Dead code - false positives on nullable DateTime parameters
          CA2201: Generic exception - acceptable for global error handlers
          CS4014: Unawaited async - intentional fire-and-forget refresh calls -->
-    <!-- NU1701: CredentialManagement package has no .NET 8 version
+    <!-- NU1701: CredentialManagement package has no .NET 10 version
          CA1001: App/MainWindow live for process lifetime - disposal handled by exit
          CA1707: MCP tool parameters use snake_case intentionally for LLM APIs
          CA1305: MCP tools use ISO 8601 format which is culture-invariant
@@ -37,12 +37,12 @@
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
     <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.7" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.8" />
     <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
-    <PackageReference Include="ModelContextProtocol" Version="1.2.0" />
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.2.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
+    <PackageReference Include="ModelContextProtocol" Version="1.3.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
     <PackageReference Include="Velopack" Version="0.0.1298" />
   </ItemGroup>
 
