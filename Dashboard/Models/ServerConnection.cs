@@ -202,4 +202,98 @@ namespace PerformanceMonitorDashboard.Models
             return credentialService.CredentialExists(Id);
         }
     }
+
+    // Replace the existing ServerVersionInfo type with this implementation (implements INotifyPropertyChanged
+    // and forwards proxy properties to keep existing XAML bindings working).
+    public class ServerVersionInfo : System.ComponentModel.INotifyPropertyChanged
+    {
+        private ServerConnection? _server;
+        public required ServerConnection Server
+        {
+            get => _server!;
+            set
+            {
+                if (_server == value) return;
+                if (_server != null) _server.PropertyChanged -= OnInnerServerPropertyChanged;
+                _server = value;
+                if (_server != null) _server.PropertyChanged += OnInnerServerPropertyChanged;
+                RaiseAllProxyProperties();
+                OnPropertyChanged(nameof(Server));
+            }
+        }
+
+        private string? _installedVersion;
+        public string? InstalledVersion
+        {
+            get => _installedVersion;
+            set
+            {
+                if (_installedVersion == value) return;
+                _installedVersion = value;
+                OnPropertyChanged(nameof(InstalledVersion));
+                OnPropertyChanged(nameof(VersionDisplay));
+            }
+        }
+
+        private bool _needsUpgrade;
+        public bool NeedsUpgrade
+        {
+            get => _needsUpgrade;
+            set
+            {
+                if (_needsUpgrade == value) return;
+                _needsUpgrade = value;
+                OnPropertyChanged(nameof(NeedsUpgrade));
+            }
+        }
+
+        public string VersionDisplay => InstalledVersion ?? "—";
+
+        // Proxy properties so existing XAML bindings continue to work
+        public string DisplayName => Server?.DisplayName ?? string.Empty;
+        public string ServerName => Server?.ServerName ?? string.Empty;
+        public string AuthenticationDisplay => Server?.AuthenticationDisplay ?? string.Empty;
+        public decimal MonthlyCostUsd => Server?.MonthlyCostUsd ?? 0m;
+        public DateTime LastConnected => Server?.LastConnected ?? DateTime.MinValue;
+        public bool IsFavorite => Server?.IsFavorite ?? false;
+
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+        private void OnPropertyChanged(string name) => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+
+        private void RaiseAllProxyProperties()
+        {
+            OnPropertyChanged(nameof(DisplayName));
+            OnPropertyChanged(nameof(ServerName));
+            OnPropertyChanged(nameof(AuthenticationDisplay));
+            OnPropertyChanged(nameof(MonthlyCostUsd));
+            OnPropertyChanged(nameof(LastConnected));
+            OnPropertyChanged(nameof(IsFavorite));
+        }
+
+        private void OnInnerServerPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            // Forward only the properties that the UI binds to
+            switch (e.PropertyName)
+            {
+                case nameof(ServerConnection.DisplayName):
+                    OnPropertyChanged(nameof(DisplayName));
+                    break;
+                case nameof(ServerConnection.ServerName):
+                    OnPropertyChanged(nameof(ServerName));
+                    break;
+                case nameof(ServerConnection.AuthenticationDisplay):
+                    OnPropertyChanged(nameof(AuthenticationDisplay));
+                    break;
+                case nameof(ServerConnection.MonthlyCostUsd):
+                    OnPropertyChanged(nameof(MonthlyCostUsd));
+                    break;
+                case nameof(ServerConnection.LastConnected):
+                    OnPropertyChanged(nameof(LastConnected));
+                    break;
+                case nameof(ServerConnection.IsFavorite):
+                    OnPropertyChanged(nameof(IsFavorite));
+                    break;
+            }
+        }
+    }
 }
