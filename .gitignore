@@ -62,3 +62,4 @@ plans/
 
 # Community scripts (user-provided, not bundled)
 community/*.sql
+/.localpilot/map.txt
