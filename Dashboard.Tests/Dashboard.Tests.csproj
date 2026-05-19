@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Ensure this path matches your dashboard project file -->
     <ProjectReference Include="..\Dashboard\Dashboard.csproj" />
   </ItemGroup>
 

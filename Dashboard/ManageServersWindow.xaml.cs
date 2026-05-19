@@ -377,6 +377,7 @@ namespace PerformanceMonitorDashboard
                     return;
                 }
 
+                // existing version comparison logic follows unchanged...
                 string appVersion = Assembly.GetExecutingAssembly()
                     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                     ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
