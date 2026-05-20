@@ -66,6 +66,7 @@ jobs:
           dotnet restore Dashboard/Dashboard.csproj --locked-mode
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Installer/PerformanceMonitorInstaller.csproj --locked-mode
+          dotnet restore Dashboard.Tests/Dashboard.Tests.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
           dotnet restore Installer.Tests/Installer.Tests.csproj --locked-mode
 
@@ -88,6 +89,10 @@ jobs:
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || github.event_name == 'release'
         run: dotnet test Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
+
+      - name: Run Dashboard tests
+        if: steps.filter.outputs.dashboard == 'true' || github.event_name == 'release'
+        run: dotnet test Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build --verbosity normal
 
       - name: Get version
         if: steps.filter.outputs.code != 'false'
