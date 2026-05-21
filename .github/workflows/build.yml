@@ -78,6 +78,10 @@ jobs:
         if: steps.filter.outputs.code != 'false'
         run: dotnet build Installer.Tests/Installer.Tests.csproj -c Release --no-restore
 
+      - name: Build Dashboard.Tests
+        if: steps.filter.outputs.code != 'false'
+        run: dotnet build Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
+
       - name: Run Lite fast tests
         if: steps.filter.outputs.code != 'false'
         run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~AnomalyDetectorTests&FullyQualifiedName!~FactCollectorTests&FullyQualifiedName!~FactCollectorMiseryTests&FullyQualifiedName!~BaselineProviderTests&FullyQualifiedName!~InferenceEngineTests&FullyQualifiedName!~ScenarioTests&FullyQualifiedName!~AnalysisServiceTests"
@@ -91,7 +95,7 @@ jobs:
         run: dotnet test Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
 
       - name: Run Dashboard tests
-        if: steps.filter.outputs.dashboard == 'true' || github.event_name == 'release'
+        if: steps.filter.outputs.code != 'false'
         run: dotnet test Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build --verbosity normal
 
       - name: Get version
