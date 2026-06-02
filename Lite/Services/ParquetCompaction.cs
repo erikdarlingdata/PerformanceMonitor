@@ -28,29 +28,113 @@ public static class ParquetCompaction
 
     /* Default on-disk parquet bytes per compaction merge batch. A group whose
        files exceed this budget is merged in multiple passes, each producing a
-       _ptNNN.parquet output file. */
+       _ptNNN.parquet output file. Narrow numeric tables compress only mildly, so
+       on-disk bytes are a fine proxy for their merge memory cost. */
     public const long DefaultBatchInputBytes = 200L * 1024 * 1024; /* 200 MB */
 
-    /* Per-table compaction overrides. query_snapshots stores query-plan XML that
-       expands ~30x on read; at the default 200 MB batch / 8192 row-group size the
-       merge OOMs a 4 GB connection (#933). Validated on a real 100-file / 15 GB-
-       uncompressed backlog: 100 MB batches at ROW_GROUP_SIZE 2048 compact it in
-       ~27 s with ~1.8 GB headroom under the cap, producing ~6 monthly part files.
-       Only wide-XML tables need this; numeric tables merge fine at the defaults. */
-    private static readonly Dictionary<string, (long BatchBytes, int RowGroupSize)> PerTableCompaction = new()
+    /* Per-table compaction overrides (#933).
+
+       query_snapshots stores query-plan XML that expands ~30x on read, and that
+       expansion is concentrated in a handful of very large values (real reporter
+       data: query_plan p50 47 KB, p99 1.1 MB, max 27 MB). Two consequences:
+
+         1. On-disk bytes badly under-count the merge's memory cost. The plan XML
+            is extremely repetitive, so parquet dictionary-encodes it and ZSTD
+            shrinks it ~30x on disk — but the merge has to *materialize* every
+            value back into strings, and that materialized size is what blows the
+            4 GB cap. (Note: parquet's own "uncompressed_size" footer stat is the
+            decoded-but-still-dictionary-encoded size and is nearly as small as
+            on disk, so it is NOT a usable proxy either — only the materialized
+            VARCHAR byte count is.) Worse, the on-disk budget is *backwards* for
+            this table: large files land one-per-batch (safe), while several small
+            files get packed into one batch that concentrates the big plans (the
+            case that OOM'd a fresh 202606 group of just 3 files). So this table
+            budgets by *materialized* VARCHAR bytes instead — see
+            GetMaterializedVarcharSizes and BudgetsByMaterializedSize.
+
+         2. A large parquet row group buffers whole rows; a few multi-MB plans in
+            one group force unspillable allocations (DuckDB upstream #16482). So
+            this table uses a small ROW_GROUP_SIZE (512) to bound how many wide
+            rows are in flight at once.
+
+       Validated against the reporter's real data shape via tools/CompactionRepro.
+       Numeric tables merge fine at the defaults and are intentionally untouched. */
+    private static readonly Dictionary<string, (long BudgetBytes, int RowGroupSize, bool ByMaterialized)> PerTableCompaction = new()
     {
-        ["query_snapshots"] = (100L * 1024 * 1024, 2048)
+        ["query_snapshots"] = (1024L * 1024 * 1024, 512, true) /* 1 GB materialized, rgs 512 */
     };
 
-    /* On-disk batch budget for <paramref name="table"/> — the per-table override
-       if one exists, otherwise the default. */
+    /* Batch budget for <paramref name="table"/> — the per-table override if one
+       exists, otherwise the default. The unit is materialized VARCHAR bytes when
+       BudgetsByMaterializedSize(table) is true, on-disk bytes otherwise. */
     public static long BatchBudgetFor(string table) =>
-        PerTableCompaction.TryGetValue(table, out var c) ? c.BatchBytes : DefaultBatchInputBytes;
+        PerTableCompaction.TryGetValue(table, out var c) ? c.BudgetBytes : DefaultBatchInputBytes;
 
     /* Output ROW_GROUP_SIZE for <paramref name="table"/> — the per-table override
        if one exists, otherwise the default. */
     public static int RowGroupSizeFor(string table) =>
         PerTableCompaction.TryGetValue(table, out var c) ? c.RowGroupSize : DefaultRowGroupSize;
+
+    /* Whether <paramref name="table"/>'s batch budget is measured in materialized
+       VARCHAR bytes rather than on-disk bytes. True only for wide-XML tables whose
+       dictionary-encoded compression makes on-disk size a poor memory proxy. */
+    public static bool BudgetsByMaterializedSize(string table) =>
+        PerTableCompaction.TryGetValue(table, out var c) && c.ByMaterialized;
+
+    /* Materialized (decoded-to-string) VARCHAR bytes per file — the sum of
+       octet_length over every VARCHAR column. This is the right proxy for a
+       merge's peak memory: it's the byte volume DuckDB must hold once the
+       dictionary-encoded plan XML is expanded back into strings, which on-disk
+       (and even parquet's footer "uncompressed_size") badly under-count. (#933)
+
+       It costs one streaming read per file — seconds across a 100-file backlog,
+       and run on a connection with no tight memory_limit so the read itself
+       doesn't trip the very cap we're trying to stay under. A file that can't be
+       read maps to its on-disk length as a conservative floor rather than
+       throwing — compaction should degrade, not abort the archival cycle. */
+    public static Dictionary<string, long> GetMaterializedVarcharSizes(IEnumerable<string> paths)
+    {
+        var sizes = new Dictionary<string, long>();
+        using var con = new DuckDBConnection("DataSource=:memory:");
+        con.Open();
+        foreach (var p in paths)
+        {
+            try
+            {
+                var varcharCols = new List<string>();
+                using (var describe = con.CreateCommand())
+                {
+                    describe.CommandText = $"DESCRIBE SELECT * FROM read_parquet('{EscapeSqlPath(p)}')";
+                    using var dr = describe.ExecuteReader();
+                    while (dr.Read())
+                    {
+                        if (dr.GetString(1).Contains("VARCHAR", StringComparison.OrdinalIgnoreCase))
+                            varcharCols.Add(dr.GetString(0));
+                    }
+                }
+
+                if (varcharCols.Count == 0)
+                {
+                    sizes[p] = FileLength(p);
+                    continue;
+                }
+
+                var perRow = string.Join(" + ", varcharCols.Select(c =>
+                    $"COALESCE(octet_length(encode(\"{c.Replace("\"", "\"\"")}\")), 0)"));
+                using var cmd = con.CreateCommand();
+                cmd.CommandText = $"SELECT COALESCE(SUM({perRow}), 0)::BIGINT FROM read_parquet('{EscapeSqlPath(p)}')";
+                var val = cmd.ExecuteScalar();
+                sizes[p] = val is null or DBNull ? FileLength(p) : Convert.ToInt64(val);
+            }
+            catch
+            {
+                sizes[p] = FileLength(p);
+            }
+        }
+        return sizes;
+    }
+
+    private static long FileLength(string path) => new FileInfo(path.Replace("/", "\\")).Length;
 
     /* Columns to exclude during compaction — dead weight from legacy archives */
     private static readonly Dictionary<string, string[]> CompactionExcludeColumns = new()
@@ -61,19 +145,27 @@ public static class ParquetCompaction
     private static string EscapeSqlPath(string path) => path.Replace("'", "''");
 
     /* Greedily group <paramref name="sortedPaths"/> (smallest-first) into batches
-       whose total on-disk bytes don't exceed <paramref name="maxBytes"/>. A single
-       file larger than the cap becomes its own one-element batch — that's the
+       whose total size doesn't exceed <paramref name="maxBytes"/>. A single file
+       larger than the cap becomes its own one-element batch — that's the
        degenerate case (the cap can't split an individual file) and the caller
-       handles it as a single-file pass-through merge. */
-    public static List<List<string>> BuildSizeBudgetedBatches(IReadOnlyList<string> sortedPaths, long maxBytes)
+       handles it as a single-file pass-through merge.
+
+       <paramref name="sizeOf"/> measures each file; it defaults to on-disk length.
+       Wide-XML tables pass a map of materialized sizes (GetMaterializedVarcharSizes)
+       so the budget reflects the merge's real memory cost, not its compressed size
+       (#933). For a meaningful budget the caller should sort by the same metric. */
+    public static List<List<string>> BuildSizeBudgetedBatches(
+        IReadOnlyList<string> sortedPaths, long maxBytes, Func<string, long>? sizeOf = null)
     {
+        sizeOf ??= FileLength;
+
         var batches = new List<List<string>>();
         var current = new List<string>();
         long currentBytes = 0;
 
         foreach (var p in sortedPaths)
         {
-            var size = new FileInfo(p.Replace("/", "\\")).Length;
+            var size = sizeOf(p);
             if (currentBytes + size > maxBytes && current.Count > 0)
             {
                 batches.Add(current);

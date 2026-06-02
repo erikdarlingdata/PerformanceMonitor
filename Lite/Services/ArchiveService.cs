@@ -443,18 +443,39 @@ COPY (
                     .Select(f => Path.Combine(_archivePath, f).Replace("\\", "/"))
                     .ToList();
 
-                /* Sort smallest-first so size-budget batches fill cheaply at first. */
+                /* How we measure each file for batching. Wide-XML tables
+                   (query_snapshots) budget by *materialized* VARCHAR size, scanned
+                   from the files, because on-disk bytes badly under-count their
+                   merge memory cost and pack small-but-heavy files together (#933).
+                   Narrow tables keep on-disk sizing. */
+                Func<string, long> sizeOf;
+                if (ParquetCompaction.BudgetsByMaterializedSize(table))
+                {
+                    var materialized = ParquetCompaction.GetMaterializedVarcharSizes(sourcePaths);
+                    sizeOf = p => materialized.TryGetValue(p, out var s)
+                        ? s
+                        : new FileInfo(p.Replace("/", "\\")).Length;
+                }
+                else
+                {
+                    sizeOf = p => new FileInfo(p.Replace("/", "\\")).Length;
+                }
+
+                /* Sort smallest-first (by the same metric we budget on) so
+                   size-budget batches fill cheaply at first. */
                 var sorted = sourcePaths
-                    .OrderBy(p => new FileInfo(p.Replace("/", "\\")).Length)
+                    .OrderBy(sizeOf)
                     .ToList();
 
                 /* Bucket files into size-budgeted batches so a single COPY never
-                   merges an unbounded amount of expanded VARCHAR data. The budget
-                   and row-group size are per-table: query_snapshots' plan XML
-                   expands ~30x on read and OOMs a 4 GB connection at the defaults,
-                   so it gets a tighter budget (see ParquetCompaction.PerTableCompaction
-                   and #933). Narrow tables fit one batch with hundreds of files. */
-                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, ParquetCompaction.BatchBudgetFor(table));
+                   merges an unbounded amount of expanded VARCHAR data. The budget,
+                   sizing metric, and row-group size are per-table: query_snapshots'
+                   plan XML expands ~30x on read and OOMs a 4 GB connection at the
+                   defaults, so it budgets by materialized size with a small row
+                   group (see ParquetCompaction.PerTableCompaction and #933). Narrow
+                   tables fit one batch with hundreds of files. */
+                var batches = ParquetCompaction.BuildSizeBudgetedBatches(
+                    sorted, ParquetCompaction.BatchBudgetFor(table), sizeOf);
 
                 /* Plan the output names. With one batch we keep the existing
                    YYYYMM_table.parquet name (backward compatible). With multiple

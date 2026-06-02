@@ -29,18 +29,25 @@ using PerformanceMonitorLite.Services;
  * the data shape that decides whether compaction OOMs; synthetic data can't
  * fake it. Use --profile-only to get just the profile and skip the merge.
  *
- * Tuning knobs (defaults = ParquetCompaction's non-table-specific defaults):
+ * Tuning knobs (single-run defaults = ParquetCompaction's per-table production
+ * values for --table, so a bare run reproduces exactly what ships):
  *   --memory-limit <str>   DuckDB memory_limit per merge connection. Default: 4GB
  *   --threads <int>        DuckDB threads per merge connection. Default: 2
- *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: 8192
- *   --max-batch-mb <int>   Per-batch on-disk input budget (MB). Default: 200
- *   --table <name>         Table name (drives exclude-column logic). Default: query_snapshots
+ *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: per-table (query_snapshots: 512)
+ *   --max-batch-mb <int>   Per-batch input budget (MB). Default: per-table (query_snapshots: 1024)
+ *   --budget-materialized  Budget/sort by materialized VARCHAR size (scanned) —
+ *                          the #933 fix; default for query_snapshots.
+ *   --budget-ondisk        Budget/sort by on-disk (compressed) size — the old
+ *                          behavior; use it to A/B against the fix.
+ *   --table <name>         Table name (drives exclude-column + per-table tuning). Default: query_snapshots
  *
  * Other options:
  *   --profile-only         Print the source data profile and exit (no merge).
  *   --sweep                Run a matrix of configs (row-group-size x batch budget
- *                          x memory limit) against the same files and print which
- *                          ones survive. Ignores --row-group-size / --max-batch-mb.
+ *                          x memory limit x budget metric) against the same files
+ *                          and print which survive. Compares on-disk vs materialized
+ *                          budgeting. Ignores --row-group-size / --max-batch-mb /
+ *                          --budget-* .
  *   --num-files <int>      Chunks to split --source-file/--synthetic into. Default: 15
  *   --synthetic-rows <int> Synthetic row count. Default: 30000
  *   --synthetic-base-ops <n>  RelOps in a normal synthetic plan. Default: 130
@@ -85,9 +92,19 @@ if (!string.IsNullOrEmpty(sourceFile) && !File.Exists(sourceFile))
 var table = GetArg(args, "--table", "query_snapshots");
 var memoryLimit = GetArg(args, "--memory-limit", ParquetCompaction.DefaultMemoryLimit);
 var threads = int.Parse(GetArg(args, "--threads", ParquetCompaction.DefaultThreads.ToString()));
-var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.DefaultRowGroupSize.ToString()));
-var maxBatchMb = int.Parse(GetArg(args, "--max-batch-mb", (ParquetCompaction.DefaultBatchInputBytes / (1024 * 1024)).ToString()));
+/* Single-run defaults mirror PRODUCTION for the chosen table (row-group size,
+   batch budget, and budget metric all come from ParquetCompaction's per-table
+   config). So `--merge-files <real files>` with no other args runs exactly what
+   ships. Override any of them to experiment; --sweep ignores them. (#933) */
+var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.RowGroupSizeFor(table).ToString()));
+var maxBatchMb = int.Parse(GetArg(args, "--max-batch-mb", (ParquetCompaction.BatchBudgetFor(table) / (1024 * 1024)).ToString()));
 var maxBatchBytes = maxBatchMb * 1024L * 1024L;
+/* Budget metric: default to the production per-table choice; let the user force
+   either way for A/B comparison. Materialized budgeting scans each file's VARCHAR
+   byte volume so the batch budget tracks real merge memory, not compressed bytes. */
+var byMaterialized = ParquetCompaction.BudgetsByMaterializedSize(table);
+if (args.Contains("--budget-ondisk")) byMaterialized = false;
+if (args.Contains("--budget-materialized")) byMaterialized = true;
 var numFiles = int.Parse(GetArg(args, "--num-files", "15"));
 var keep = args.Contains("--keep");
 var profileOnly = args.Contains("--profile-only");
@@ -144,7 +161,8 @@ if (sweep)
 }
 else
 {
-    Console.WriteLine($"Settings: memory_limit={memoryLimit}, threads={threads}, ROW_GROUP_SIZE={rowGroupSize}, max-batch={maxBatchMb} MB");
+    var metric = byMaterialized ? "materialized" : "on-disk";
+    Console.WriteLine($"Settings: memory_limit={memoryLimit}, threads={threads}, ROW_GROUP_SIZE={rowGroupSize}, max-batch={maxBatchMb} MB ({metric})");
 }
 if (mergeFiles.Count == 0)
     Console.WriteLine($"Splitting source into {numFiles} chunks");
@@ -196,29 +214,45 @@ try
         return 0;
     }
 
-    /* Sort smallest-first — mirrors ArchiveService.CompactParquetFiles. */
-    var sorted = sourcePaths
-        .OrderBy(p => new FileInfo(p.Replace("/", "\\")).Length)
-        .ToList();
-
     var spillDir = Path.Combine(tempDir, "duckdb_tmp").Replace("\\", "/");
     Directory.CreateDirectory(spillDir);
     var process = Process.GetCurrentProcess();
+
+    static long OnDiskLen(string p) => new FileInfo(p.Replace("/", "\\")).Length;
+
+    /* Materialized VARCHAR sizes are scanned once and cached — a sweep reuses them
+       across configs. Computed via the real production helper. */
+    Dictionary<string, long>? materializedCache = null;
+    Dictionary<string, long> MaterializedSizes() =>
+        materializedCache ??= ParquetCompaction.GetMaterializedVarcharSizes(sourcePaths);
+
+    /* The metric a config budgets/sorts on — mirrors ArchiveService. */
+    Func<string, long> SizeOf(bool byMat) => byMat
+        ? p => MaterializedSizes().TryGetValue(p, out var s) ? s : OnDiskLen(p)
+        : OnDiskLen;
 
     /* Run one full compaction (size-budget batching + per-batch merge) for a
        given config. Never throws — a merge OOM is caught and returned as
        Ok=false so a sweep can carry on to the next config. */
     (bool Ok, double StartMb, double PeakMb, double Sec, int Batches, string? Fail, List<string> Outputs)
-        RunOneConfig(int rgs, long batchBytes, string memLimit, int thr, bool verbose)
+        RunOneConfig(int rgs, long batchBytes, string memLimit, int thr, bool byMat, bool verbose)
     {
-        var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBytes);
+        var sizeOf = SizeOf(byMat);
+        /* Sort smallest-first by the same metric we budget on — mirrors
+           ArchiveService.CompactParquetFiles. */
+        var sorted = sourcePaths.OrderBy(sizeOf).ToList();
+        var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBytes, sizeOf);
         if (verbose)
         {
-            Console.WriteLine($"      {sorted.Count} files -> {batches.Count} batch(es) at {batchBytes / 1024 / 1024} MB budget");
+            var unit = byMat ? "materialized" : "on-disk";
+            Console.WriteLine($"      {sorted.Count} files -> {batches.Count} batch(es) at {batchBytes / 1024 / 1024} MB {unit} budget");
             for (var i = 0; i < batches.Count; i++)
             {
-                var bb = batches[i].Sum(p => new FileInfo(p.Replace("/", "\\")).Length);
-                Console.WriteLine($"        batch {i + 1}: {batches[i].Count} files, {bb / 1024.0 / 1024.0:F1} MB on disk");
+                var diskMb = batches[i].Sum(OnDiskLen) / 1024.0 / 1024.0;
+                var budgetMb = batches[i].Sum(sizeOf) / 1024.0 / 1024.0;
+                Console.WriteLine(byMat
+                    ? $"        batch {i + 1}: {batches[i].Count} files, {budgetMb:F1} MB materialized ({diskMb:F1} MB on disk)"
+                    : $"        batch {i + 1}: {batches[i].Count} files, {diskMb:F1} MB on disk");
             }
         }
 
@@ -301,25 +335,28 @@ try
     if (sweep)
     {
         /* Matrix of merge configs run against the same source files — varies
-           row-group size, batch budget and memory cap to find which combination
-           keeps the merge within the cap on real data. (#933) */
-        var configs = new (string Label, int Rgs, int BatchMb, string Mem)[]
+           row-group size, batch budget, memory cap, and budget metric to find
+           which combination keeps the merge within the cap on real data. The
+           "unc:" rows budget by uncompressed size (the #933 fix); the on-disk
+           rows are kept for A/B comparison against the old behavior. */
+        var configs = new (string Label, int Rgs, int BatchMb, string Mem, bool ByMat)[]
         {
-            ("rgs=8192 batch=200 mem=4GB", 8192, 200, "4GB"),
-            ("rgs=2048 batch=100 mem=4GB", 2048, 100, "4GB"),
-            ("rgs=512  batch=50  mem=4GB",  512,  50, "4GB"),
-            ("rgs=512  batch=25  mem=4GB",  512,  25, "4GB"),
-            ("rgs=256  batch=25  mem=2GB",  256,  25, "2GB"),
+            ("on-disk: rgs=8192 batch=200 mem=4GB", 8192, 200, "4GB", false),
+            ("on-disk: rgs=2048 batch=100 mem=4GB", 2048, 100, "4GB", false),
+            ("on-disk: rgs=512  batch=25  mem=4GB",  512,  25, "4GB", false),
+            ("mat: rgs=512  budget=1GB   mem=4GB",   512, 1024, "4GB", true),
+            ("mat: rgs=512  budget=1.5GB mem=4GB",   512, 1536, "4GB", true),
+            ("mat: rgs=2048 budget=1GB   mem=4GB",  2048, 1024, "4GB", true),
         };
 
-        Console.WriteLine($"[sweep] Running {configs.Length} configs against the same {sorted.Count} source files.");
+        Console.WriteLine($"[sweep] Running {configs.Length} configs against the same {sourcePaths.Count} source files.");
         Console.WriteLine();
 
         var results = new List<(string Label, bool Ok, double PeakDeltaMb, double Sec, int Batches, string? Fail)>();
         foreach (var c in configs)
         {
             Console.WriteLine($"[sweep] {c.Label} ...");
-            var r = RunOneConfig(c.Rgs, c.BatchMb * 1024L * 1024L, c.Mem, threads, verbose: false);
+            var r = RunOneConfig(c.Rgs, c.BatchMb * 1024L * 1024L, c.Mem, threads, c.ByMat, verbose: false);
             CleanOutputs();
             var peakDelta = r.PeakMb - r.StartMb;
             results.Add((c.Label, r.Ok, peakDelta, r.Sec, r.Batches, r.Fail));
@@ -329,9 +366,9 @@ try
         }
 
         Console.WriteLine("[sweep] SUMMARY");
-        Console.WriteLine($"  {"config",-38} {"status",-6} {"peak",10} {"time",7} {"parts",6}");
+        Console.WriteLine($"  {"config",-40} {"status",-6} {"peak",10} {"time",7} {"parts",6}");
         foreach (var r in results)
-            Console.WriteLine($"  {r.Label,-38} {(r.Ok ? "OK" : "FAIL"),-6} {("+" + r.PeakDeltaMb.ToString("F0") + " MB"),10} {(r.Sec.ToString("F0") + "s"),7} {r.Batches,6}");
+            Console.WriteLine($"  {r.Label,-40} {(r.Ok ? "OK" : "FAIL"),-6} {("+" + r.PeakDeltaMb.ToString("F0") + " MB"),10} {(r.Sec.ToString("F0") + "s"),7} {r.Batches,6}");
         Console.WriteLine();
         var firstOk = results.FirstOrDefault(r => r.Ok);
         Console.WriteLine(firstOk.Label != null
@@ -342,7 +379,7 @@ try
 
     /* Single-config run. */
     Console.WriteLine($"[3/3] Running merge (real ParquetCompaction code)...");
-    var single = RunOneConfig(rowGroupSize, maxBatchBytes, memoryLimit, threads, verbose: true);
+    var single = RunOneConfig(rowGroupSize, maxBatchBytes, memoryLimit, threads, byMaterialized, verbose: true);
 
     Console.WriteLine();
     Console.WriteLine("Result:");
