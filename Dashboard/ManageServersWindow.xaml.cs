@@ -8,10 +8,9 @@
 
 using Installer.Core;
 using Installer.Core.Models;
-using ModelContextProtocol.Protocol;
+using PerformanceMonitorDashboard.Interfaces;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
-using PerformanceMonitorDashboard.Interfaces;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -51,7 +50,7 @@ namespace PerformanceMonitorDashboard
             this.Closing += ManageServersWindow_Closing;
         }
 
-        private void ManageServersWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+        private async void ManageServersWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
             if (_upgradeCts != null && !_upgradeCts.IsCancellationRequested)
             {
@@ -59,11 +58,14 @@ namespace PerformanceMonitorDashboard
                 {
                     _upgradeCts.Cancel();
                 }
-                catch { }
+                catch (OperationCanceledException)
+                {
+                    // Cancellation is expected and handled.
+                }
             }
         }
 
-        private record PerServerUpgradeResult(
+        private sealed record PerServerUpgradeResult(
             string ServerId,
             string ServerDisplay,
             int UpgradesSucceeded,
@@ -371,7 +373,6 @@ namespace PerformanceMonitorDashboard
                     return;
                 }
 
-                // existing version comparison logic follows unchanged...
                 string appVersion = Assembly.GetExecutingAssembly()
                     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                     ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
@@ -452,7 +453,7 @@ namespace PerformanceMonitorDashboard
 
             try
             {
-                string appVersion = GetAppVersion(); // extract the existing version logic into a helper
+                string appVersion = GetAppVersion();
 
                 // Check all servers in parallel
                 var tasks = _serverManager.GetAllServers().Select(async server =>
@@ -529,7 +530,10 @@ namespace PerformanceMonitorDashboard
 
             if (!Dispatcher.CheckAccess())
             {
-                Dispatcher.Invoke(() => AppendUpgradeLog(message, status));
+                if (!Dispatcher.HasShutdownStarted)
+                {
+                    Dispatcher.Invoke(() => AppendUpgradeLog(message, status));
+                }
                 return;
             }
 
@@ -638,10 +642,7 @@ namespace PerformanceMonitorDashboard
 
         private async void UpgradeAll_Click(object sender, RoutedEventArgs e)
         {
-            string appVersion = GetAppVersion(); // extract the existing version logic into a helper
-
-            int successCount = 0;
-            int failCount = 0;
+            string appVersion = GetAppVersion();
 
             // Confirm with the user
             var confirm = MessageBox.Show(
