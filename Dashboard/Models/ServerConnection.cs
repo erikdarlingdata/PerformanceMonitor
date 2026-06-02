@@ -202,9 +202,6 @@ namespace PerformanceMonitorDashboard.Models
             return credentialService.CredentialExists(Id);
         }
     }
-
-    // Replace the existing ServerVersionInfo type with this implementation (implements INotifyPropertyChanged
-    // and forwards proxy properties to keep existing XAML bindings working).
     public class ServerVersionInfo : System.ComponentModel.INotifyPropertyChanged
     {
         private ServerConnection? _server;
@@ -221,15 +218,13 @@ namespace PerformanceMonitorDashboard.Models
                 OnPropertyChanged(nameof(Server));
             }
         }
-
-        private string? _installedVersion;
         public string? InstalledVersion
         {
-            get => _installedVersion;
+            get => _server!.InstalledVersion;
             set
             {
-                if (_installedVersion == value) return;
-                _installedVersion = value;
+                if (_server!.InstalledVersion == value) return;
+                _server!.InstalledVersion = value;
                 OnPropertyChanged(nameof(InstalledVersion));
                 OnPropertyChanged(nameof(VersionDisplay));
             }
@@ -268,6 +263,7 @@ namespace PerformanceMonitorDashboard.Models
             OnPropertyChanged(nameof(MonthlyCostUsd));
             OnPropertyChanged(nameof(LastConnected));
             OnPropertyChanged(nameof(IsFavorite));
+            OnPropertyChanged(nameof(InstalledVersion));
         }
 
         private void OnInnerServerPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -292,6 +288,9 @@ namespace PerformanceMonitorDashboard.Models
                     break;
                 case nameof(ServerConnection.IsFavorite):
                     OnPropertyChanged(nameof(IsFavorite));
+                    break;
+                case nameof(ServerConnection.InstalledVersion):
+                    OnPropertyChanged(nameof(InstalledVersion));
                     break;
             }
         }
