@@ -60,7 +60,11 @@ namespace PerformanceMonitorDashboard
                 }
                 catch (OperationCanceledException)
                 {
-                    // Cancellation is expected and handled.
+                    // Cancellation is expected.
+                }
+                catch (Exception)
+                {   // Log any exceptions during cancellation 
+                    AppendUpgradeLog("An unexpected error while closing the window.", "Warning");
                 }
             }
         }
