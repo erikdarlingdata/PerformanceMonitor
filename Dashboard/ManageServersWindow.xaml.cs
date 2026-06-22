@@ -683,24 +683,48 @@ namespace PerformanceMonitorDashboard
 
             var provider = ScriptProvider.FromEmbeddedResources();
 
-            // central progress handler that updates UI; we will create server-prefixed progress wrappers for each server
-            var centralProgress = new Progress<InstallationProgress>(p =>
+            // Store the number of servers we are upgrading to calculate the denominator for the average
+            int totalServersToUpgrade = _lastVersionCheckResults.Count(r => r.NeedsUpgrade);
+
+            // Thread-safe dictionary to track the most recent progress of each server by its ID
+            var serverProgressMap = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+
+            // Change the signature to accept a tuple: (ServerId, InstallationProgress)
+            var centralProgress = new Progress<(string ServerId, InstallationProgress p)>(report =>
             {
+                var serverId = report.ServerId;
+                var p = report.p;
+
                 Dispatcher.Invoke(() =>
                 {
-                    /* Update progress bar */
+                    /* Only update the map if the payload actually contains progress data */
+                    bool progressChanged = false;
+
                     if (p.ProgressPercent.HasValue)
                     {
-                        UpgradeProgressBar.Value = p.ProgressPercent.Value;
+                        serverProgressMap[serverId] = p.ProgressPercent.Value;
+                        progressChanged = true;
+                    }
+                    else if (p.TotalSteps > 0)
+                    {
+                        serverProgressMap[serverId] = ((double)p.CurrentStep / (double)p.TotalSteps) * 100.0;
+                        progressChanged = true;
                     }
 
-                    /* Update status text */
+                    /* Recalculate progress ONLY if a numeric update occurred */
+                    if (progressChanged && !serverProgressMap.IsEmpty)
+                    {
+                        double overallProgress = serverProgressMap.Values.Sum() / totalServersToUpgrade;
+                        UpgradeProgressBar.Value = overallProgress;
+                    }
+
+                    /* Update status text if present */
                     if (!string.IsNullOrEmpty(p.Message))
                     {
                         UpgradeProgressText.Text = p.Message;
                     }
 
-                    /* Append to log (filter out Debug messages) */
+                    /* Append to log while filtering out Debug messages */
                     if (p.Status != "Debug")
                     {
                         AppendUpgradeLog(p.Message, p.Status);
@@ -766,7 +790,6 @@ namespace PerformanceMonitorDashboard
             // Run per-server workflows in parallel, using per-server progress wrappers so messages are prefixed.
             var tasks = upgradeTargets.Select(t =>
             {
-                // per-server progress wraps centralProgress and prefixes messages with server display
                 IProgress<InstallationProgress> serverProgress = new Progress<InstallationProgress>(p =>
                 {
                     var prefixed = new InstallationProgress
@@ -777,7 +800,9 @@ namespace PerformanceMonitorDashboard
                         CurrentStep = p.CurrentStep,
                         TotalSteps = p.TotalSteps
                     };
-                    ((IProgress<InstallationProgress>)centralProgress).Report(prefixed);
+
+                    // Report the unique server ID alongside the progress payload
+                    ((IProgress<(string, InstallationProgress)>)centralProgress).Report((t.Server.Id, prefixed));
                 });
 
                 return RunUpgradeAsync(t.Server, t.InstallerConnectionString, t.InstalledVersion, appVersion, provider, serverProgress, cancellationToken);
@@ -807,7 +832,7 @@ namespace PerformanceMonitorDashboard
             var agg = UpgradeAggregator.Aggregate(inputs);
 
             // After all complete: show summary (include server counts and step counts)
-            UpgradeProgressText.Text = $"Complete: {agg.Summary}";
+            UpgradeProgressText.Text = $"Complete: {agg.ServerSuccessCount} of {upgradeTargets.Count} servers upgraded.";
             AppendUpgradeLog($"Bulk upgrade completed: {agg.ServerSuccessCount} succeeded, {agg.ServerFailCount} failed. {agg.StepsSucceeded} steps succeeded, {agg.StepsFailed} steps failed", agg.StepsFailed == 0 ? "Success" : "Warning");
 
             UpgradeAllButton.IsEnabled = false;
