@@ -303,6 +303,24 @@ BEGIN
                             N'(//blocked-process-report/blocking-process/process/@status)[1]',
                             N'nvarchar(10)'
                         ),
+                    b.blocking_login_name =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/@loginname)[1]',
+                            N'nvarchar(256)'
+                        ),
+                    b.blocking_host_name =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/@hostname)[1]',
+                            N'nvarchar(256)'
+                        ),
+                    b.blocking_client_app =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/@clientapp)[1]',
+                            N'nvarchar(256)'
+                        ),
                     b.blocked_sql_text =
                         LTRIM(RTRIM(b.blocked_process_report_xml.value
                         (

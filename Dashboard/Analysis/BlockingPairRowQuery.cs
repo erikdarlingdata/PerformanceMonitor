@@ -33,7 +33,10 @@ SELECT TOP (5000)
     blocking_sql_text,
     login_name,
     host_name,
-    client_app
+    client_app,
+    blocking_login_name,
+    blocking_host_name,
+    blocking_client_app
 FROM collect.blocking_BlockedProcessReport
 WHERE collection_time >= @collectionWindow
 AND   event_time >= @startTime
@@ -67,12 +70,14 @@ ORDER BY collection_time DESC";
         BlockingStatus = reader.IsDBNull(8) ? string.Empty : reader.GetString(8),
         BlockedSqlText = reader.IsDBNull(9) ? string.Empty : reader.GetString(9),
         BlockingSqlText = reader.IsDBNull(10) ? string.Empty : reader.GetString(10),
-        // Blocked-side identity (the 'blocked' row's own session). The Dashboard table does NOT parse the
-        // blocker's login/host/app from the XML (only blocking_status/blocking_last_tran_started/
-        // blocking_sql_text), so the blocking-side identity stays empty here — the pure apex shows SQL + db
-        // but no login/host/app. See BlockingChainViewerProjection / the PR notes for the schema follow-up.
+        // Blocked-side identity (the 'blocked' row's own session) and, since 3.1.0, the blocker's identity
+        // parsed from the XML by collect.process_blocked_process_xml — so the block-chain viewer's apex
+        // shows login/host/app on Dashboard too, matching Lite.
         BlockedLoginName = reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
         BlockedHostName = reader.IsDBNull(12) ? string.Empty : reader.GetString(12),
-        BlockedClientApp = reader.IsDBNull(13) ? string.Empty : reader.GetString(13)
+        BlockedClientApp = reader.IsDBNull(13) ? string.Empty : reader.GetString(13),
+        BlockingLoginName = reader.IsDBNull(14) ? string.Empty : reader.GetString(14),
+        BlockingHostName = reader.IsDBNull(15) ? string.Empty : reader.GetString(15),
+        BlockingClientApp = reader.IsDBNull(16) ? string.Empty : reader.GetString(16)
     };
 }

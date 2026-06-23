@@ -1124,6 +1124,9 @@ BEGIN
         blocking_status nvarchar(10) NULL,
         blocked_sql_text nvarchar(max) NULL,
         blocking_sql_text nvarchar(max) NULL,
+        blocking_login_name nvarchar(256) NULL,
+        blocking_host_name nvarchar(256) NULL,
+        blocking_client_app nvarchar(256) NULL,
         CONSTRAINT
             PK_collect_blocking_BlockedProcessReport
         PRIMARY KEY CLUSTERED

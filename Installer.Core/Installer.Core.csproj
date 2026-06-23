@@ -7,10 +7,10 @@
     <RootNamespace>Installer.Core</RootNamespace>
     <AssemblyName>Installer.Core</AssemblyName>
     <Product>SQL Server Performance Monitor Installer Core</Product>
-    <Version>3.0.0</Version>
-    <AssemblyVersion>3.0.0.0</AssemblyVersion>
-    <FileVersion>3.0.0.0</FileVersion>
-    <InformationalVersion>3.0.0</InformationalVersion>
+    <Version>3.1.0</Version>
+    <AssemblyVersion>3.1.0.0</AssemblyVersion>
+    <FileVersion>3.1.0.0</FileVersion>
+    <InformationalVersion>3.1.0</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright (c) 2026 Darling Data, LLC</Copyright>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
