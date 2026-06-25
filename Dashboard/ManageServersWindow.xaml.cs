@@ -68,7 +68,7 @@ namespace PerformanceMonitorDashboard
                 }
                 catch (Exception)
                 {   // Log any exceptions during cancellation 
-                    AppendUpgradeLog("An unexpected error while closing the window.", "Warning");
+                    AppendUpgradeLog("An unexpected error occurred while closing the window.", "Warning");
                 }
             }
         }
@@ -113,6 +113,9 @@ namespace PerformanceMonitorDashboard
                 InstalledVersion = string.IsNullOrEmpty(s.InstalledVersion) ? "" : s.InstalledVersion,
                 NeedsUpgrade = false
             }).ToList();
+
+            UpgradeAllButton.Visibility = Visibility.Collapsed;
+            OutdatedCount = 0;
 
             ServersDataGrid.ItemsSource = _lastVersionCheckResults;
             ServersDataGrid.Items.Refresh();
@@ -652,10 +655,12 @@ namespace PerformanceMonitorDashboard
         {
             string appVersion = GetAppVersion();
 
+            int OutdatedEntraMFACount = _lastVersionCheckResults.Count(r => r.NeedsUpgrade && (r.AuthenticationDisplay == "Microsoft Entra MFA"));
+
             // Confirm with the user
             var confirm = MessageBox.Show(
                 $"Upgrade {OutdatedCount} server(s) to v{appVersion}?\n\n" +
-                "All servers will be upgraded in parallel.",
+                $"All servers{(OutdatedEntraMFACount > 0 ? $", including {OutdatedEntraMFACount} Entra MFA server(s)," : "")} will be upgraded in parallel.",
                 "Confirm Bulk Upgrade",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Question);
