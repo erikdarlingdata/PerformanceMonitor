@@ -239,7 +239,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          dotnet tool install -g vpk
+          # Pin vpk to the Velopack library version (keep in sync with the Velopack
+          # PackageReference in Dashboard.csproj / PerformanceMonitorLite.csproj).
+          dotnet tool install -g vpk --version 1.2.0
           New-Item -ItemType Directory -Force -Path releases/velopack-dashboard
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
 

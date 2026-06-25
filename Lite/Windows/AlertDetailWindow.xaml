@@ -7,6 +7,9 @@
         ResizeMode="NoResize"
         Icon="/EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -88,7 +91,68 @@
             <StackPanel>
                 <TextBlock Text="Details" FontWeight="SemiBold" FontSize="13"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>
+
+                <!-- Structured detail items (advice prose, remediation T-SQL, drill-down).
+                     Shown when the persisted context_json deserializes. -->
+                <ScrollViewer x:Name="DetailItemsScroll" Visibility="Collapsed"
+                              MaxHeight="380" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="DetailItems">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,0,0,10">
+                                    <TextBlock Text="{Binding Heading}" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+
+                                    <!-- Remediation T-SQL: monospace, read-only, with Copy. -->
+                                    <StackPanel Visibility="{Binding IsCodeBlock, Converter={StaticResource BoolToVis}}">
+                                        <Button Content="Copy" HorizontalAlignment="Right"
+                                                Padding="8,2" Margin="0,0,0,4"
+                                                Click="CopyTsqlButton_Click"/>
+                                        <TextBox Text="{Binding Body, Mode=OneWay}" IsReadOnly="True"
+                                                 FontFamily="Consolas" FontSize="12" TextWrapping="NoWrap"
+                                                 MaxHeight="240"
+                                                 VerticalScrollBarVisibility="Auto"
+                                                 HorizontalScrollBarVisibility="Auto"
+                                                 Background="Transparent"
+                                                 Foreground="{DynamicResource ForegroundBrush}"
+                                                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+                                    </StackPanel>
+
+                                    <!-- Advice prose. -->
+                                    <TextBlock Text="{Binding Body}" TextWrapping="Wrap"
+                                               Visibility="{Binding IsProse, Converter={StaticResource BoolToVis}}"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+
+                                    <!-- Label/value field rows. -->
+                                    <ItemsControl ItemsSource="{Binding Fields}"
+                                                  Visibility="{Binding HasFields, Converter={StaticResource BoolToVis}}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="0,1">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="130"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{Binding Label}"
+                                                               Foreground="{DynamicResource ForegroundBrush}"
+                                                               TextWrapping="Wrap"/>
+                                                    <TextBlock Grid.Column="1" Text="{Binding Value}"
+                                                               Foreground="{DynamicResource ForegroundBrush}"
+                                                               FontFamily="Consolas" FontSize="12"
+                                                               TextWrapping="Wrap"/>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+
+                <!-- Legacy / no-context fallback: flat persisted detail_text. -->
                 <TextBox x:Name="DetailTextBox" IsReadOnly="True" TextWrapping="Wrap"
+                         Visibility="Collapsed"
                          Background="Transparent" BorderThickness="0"
                          Foreground="{DynamicResource ForegroundBrush}" FontFamily="Consolas"
                          FontSize="12" MaxHeight="300"

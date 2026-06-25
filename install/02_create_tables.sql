@@ -941,7 +941,13 @@ BEGIN
         collection_time datetime2(7) NOT NULL DEFAULT SYSDATETIME(),
         sample_time datetime2(7) NOT NULL,
         sqlserver_cpu_utilization integer NOT NULL,
-        other_process_cpu_utilization integer NOT NULL,
+        /*
+        Nullable: NULL means host/other-process CPU is not derivable. On SQL Server
+        on Linux the SCHEDULER_MONITOR ring buffer reports SystemIdle = 0, so the
+        collector cannot compute a real host figure and stores NULL here rather than
+        a false 100% (Issue #1048). NULL propagates to total_cpu_utilization below.
+        */
+        other_process_cpu_utilization integer NULL,
         total_cpu_utilization AS (sqlserver_cpu_utilization + other_process_cpu_utilization) PERSISTED,
         CONSTRAINT PK_cpu_utilization_stats PRIMARY KEY CLUSTERED (collection_time, collection_id) WITH (DATA_COMPRESSION = PAGE)
     );
@@ -1106,6 +1112,23 @@ BEGIN
         login_name nvarchar(256) NULL,
         transaction_id bigint NULL,
         blocked_process_report_xml xml NULL,
+        /*
+        Blocker-side fields parsed from blocked_process_report_xml at insert
+        time so the analysis path does not re-parse XML on every BLOCKING_CHAIN
+        fact. Populated only on activity = 'blocked' rows; NULL on activity =
+        'blocking' rows (those rows describe the blocker side via their own
+        spid/status/last_transaction_started columns).
+        */
+        blocking_spid integer NULL,
+        blocking_last_tran_started datetime2(7) NULL,
+        blocking_status nvarchar(10) NULL,
+        /* Session identity for (monitor_loop, spid, ecid) chain reconstruction; populated by install/23.
+           blocking_ecid is the blocker's exec-context (blocked side uses the ecid column above); monitor_loop
+           is the blocked-process-report episode. */
+        blocking_ecid integer NULL,
+        monitor_loop integer NULL,
+        blocked_sql_text nvarchar(max) NULL,
+        blocking_sql_text nvarchar(max) NULL,
         CONSTRAINT
             PK_collect_blocking_BlockedProcessReport
         PRIMARY KEY CLUSTERED
@@ -1458,6 +1481,84 @@ BEGIN
 END;
 
 /*
+Index/Object Statistics Table (FinOps)
+Per-table and per-index size, usage, and locking stats for growth trending,
+unused-index detection, and contention analysis. Size columns are absolute
+point-in-time values; usage and locking counters are cumulative (reset on
+instance restart / DB detach / AUTO_CLOSE) - sqlserver_start_time carries the
+reset boundary so deltas can be computed safely in the read layer.
+*/
+IF OBJECT_ID(N'collect.index_object_stats', N'U') IS NULL
+BEGIN
+    CREATE TABLE
+        collect.index_object_stats
+    (
+        collection_id bigint IDENTITY NOT NULL,
+        collection_time datetime2(7) NOT NULL
+            DEFAULT SYSDATETIME(),
+        sqlserver_start_time datetime2(7) NULL,
+        database_name sysname NOT NULL,
+        database_id integer NOT NULL,
+        schema_name sysname NOT NULL,
+        object_id integer NOT NULL,
+        table_name sysname NOT NULL,
+        index_id integer NOT NULL,
+        index_name sysname NULL,
+        index_type_desc nvarchar(60) NULL,
+        is_unique bit NULL,
+        is_primary_key bit NULL,
+        is_filtered bit NULL,
+        partition_count integer NULL,
+        reserved_mb decimal(19,2) NULL,
+        used_mb decimal(19,2) NULL,
+        in_row_data_mb decimal(19,2) NULL,
+        lob_data_mb decimal(19,2) NULL,
+        row_overflow_mb decimal(19,2) NULL,
+        total_rows bigint NULL,
+        user_seeks bigint NULL,
+        user_scans bigint NULL,
+        user_lookups bigint NULL,
+        user_updates bigint NULL,
+        last_user_seek datetime2(7) NULL,
+        last_user_scan datetime2(7) NULL,
+        last_user_lookup datetime2(7) NULL,
+        last_user_update datetime2(7) NULL,
+        leaf_insert_count bigint NULL,
+        leaf_update_count bigint NULL,
+        leaf_delete_count bigint NULL,
+        range_scan_count bigint NULL,
+        singleton_lookup_count bigint NULL,
+        row_lock_count bigint NULL,
+        row_lock_wait_count bigint NULL,
+        row_lock_wait_in_ms bigint NULL,
+        page_lock_count bigint NULL,
+        page_lock_wait_count bigint NULL,
+        page_lock_wait_in_ms bigint NULL,
+        index_lock_promotion_attempt_count bigint NULL,
+        index_lock_promotion_count bigint NULL,
+        page_latch_wait_count bigint NULL,
+        page_latch_wait_in_ms bigint NULL,
+        page_io_latch_wait_count bigint NULL,
+        page_io_latch_wait_in_ms bigint NULL,
+        /*Analysis helpers - computed columns*/
+        total_reads AS
+        (
+            ISNULL(user_seeks, 0) +
+            ISNULL(user_scans, 0) +
+            ISNULL(user_lookups, 0)
+        ),
+        CONSTRAINT
+            PK_index_object_stats
+        PRIMARY KEY CLUSTERED
+            (collection_time, collection_id)
+        WITH
+            (DATA_COMPRESSION = PAGE)
+    );
+
+    PRINT 'Created collect.index_object_stats table';
+END;
+
+/*
 Server Properties Table (FinOps)
 */
 IF OBJECT_ID(N'collect.server_properties', N'U') IS NULL
@@ -1483,6 +1584,9 @@ BEGIN
         is_clustered bit NULL,
         enterprise_features nvarchar(max) NULL,
         service_objective sysname NULL,
+        lock_pages_in_memory bit NULL,
+        instant_file_initialization_enabled bit NULL,
+        memory_dump_count integer NULL,
         row_hash binary(32) NULL,
         CONSTRAINT
             PK_server_properties
@@ -1571,6 +1675,26 @@ BEGIN
         (SORT_IN_TEMPDB = ON, DATA_COMPRESSION = PAGE' + @online_option + N');';
     EXEC sys.sp_executesql @index_sql;
     PRINT 'Created collect.query_store_data.IX_query_store_data_id_lookup index';
+END;
+
+IF NOT EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.indexes
+    WHERE object_id = OBJECT_ID(N'collect.index_object_stats')
+    AND   name = N'IX_index_object_stats_object_lookup'
+)
+BEGIN
+    SET @index_sql = N'
+    CREATE NONCLUSTERED INDEX
+        IX_index_object_stats_object_lookup
+    ON collect.index_object_stats
+        (database_name, object_id, index_id, collection_time DESC)
+    WITH
+        (SORT_IN_TEMPDB = ON, DATA_COMPRESSION = PAGE' + @online_option + N');';
+    EXEC sys.sp_executesql @index_sql;
+    PRINT 'Created collect.index_object_stats.IX_index_object_stats_object_lookup index';
 END;
 
 PRINT 'All collection tables created successfully';

@@ -22,19 +22,29 @@ namespace PerformanceMonitorDashboard.Services
         // Overview Tab Data Access
         // ============================================
 
-                public async Task<List<DailySummaryItem>> GetDailySummaryAsync(DateTime? summaryDate = null)
+                public async Task<List<DailySummaryItem>> GetDailySummaryAsync(DateTime? summaryDate = null, CpuAlertMode cpuAlertMode = CpuAlertMode.Total)
                 {
                     var items = new List<DailySummaryItem>();
-        
+
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
-        
+
+                    // CPU column for the High CPU events count + critical-health check (PM#1004).
+                    // The view at report.daily_summary always uses total_cpu_utilization (no per-user prefs available there).
+                    // This date-parameterized path additionally honors the user's CpuAlertMode.
+                    // Total mode coalesces to the SQL-only figure because total_cpu_utilization is
+                    // NULL on SQL Server on Linux, where host CPU is not derivable (Issue #1048).
+                    // Expressions are fully cus.-qualified so they drop straight into the predicates below.
+                    string cpuColumn = cpuAlertMode == CpuAlertMode.SqlOnly
+                        ? "cus.sqlserver_cpu_utilization"
+                        : "ISNULL(cus.total_cpu_utilization, cus.sqlserver_cpu_utilization)";
+
                     // If no date provided, use the view directly (today's summary)
                     // Otherwise, replicate the view logic with the specified date
                     string query;
                     if (summaryDate.HasValue)
                     {
-                        query = @"
+                        query = $@"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
         DECLARE
@@ -106,7 +116,7 @@ namespace PerformanceMonitorDashboard.Services
                 SELECT
                     COUNT_BIG(*)
                 FROM collect.cpu_utilization_stats AS cus
-                WHERE cus.sqlserver_cpu_utilization >= 80
+                WHERE {cpuColumn} >= 80
                 AND   cus.collection_time >= @day_start
                 AND   cus.collection_time < @day_end
             ),
@@ -133,7 +143,7 @@ namespace PerformanceMonitorDashboard.Services
                         SELECT
                             1/0
                         FROM collect.cpu_utilization_stats AS cus
-                        WHERE cus.sqlserver_cpu_utilization >= 90
+                        WHERE {cpuColumn} >= 90
                         AND   cus.collection_time >= @day_start
                         AND   cus.collection_time < @day_end
                     )

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -623,33 +624,7 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
     }
 
     /* ═══════════════════════════════════════════════════════════════════
-       Perfmon: PLE of zero — absolute minimum
-       Should produce maximum severity from inverted scoring
-       ═══════════════════════════════════════════════════════════════════ */
-
-    [Fact]
-    public async Task Perfmon_PleZero_FactCreatedWithZeroValue()
-    {
-        await _duckDb.InitializeAsync();
-        await _duckDb.InitializeAnalysisSchemaAsync();
-
-        var seeder = new TestDataSeeder(_duckDb);
-        await seeder.ClearTestDataAsync();
-        await seeder.SeedTestServerAsync();
-
-        await seeder.SeedPerfmonAsync(ple: 0);
-
-        var collector = new DuckDbFactCollector(_duckDb);
-        var context = TestDataSeeder.CreateTestContext();
-        var facts = await collector.CollectFactsAsync(context);
-
-        var ple = facts.FirstOrDefault(f => f.Key == "PERFMON_PLE");
-        Assert.NotNull(ple);
-        Assert.Equal(0, ple.Value);
-    }
-
-    /* ═══════════════════════════════════════════════════════════════════
-       Scoring: PLE=0 and disk=0% free should hit maximum severity
+       Scoring: disk=0% free should hit maximum severity (inverted metric)
        ═══════════════════════════════════════════════════════════════════ */
 
     [Fact]
@@ -662,7 +637,6 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
         await seeder.ClearTestDataAsync();
         await seeder.SeedTestServerAsync();
         await seeder.SeedServerEditionAsync(edition: 2, majorVersion: 16);
-        await seeder.SeedPerfmonAsync(ple: 0);
         await seeder.SeedDiskSpaceAsync(("D:\\", 500_000, 0)); // 0% free
 
         var collector = new DuckDbFactCollector(_duckDb);
@@ -672,13 +646,9 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
         var scorer = new FactScorer();
         scorer.ScoreAll(facts);
 
-        var ple = facts.FirstOrDefault(f => f.Key == "PERFMON_PLE");
         var disk = facts.FirstOrDefault(f => f.Key == "DISK_SPACE");
 
-        Assert.NotNull(ple);
         Assert.NotNull(disk);
-        Assert.True(ple.BaseSeverity >= 1.0,
-            $"PLE=0 should be max severity, got {ple.BaseSeverity:F3}");
         Assert.True(disk.BaseSeverity >= 1.0,
             $"Disk=0% free should be max severity, got {disk.BaseSeverity:F3}");
     }

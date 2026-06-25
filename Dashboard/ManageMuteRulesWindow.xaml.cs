@@ -11,6 +11,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 
@@ -29,38 +30,38 @@ namespace PerformanceMonitorDashboard
             RulesGrid.ItemsSource = _rules;
         }
 
-        private void AddRule_Click(object sender, RoutedEventArgs e)
+        private async void AddRule_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new MuteRuleDialog { Owner = this };
             if (dialog.ShowDialog() == true)
             {
-                _muteRuleService.AddRule(dialog.Rule);
+                await _muteRuleService.AddRuleAsync(dialog.Rule);
                 _rules.Add(dialog.Rule);
             }
         }
 
-        private void EditRule_Click(object sender, RoutedEventArgs e)
+        private async void EditRule_Click(object sender, RoutedEventArgs e)
         {
             if (RulesGrid.SelectedItem is not MuteRule selected) return;
             var dialog = new MuteRuleDialog(selected) { Owner = this };
             if (dialog.ShowDialog() == true)
             {
-                _muteRuleService.UpdateRule(dialog.Rule);
+                await _muteRuleService.UpdateRuleAsync(dialog.Rule);
                 RefreshList();
             }
         }
 
-        private void ToggleRule_Click(object sender, RoutedEventArgs e)
+        private async void ToggleRule_Click(object sender, RoutedEventArgs e)
         {
             if (RulesGrid.SelectedItem is not MuteRule selected) return;
             var index = RulesGrid.SelectedIndex;
-            _muteRuleService.SetRuleEnabled(selected.Id, !selected.Enabled);
+            await _muteRuleService.SetRuleEnabledAsync(selected.Id, !selected.Enabled);
             RefreshList();
             if (index < _rules.Count) RulesGrid.SelectedIndex = index;
             RulesGrid.Focus();
         }
 
-        private void DeleteRule_Click(object sender, RoutedEventArgs e)
+        private async void DeleteRule_Click(object sender, RoutedEventArgs e)
         {
             if (RulesGrid.SelectedItem is not MuteRule selected) return;
             var index = RulesGrid.SelectedIndex;
@@ -72,7 +73,7 @@ namespace PerformanceMonitorDashboard
 
             if (result == MessageBoxResult.Yes)
             {
-                _muteRuleService.RemoveRule(selected.Id);
+                await _muteRuleService.RemoveRuleAsync(selected.Id);
                 _rules.Remove(selected);
                 if (_rules.Count > 0)
                     RulesGrid.SelectedIndex = Math.Min(index, _rules.Count - 1);
@@ -80,9 +81,9 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void PurgeExpired_Click(object sender, RoutedEventArgs e)
+        private async void PurgeExpired_Click(object sender, RoutedEventArgs e)
         {
-            int removed = _muteRuleService.PurgeExpiredRules();
+            int removed = await _muteRuleService.PurgeExpiredRulesAsync();
             if (removed > 0)
             {
                 RefreshList();
@@ -96,11 +97,11 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void EnabledCheckBox_Click(object sender, RoutedEventArgs e)
+        private async void EnabledCheckBox_Click(object sender, RoutedEventArgs e)
         {
             if (sender is CheckBox cb && cb.DataContext is MuteRule rule)
             {
-                _muteRuleService.SetRuleEnabled(rule.Id, cb.IsChecked == true);
+                await _muteRuleService.SetRuleEnabledAsync(rule.Id, cb.IsChecked == true);
             }
         }
 

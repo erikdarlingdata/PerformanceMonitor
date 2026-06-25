@@ -26,6 +26,10 @@
             <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
             </MenuItem>
+            <Separator/>
+            <MenuItem Header="View Plan" Click="ViewPlan_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
+            </MenuItem>
         </ContextMenu>
     </Window.Resources>
     <Grid>

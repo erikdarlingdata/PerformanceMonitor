@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -32,14 +33,14 @@ public sealed class McpMemoryTools
             var rows = await resolved.Value.Service.GetMemoryStatsAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No memory stats available.";
+                return McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
             /* Return only the latest snapshot */
             var stats = rows.OrderByDescending(r => r.CollectionTime).FirstOrDefault();
             if (stats == null)
             {
-                return "No memory stats available.";
+                return McpHelpers.Status("unavailable", "No memory stats available.");
             }
 
             return JsonSerializer.Serialize(new
@@ -84,7 +85,7 @@ public sealed class McpMemoryTools
             var rows = await resolved.Value.Service.GetMemoryStatsAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No memory trend data available.";
+                return McpHelpers.Status("unavailable", "No memory trend data available.");
             }
 
             var result = rows.Select(r => new
@@ -130,7 +131,7 @@ public sealed class McpMemoryTools
             var rows = await resolved.Value.Service.GetMemoryClerksAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No memory clerk data available.";
+                return McpHelpers.Status("unavailable", "No memory clerk data available.");
             }
 
             /* Return latest snapshot only */
@@ -179,7 +180,7 @@ public sealed class McpMemoryTools
             var rows = await resolved.Value.Service.GetMemoryGrantStatsAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No memory grant data available.";
+                return McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 
             /* Return latest snapshot */

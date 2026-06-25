@@ -23,8 +23,7 @@ namespace PerformanceMonitorDashboard
             if (_databaseService == null) return;
             try
             {
-                var data = await _databaseService.GetBlockingSlicerDataAsync(
-                    _blockingHoursBack, _blockingFromDate, _blockingToDate);
+                var data = await _databaseService.GetBlockingSlicerDataAsync(_blockingHoursBack, _blockingFromDate, _blockingToDate);
                 var (start, end) = GetLockingSlicerTimeRange(_blockingHoursBack, _blockingFromDate, _blockingToDate);
                 if (data.Count > 0)
                     BlockingSlicer.LoadData(data, "Blocking Events", start, end);
@@ -37,7 +36,7 @@ namespace PerformanceMonitorDashboard
             if (_databaseService == null) return;
             try
             {
-                var data = await _databaseService.GetBlockingEventsAsync(0, e.Start, e.End);
+                var data = await _databaseService.GetBlockingEventsAsync(0, e.Start, e.End, includeReport: false);
                 BlockingEventsDataGrid.ItemsSource = data;
                 UpdateDataGridFilterButtonStyles(BlockingEventsDataGrid, _blockingEventsFilters);
                 BlockingEventsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -52,8 +51,7 @@ namespace PerformanceMonitorDashboard
             if (_databaseService == null) return;
             try
             {
-                var data = await _databaseService.GetDeadlockSlicerDataAsync(
-                    _deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
+                var data = await _databaseService.GetDeadlockSlicerDataAsync(_deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
                 var (start, end) = GetLockingSlicerTimeRange(_deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
                 if (data.Count > 0)
                     DeadlockSlicer.LoadData(data, "Deadlocks", start, end);
@@ -66,7 +64,7 @@ namespace PerformanceMonitorDashboard
             if (_databaseService == null) return;
             try
             {
-                var data = await _databaseService.GetDeadlocksAsync(0, e.Start, e.End);
+                var data = await _databaseService.GetDeadlocksAsync(0, e.Start, e.End, includeGraph: false);
                 DeadlocksDataGrid.ItemsSource = data;
                 UpdateDataGridFilterButtonStyles(DeadlocksDataGrid, _deadlocksFilters);
                 DeadlocksNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -92,7 +90,7 @@ namespace PerformanceMonitorDashboard
             try
             {
                 StatusText.Text = GetLoadingMessage();
-                var deadlocks = await _databaseService.GetDeadlocksAsync(_deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate);
+                var deadlocks = await _databaseService.GetDeadlocksAsync(_deadlocksHoursBack, _deadlocksFromDate, _deadlocksToDate, includeGraph: false);
                 DeadlocksDataGrid.ItemsSource = deadlocks;
                 DeadlocksNoDataMessage.Visibility = deadlocks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 StatusText.Text = $"Loaded {deadlocks.Count} deadlocks";
@@ -146,7 +144,7 @@ namespace PerformanceMonitorDashboard
             try
             {
                 StatusText.Text = "Refreshing blocking events...";
-                var blocking = await _databaseService.GetBlockingEventsAsync(_blockingHoursBack, _blockingFromDate, _blockingToDate);
+                var blocking = await _databaseService.GetBlockingEventsAsync(_blockingHoursBack, _blockingFromDate, _blockingToDate, includeReport: false);
                 BlockingEventsDataGrid.ItemsSource = blocking;
                 BlockingEventsNoDataMessage.Visibility = blocking.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 StatusText.Text = $"Loaded {blocking.Count} blocking events";

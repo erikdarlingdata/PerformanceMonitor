@@ -1,0 +1,602 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Text.Json;
+using PerformanceMonitor.Analysis;
+
+namespace PerformanceMonitor.Notifications;
+
+/// <summary>
+/// Optional detail context attached to alert emails.
+/// Populated from blocking/deadlock detail queries at alert time.
+/// </summary>
+public class AlertContext
+{
+    public List<AlertDetailItem> Details { get; set; } = new();
+    public string? AttachmentXml { get; set; }
+    public string? AttachmentFileName { get; set; }
+
+    /// <summary>
+    /// Forces the rendered severity tier (email badge/color, Teams/Slack accent) regardless of
+    /// metric name, for metrics graded at runtime — low-disk fires WARNING normally and CRITICAL
+    /// when critically low (#1136). <c>null</c> = use the per-metric <see cref="AlertSeverity"/>
+    /// map. Deliberately not persisted (like <see cref="AttachmentXml"/>): it drives the live
+    /// email/webhook render only, and the alert-history UI does not re-derive severity, so the
+    /// JSON projection (<see cref="AlertContextSerializer"/>) need not carry it.
+    /// </summary>
+    public AlertSeverityLevel? SeverityOverride { get; set; }
+
+    /// <summary>
+    /// One entry per distinct grouped incident this alert covers (#1140). Carries the stable
+    /// dedup fingerprint + human-readable involved objects that downstream automation uses to
+    /// collapse recurrences of the same incident. <c>null</c>/empty = no fingerprintable incident
+    /// (alert type not wired, or no objects resolvable). Persisted in the alert-history context JSON.
+    /// </summary>
+    public List<AlertIncident>? Incidents { get; set; }
+}
+
+/// <summary>
+/// A single dedup-able incident within an alert (#1140): a stable fingerprint, the fully-qualified
+/// objects it involves (human-readable, for the ticket body), the grouped occurrence count, and an
+/// optional display-only wait range. Volatile per-sample fields (wait time, durations, SPIDs) are
+/// never part of <see cref="DedupKey"/> — only the identity members hashed by
+/// <see cref="AlertFingerprint"/>.
+/// </summary>
+public sealed record AlertIncident(
+    string DedupKey,
+    IReadOnlyList<string> InvolvedObjects,
+    int OccurrenceCount = 1,
+    string? WaitRange = null,
+    IReadOnlyList<AlertIncidentField>? DetailFields = null);
+
+/// <summary>
+/// A forensic label/value pair carried on an <see cref="AlertIncident"/> for #1141 Per-event delivery
+/// (e.g. Victim SQL / Processes for a deadlock; Database / Blocked Query / Blocking Query / Lock Mode
+/// for a blocking chain). Transient: populated by the incident groupers, rendered into the per-event
+/// card by <see cref="PerEventNotification"/>, and deliberately NOT persisted (the Summary card already
+/// lists the per-incident detail via the builders, and the per-event card's rendered Details are what
+/// get saved). Summary rendering ignores it, so that path is unchanged.
+/// </summary>
+public sealed record AlertIncidentField(string Label, string Value);
+
+/// <summary>
+/// A single detail item (e.g., one blocking chain or one deadlock participant).
+/// </summary>
+public class AlertDetailItem
+{
+    public string Heading { get; set; } = "";
+    public List<(string Label, string Value)> Fields { get; set; } = new();
+
+    /// <summary>
+    /// Multi-paragraph prose for this item (advice Investigation / Remediation).
+    /// When non-null, renderers emit this as flowing paragraph text rather than
+    /// label/value rows.
+    /// </summary>
+    public string? Body { get; set; }
+
+    /// <summary>
+    /// Marks this item as a copy-paste code block. Renderers emit a monospace
+    /// &lt;pre&gt; (HTML) / fenced (plain text) / Consolas TextBox with a copy
+    /// button (dialog). Webhooks render only the heading + a "see email or in-app
+    /// dialog for the copy-paste T-SQL" hint when this flag is true.
+    /// </summary>
+    public bool IsCodeBlock { get; set; }
+
+    /// <summary>
+    /// Structured, typed remediation payload that lets the in-app dialog drive a
+    /// parameterised Apply from this code block (PLAN_REGRESSION force-plan in
+    /// v1). Null for every item that is not an applicable remediation T-SQL block
+    /// — and null for legacy persisted contexts written before this field existed,
+    /// which is the no-Apply-button case.
+    /// </summary>
+    public RemediationAction? Remediation { get; set; }
+}
+
+/// <summary>
+/// Serialization DTO for persisting <see cref="AlertContext"/> as JSON.
+/// <see cref="AlertDetailItem.Fields"/> is a <c>List&lt;(string,string)&gt;</c>
+/// ValueTuple, which System.Text.Json will not round-trip (tuple elements are
+/// fields, not properties); these DTOs name every member explicitly so the
+/// persisted context survives the round-trip into the in-app dialog.
+/// <see cref="AlertContext.AttachmentXml"/>/<see cref="AlertContext.AttachmentFileName"/>
+/// are deliberately not persisted (the dialog has no attachment surface).
+/// </summary>
+public record AlertContextDto(List<AlertDetailItemDto> Details, List<AlertIncidentDto>? Incidents = null);
+public record AlertDetailItemDto(string Heading, List<FieldDto> Fields, string? Body, bool IsCodeBlock, RemediationActionDto? Remediation = null);
+public record FieldDto(string Label, string Value);
+
+/// <summary>
+/// JSON mirror of <see cref="AlertIncident"/> (#1140). The trailing optional <c>Incidents</c>
+/// member on <see cref="AlertContextDto"/> keeps the round-trip backward-compatible: legacy
+/// contextJson written before this field existed deserializes <c>Incidents</c> to null.
+/// </summary>
+public record AlertIncidentDto(string DedupKey, List<string> InvolvedObjects, int OccurrenceCount = 1, string? WaitRange = null);
+
+/// <summary>
+/// JSON mirror of <see cref="RemediationAction"/> / <see cref="ForcePlanTarget"/>
+/// (PerformanceMonitor.Analysis). The trailing optional member on
+/// <see cref="AlertDetailItemDto"/> plus the reference-type nullability here make
+/// the round-trip backward-compatible: legacy contextJson with no Remediation
+/// property deserializes the field to null.
+/// </summary>
+public record RemediationActionDto(
+    string FactKey,
+    string Action,
+    List<ForcePlanTargetDto> Targets,
+    List<DbConfigTargetDto>? DbConfigTargets = null,
+    RcsiInactionFiguresDto? RcsiFigures = null,
+    List<ClearPlanTargetDto>? ClearPlanTargets = null,
+    ClearPlanFiguresDto? ClearPlanFigures = null,
+    List<FileGrowthTargetDto>? FileGrowthTargets = null,
+    List<RcsiTargetDto>? RcsiTargets = null,
+    List<ServerConfigTargetDto>? ServerConfigTargets = null,
+    List<MissingIndexTargetDto>? MissingIndexTargets = null);
+
+/// <summary>
+/// JSON mirror of <see cref="RcsiTarget"/>. The per-database RCSI targets are carried on a
+/// DB_CONFIG action PURELY so the Recommendations reader can fan per-db RCSI cards on read
+/// (the drill-down is ephemeral); they are never executed from the DB_CONFIG action itself.
+/// The trailing optional <c>RcsiTargets</c> member on <see cref="RemediationActionDto"/> keeps
+/// the round-trip backward-compatible: legacy/non-DB_CONFIG contextJson without it deserializes
+/// to null.
+/// </summary>
+public record RcsiTargetDto(
+    string Database,
+    RcsiInactionFiguresDto Figures);
+
+/// <summary>
+/// JSON mirror of <see cref="ClearPlanTarget"/> (clear-cached-plan, PR-B). The
+/// <c>QueryHash</c> is the only execution input; the remaining members are display/
+/// disclosure only. The trailing optional <c>ClearPlanTargets</c> member on
+/// <see cref="RemediationActionDto"/> keeps the round-trip backward-compatible: legacy/
+/// non-CLEAR_PLAN contextJson without it deserializes to null.
+/// </summary>
+public record ClearPlanTargetDto(
+    string Database,
+    string QueryHash,
+    double CurrentCpuPerExecMs,
+    double BaselineCpuPerExecMs,
+    double AnomalyRatio,
+    string? LatestPlanHandle);
+
+/// <summary>
+/// JSON mirror of <see cref="ClearPlanFigures"/> (clear-cached-plan, PR-B). Carried on
+/// the persisted CLEAR_PLAN action so the informed-consent dialog shows the REAL anomaly
+/// figures (incl. the window CPU%, LOW-1) at apply time, when the UI apply call site has
+/// no finding. Trailing optional → backward-compatible.
+/// </summary>
+public record ClearPlanFiguresDto(
+    double CurrentCpuPerExecMs,
+    double BaselineCpuPerExecMs,
+    double AnomalyRatio,
+    int CpuPercent,
+    bool PlanRegressionCoFired,
+    bool ParameterSensitivityCoFired);
+
+/// <summary>
+/// JSON mirror of <see cref="RcsiInactionFigures"/> (B3 Phase 3). Carried on the
+/// persisted RCSI action so the informed-consent dialog shows the REAL blocking/
+/// deadlock/reader-writer figures at apply time (the UI apply call site has no
+/// finding). The trailing optional member on <see cref="RemediationActionDto"/>
+/// keeps the round-trip backward-compatible: legacy/non-RCSI contextJson without it
+/// deserializes to null.
+/// </summary>
+public record RcsiInactionFiguresDto(
+    int BlockingEvents,
+    int Deadlocks,
+    int? ReaderWriterPct);
+public record ForcePlanTargetDto(
+    string Database,
+    long QueryId,
+    long PlanId,
+    string? BestPlanHash,
+    string? LatestPlanHash,
+    double LatestCpuPerExecUs,
+    double BestCpuPerExecUs,
+    double RegressionFactor);
+
+/// <summary>
+/// JSON mirror of <see cref="DbConfigTarget"/>. <see cref="Setting"/> is persisted
+/// as the enum's int value. The trailing optional <c>DbConfigTargets</c> member on
+/// <see cref="RemediationActionDto"/> keeps the round-trip backward-compatible:
+/// legacy contextJson without it deserializes to null.
+/// </summary>
+public record DbConfigTargetDto(
+    string Database,
+    int Setting,
+    string? CurrentValue);
+
+/// <summary>
+/// JSON mirror of <see cref="FileGrowthTarget"/> (WS3 percent-autogrowth advisory). The
+/// trailing optional <c>FileGrowthTargets</c> member on <see cref="RemediationActionDto"/>
+/// keeps the round-trip backward-compatible: legacy/non-autogrowth contextJson without it
+/// deserializes to null. Carried so the copy-paste MODIFY FILE statements survive the
+/// persisted-action round-trip the Recommendations reader renders from (the drill-down is
+/// ephemeral). Advisory only — there is no handler, so it never drives Apply.
+/// </summary>
+public record FileGrowthTargetDto(
+    string Database,
+    string LogicalFileName,
+    double CurrentSizeMb,
+    int CurrentGrowthPercent,
+    int RecommendedGrowthMb);
+
+/// <summary>
+/// JSON mirror of <see cref="ServerConfigTarget"/> (WS3 server-level config). <see cref="Setting"/>
+/// is persisted as the enum's int value. The trailing optional <c>ServerConfigTargets</c> member on
+/// <see cref="RemediationActionDto"/> keeps the round-trip backward-compatible: legacy/non-
+/// SERVER_CONFIG contextJson without it deserializes to null. Carried so the Recommendations reader
+/// can fan the server-config cards on read (the drill-down is ephemeral); MAXDOP/CTFP drive Apply,
+/// the two memory targets are copy-paste only.
+/// </summary>
+public record ServerConfigTargetDto(
+    int Setting,
+    long CurrentValue,
+    long RecommendedValue);
+
+/// <summary>
+/// JSON mirror of <see cref="MissingIndexTarget"/> (WS4 missing-index advisory). The trailing
+/// optional <c>MissingIndexTargets</c> member on <see cref="RemediationActionDto"/> keeps the
+/// round-trip backward-compatible: legacy/non-MISSING_INDEX contextJson without it deserializes to
+/// null. Carried so the Recommendations reader can render the suggested CREATE on read (the
+/// drill-down is ephemeral). Copy-paste only — there is no handler, so it never drives Apply.
+/// </summary>
+public record MissingIndexTargetDto(
+    string Table,
+    double Impact,
+    string CreateStatement);
+
+/// <summary>
+/// Maps <see cref="AlertContext"/> to/from the <see cref="AlertContextDto"/> JSON projection
+/// persisted alongside the flat detail_text. Centralizes the DTO mapping so the persistence
+/// write (EmailAlertService) and the dialog read (AlertDetailWindow) cannot drift.
+/// </summary>
+public static class AlertContextSerializer
+{
+    /// <summary>
+    /// True when the persisted <paramref name="contextJson"/> carries the given #1140 dedup fingerprint
+    /// (#1154 per-fingerprint cooldown seed). Anchored substring match on the serialized
+    /// <c>"DedupKey":"&lt;hex&gt;"</c> property — safe because the key is lowercase SHA-256 hex (no JSON
+    /// escaping, no collision with any other serialized field) and <see cref="Serialize"/> emits PascalCase
+    /// with default options. Returns false on null/blank input — the Dashboard scan visits many rows whose
+    /// <c>ContextJson</c> is null (tray/muted/server-reachability rows), and an un-guarded match would NRE.
+    /// Centralizes the JSON shape so the Dashboard store cannot drift; the Lite store re-states the same
+    /// anchor in its SQL <c>LIKE</c> for push-down and is guarded by a store round-trip test.
+    /// </summary>
+    public static bool ContextJsonContainsDedupKey(string? contextJson, string? dedupKey)
+    {
+        if (string.IsNullOrEmpty(contextJson) || string.IsNullOrEmpty(dedupKey))
+            return false;
+        return contextJson.Contains("\"DedupKey\":\"" + dedupKey + "\"", StringComparison.Ordinal);
+    }
+
+    public static string Serialize(AlertContext context)
+    {
+        var dto = new AlertContextDto(
+            context.Details.ConvertAll(d => new AlertDetailItemDto(
+                d.Heading,
+                d.Fields.ConvertAll(f => new FieldDto(f.Label, f.Value)),
+                d.Body,
+                d.IsCodeBlock,
+                ToDto(d.Remediation))),
+            context.Incidents?.ConvertAll(i => new AlertIncidentDto(
+                i.DedupKey,
+                new List<string>(i.InvolvedObjects),
+                i.OccurrenceCount,
+                i.WaitRange)));
+        return JsonSerializer.Serialize(dto);
+    }
+
+    /// <summary>
+    /// Serializes a single <see cref="RemediationAction"/> to JSON for persistence on a
+    /// finding row (recommendations rebuild D2). Reuses the SAME private
+    /// <see cref="ToDto(RemediationAction?)"/> projection the alert-context write already
+    /// uses, so a finding's persisted action round-trips byte-identically to one carried
+    /// in an alert's ContextJson (incl. RcsiInactionFigures / ClearPlanFigures / all
+    /// target lists). Returns null when the action is null.
+    /// </summary>
+    public static string? SerializeAction(RemediationAction? action)
+    {
+        if (action is null)
+            return null;
+        return JsonSerializer.Serialize(ToDto(action));
+    }
+
+    /// <summary>
+    /// Deserializes a finding's persisted <c>remediation_action_json</c> back into a
+    /// <see cref="RemediationAction"/> via the SAME private
+    /// <see cref="FromDto(RemediationActionDto?)"/> the alert-context read uses. Returns
+    /// null for null/blank/garbage JSON (try-catch, mirroring <see cref="TryDeserialize"/>),
+    /// so a corrupt column degrades to "no Apply affordance" rather than throwing.
+    /// </summary>
+    public static RemediationAction? DeserializeAction(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+        try
+        {
+            return FromDto(JsonSerializer.Deserialize<RemediationActionDto>(json));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static bool TryDeserialize(string? json, out AlertContext context)
+    {
+        context = new AlertContext();
+        if (string.IsNullOrWhiteSpace(json))
+            return false;
+
+        try
+        {
+            var dto = JsonSerializer.Deserialize<AlertContextDto>(json);
+            if (dto?.Details is null)
+                return false;
+
+            foreach (var d in dto.Details)
+            {
+                var item = new AlertDetailItem
+                {
+                    Heading = d.Heading,
+                    Body = d.Body,
+                    IsCodeBlock = d.IsCodeBlock,
+                    Remediation = FromDto(d.Remediation)
+                };
+                if (d.Fields is not null)
+                {
+                    foreach (var f in d.Fields)
+                        item.Fields.Add((f.Label, f.Value));
+                }
+                context.Details.Add(item);
+            }
+
+            /* #1140: rehydrate the dedup incidents. Legacy contextJson without the field leaves
+               dto.Incidents null -> context.Incidents stays null (backward-compatible). */
+            if (dto.Incidents is { Count: > 0 })
+            {
+                context.Incidents = new List<AlertIncident>(dto.Incidents.Count);
+                foreach (var i in dto.Incidents)
+                {
+                    context.Incidents.Add(new AlertIncident(
+                        i.DedupKey ?? string.Empty,
+                        i.InvolvedObjects ?? new List<string>(),
+                        i.OccurrenceCount,
+                        i.WaitRange));
+                }
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static RemediationActionDto? ToDto(RemediationAction? action)
+    {
+        if (action is null)
+            return null;
+
+        var targets = new List<ForcePlanTargetDto>(action.Targets.Count);
+        foreach (var t in action.Targets)
+        {
+            targets.Add(new ForcePlanTargetDto(
+                t.Database,
+                t.QueryId,
+                t.PlanId,
+                t.BestPlanHash,
+                t.LatestPlanHash,
+                t.LatestCpuPerExecUs,
+                t.BestCpuPerExecUs,
+                t.RegressionFactor));
+        }
+
+        List<DbConfigTargetDto>? dbConfigTargets = null;
+        if (action.DbConfigTargets is not null)
+        {
+            dbConfigTargets = new List<DbConfigTargetDto>(action.DbConfigTargets.Count);
+            foreach (var t in action.DbConfigTargets)
+                dbConfigTargets.Add(new DbConfigTargetDto(t.Database, (int)t.Setting, t.CurrentValue));
+        }
+
+        var rcsiFigures = action.RcsiFigures is { } f
+            ? new RcsiInactionFiguresDto(f.BlockingEvents, f.Deadlocks, f.ReaderWriterPct)
+            : null;
+
+        // Clear-cached-plan (PR-B): persist the targets + carried figures so the affordance
+        // survives the contextJson round-trip and the dialog shows the REAL numbers at apply.
+        List<ClearPlanTargetDto>? clearPlanTargets = null;
+        if (action.ClearPlanTargets is not null)
+        {
+            clearPlanTargets = new List<ClearPlanTargetDto>(action.ClearPlanTargets.Count);
+            foreach (var t in action.ClearPlanTargets)
+                clearPlanTargets.Add(new ClearPlanTargetDto(
+                    t.Database, t.QueryHash, t.CurrentCpuPerExecMs, t.BaselineCpuPerExecMs,
+                    t.AnomalyRatio, t.LatestPlanHandle));
+        }
+
+        var clearPlanFigures = action.ClearPlanFigures is { } cf
+            ? new ClearPlanFiguresDto(cf.CurrentCpuPerExecMs, cf.BaselineCpuPerExecMs, cf.AnomalyRatio,
+                cf.CpuPercent, cf.PlanRegressionCoFired, cf.ParameterSensitivityCoFired)
+            : null;
+
+        // WS3 (percent-autogrowth advisory): persist the file targets so the Recommendations
+        // reader can render the copy-paste MODIFY FILE statements on read (the drill-down is
+        // ephemeral). Null for every other fact key -> backward-compatible.
+        List<FileGrowthTargetDto>? fileGrowthTargets = null;
+        if (action.FileGrowthTargets is not null)
+        {
+            fileGrowthTargets = new List<FileGrowthTargetDto>(action.FileGrowthTargets.Count);
+            foreach (var t in action.FileGrowthTargets)
+                fileGrowthTargets.Add(new FileGrowthTargetDto(
+                    t.Database, t.LogicalFileName, t.CurrentSizeMb, t.CurrentGrowthPercent, t.RecommendedGrowthMb));
+        }
+
+        // Per-db RCSI targets (carried on a DB_CONFIG action for the read-time card fan-out).
+        // Persist them so the Recommendations reader can fan per-db RCSI cards after the round-
+        // trip (the drill-down they came from is ephemeral). Null for every other fact key ->
+        // backward-compatible. Never executed from the DB_CONFIG action.
+        List<RcsiTargetDto>? rcsiTargets = null;
+        if (action.RcsiTargets is not null)
+        {
+            rcsiTargets = new List<RcsiTargetDto>(action.RcsiTargets.Count);
+            foreach (var t in action.RcsiTargets)
+                rcsiTargets.Add(new RcsiTargetDto(
+                    t.Database,
+                    new RcsiInactionFiguresDto(t.Figures.BlockingEvents, t.Figures.Deadlocks, t.Figures.ReaderWriterPct)));
+        }
+
+        // WS3 (server-level config): persist the targets so the Recommendations reader can fan the
+        // server-config cards on read (the drill-down is ephemeral) AND the ServerConfigHandler can
+        // re-derive the MAXDOP/CTFP target at apply. Null for every other fact key -> backward-compatible.
+        List<ServerConfigTargetDto>? serverConfigTargets = null;
+        if (action.ServerConfigTargets is not null)
+        {
+            serverConfigTargets = new List<ServerConfigTargetDto>(action.ServerConfigTargets.Count);
+            foreach (var t in action.ServerConfigTargets)
+                serverConfigTargets.Add(new ServerConfigTargetDto((int)t.Setting, t.CurrentValue, t.RecommendedValue));
+        }
+
+        // WS4 (missing-index advisory): persist the suggested CREATE statements so the Recommendations
+        // reader can render them as copy-paste on read (the drill-down is ephemeral). Copy-paste only —
+        // no handler, never Apply. Null for every other fact key -> backward-compatible.
+        List<MissingIndexTargetDto>? missingIndexTargets = null;
+        if (action.MissingIndexTargets is not null)
+        {
+            missingIndexTargets = new List<MissingIndexTargetDto>(action.MissingIndexTargets.Count);
+            foreach (var t in action.MissingIndexTargets)
+                missingIndexTargets.Add(new MissingIndexTargetDto(t.Table, t.Impact, t.CreateStatement));
+        }
+
+        return new RemediationActionDto(action.FactKey, action.Action, targets, dbConfigTargets,
+            rcsiFigures, clearPlanTargets, clearPlanFigures, fileGrowthTargets, rcsiTargets,
+            serverConfigTargets, missingIndexTargets);
+    }
+
+    private static RemediationAction? FromDto(RemediationActionDto? dto)
+    {
+        if (dto is null)
+            return null;
+
+        var targets = new List<ForcePlanTarget>(dto.Targets?.Count ?? 0);
+        if (dto.Targets is not null)
+        {
+            foreach (var t in dto.Targets)
+            {
+                targets.Add(new ForcePlanTarget(
+                    t.Database,
+                    t.QueryId,
+                    t.PlanId,
+                    t.BestPlanHash,
+                    t.LatestPlanHash,
+                    t.LatestCpuPerExecUs,
+                    t.BestCpuPerExecUs,
+                    t.RegressionFactor));
+            }
+        }
+
+        // m-A: deserialize the DB-config targets and PASS them to the ctor. The
+        // RemediationAction ctor's trailing DbConfigTargets defaults to null, so a
+        // 3-arg call here would silently drop a DB_CONFIG action's targets on the
+        // round-trip (un-applyable from any persisted context). Legacy JSON without
+        // the field deserializes dto.DbConfigTargets to null -> dbConfigTargets null
+        // -> backward-compatible.
+        List<DbConfigTarget>? dbConfigTargets = null;
+        if (dto.DbConfigTargets is not null)
+        {
+            dbConfigTargets = new List<DbConfigTarget>(dto.DbConfigTargets.Count);
+            foreach (var t in dto.DbConfigTargets)
+                dbConfigTargets.Add(new DbConfigTarget(t.Database, (DbConfigSetting)t.Setting, t.CurrentValue));
+        }
+
+        // B3 Phase 3: the RCSI risk figures must survive the round-trip so the dialog
+        // shows the REAL numbers at apply time. Legacy/non-RCSI JSON without the field
+        // deserializes to null -> the disclosure falls back to the finding/weak-case.
+        var rcsiFigures = dto.RcsiFigures is { } f
+            ? new RcsiInactionFigures(f.BlockingEvents, f.Deadlocks, f.ReaderWriterPct)
+            : null;
+
+        // Clear-cached-plan (PR-B): rebuild the targets + carried figures from the DTO and
+        // PASS them to the ctor (the trailing ClearPlan* members default to null, so a short
+        // call would silently drop a CLEAR_PLAN action's targets on the round-trip). Legacy
+        // JSON without the fields deserializes to null → backward-compatible.
+        List<ClearPlanTarget>? clearPlanTargets = null;
+        if (dto.ClearPlanTargets is not null)
+        {
+            clearPlanTargets = new List<ClearPlanTarget>(dto.ClearPlanTargets.Count);
+            foreach (var t in dto.ClearPlanTargets)
+                clearPlanTargets.Add(new ClearPlanTarget(
+                    t.Database, t.QueryHash, t.CurrentCpuPerExecMs, t.BaselineCpuPerExecMs,
+                    t.AnomalyRatio, t.LatestPlanHandle));
+        }
+
+        var clearPlanFigures = dto.ClearPlanFigures is { } cf
+            ? new ClearPlanFigures(cf.CurrentCpuPerExecMs, cf.BaselineCpuPerExecMs, cf.AnomalyRatio,
+                cf.CpuPercent, cf.PlanRegressionCoFired, cf.ParameterSensitivityCoFired)
+            : null;
+
+        // WS3: rebuild the percent-autogrowth file targets from the DTO and PASS them to the
+        // ctor (the trailing FileGrowthTargets member defaults to null, so a short call would
+        // silently drop them on the round-trip). Legacy JSON without the field -> null.
+        List<FileGrowthTarget>? fileGrowthTargets = null;
+        if (dto.FileGrowthTargets is not null)
+        {
+            fileGrowthTargets = new List<FileGrowthTarget>(dto.FileGrowthTargets.Count);
+            foreach (var t in dto.FileGrowthTargets)
+                fileGrowthTargets.Add(new FileGrowthTarget(
+                    t.Database, t.LogicalFileName, t.CurrentSizeMb, t.CurrentGrowthPercent, t.RecommendedGrowthMb));
+        }
+
+        // Per-db RCSI targets: rebuild from the DTO and PASS them to the ctor (the trailing
+        // RcsiTargets member defaults to null, so a short call would silently drop them on the
+        // round-trip — the reader would then fan no RCSI cards). Legacy JSON without the field
+        // deserializes to null → backward-compatible.
+        List<RcsiTarget>? rcsiTargets = null;
+        if (dto.RcsiTargets is not null)
+        {
+            rcsiTargets = new List<RcsiTarget>(dto.RcsiTargets.Count);
+            foreach (var t in dto.RcsiTargets)
+                rcsiTargets.Add(new RcsiTarget(
+                    t.Database,
+                    new RcsiInactionFigures(t.Figures.BlockingEvents, t.Figures.Deadlocks, t.Figures.ReaderWriterPct)));
+        }
+
+        // WS3: rebuild the server-config targets from the DTO and PASS them to the ctor (the trailing
+        // ServerConfigTargets member defaults to null, so a short call would silently drop them on the
+        // round-trip — the reader would then fan no server-config cards and the handler could not
+        // re-derive the MAXDOP/CTFP target). Legacy JSON without the field deserializes to null →
+        // backward-compatible.
+        List<ServerConfigTarget>? serverConfigTargets = null;
+        if (dto.ServerConfigTargets is not null)
+        {
+            serverConfigTargets = new List<ServerConfigTarget>(dto.ServerConfigTargets.Count);
+            foreach (var t in dto.ServerConfigTargets)
+                serverConfigTargets.Add(new ServerConfigTarget((ServerConfigSetting)t.Setting, t.CurrentValue, t.RecommendedValue));
+        }
+
+        // WS4: rebuild the missing-index targets from the DTO and PASS them to the ctor (the trailing
+        // MissingIndexTargets member defaults to null, so a short call would silently drop them on the
+        // round-trip — the reader would then render no missing-index copy-paste). Legacy JSON without
+        // the field deserializes to null → backward-compatible.
+        List<MissingIndexTarget>? missingIndexTargets = null;
+        if (dto.MissingIndexTargets is not null)
+        {
+            missingIndexTargets = new List<MissingIndexTarget>(dto.MissingIndexTargets.Count);
+            foreach (var t in dto.MissingIndexTargets)
+                missingIndexTargets.Add(new MissingIndexTarget(t.Table, t.Impact, t.CreateStatement));
+        }
+
+        return new RemediationAction(dto.FactKey, dto.Action, targets, dbConfigTargets, rcsiFigures,
+            clearPlanTargets, clearPlanFigures, fileGrowthTargets, rcsiTargets, serverConfigTargets,
+            missingIndexTargets);
+    }
+}

@@ -112,9 +112,9 @@ public partial class ServerTab : UserControl
 
         SetQueryStatsComparisonMode(true, baselineRange);
 
-        var items = await _dataService.GetQueryStatsComparisonAsync(
+        var items = await Task.Run(() => _dataService.GetQueryStatsComparisonAsync(
             _serverId, currentStart, currentEnd,
-            baselineRange.Value.From, baselineRange.Value.To);
+            baselineRange.Value.From, baselineRange.Value.To));
 
         // Sort: NEW first, then by duration delta descending, GONE last
         var sorted = items
@@ -150,9 +150,9 @@ public partial class ServerTab : UserControl
 
         SetProcStatsComparisonMode(true, baselineRange);
 
-        var items = await _dataService.GetProcedureStatsComparisonAsync(
+        var items = await Task.Run(() => _dataService.GetProcedureStatsComparisonAsync(
             _serverId, currentStart, currentEnd,
-            baselineRange.Value.From, baselineRange.Value.To);
+            baselineRange.Value.From, baselineRange.Value.To));
 
         var sorted = items
             .OrderBy(x => x.SortGroup)
@@ -187,9 +187,9 @@ public partial class ServerTab : UserControl
 
         SetQueryStoreComparisonMode(true, baselineRange);
 
-        var items = await _dataService.GetQueryStoreComparisonAsync(
+        var items = await Task.Run(() => _dataService.GetQueryStoreComparisonAsync(
             _serverId, currentStart, currentEnd,
-            baselineRange.Value.From, baselineRange.Value.To);
+            baselineRange.Value.From, baselineRange.Value.To));
 
         var sorted = items
             .OrderBy(x => x.SortGroup)

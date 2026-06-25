@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -25,7 +26,9 @@ public sealed class McpHealthTools
             var summary = await dataService.GetServerSummaryAsync(resolved.Value.ServerId, resolved.Value.ServerName);
             if (summary == null)
             {
-                return $"No data available for {resolved.Value.ServerName}. The collector may not have run yet.";
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"No data available for {resolved.Value.ServerName}. The collector may not have run yet.");
             }
 
             return JsonSerializer.Serialize(new
@@ -61,7 +64,7 @@ public sealed class McpHealthTools
             var rows = await dataService.GetCollectionHealthAsync(resolved.Value.ServerId);
             if (rows.Count == 0)
             {
-                return "No collection health data available.";
+                return McpHelpers.Status("unavailable", "No collection health data available.");
             }
 
             var result = rows.Select(r => new

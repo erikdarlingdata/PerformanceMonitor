@@ -9,6 +9,7 @@ using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Interfaces;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard
 {
@@ -25,6 +26,18 @@ namespace PerformanceMonitorDashboard
         public int UtcOffsetMinutes { get; }
 
         public DatabaseService DatabaseService => _databaseService;
+
+        /// <summary>
+        /// The shared, gated remediation entry point. Threaded from <c>MainWindow</c> after
+        /// construction and forwarded to the Recommendations sub-tab (its Apply button reads it
+        /// lazily at click time), mirroring how the Alerts tab receives the same instance.
+        /// </summary>
+        public Services.Remediation.RemediationApplyService? RemediationApplyService
+        {
+            get => RecommendationsTab.RemediationApplyService;
+            set => RecommendationsTab.RemediationApplyService = value;
+        }
+
         private static string GetLoadingMessage() => LoadingMessages.GetRandom();
 
 
@@ -61,18 +74,18 @@ namespace PerformanceMonitorDashboard
                     Helpers.TabHelpers.ApplyThemeToChart(chart);
             }
 
-            _resourceOverviewCpuHover = new Helpers.ChartHoverHelper(ResourceOverviewCpuChart, "%");
-            _resourceOverviewMemoryHover = new Helpers.ChartHoverHelper(ResourceOverviewMemoryChart, "MB");
-            _resourceOverviewIoHover = new Helpers.ChartHoverHelper(ResourceOverviewIoChart, "ms");
-            _resourceOverviewWaitHover = new Helpers.ChartHoverHelper(ResourceOverviewWaitChart, "ms/sec");
-            _lockWaitStatsHover = new Helpers.ChartHoverHelper(LockWaitStatsChart, "ms/sec");
-            _blockingEventsHover = new Helpers.ChartHoverHelper(BlockingStatsBlockingEventsChart, "events");
-            _blockingDurationHover = new Helpers.ChartHoverHelper(BlockingStatsDurationChart, "ms");
-            _deadlocksHover = new Helpers.ChartHoverHelper(BlockingStatsDeadlocksChart, "events");
-            _deadlockWaitTimeHover = new Helpers.ChartHoverHelper(BlockingStatsDeadlockWaitTimeChart, "ms");
-            _collectorDurationHover = new Helpers.ChartHoverHelper(CollectorDurationChart, "ms");
-            _currentWaitsDurationHover = new Helpers.ChartHoverHelper(CurrentWaitsDurationChart, "ms");
-            _currentWaitsBlockedHover = new Helpers.ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
+            _resourceOverviewCpuHover = new ChartHoverHelper(ResourceOverviewCpuChart, "%");
+            _resourceOverviewMemoryHover = new ChartHoverHelper(ResourceOverviewMemoryChart, "MB");
+            _resourceOverviewIoHover = new ChartHoverHelper(ResourceOverviewIoChart, "ms");
+            _resourceOverviewWaitHover = new ChartHoverHelper(ResourceOverviewWaitChart, "ms/sec");
+            _lockWaitStatsHover = new ChartHoverHelper(LockWaitStatsChart, "ms/sec");
+            _blockingEventsHover = new ChartHoverHelper(BlockingStatsBlockingEventsChart, "events");
+            _blockingDurationHover = new ChartHoverHelper(BlockingStatsDurationChart, "ms");
+            _deadlocksHover = new ChartHoverHelper(BlockingStatsDeadlocksChart, "events");
+            _deadlockWaitTimeHover = new ChartHoverHelper(BlockingStatsDeadlockWaitTimeChart, "ms");
+            _collectorDurationHover = new ChartHoverHelper(CollectorDurationChart, "ms");
+            _currentWaitsDurationHover = new ChartHoverHelper(CurrentWaitsDurationChart, "ms");
+            _currentWaitsBlockedHover = new ChartHoverHelper(CurrentWaitsBlockedChart, "sessions");
 
             _serverConnection = serverConnection;
             UtcOffsetMinutes = utcOffsetMinutes;
@@ -90,13 +103,13 @@ namespace PerformanceMonitorDashboard
             Loaded += ServerTab_Loaded;
             Unloaded += ServerTab_Unloaded;
             KeyDown += ServerTab_KeyDown;
-            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            ThemeManager.ThemeChanged += OnThemeChanged;
             Focusable = true;
 
             // Initialize Overview sub-tab UserControls
-            DailySummaryTab.Initialize(_databaseService);
-            CriticalIssuesTab.Initialize(_databaseService);
-            CriticalIssuesTab.InvestigateRequested += OnInvestigateCriticalIssue;
+            DailySummaryTab.Initialize(_databaseService, _preferencesService);
+            RecommendationsTab.Initialize(_databaseService, _serverConnection, _credentialService, UtcOffsetMinutes);
+            RecommendationsTab.OpenActiveQueriesRequested += OnOpenActiveQueriesForFinding;
             DefaultTraceTab.Initialize(_databaseService);
             CurrentConfigTab.Initialize(_databaseService);
             ConfigChangesTab.Initialize(_databaseService);
@@ -124,7 +137,7 @@ namespace PerformanceMonitorDashboard
 
             // Set default time range on UserControls based on user preferences
             var prefs = _preferencesService.GetPreferences();
-            CriticalIssuesTab.SetTimeRange(prefs.DefaultHoursBack);
+            RecommendationsTab.SetTimeRange(prefs.DefaultHoursBack);
 
             // Sync time display mode picker with current setting
             var modeTag = ServerTimeHelper.CurrentDisplayMode.ToString();
@@ -226,7 +239,7 @@ namespace PerformanceMonitorDashboard
             _autoRefreshTimer = null;
             _initializedTabs.Clear();
 
-            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+            ThemeManager.ThemeChanged -= OnThemeChanged;
             Loaded -= ServerTab_Loaded;
             Unloaded -= ServerTab_Unloaded;
             KeyDown -= ServerTab_KeyDown;
@@ -234,7 +247,8 @@ namespace PerformanceMonitorDashboard
             BlockingSlicer.RangeChanged -= OnBlockingSlicerChanged;
             DeadlockSlicer.RangeChanged -= OnDeadlockSlicerChanged;
 
-            CriticalIssuesTab.InvestigateRequested -= OnInvestigateCriticalIssue;
+            RecommendationsTab.OpenActiveQueriesRequested -= OnOpenActiveQueriesForFinding;
+
             MemoryTab.ChartDrillDownRequested -= OnChildChartDrillDown;
             ResourceMetricsContent.ChartDrillDownRequested -= OnChildChartDrillDown;
 
@@ -259,6 +273,12 @@ namespace PerformanceMonitorDashboard
 
         public void DisposeChartHelpers()
         {
+            /* Closing the server tab with plan tabs still open would leak each PlanViewerControl via
+               the static ThemeChanged event — clean them up here too (ClosePlanTab_Click only handles
+               the per-tab close-button path). Mirrors Lite's ServerTab cleanup. */
+            foreach (var item in PlanTabControl.Items)
+                if (item is TabItem { Content: PlanViewerControl pv }) pv.Cleanup();
+
             _resourceOverviewCpuHover?.Dispose();
             _resourceOverviewMemoryHover?.Dispose();
             _resourceOverviewIoHover?.Dispose();
@@ -373,6 +393,11 @@ namespace PerformanceMonitorDashboard
 
                 LoadUserPreferences();
 
+                // Sync the per-tab range fields (including the blocking/deadlock slicers) to the global
+                // range so nothing opens out of sync — e.g. the global on 24h but a slicer rendering the
+                // last 7 days from a stale saved per-tab preference.
+                ApplyGlobalRangeToAllTabs();
+
                 // Sync time range button visual with saved preference
                 HighlightTimeButton(_globalHoursBack);
                 GlobalDateRangeIndicator.Text = GetGlobalDateRangeText();
@@ -382,7 +407,7 @@ namespace PerformanceMonitorDashboard
                 MemoryTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 ResourceMetricsContent.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
                 SystemEventsContent.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
-                CriticalIssuesTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
+                RecommendationsTab.SetTimeRange(_globalHoursBack);
                 DefaultTraceTab.SetTimeRange(_globalHoursBack, _globalFromDate, _globalToDate);
 
                 await LoadDataAsync(fullRefresh: false);
@@ -428,7 +453,7 @@ namespace PerformanceMonitorDashboard
             _refreshStartedUtc = DateTime.UtcNow;
             try
             {
-                await RefreshVisibleTabAsync();
+                await RefreshVisibleTabWithCatchUpAsync();
                 StatusText.Text = "Ready";
                 FooterText.Text = $"Last refresh: {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Server: {_serverConnection.DisplayName}";
             }

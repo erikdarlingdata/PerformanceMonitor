@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -36,7 +37,7 @@ public sealed class McpJobTools
             var rows = await resolved.Value.Service.GetRunningJobsAsync();
             if (rows.Count == 0)
             {
-                return "No running SQL Agent jobs found (or no data in report.running_jobs).";
+                return McpHelpers.Status("empty", "No running SQL Agent jobs found (or no data in report.running_jobs).");
             }
 
             var result = rows.Select(r => new

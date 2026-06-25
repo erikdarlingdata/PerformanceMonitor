@@ -10,6 +10,7 @@ using System.Windows;
 using PerformanceMonitorDashboard.Services;
 using Velopack;
 using System;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard
 {

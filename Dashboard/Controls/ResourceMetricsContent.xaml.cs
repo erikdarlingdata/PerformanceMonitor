@@ -23,6 +23,7 @@ using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 using PerformanceMonitorDashboard.Helpers;
 using ScottPlot.WPF;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -37,7 +38,7 @@ namespace PerformanceMonitorDashboard.Controls
         public event Action<string, DateTime>? ChartDrillDownRequested;
 
         private void AddDrillDown(ScottPlot.WPF.WpfPlot chart, ContextMenu menu,
-            Func<Helpers.ChartHoverHelper?> hoverGetter, string label, string chartType)
+            Func<ChartHoverHelper?> hoverGetter, string label, string chartType)
         {
             menu.Items.Insert(0, new Separator());
             var item = new MenuItem { Header = label };
@@ -107,17 +108,18 @@ namespace PerformanceMonitorDashboard.Controls
         private List<WaitStatsDataPoint>? _allWaitStatsDetailData;
         private List<WaitTypeSelectionItem>? _waitTypeItems;
         private bool _isUpdatingWaitTypeSelection = false;
-        private Helpers.ChartHoverHelper? _sessionStatsHover;
-        private Helpers.ChartHoverHelper? _latchStatsHover;
-        private Helpers.ChartHoverHelper? _spinlockStatsHover;
-        private Helpers.ChartHoverHelper? _fileIoReadHover;
-        private Helpers.ChartHoverHelper? _fileIoWriteHover;
-        private Helpers.ChartHoverHelper? _fileIoReadThroughputHover;
-        private Helpers.ChartHoverHelper? _fileIoWriteThroughputHover;
-        private Helpers.ChartHoverHelper? _perfmonHover;
-        private Helpers.ChartHoverHelper? _waitStatsHover;
-        private Helpers.ChartHoverHelper? _tempdbStatsHover;
-        private Helpers.ChartHoverHelper? _tempDbLatencyHover;
+        private ChartHoverHelper? _sessionStatsHover;
+        private ChartHoverHelper? _latchStatsHover;
+        private ChartHoverHelper? _spinlockStatsHover;
+        private ChartHoverHelper? _fileIoReadHover;
+        private ChartHoverHelper? _fileIoWriteHover;
+        private ChartHoverHelper? _fileIoReadThroughputHover;
+        private ChartHoverHelper? _fileIoWriteThroughputHover;
+        private ChartHoverHelper? _perfmonHover;
+        private ChartHoverHelper? _waitStatsHover;
+        private ChartHoverHelper? _tempdbStatsHover;
+        private ChartHoverHelper? _tempdbSizeHover;
+        private ChartHoverHelper? _tempDbLatencyHover;
         // Filter state dictionaries for each DataGrid
         // Legend panel references for edge-based legends (ScottPlot issue #4717 workaround)
         // Must store and remove these by reference before creating new ones
@@ -129,7 +131,7 @@ namespace PerformanceMonitorDashboard.Controls
             InitializeComponent();
             SetupChartContextMenus();
             Loaded += OnLoaded;
-            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            ThemeManager.ThemeChanged += OnThemeChanged;
             /* WPF fires Unloaded on every TabControl tab switch, not just on destruction.
                Tearing down chart hover helpers here unsubscribes their MouseMove handlers
                and they are never re-registered when the user returns — this is the
@@ -148,17 +150,18 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.ApplyThemeToChart(PerfmonCountersChart);
             TabHelpers.ApplyThemeToChart(WaitStatsDetailChart);
 
-            _sessionStatsHover = new Helpers.ChartHoverHelper(SessionStatsChart, "sessions");
-            _latchStatsHover = new Helpers.ChartHoverHelper(LatchStatsChart, "ms/sec");
-            _spinlockStatsHover = new Helpers.ChartHoverHelper(SpinlockStatsChart, "collisions/sec");
-            _fileIoReadHover = new Helpers.ChartHoverHelper(UserDbReadLatencyChart, "ms");
-            _fileIoWriteHover = new Helpers.ChartHoverHelper(UserDbWriteLatencyChart, "ms");
-            _fileIoReadThroughputHover = new Helpers.ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
-            _fileIoWriteThroughputHover = new Helpers.ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
-            _perfmonHover = new Helpers.ChartHoverHelper(PerfmonCountersChart, "");
-            _waitStatsHover = new Helpers.ChartHoverHelper(WaitStatsDetailChart, "ms/sec");
-            _tempdbStatsHover = new Helpers.ChartHoverHelper(TempdbStatsChart, "MB");
-            _tempDbLatencyHover = new Helpers.ChartHoverHelper(TempDbLatencyChart, "ms");
+            _sessionStatsHover = new ChartHoverHelper(SessionStatsChart, "sessions");
+            _latchStatsHover = new ChartHoverHelper(LatchStatsChart, "ms/sec");
+            _spinlockStatsHover = new ChartHoverHelper(SpinlockStatsChart, "collisions/sec");
+            _fileIoReadHover = new ChartHoverHelper(UserDbReadLatencyChart, "ms");
+            _fileIoWriteHover = new ChartHoverHelper(UserDbWriteLatencyChart, "ms");
+            _fileIoReadThroughputHover = new ChartHoverHelper(FileIoReadThroughputChart, "MB/s");
+            _fileIoWriteThroughputHover = new ChartHoverHelper(FileIoWriteThroughputChart, "MB/s");
+            _perfmonHover = new ChartHoverHelper(PerfmonCountersChart, "");
+            _waitStatsHover = new ChartHoverHelper(WaitStatsDetailChart, "ms/sec");
+            _tempdbStatsHover = new ChartHoverHelper(TempdbStatsChart, "MB");
+            _tempdbSizeHover = new ChartHoverHelper(TempdbSizeChart, "MB");
+            _tempDbLatencyHover = new ChartHoverHelper(TempDbLatencyChart, "ms");
         }
 
         public void DisposeChartHelpers()
@@ -173,8 +176,9 @@ namespace PerformanceMonitorDashboard.Controls
             _perfmonHover?.Dispose();
             _waitStatsHover?.Dispose();
             _tempdbStatsHover?.Dispose();
+            _tempdbSizeHover?.Dispose();
             _tempDbLatencyHover?.Dispose();
-            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+            ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -198,29 +202,42 @@ namespace PerformanceMonitorDashboard.Controls
         private void SetupChartContextMenus()
         {
             // Latch Stats chart
-            TabHelpers.SetupChartContextMenu(LatchStatsChart, "Latch_Stats", "collect.latch_stats");
+            var latchMenu = TabHelpers.SetupChartContextMenu(LatchStatsChart, "Latch_Stats", "collect.latch_stats");
+            AddDrillDown(LatchStatsChart, latchMenu, () => _latchStatsHover, "Show Active Queries at This Time", "Latch");
 
             // Spinlock Stats chart
-            TabHelpers.SetupChartContextMenu(SpinlockStatsChart, "Spinlock_Stats", "collect.spinlock_stats");
+            var spinlockMenu = TabHelpers.SetupChartContextMenu(SpinlockStatsChart, "Spinlock_Stats", "collect.spinlock_stats");
+            AddDrillDown(SpinlockStatsChart, spinlockMenu, () => _spinlockStatsHover, "Show Active Queries at This Time", "Spinlock");
 
             // TempDB Stats chart
-            TabHelpers.SetupChartContextMenu(TempdbStatsChart, "TempDB_Stats", "collect.tempdb_stats");
+            var tempdbStatsMenu = TabHelpers.SetupChartContextMenu(TempdbStatsChart, "TempDB_Stats", "collect.tempdb_stats");
+            AddDrillDown(TempdbStatsChart, tempdbStatsMenu, () => _tempdbStatsHover, "Show Active Queries at This Time", "TempdbStats");
 
-            // CPU Spikes chart
+            // TempDB Allocated Size chart
+            var tempdbSizeMenu = TabHelpers.SetupChartContextMenu(TempdbSizeChart, "TempDB_Allocated_Size", "collect.tempdb_stats");
+            AddDrillDown(TempdbSizeChart, tempdbSizeMenu, () => _tempdbSizeHover, "Show Active Queries at This Time", "TempdbSize");
+
             // Session Stats chart
-            TabHelpers.SetupChartContextMenu(SessionStatsChart, "Session_Stats", "collect.session_stats");
+            var sessionMenu = TabHelpers.SetupChartContextMenu(SessionStatsChart, "Session_Stats", "collect.session_stats");
+            AddDrillDown(SessionStatsChart, sessionMenu, () => _sessionStatsHover, "Show Active Queries at This Time", "SessionStats");
 
             // File I/O Latency charts
-            TabHelpers.SetupChartContextMenu(UserDbReadLatencyChart, "UserDB_Read_Latency", "collect.file_io_stats");
-            TabHelpers.SetupChartContextMenu(UserDbWriteLatencyChart, "UserDB_Write_Latency", "collect.file_io_stats");
+            var userReadLatencyMenu = TabHelpers.SetupChartContextMenu(UserDbReadLatencyChart, "UserDB_Read_Latency", "collect.file_io_stats");
+            AddDrillDown(UserDbReadLatencyChart, userReadLatencyMenu, () => _fileIoReadHover, "Show Active Queries at This Time", "FileIoReadLatency");
+            var userWriteLatencyMenu = TabHelpers.SetupChartContextMenu(UserDbWriteLatencyChart, "UserDB_Write_Latency", "collect.file_io_stats");
+            AddDrillDown(UserDbWriteLatencyChart, userWriteLatencyMenu, () => _fileIoWriteHover, "Show Active Queries at This Time", "FileIoWriteLatency");
 
             // File I/O Throughput charts
-            TabHelpers.SetupChartContextMenu(FileIoReadThroughputChart, "UserDB_Read_Throughput", "collect.file_io_stats");
-            TabHelpers.SetupChartContextMenu(FileIoWriteThroughputChart, "UserDB_Write_Throughput", "collect.file_io_stats");
-            TabHelpers.SetupChartContextMenu(TempDbLatencyChart, "TempDB_Latency", "collect.file_io_stats");
+            var readThroughputMenu = TabHelpers.SetupChartContextMenu(FileIoReadThroughputChart, "UserDB_Read_Throughput", "collect.file_io_stats");
+            AddDrillDown(FileIoReadThroughputChart, readThroughputMenu, () => _fileIoReadThroughputHover, "Show Active Queries at This Time", "FileIoReadThroughput");
+            var writeThroughputMenu = TabHelpers.SetupChartContextMenu(FileIoWriteThroughputChart, "UserDB_Write_Throughput", "collect.file_io_stats");
+            AddDrillDown(FileIoWriteThroughputChart, writeThroughputMenu, () => _fileIoWriteThroughputHover, "Show Active Queries at This Time", "FileIoWriteThroughput");
+            var tempDbLatencyMenu = TabHelpers.SetupChartContextMenu(TempDbLatencyChart, "TempDB_Latency", "collect.file_io_stats");
+            AddDrillDown(TempDbLatencyChart, tempDbLatencyMenu, () => _tempDbLatencyHover, "Show Active Queries at This Time", "TempDbLatency");
 
             // Perfmon Counters chart
-            TabHelpers.SetupChartContextMenu(PerfmonCountersChart, "Perfmon_Counters", "collect.perfmon_stats");
+            var perfmonMenu = TabHelpers.SetupChartContextMenu(PerfmonCountersChart, "Perfmon_Counters", "collect.perfmon_stats");
+            AddDrillDown(PerfmonCountersChart, perfmonMenu, () => _perfmonHover, "Show Active Queries at This Time", "Perfmon");
 
             // Wait Stats Detail chart
             var waitStatsMenu = TabHelpers.SetupChartContextMenu(WaitStatsDetailChart, "Wait_Stats_Detail", "collect.wait_stats");
@@ -235,6 +252,8 @@ namespace PerformanceMonitorDashboard.Controls
         {
             _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
             CorrelatedLanes.Initialize(databaseService, baselineProvider);
+            // Forward the Overview lanes' right-click drill-down to the host (-> Active Queries).
+            CorrelatedLanes.ShowActiveQueriesRequested += t => ChartDrillDownRequested?.Invoke("CorrelatedLanes", t);
         }
 
         /// <summary>
@@ -290,15 +309,15 @@ namespace PerformanceMonitorDashboard.Controls
                 {
                     // Run all independent refreshes in parallel for initial load / manual refresh
                     await Task.WhenAll(
-                        RefreshLatchStatsAsync(),
-                        RefreshSpinlockStatsAsync(),
-                        RefreshTempdbStatsAsync(),
-                        RefreshSessionStatsAsync(),
-                        LoadFileIoLatencyChartsAsync(),
-                        LoadFileIoThroughputChartsAsync(),
-                        RefreshServerTrendsAsync(),
-                        RefreshPerfmonCountersTabAsync(),
-                        RefreshWaitStatsDetailTabAsync()
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.LatchStats", () => RefreshLatchStatsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.SpinlockStats", () => RefreshSpinlockStatsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.TempdbStats", () => RefreshTempdbStatsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.SessionStats", () => RefreshSessionStatsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.FileIoLatency", () => LoadFileIoLatencyChartsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.FileIoThroughput", () => LoadFileIoThroughputChartsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.ServerTrends", () => RefreshServerTrendsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.PerfmonCounters", () => RefreshPerfmonCountersTabAsync()),
+                        Helpers.MethodProfiler.TimeAsync("ResourceMetrics.WaitStatsDetail", () => RefreshWaitStatsDetailTabAsync())
                     );
                 }
                 else

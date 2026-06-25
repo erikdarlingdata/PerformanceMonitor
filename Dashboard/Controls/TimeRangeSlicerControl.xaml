@@ -1,6 +1,39 @@
 <UserControl x:Class="PerformanceMonitorDashboard.Controls.TimeRangeSlicerControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <!-- Quick-range pill/chip: rounded, theme-aware, lights up in the slicer accent on hover. -->
+        <Style x:Key="SlicerChipStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource SlicerLabelBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource SlicerBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="7,1"/>
+            <Setter Property="Margin" Value="3,0,0,0"/>
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ChipBorder" CornerRadius="8"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ChipBorder" Property="Background" Value="{DynamicResource SlicerHandleHoverBrush}"/>
+                                <Setter TargetName="ChipBorder" Property="BorderBrush" Value="{DynamicResource SlicerHandleHoverBrush}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
     <Border Background="{DynamicResource SlicerBackgroundBrush}"
             BorderBrush="{DynamicResource SlicerBorderBrush}"
             BorderThickness="0,0,0,1">
@@ -9,26 +42,40 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            <Button x:Name="ToggleButton" Grid.Row="0"
-                    Background="Transparent" BorderThickness="0"
-                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
-                    Padding="8,4" Cursor="Hand"
-                    Click="Toggle_Click">
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock x:Name="ToggleIcon" Text="▾" FontSize="12"
-                               Foreground="{DynamicResource SlicerToggleBrush}"
-                               VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <TextBlock x:Name="ToggleLabel" Text="Time Range"
-                               FontSize="11" FontWeight="SemiBold"
-                               Foreground="{DynamicResource SlicerToggleBrush}"
-                               VerticalAlignment="Center"/>
-                    <TextBlock x:Name="RangeLabel" Text=""
-                               FontSize="11"
-                               Foreground="{DynamicResource SlicerLabelBrush}"
-                               VerticalAlignment="Center" Margin="12,0,0,0"/>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name="ToggleButton" Grid.Column="0"
+                        Background="Transparent" BorderThickness="0"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                        Padding="8,4" Cursor="Hand"
+                        Click="Toggle_Click">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="ToggleIcon" Text="▾" FontSize="12"
+                                   Foreground="{DynamicResource SlicerToggleBrush}"
+                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="ToggleLabel" Text="Time Range"
+                                   FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource SlicerToggleBrush}"
+                                   VerticalAlignment="Center"/>
+                        <TextBlock x:Name="RangeLabel" Text=""
+                                   FontSize="11"
+                                   Foreground="{DynamicResource SlicerLabelBrush}"
+                                   VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    </StackPanel>
+                </Button>
+                <StackPanel x:Name="QuickRangeChips" Grid.Column="1" Orientation="Horizontal"
+                            VerticalAlignment="Center" Margin="0,0,8,0">
+                    <Button Content="15m" Tag="15"   Click="QuickRange_Click" Style="{StaticResource SlicerChipStyle}"/>
+                    <Button Content="1h"  Tag="60"   Click="QuickRange_Click" Style="{StaticResource SlicerChipStyle}"/>
+                    <Button Content="6h"  Tag="360"  Click="QuickRange_Click" Style="{StaticResource SlicerChipStyle}"/>
+                    <Button Content="24h" Tag="1440" Click="QuickRange_Click" Style="{StaticResource SlicerChipStyle}"/>
+                    <Button Content="All" Tag="0"    Click="QuickRange_Click" Style="{StaticResource SlicerChipStyle}"/>
                 </StackPanel>
-            </Button>
-            <Border x:Name="SlicerBorder" Grid.Row="1" Height="150" Margin="8,0,8,6"
+            </Grid>
+            <Border x:Name="SlicerBorder" Grid.Row="1" Height="130" Margin="8,0,8,6"
                     Background="{DynamicResource SlicerBackgroundBrush}"
                     CornerRadius="4" ClipToBounds="True">
                 <Canvas x:Name="SlicerCanvas"
@@ -36,6 +83,7 @@
                         MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
                         MouseMove="Canvas_MouseMove"
                         MouseLeftButtonUp="Canvas_MouseLeftButtonUp"
+                        MouseLeave="Canvas_MouseLeave"
                         MouseWheel="Canvas_MouseWheel"/>
             </Border>
         </Grid>

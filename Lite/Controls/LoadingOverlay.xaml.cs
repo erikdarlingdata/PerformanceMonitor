@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorLite.Helpers;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
 

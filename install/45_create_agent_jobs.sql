@@ -67,7 +67,8 @@ BEGIN
     END CATCH;
 
     EXECUTE msdb.dbo.sp_delete_job
-        @job_name = N'PerformanceMonitor - Collection';
+        @job_name = N'PerformanceMonitor - Collection',
+        @delete_unused_schedule = 1;
 
     PRINT 'Dropped existing PerformanceMonitor - Collection job';
 END;
@@ -145,7 +146,8 @@ BEGIN
     END CATCH;
 
     EXECUTE msdb.dbo.sp_delete_job
-        @job_name = N'PerformanceMonitor - Data Retention';
+        @job_name = N'PerformanceMonitor - Data Retention',
+        @delete_unused_schedule = 1;
 
     PRINT 'Dropped existing PerformanceMonitor - Data Retention job';
 END;
@@ -222,7 +224,8 @@ BEGIN
     END CATCH;
 
     EXECUTE msdb.dbo.sp_delete_job
-        @job_name = N'PerformanceMonitor - Hung Job Monitor';
+        @job_name = N'PerformanceMonitor - Hung Job Monitor',
+        @delete_unused_schedule = 1;
 
     PRINT 'Dropped existing PerformanceMonitor - Hung Job Monitor job';
 END;

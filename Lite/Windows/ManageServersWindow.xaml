@@ -73,6 +73,8 @@
             <Button Content="Add Server" Click="AddButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
             <Button Content="Edit" Click="EditButton_Click" Margin="0,0,8,0"/>
             <Button Content="Excluded Databases" Click="ExcludedDatabases_Click" Margin="0,0,8,0"/>
+            <Button Content="Credential Profiles…" Click="CredentialProfiles_Click" Margin="0,0,8,0"
+                    ToolTip="Manage named, reusable credentials that many servers can share."/>
             <Button Content="Delete" Click="DeleteButton_Click" Margin="0,0,8,0"/>
             <Button Content="Close" Click="CloseButton_Click"/>
         </StackPanel>

@@ -1,0 +1,180 @@
+<Window x:Class="PerformanceMonitorDashboard.RemediationConfirmWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Confirm Apply Fix"
+        Width="560" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Icon="/EDD.ico"
+        Background="{DynamicResource BackgroundBrush}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0" x:Name="HeaderText" FontSize="16" FontWeight="SemiBold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+        <!-- Who / where -->
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="120"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Server:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,3"/>
+            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="ServerText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,3" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Executing as:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,3"/>
+            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="ExecutingText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,3" TextWrapping="Wrap"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Initiated by:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,3"/>
+            <TextBlock Grid.Row="2" Grid.Column="1" x:Name="OperatorText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,3" TextWrapping="Wrap"/>
+        </Grid>
+
+        <!-- Banners: resolved-by-name note + audit-table-absent hard block -->
+        <StackPanel Grid.Row="2">
+            <Border x:Name="ByNameBanner" Visibility="Collapsed"
+                    CornerRadius="4" Padding="8" Margin="0,0,0,8">
+                <Border.Background>
+                    <SolidColorBrush Color="{StaticResource WarningColor}" Opacity="0.15"/>
+                </Border.Background>
+                <StackPanel>
+                    <TextBlock x:Name="ByNameText" Foreground="{DynamicResource ForegroundBrush}"
+                               FontStyle="Italic" TextWrapping="Wrap"/>
+                    <!-- LOW-2: a by-name-resolved server may be the wrong target if it was
+                         renamed/replaced since the alert. Require explicit acknowledgement
+                         (and no Enter click-through) before Apply is enabled. -->
+                    <CheckBox x:Name="ByNameAckCheck" Visibility="Collapsed" Margin="0,8,0,0"
+                              Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold"
+                              Content="I confirm this is the correct target server."
+                              Checked="ByNameAck_Changed" Unchecked="ByNameAck_Changed"/>
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="AuditAbsentBanner" Visibility="Collapsed"
+                    CornerRadius="4" Padding="10" Margin="0,0,0,8">
+                <Border.Background>
+                    <SolidColorBrush Color="{StaticResource ErrorColor}" Opacity="0.20"/>
+                </Border.Background>
+                <TextBlock x:Name="AuditAbsentText" Foreground="{DynamicResource ForegroundBrush}"
+                           FontWeight="SemiBold" TextWrapping="Wrap"/>
+            </Border>
+        </StackPanel>
+
+        <!-- Targets -->
+        <Border Grid.Row="3" Background="{DynamicResource BackgroundBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                CornerRadius="4" Padding="8" Margin="0,0,0,10">
+            <StackPanel>
+                <TextBlock x:Name="TargetsHeader" Text="Targets" FontWeight="SemiBold"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <ItemsControl x:Name="TargetsList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="0,2">
+                                <TextBlock Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           FontFamily="Consolas" FontSize="12" Text="{Binding HeadLine}"/>
+                                <TextBlock Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap"
+                                           FontSize="11" Text="{Binding StatusLine}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+
+        <!-- M2: still-better caveat -->
+        <Border Grid.Row="4" x:Name="CaveatBanner" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+            <Border.Background>
+                <SolidColorBrush Color="{StaticResource WarningColor}" Opacity="0.22"/>
+            </Border.Background>
+            <StackPanel>
+                <TextBlock x:Name="CaveatHeader" Text="⚠ Verify this is still the right fix"
+                           FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <TextBlock x:Name="CaveatText" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <!-- SQL preview -->
+        <StackPanel Grid.Row="5" Margin="0,0,0,12">
+            <TextBlock Text="SQL to execute:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox x:Name="SqlPreview" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+                     TextWrapping="NoWrap" MaxHeight="180"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                     Background="Transparent" Foreground="{DynamicResource ForegroundBrush}"
+                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+        </StackPanel>
+
+        <!-- B3 Phase 3: informed-consent acknowledge-each-risk gate (destructive only) -->
+        <StackPanel Grid.Row="6" x:Name="ConsentSection" Visibility="Collapsed" Margin="0,0,0,12">
+            <!-- One-line framing banner (FactKey-specific; RCSI arm) -->
+            <Border x:Name="ConsentBanner" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+                <Border.Background>
+                    <SolidColorBrush Color="{StaticResource ErrorColor}" Opacity="0.20"/>
+                </Border.Background>
+                <TextBlock x:Name="ConsentBannerText" Foreground="{DynamicResource ForegroundBrush}"
+                           FontWeight="SemiBold" TextWrapping="Wrap"/>
+            </Border>
+
+            <!-- RISK OF CHANGING -->
+            <TextBlock Text="RISK OF CHANGING" FontWeight="SemiBold" FontSize="13"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <ItemsControl x:Name="ChangingRisksList" Margin="0,0,0,10">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <CheckBox Margin="0,3" IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                                  Checked="RiskBox_Changed" Unchecked="RiskBox_Changed"
+                                  Foreground="{DynamicResource ForegroundBrush}">
+                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                        </CheckBox>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- RISK OF NOT CHANGING -->
+            <TextBlock Text="RISK OF NOT CHANGING" FontWeight="SemiBold" FontSize="13"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <ItemsControl x:Name="NotChangingRisksList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <CheckBox Margin="0,3" IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                                  Checked="RiskBox_Changed" Unchecked="RiskBox_Changed"
+                                  Foreground="{DynamicResource ForegroundBrush}">
+                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                        </CheckBox>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="CancelButton" Content="Cancel" Padding="14,5" Margin="0,0,8,0"
+                    Click="CancelButton_Click" IsCancel="True"/>
+            <Button x:Name="ConfirmButton" Padding="14,5" Click="ConfirmButton_Click" IsDefault="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

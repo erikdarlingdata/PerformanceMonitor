@@ -16,6 +16,8 @@ using System.Windows.Controls;
 using Microsoft.Win32;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -28,6 +30,7 @@ public partial class ProcedureHistoryWindow : Window
     private readonly string _objectName;
     private readonly int _hoursBack;
     private readonly string? _connectionString;
+    private readonly PlanNavigationController _planActions;
     private List<ProcedureStatsHistoryRow> _historyData = new();
 
     public ProcedureHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string schemaName, string objectName, int hoursBack, string? connectionString = null)
@@ -41,11 +44,18 @@ public partial class ProcedureHistoryWindow : Window
         _hoursBack = hoursBack;
         _connectionString = connectionString;
 
+        _planActions = new PlanNavigationController(
+            this,
+            (xml, label, qt) => PlanViewerWindow.ShowPlanAsync(this, xml, label, qt),
+            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+                _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct),
+            "the monitored server");
+
         var fullName = string.IsNullOrEmpty(schemaName) ? objectName : $"{schemaName}.{objectName}";
         ProcIdentifierText.Text = $"Procedure History: {fullName} in [{databaseName}]";
         Loaded += async (_, _) => await LoadHistoryAsync();
-        Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
-        Closed += (s, e) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+        ThemeManager.ThemeChanged += OnThemeChanged;
+        Closed += (s, e) => ThemeManager.ThemeChanged -= OnThemeChanged;
     }
 
     private async System.Threading.Tasks.Task LoadHistoryAsync()
@@ -96,9 +106,8 @@ public partial class ProcedureHistoryWindow : Window
         var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.Scatter(xs, ys);
-        scatter.LineWidth = 2;
-        scatter.MarkerSize = 5;
-        scatter.Color = ScottPlot.Color.FromHex("#4FC3F7");
+        scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MetricTrend"));
+        ChartStyle.StyleScatter(scatter);
         scatter.LegendText = label;
 
         HistoryChart.Plot.Axes.DateTimeTicksBottom();
@@ -120,37 +129,7 @@ public partial class ProcedureHistoryWindow : Window
 
     private void MetricSelector_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (IsLoaded) UpdateChart(); }
 
-    private static void ApplyTheme(ScottPlot.WPF.WpfPlot chart)
-    {
-        ScottPlot.Color figureBackground, dataBackground, textColor, gridColor;
-        if (Helpers.ThemeManager.CurrentTheme == "CoolBreeze")
-        {
-            figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
-            dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
-            textColor        = ScottPlot.Color.FromHex("#1A2A3A");
-            gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
-        }
-        else if (Helpers.ThemeManager.HasLightBackground)
-        {
-            figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
-            dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
-            textColor        = ScottPlot.Color.FromHex("#1A1D23");
-            gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
-        }
-        else
-        {
-            figureBackground = ScottPlot.Color.FromHex("#22252b");
-            dataBackground   = ScottPlot.Color.FromHex("#111217");
-            textColor        = ScottPlot.Color.FromHex("#E4E6EB");
-            gridColor        = ScottPlot.Colors.White.WithAlpha(40);
-        }
-        chart.Plot.FigureBackground.Color = figureBackground;
-        chart.Plot.DataBackground.Color = dataBackground;
-        chart.Plot.Axes.Color(textColor);
-        chart.Plot.Grid.MajorLineColor = gridColor;
-        chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
-        chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
-    }
+    private static void ApplyTheme(ScottPlot.WPF.WpfPlot chart) => ChartStyle.ApplyMinimalChartTheme(chart);
 
     private void OnThemeChanged(string _)
     {
@@ -199,6 +178,20 @@ public partial class ProcedureHistoryWindow : Window
     private void CopyRow_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyRow(sender);
     private void CopyAllRows_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.CopyAllRows(sender);
     private void ExportToCsv_Click(object sender, RoutedEventArgs e) => Helpers.ContextMenuHelper.ExportToCsv(sender, "procedure_history");
+
+    // Procedures are View Plan only — re-executing a proc without parameter values is unsafe,
+    // matching the main Procedure grid (no Get Actual case in its switch).
+    private async System.Threading.Tasks.Task<string?> FetchPlanAsync()
+    {
+        if (string.IsNullOrEmpty(_connectionString) || string.IsNullOrEmpty(_objectName)) return null;
+        return await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName);
+    }
+
+    private async void ViewPlan_Click(object sender, RoutedEventArgs e)
+    {
+        var fullName = string.IsNullOrEmpty(_schemaName) ? _objectName : $"{_schemaName}.{_objectName}";
+        await _planActions.ViewPlanAsync(FetchPlanAsync, $"Est Plan - {fullName}", queryText: null);
+    }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }

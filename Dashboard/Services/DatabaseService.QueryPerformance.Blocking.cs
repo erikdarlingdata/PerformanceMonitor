@@ -12,6 +12,8 @@ using System.Data;
 using System.Globalization;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Analysis;
+using PerformanceMonitorDashboard.Analysis;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 
@@ -23,7 +25,7 @@ namespace PerformanceMonitorDashboard.Services
         // Blocking, deadlock, and lock-wait data access.
         // ============================================
 
-                public async Task<List<BlockingEventItem>> GetBlockingEventsAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+                public async Task<List<BlockingEventItem>> GetBlockingEventsAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, bool includeReport = true)
                 {
                     var items = new List<BlockingEventItem>();
         
@@ -67,7 +69,11 @@ namespace PerformanceMonitorDashboard.Services
                                 b.host_name,
                                 b.login_name,
                                 b.transaction_id,
-                                CONVERT(nvarchar(max), b.blocked_process_report_xml) AS blocked_process_report_xml
+                                CONVERT(nvarchar(max), b.blocked_process_report_xml) AS blocked_process_report_xml,
+                                CAST(CASE WHEN b.blocked_process_report_xml IS NOT NULL THEN 1 ELSE 0 END AS bit) AS has_blocked_process_report,
+                                b.blocking_spid,
+                                b.blocking_last_tran_started,
+                                b.monitor_loop
                             FROM collect.blocking_BlockedProcessReport AS b
                             WHERE b.collection_time >= @from_date
                             AND   b.collection_time <= @to_date
@@ -113,7 +119,11 @@ namespace PerformanceMonitorDashboard.Services
                                 b.host_name,
                                 b.login_name,
                                 b.transaction_id,
-                                CONVERT(nvarchar(max), b.blocked_process_report_xml) AS blocked_process_report_xml
+                                CONVERT(nvarchar(max), b.blocked_process_report_xml) AS blocked_process_report_xml,
+                                CAST(CASE WHEN b.blocked_process_report_xml IS NOT NULL THEN 1 ELSE 0 END AS bit) AS has_blocked_process_report,
+                                b.blocking_spid,
+                                b.blocking_last_tran_started,
+                                b.monitor_loop
                             FROM collect.blocking_BlockedProcessReport AS b
                             WHERE b.collection_time >= DATEADD(HOUR, @hours_back, SYSDATETIME())
                             ORDER BY
@@ -123,12 +133,20 @@ namespace PerformanceMonitorDashboard.Services
                             OPTION(RECOMPILE);";
                     }
         
+                    // The grid never displays the report XML — it only needs to know one exists
+                    // (to enable the View Plan / Download buttons). Skip the expensive
+                    // CONVERT(nvarchar(max), xml) of ~10 KB per row; fetch on demand instead.
+                    if (!includeReport)
+                        query = query.Replace(
+                            "CONVERT(nvarchar(max), b.blocked_process_report_xml) AS blocked_process_report_xml",
+                            "CONVERT(nvarchar(max), NULL) AS blocked_process_report_xml");
+
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
                     command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
                     if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
                     if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
-        
+
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
@@ -164,14 +182,39 @@ namespace PerformanceMonitorDashboard.Services
                             HostName = reader.IsDBNull(27) ? string.Empty : reader.GetString(27),
                             LoginName = reader.IsDBNull(28) ? string.Empty : reader.GetString(28),
                             TransactionId = reader.IsDBNull(29) ? (long?)null : reader.GetInt64(29),
-                            BlockedProcessReportXml = reader.IsDBNull(30) ? string.Empty : reader.GetString(30)
+                            BlockedProcessReportXml = reader.IsDBNull(30) ? string.Empty : reader.GetString(30),
+                            HasBlockedProcessReport = !reader.IsDBNull(31) && reader.GetBoolean(31),
+                            BlockingSpid = reader.IsDBNull(32) ? (int?)null : reader.GetInt32(32),
+                            BlockingLastTranStarted = reader.IsDBNull(33) ? (DateTime?)null : reader.GetDateTime(33),
+                            MonitorLoop = reader.IsDBNull(34) ? (int?)null : reader.GetInt32(34)
                         });
                     }
         
                     return items;
                 }
 
-                public async Task<List<DeadlockItem>> GetDeadlocksAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+                // On-demand fetch of a single blocked process report XML (deferred from the grid query
+                // above). CONVERT(nvarchar(max), xml) is used so the result carries no UTF-16 encoding
+                // declaration — keeping it parseable by XElement.Parse downstream.
+                public async Task<string?> GetBlockedProcessReportAsync(long blockingId, DateTime collectionTime)
+                {
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+                    const string query = @"
+                        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                        SELECT TOP (1) CONVERT(nvarchar(max), b.blocked_process_report_xml)
+                        FROM collect.blocking_BlockedProcessReport AS b
+                        WHERE b.blocking_id = @blockingId
+                        AND   b.collection_time = @collectionTime;";
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 120;
+                    command.Parameters.Add(new SqlParameter("@blockingId", SqlDbType.BigInt) { Value = blockingId });
+                    command.Parameters.Add(new SqlParameter("@collectionTime", SqlDbType.DateTime2) { Value = collectionTime });
+                    var result = await command.ExecuteScalarAsync();
+                    return result == DBNull.Value ? null : result as string;
+                }
+
+                public async Task<List<DeadlockItem>> GetDeadlocksAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, bool includeGraph = true)
                 {
                     var items = new List<DeadlockItem>();
         
@@ -289,12 +332,18 @@ namespace PerformanceMonitorDashboard.Services
                             OPTION(RECOMPILE);";
                     }
         
+                    // The grid never displays the deadlock graph (View/Download fetch it on demand), and
+                    // CONVERT(nvarchar(max), xml) over ~100 graphs is the bulk of the Locking-tab load.
+                    // Skip it for grid callers; the alert engine / MCP keep includeGraph = true.
+                    if (!includeGraph)
+                        query = query.Replace("CONVERT(nvarchar(max), d.deadlock_graph)", "CONVERT(nvarchar(max), NULL)");
+
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
                     command.Parameters.Add(new SqlParameter("@hours_back", SqlDbType.Int) { Value = -hoursBack });
                     if (fromDate.HasValue) command.Parameters.Add(new SqlParameter("@from_date", SqlDbType.DateTime2) { Value = fromDate.Value });
                     if (toDate.HasValue) command.Parameters.Add(new SqlParameter("@to_date", SqlDbType.DateTime2) { Value = toDate.Value });
-        
+
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
@@ -346,6 +395,61 @@ namespace PerformanceMonitorDashboard.Services
                     }
         
                     return items;
+                }
+
+                /// <summary>
+                /// Fetches one deadlock's graph XML on demand (View/Download). The grid query skips the
+                /// graph (includeGraph: false) because CONVERT(nvarchar(max), xml) over ~100 graphs is the
+                /// bulk of the Locking-tab load. CONVERT here yields a declaration-free string the deadlock
+                /// graph parser accepts.
+                /// </summary>
+                public async Task<string?> GetDeadlockGraphAsync(DateTime collectionTime, long deadlockId)
+                {
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT TOP (1)
+            CONVERT(nvarchar(max), d.deadlock_graph)
+        FROM collect.deadlocks AS d
+        WHERE d.collection_time = @collectionTime
+        AND   d.deadlock_id = @deadlockId;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 120;
+                    command.Parameters.Add(new SqlParameter("@collectionTime", SqlDbType.DateTime2) { Value = collectionTime });
+                    command.Parameters.Add(new SqlParameter("@deadlockId", SqlDbType.BigInt) { Value = deadlockId });
+
+                    var result = await command.ExecuteScalarAsync();
+                    return result == DBNull.Value ? null : result as string;
+                }
+
+                /// <summary>
+                /// Fetches the blocked/blocker pair rows for a window, for the block-chain viewer to feed
+                /// <see cref="BlockingChainReconstructor"/>. Internal (not public): <see cref="BlockingPairRow"/>
+                /// is internal to the analysis assembly — a public method returning it would be CS0050. Uses
+                /// the viewer variant <see cref="BlockingPairRowQuery.SqlWithBlockerIdentity"/>: the same apex
+                /// filter as the drill-down + fact collectors, plus the correlated blocker identity so the apex
+                /// node shows login/host/app (the collectors keep the lighter query; they don't display it).
+                /// </summary>
+                internal async Task<List<BlockingPairRow>> GetBlockingPairRowsAsync(DateTime start, DateTime end)
+                {
+                    var rows = new List<BlockingPairRow>();
+
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    using var command = new SqlCommand(BlockingPairRowQuery.SqlWithBlockerIdentity, connection);
+                    command.CommandTimeout = 120;
+                    BlockingPairRowQuery.AddParameters(command, start, end);
+
+                    using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                        rows.Add(BlockingPairRowQuery.ReadWithBlockerIdentity(reader));
+
+                    return rows;
                 }
 
                 public async Task<List<BlockingDeadlockStatsItem>> GetBlockingDeadlockStatsAsync(int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)

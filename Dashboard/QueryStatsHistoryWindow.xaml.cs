@@ -21,6 +21,8 @@ using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 using ScottPlot;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard
 {
@@ -32,6 +34,8 @@ namespace PerformanceMonitorDashboard
         private readonly int _hoursBack;
         private readonly DateTime? _fromDate;
         private readonly DateTime? _toDate;
+        private readonly string? _queryText;
+        private readonly PlanNavigationController _planActions;
         private List<QueryStatsHistoryItem> _historyData = new();
         private ChartHoverHelper? _chartHover;
 
@@ -47,7 +51,8 @@ namespace PerformanceMonitorDashboard
             string queryHash,
             int hoursBack = 24,
             DateTime? fromDate = null,
-            DateTime? toDate = null)
+            DateTime? toDate = null,
+            string? queryText = null)
         {
             InitializeComponent();
 
@@ -57,13 +62,21 @@ namespace PerformanceMonitorDashboard
             _hoursBack = hoursBack;
             _fromDate = fromDate;
             _toDate = toDate;
+            _queryText = queryText;
+
+            _planActions = new PlanNavigationController(
+                this,
+                (xml, label, qt) => PlanViewerWindow.ShowPlanAsync(this, xml, label, qt),
+                (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+                    _databaseService.ConnectionString, db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct),
+                "the monitored server");
 
             QueryIdentifierText.Text = $"Query Stats History: {queryHash} in [{databaseName}]";
 
             ApplyThemeToChart();
             Loaded += QueryStatsHistoryWindow_Loaded;
-            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
-            Closed += (s, e) => Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+            ThemeManager.ThemeChanged += OnThemeChanged;
+            Closed += (s, e) => ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
         private void ApplyThemeToChart()
@@ -186,21 +199,10 @@ namespace PerformanceMonitorDashboard
             var dates = orderedData.Select(h => h.CollectionTime.ToOADate()).ToArray();
             var values = orderedData.Select(h => GetMetricValue(h, metricTag)).ToArray();
 
-            var color = ScottPlot.Color.FromHex("#4FC3F7");
+            var color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MetricTrend"));
             var scatter = HistoryChart.Plot.Add.Scatter(dates, values);
             scatter.Color = color;
-
-            // Sparse data: show only markers to avoid misleading interpolated lines
-            if (dates.Length <= 1)
-            {
-                scatter.LineWidth = 0;
-                scatter.MarkerSize = 8;
-            }
-            else
-            {
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 4;
-            }
+            ChartStyle.StyleScatter(scatter);
 
             HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
             Helpers.TabHelpers.ReapplyAxisColors(HistoryChart);
@@ -420,7 +422,7 @@ namespace PerformanceMonitorDashboard
                     foreach (var column in dataGrid.Columns)
                     {
                         if (column is DataGridBoundColumn)
-                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
+                            headers.Add(DataGridClipboardBehavior.GetHeaderText(column));
                     }
                     sb.AppendLine(string.Join("\t", headers));
                     foreach (var item in dataGrid.Items)
@@ -453,7 +455,7 @@ namespace PerformanceMonitorDashboard
                             foreach (var column in dataGrid.Columns)
                             {
                                 if (column is DataGridBoundColumn)
-                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
+                                    headers.Add(TabHelpers.EscapeCsvField(DataGridClipboardBehavior.GetHeaderText(column)));
                             }
                             sb.AppendLine(string.Join(",", headers));
                             foreach (var item in dataGrid.Items)
@@ -471,6 +473,33 @@ namespace PerformanceMonitorDashboard
                     }
                 }
             }
+        }
+
+        #endregion
+
+        #region Plan Actions
+
+        private async void ViewPlan_Click(object sender, RoutedEventArgs e)
+        {
+            if (GetHistoryItem(sender) is not { } item) return;
+            await _planActions.ViewPlanAsync(
+                () => _databaseService.GetQueryStatsPlanXmlByCollectionIdAsync(item.CollectionId),
+                $"Est Plan - {_queryHash}", _queryText);
+        }
+
+        private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
+        {
+            await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - {_queryHash}");
+        }
+
+        private static QueryStatsHistoryItem? GetHistoryItem(object sender)
+        {
+            if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+            {
+                var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu);
+                return (dataGrid?.CurrentCell.Item ?? dataGrid?.SelectedItem) as QueryStatsHistoryItem;
+            }
+            return null;
         }
 
         #endregion

@@ -38,13 +38,40 @@
         <!-- Authentication -->
         <TextBlock Grid.Row="5" Text="Authentication" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
         <StackPanel Grid.Row="6" Margin="0,0,0,12">
-            <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
-                         IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
-            <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
-                         Checked="AuthMode_Changed" Margin="0,0,0,4"/>
-            <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
-                         Checked="AuthMode_Changed"
-                         ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
+            <!-- Credential source: inline (per-server) vs a shared credential profile -->
+            <RadioButton x:Name="ConfigureOnServerRadio" Content="Configure credentials on this server"
+                         Foreground="{DynamicResource ForegroundBrush}" IsChecked="True"
+                         Checked="CredentialSource_Changed" Margin="0,0,0,4"/>
+            <RadioButton x:Name="UseProfileRadio" Content="Use a credential profile"
+                         Foreground="{DynamicResource ForegroundBrush}"
+                         Checked="CredentialSource_Changed" Margin="0,0,0,4"
+                         ToolTip="Use a named, shared credential (set up under Manage Servers → Credential Profiles). The profile fully overrides this server's auth type and credentials."/>
+
+            <!-- Profile picker (shown when 'Use a credential profile' is selected) -->
+            <StackPanel x:Name="ProfilePickerPanel" Visibility="Collapsed" Margin="0,4,0,0">
+                <TextBlock Text="Credential Profile" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <ComboBox x:Name="ProfileComboBox" DisplayMemberPath="PickerDisplay"/>
+                <TextBlock x:Name="NoProfilesNote" TextWrapping="Wrap" FontSize="11" Visibility="Collapsed"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0"
+                           Text="No credential profiles exist yet. Create one under Manage Servers → Credential Profiles."/>
+            </StackPanel>
+
+            <!-- Inline per-server auth radios (hidden when a profile is chosen) -->
+            <StackPanel x:Name="InlineAuthRadios" Margin="0,4,0,0">
+                <RadioButton x:Name="WindowsAuthRadio" Content="Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
+                             IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
+                <RadioButton x:Name="SqlAuthRadio" Content="SQL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed" Margin="0,0,0,4"/>
+                <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed"
+                             ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service Principal" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed" Margin="0,4,0,0"
+                             ToolTip="Non-interactive Azure SQL auth using an Entra app registration (client id + secret)."/>
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed" Margin="0,4,0,0"
+                             ToolTip="Non-interactive Azure SQL auth using the managed identity of the Azure resource running Lite."/>
+            </StackPanel>
         </StackPanel>
 
         <!-- SQL Auth Credentials -->
@@ -60,6 +87,27 @@
             <TextBlock Text="Username (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox x:Name="EntraMfaUsernameBox" Margin="0,0,0,8"
                      ToolTip="Optional: Pre-populate the authentication dialog with this email"/>
+        </StackPanel>
+
+        <!-- Service Principal Credentials -->
+        <StackPanel Grid.Row="7" x:Name="ServicePrincipalPanel" Visibility="Collapsed" Margin="0,0,0,12">
+            <TextBlock Text="Client (Application) ID" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox x:Name="AzureClientIdBox" Margin="0,0,0,8"
+                     ToolTip="The Application (client) ID of the Entra app registration / service principal."/>
+            <TextBlock Text="Client Secret" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <PasswordBox x:Name="AzureClientSecretBox" Margin="0,0,0,8"/>
+            <TextBlock Text="Tenant ID (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox x:Name="AzureTenantIdBox" Margin="0,0,0,4"
+                     ToolTip="Optional. Stored for reference; the tenant is resolved automatically from the target server."/>
+        </StackPanel>
+
+        <!-- Managed Identity Credentials -->
+        <StackPanel Grid.Row="7" x:Name="ManagedIdentityPanel" Visibility="Collapsed" Margin="0,0,0,12">
+            <TextBlock Text="User-Assigned Identity Client ID (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+            <TextBox x:Name="ManagedIdentityClientIdBox" Margin="0,0,0,8"
+                     ToolTip="Leave blank to use the system-assigned managed identity. Set to a client id to use a specific user-assigned identity."/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
+                       Text="Managed Identity only works when Lite is running on an Azure VM / resource that has a managed identity assigned — not on a typical workstation. Use Service Principal for non-interactive auth from a workstation."/>
         </StackPanel>
 
         <!-- Connection Options -->

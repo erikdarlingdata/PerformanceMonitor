@@ -14,5 +14,6 @@ public enum InstallationResultCode
     VersionCheckFailed = 5,
     SqlFilesNotFound = 6,
     UninstallFailed = 7,
-    UpgradesFailed = 8
+    UpgradesFailed = 8,
+    CleanInstallFailed = 9
 }

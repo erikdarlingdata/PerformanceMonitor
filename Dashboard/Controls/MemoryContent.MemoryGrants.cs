@@ -21,6 +21,7 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -137,9 +138,8 @@ namespace PerformanceMonitorDashboard.Controls
                     if (xs.Length > 0)
                     {
                         var scatter = MemoryGrantSizingChart.Plot.Add.Scatter(xs, ys);
-                        scatter.LineWidth = 2;
-                        scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
+                        ChartStyle.StyleScatter(scatter);
                         var label = $"Pool {poolId}: {metricName}";
                         scatter.LegendText = label;
                         _memoryGrantSizingHover?.Add(scatter, label);
@@ -207,9 +207,8 @@ namespace PerformanceMonitorDashboard.Controls
                     if (xs.Length > 0)
                     {
                         var scatter = MemoryGrantActivityChart.Plot.Add.Scatter(xs, ys);
-                        scatter.LineWidth = 2;
-                        scatter.MarkerSize = 5;
                         scatter.Color = colors[colorIndex % colors.Length];
+                        ChartStyle.StyleScatter(scatter);
                         var label = $"Pool {poolId}: {metricName}";
                         scatter.LegendText = label;
                         _memoryGrantActivityHover?.Add(scatter, label);

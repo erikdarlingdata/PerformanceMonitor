@@ -8,6 +8,7 @@
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Models
 {

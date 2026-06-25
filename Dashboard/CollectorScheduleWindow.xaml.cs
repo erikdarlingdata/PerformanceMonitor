@@ -14,6 +14,7 @@ using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard
 {
@@ -358,7 +359,7 @@ namespace PerformanceMonitorDashboard
                     var sb = new System.Text.StringBuilder();
                     var headers = new List<string>();
                     foreach (var column in dataGrid.Columns)
-                        headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
+                        headers.Add(DataGridClipboardBehavior.GetHeaderText(column));
                     sb.AppendLine(string.Join("\t", headers));
                     foreach (var item in dataGrid.Items)
                         sb.AppendLine(Helpers.TabHelpers.GetRowAsText(dataGrid, item));
@@ -385,7 +386,7 @@ namespace PerformanceMonitorDashboard
                         var sb = new System.Text.StringBuilder();
                         var headers = new List<string>();
                         foreach (var column in dataGrid.Columns)
-                            headers.Add(Helpers.TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
+                            headers.Add(Helpers.TabHelpers.EscapeCsvField(DataGridClipboardBehavior.GetHeaderText(column)));
                         sb.AppendLine(string.Join(",", headers));
                         foreach (var item in dataGrid.Items)
                         {

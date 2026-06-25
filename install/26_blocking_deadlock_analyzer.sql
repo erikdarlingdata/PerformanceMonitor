@@ -135,8 +135,11 @@ BEGIN
             SELECT
                 database_name = ISNULL(bg.database_name, N'UNKNOWN'),
                 blocking_event_count = COUNT_BIG(*),
-                total_blocking_duration_ms = SUM(bg.wait_time_ms),
-                max_blocking_duration_ms = MAX(bg.wait_time_ms),
+                /* wait_time_ms is nullable; SUM/MAX over an all-NULL group is NULL and these
+                   target columns are NOT NULL — ISNULL so a blocked-process report missing the
+                   duration can't fail the whole insert. */
+                total_blocking_duration_ms = ISNULL(SUM(bg.wait_time_ms), 0),
+                max_blocking_duration_ms = ISNULL(MAX(bg.wait_time_ms), 0),
                 avg_blocking_duration_ms = AVG(CONVERT(decimal(19,2), bg.wait_time_ms)),
                 deadlock_count = 0,
                 total_deadlock_wait_time_ms = 0,
@@ -151,7 +154,7 @@ BEGIN
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'Aggregated %d database(s) with blocking events', 0, 1, @rows_collected) WITH NOWAIT;
+                RAISERROR(N'Aggregated %I64d database(s) with blocking events', 0, 1, @rows_collected) WITH NOWAIT;
             END;
         END
         ELSE
@@ -186,8 +189,8 @@ BEGIN
             (
                 SELECT
                     database_name = ISNULL(bl.database_name, N'UNKNOWN'),
-                    deadlock_count = COUNT_BIG(DISTINCT LEFT(bl.deadlock_group, CHARINDEX(N',', bl.deadlock_group) - 1)),
-                    total_deadlock_wait_time_ms = SUM(bl.wait_time),
+                    deadlock_count = COUNT_BIG(DISTINCT LEFT(bl.deadlock_group, COALESCE(NULLIF(CHARINDEX(N',', bl.deadlock_group), 0) - 1, LEN(bl.deadlock_group)))),
+                    total_deadlock_wait_time_ms = ISNULL(SUM(bl.wait_time), 0),
                     victim_count = SUM(CASE WHEN bl.deadlock_group LIKE N'%- VICTIM' THEN 1 ELSE 0 END)
                 FROM collect.deadlocks AS bl
                 WHERE bl.collection_time >= @last_deadlock_collection
@@ -425,7 +428,7 @@ BEGIN
 
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Logged %d critical issue(s) for blocking/deadlock events', 0, 1, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'Logged %I64d critical issue(s) for blocking/deadlock events', 0, 1, @rows_collected) WITH NOWAIT;
         END;
 
         /*

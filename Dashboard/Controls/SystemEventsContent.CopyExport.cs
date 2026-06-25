@@ -21,6 +21,7 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
 
 
 namespace PerformanceMonitorDashboard.Controls
@@ -70,7 +71,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var sb = new StringBuilder();
 
                     // Header row
-                    var headers = grid.Columns.Select(c => Helpers.DataGridClipboardBehavior.GetHeaderText(c));
+                    var headers = grid.Columns.Select(c => DataGridClipboardBehavior.GetHeaderText(c));
                     sb.AppendLine(string.Join("\t", headers));
 
                     // Data rows
@@ -120,7 +121,7 @@ namespace PerformanceMonitorDashboard.Controls
 
                             // Header row
                             var sep = TabHelpers.CsvSeparator;
-                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c), sep));
+                            var headers = grid.Columns.Select(c => TabHelpers.EscapeCsvField(DataGridClipboardBehavior.GetHeaderText(c), sep));
                             sb.AppendLine(string.Join(sep, headers));
 
                             // Data rows

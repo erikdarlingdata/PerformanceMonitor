@@ -14,9 +14,13 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Navigation;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Interfaces;
+using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard
 {
@@ -151,6 +155,14 @@ namespace PerformanceMonitorDashboard
             McpPortTextBox.IsEnabled = prefs.McpEnabled;
             UpdateMcpStatus(prefs);
 
+            // Automated analysis. Production (AnalysisEnabled, default on) is decoupled
+            // from notification delivery (AnalysisNotificationsEnabled). Cooldown and
+            // timeout are intentionally not exposed in the UI — preferences.json only.
+            AnalysisEnabledCheckBox.IsChecked = prefs.AnalysisEnabled;
+            AnalysisNotificationsEnabledCheckBox.IsChecked = prefs.AnalysisNotificationsEnabled;
+            AnalysisIntervalMinutesTextBox.Text = prefs.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+            AnalysisNotifySeverityTextBox.Text = prefs.AnalysisNotifySeverity.ToString("F1", CultureInfo.InvariantCulture);
+
             // System tray settings
             MinimizeToTrayCheckBox.IsChecked = prefs.MinimizeToTray;
             NotificationsEnabledCheckBox.IsChecked = prefs.NotificationsEnabled;
@@ -164,6 +176,7 @@ namespace PerformanceMonitorDashboard
             DeadlockThresholdTextBox.Text = prefs.DeadlockThreshold.ToString(CultureInfo.InvariantCulture);
             NotifyOnHighCpuCheckBox.IsChecked = prefs.NotifyOnHighCpu;
             CpuThresholdTextBox.Text = prefs.CpuThresholdPercent.ToString(CultureInfo.InvariantCulture);
+            CpuAlertModeBox.SelectedIndex = prefs.CpuAlertMode == CpuAlertMode.SqlOnly ? 1 : 0;
             NotifyOnPoisonWaitsCheckBox.IsChecked = prefs.NotifyOnPoisonWaits;
             PoisonWaitThresholdTextBox.Text = prefs.PoisonWaitThresholdMs.ToString(CultureInfo.InvariantCulture);
             NotifyOnLongRunningQueriesCheckBox.IsChecked = prefs.NotifyOnLongRunningQueries;
@@ -173,13 +186,21 @@ namespace PerformanceMonitorDashboard
             LrqExcludeWaitForCheckBox.IsChecked = prefs.LongRunningQueryExcludeWaitFor;
             LrqExcludeBackupsCheckBox.IsChecked = prefs.LongRunningQueryExcludeBackups;
             LrqExcludeMiscWaitsCheckBox.IsChecked = prefs.LongRunningQueryExcludeMiscWaits;
+            LrqExcludeCdcCheckBox.IsChecked = prefs.LongRunningQueryExcludeCdc;
             AlertExcludedDatabasesTextBox.Text = string.Join(", ", prefs.AlertExcludedDatabases);
             NotifyOnTempDbSpaceCheckBox.IsChecked = prefs.NotifyOnTempDbSpace;
             TempDbSpaceThresholdTextBox.Text = prefs.TempDbSpaceThresholdPercent.ToString(CultureInfo.InvariantCulture);
+            NotifyOnLowDiskCheckBox.IsChecked = prefs.NotifyOnLowDisk;
+            LowDiskThresholdPercentTextBox.Text = prefs.LowDiskThresholdPercent.ToString(CultureInfo.InvariantCulture);
+            LowDiskThresholdGbTextBox.Text = prefs.LowDiskThresholdGb.ToString(CultureInfo.InvariantCulture);
             NotifyOnLongRunningJobsCheckBox.IsChecked = prefs.NotifyOnLongRunningJobs;
             LongRunningJobMultiplierTextBox.Text = prefs.LongRunningJobMultiplier.ToString(CultureInfo.InvariantCulture);
+            NotifyOnFailedJobsCheckBox.IsChecked = prefs.NotifyOnFailedJobs;
+            FailedJobLookbackTextBox.Text = prefs.FailedJobLookbackMinutes.ToString(CultureInfo.InvariantCulture);
             AlertCooldownTextBox.Text = prefs.AlertCooldownMinutes.ToString(CultureInfo.InvariantCulture);
             EmailCooldownTextBox.Text = prefs.EmailCooldownMinutes.ToString(CultureInfo.InvariantCulture);
+            AlertDeliveryModeCombo.SelectedIndex = prefs.AlertDeliveryMode == AlertNotificationMode.PerEvent ? 1 : 0;
+            AlertPerEventMaxTextBox.Text = prefs.AlertPerEventMaxPerCycle.ToString(CultureInfo.InvariantCulture);
             MuteRuleDefaultExpirationCombo.SelectedIndex = prefs.MuteRuleDefaultExpiration switch
             {
                 "1 hour" => 0,
@@ -200,7 +221,7 @@ namespace PerformanceMonitorDashboard
             SmtpFromTextBox.Text = prefs.SmtpFromAddress;
             SmtpRecipientsTextBox.Text = prefs.SmtpRecipients;
 
-            var password = EmailAlertService.GetSmtpPassword();
+            var password = DashboardAlertCredentials.GetSmtpPassword();
             if (!string.IsNullOrEmpty(password))
             {
                 SmtpPasswordBox.Password = password;
@@ -217,20 +238,20 @@ namespace PerformanceMonitorDashboard
             /* Migrate legacy plaintext webhook URLs to Credential Manager */
             if (!string.IsNullOrWhiteSpace(prefs.TeamsWebhookUrl))
             {
-                WebhookAlertService.SaveTeamsWebhookUrl(prefs.TeamsWebhookUrl);
+                DashboardAlertCredentials.SaveTeamsWebhookUrl(prefs.TeamsWebhookUrl);
                 prefs.TeamsWebhookUrl = "";
                 _preferencesService.SavePreferences(prefs);
             }
             if (!string.IsNullOrWhiteSpace(prefs.SlackWebhookUrl))
             {
-                WebhookAlertService.SaveSlackWebhookUrl(prefs.SlackWebhookUrl);
+                DashboardAlertCredentials.SaveSlackWebhookUrl(prefs.SlackWebhookUrl);
                 prefs.SlackWebhookUrl = "";
                 _preferencesService.SavePreferences(prefs);
             }
 
             /* Load webhook URLs from Credential Manager */
-            TeamsWebhookUrlTextBox.Text = WebhookAlertService.GetTeamsWebhookUrl();
-            SlackWebhookUrlTextBox.Text = WebhookAlertService.GetSlackWebhookUrl();
+            TeamsWebhookUrlTextBox.Text = DashboardAlertCredentials.GetTeamsWebhookUrl();
+            SlackWebhookUrlTextBox.Text = DashboardAlertCredentials.GetSlackWebhookUrl();
             UpdateTeamsControlStates();
             UpdateSlackControlStates();
 
@@ -340,7 +361,19 @@ namespace PerformanceMonitorDashboard
             UpdateAlertNotificationStates();
         }
 
+        private void NotifyOnLowDiskCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_isLoading) return;
+            UpdateAlertNotificationStates();
+        }
+
         private void NotifyOnLongRunningJobsCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_isLoading) return;
+            UpdateAlertNotificationStates();
+        }
+
+        private void NotifyOnFailedJobsCheckBox_Changed(object sender, RoutedEventArgs e)
         {
             if (_isLoading) return;
             UpdateAlertNotificationStates();
@@ -354,9 +387,14 @@ namespace PerformanceMonitorDashboard
             PoisonWaitThresholdTextBox.Text = "500";
             LongRunningQueryThresholdTextBox.Text = "30";
             TempDbSpaceThresholdTextBox.Text = "80";
+            LowDiskThresholdPercentTextBox.Text = "10";
+            LowDiskThresholdGbTextBox.Text = "5";
             LongRunningJobMultiplierTextBox.Text = "3";
+            FailedJobLookbackTextBox.Text = "60";
             AlertCooldownTextBox.Text = "5";
             EmailCooldownTextBox.Text = "15";
+            AlertDeliveryModeCombo.SelectedIndex = 0;
+            AlertPerEventMaxTextBox.Text = "10";
             AlertExcludedDatabasesTextBox.Text = "";
             MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
             UpdateAlertPreviewText();
@@ -385,8 +423,12 @@ namespace PerformanceMonitorDashboard
                 parts.Add($"queries > {LongRunningQueryThresholdTextBox.Text}min");
             if (NotifyOnTempDbSpaceCheckBox.IsChecked == true)
                 parts.Add($"TempDB > {TempDbSpaceThresholdTextBox.Text}%");
+            if (NotifyOnLowDiskCheckBox.IsChecked == true)
+                parts.Add($"disk free < {LowDiskThresholdPercentTextBox.Text}% or {LowDiskThresholdGbTextBox.Text}GB");
             if (NotifyOnLongRunningJobsCheckBox.IsChecked == true)
                 parts.Add($"jobs > {LongRunningJobMultiplierTextBox.Text}x avg");
+            if (NotifyOnFailedJobsCheckBox.IsChecked == true)
+                parts.Add($"failed jobs (last {FailedJobLookbackTextBox.Text}m)");
 
             AlertPreviewText.Text = parts.Count > 0
                 ? $"Will alert when: {string.Join(", ", parts)}"
@@ -402,14 +444,20 @@ namespace PerformanceMonitorDashboard
             DeadlockThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnDeadlockCheckBox.IsChecked == true;
             NotifyOnHighCpuCheckBox.IsEnabled = notificationsEnabled;
             CpuThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnHighCpuCheckBox.IsChecked == true;
+            CpuAlertModeBox.IsEnabled = notificationsEnabled && NotifyOnHighCpuCheckBox.IsChecked == true;
             NotifyOnPoisonWaitsCheckBox.IsEnabled = notificationsEnabled;
             PoisonWaitThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnPoisonWaitsCheckBox.IsChecked == true;
             NotifyOnLongRunningQueriesCheckBox.IsEnabled = notificationsEnabled;
             LongRunningQueryThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnLongRunningQueriesCheckBox.IsChecked == true;
             NotifyOnTempDbSpaceCheckBox.IsEnabled = notificationsEnabled;
             TempDbSpaceThresholdTextBox.IsEnabled = notificationsEnabled && NotifyOnTempDbSpaceCheckBox.IsChecked == true;
+            NotifyOnLowDiskCheckBox.IsEnabled = notificationsEnabled;
+            LowDiskThresholdPercentTextBox.IsEnabled = notificationsEnabled && NotifyOnLowDiskCheckBox.IsChecked == true;
+            LowDiskThresholdGbTextBox.IsEnabled = notificationsEnabled && NotifyOnLowDiskCheckBox.IsChecked == true;
             NotifyOnLongRunningJobsCheckBox.IsEnabled = notificationsEnabled;
             LongRunningJobMultiplierTextBox.IsEnabled = notificationsEnabled && NotifyOnLongRunningJobsCheckBox.IsChecked == true;
+            NotifyOnFailedJobsCheckBox.IsEnabled = notificationsEnabled;
+            FailedJobLookbackTextBox.IsEnabled = notificationsEnabled && NotifyOnFailedJobsCheckBox.IsChecked == true;
             UpdateAlertPreviewText();
         }
 
@@ -642,6 +690,7 @@ namespace PerformanceMonitorDashboard
                 prefs.CpuThresholdPercent = cpuThreshold;
             else if (prefs.NotifyOnHighCpu)
                 validationErrors.Add("CPU threshold must be between 1 and 100");
+            prefs.CpuAlertMode = CpuAlertModeBox.SelectedIndex == 1 ? CpuAlertMode.SqlOnly : CpuAlertMode.Total;
 
             prefs.NotifyOnPoisonWaits = NotifyOnPoisonWaitsCheckBox.IsChecked == true;
             if (int.TryParse(PoisonWaitThresholdTextBox.Text, out int poisonWaitThreshold) && poisonWaitThreshold > 0)
@@ -668,6 +717,7 @@ namespace PerformanceMonitorDashboard
             prefs.LongRunningQueryExcludeWaitFor = LrqExcludeWaitForCheckBox.IsChecked == true;
             prefs.LongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true;
             prefs.LongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
+            prefs.LongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true;
             prefs.AlertExcludedDatabases = AlertExcludedDatabasesTextBox.Text
                 .Split(',')
                 .Select(s => s.Trim())
@@ -680,11 +730,27 @@ namespace PerformanceMonitorDashboard
             else if (prefs.NotifyOnTempDbSpace)
                 validationErrors.Add("TempDB space threshold must be between 1 and 100");
 
+            prefs.NotifyOnLowDisk = NotifyOnLowDiskCheckBox.IsChecked == true;
+            if (int.TryParse(LowDiskThresholdPercentTextBox.Text, out int lowDiskPct) && lowDiskPct >= 0 && lowDiskPct <= 100)
+                prefs.LowDiskThresholdPercent = lowDiskPct;
+            else if (prefs.NotifyOnLowDisk)
+                validationErrors.Add("Volume free space percent threshold must be between 0 and 100");
+            if (int.TryParse(LowDiskThresholdGbTextBox.Text, out int lowDiskGb) && lowDiskGb >= 0)
+                prefs.LowDiskThresholdGb = lowDiskGb;
+            else if (prefs.NotifyOnLowDisk)
+                validationErrors.Add("Volume free space GB threshold must be 0 or greater");
+
             prefs.NotifyOnLongRunningJobs = NotifyOnLongRunningJobsCheckBox.IsChecked == true;
             if (int.TryParse(LongRunningJobMultiplierTextBox.Text, out int jobMultiplier) && jobMultiplier > 0)
                 prefs.LongRunningJobMultiplier = jobMultiplier;
             else if (prefs.NotifyOnLongRunningJobs)
                 validationErrors.Add("Job multiplier must be a positive number");
+
+            prefs.NotifyOnFailedJobs = NotifyOnFailedJobsCheckBox.IsChecked == true;
+            if (int.TryParse(FailedJobLookbackTextBox.Text, out int failedJobLookback) && failedJobLookback >= 1 && failedJobLookback <= 1440)
+                prefs.FailedJobLookbackMinutes = failedJobLookback;
+            else if (prefs.NotifyOnFailedJobs)
+                validationErrors.Add("Failed-job lookback must be between 1 and 1440 minutes");
 
             if (int.TryParse(AlertCooldownTextBox.Text, out int alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
                 prefs.AlertCooldownMinutes = alertCooldown;
@@ -695,6 +761,12 @@ namespace PerformanceMonitorDashboard
                 prefs.EmailCooldownMinutes = emailCooldown;
             else
                 validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes");
+
+            prefs.AlertDeliveryMode = AlertDeliveryModeCombo.SelectedIndex == 1 ? AlertNotificationMode.PerEvent : AlertNotificationMode.Summary;
+            if (int.TryParse(AlertPerEventMaxTextBox.Text, out int perEventMax) && perEventMax >= 1 && perEventMax <= 100)
+                prefs.AlertPerEventMaxPerCycle = perEventMax;
+            else
+                validationErrors.Add("Per-event max-per-cycle must be between 1 and 100");
 
             prefs.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
             MuteRuleDialog.DefaultExpiration = prefs.MuteRuleDefaultExpiration;
@@ -716,7 +788,7 @@ namespace PerformanceMonitorDashboard
 
             if (!string.IsNullOrEmpty(SmtpPasswordBox.Password))
             {
-                EmailAlertService.SaveSmtpPassword(SmtpPasswordBox.Password, prefs.SmtpUsername);
+                DashboardAlertCredentials.SaveSmtpPassword(SmtpPasswordBox.Password, prefs.SmtpUsername);
             }
 
             // Save webhook settings (Teams / Slack)
@@ -728,8 +800,8 @@ namespace PerformanceMonitorDashboard
             prefs.SlackProxyAddress = SlackProxyAddressTextBox.Text?.Trim() ?? "";
 
             /* Save webhook URLs to Credential Manager */
-            WebhookAlertService.SaveTeamsWebhookUrl(TeamsWebhookUrlTextBox.Text?.Trim() ?? "");
-            WebhookAlertService.SaveSlackWebhookUrl(SlackWebhookUrlTextBox.Text?.Trim() ?? "");
+            DashboardAlertCredentials.SaveTeamsWebhookUrl(TeamsWebhookUrlTextBox.Text?.Trim() ?? "");
+            DashboardAlertCredentials.SaveSlackWebhookUrl(SlackWebhookUrlTextBox.Text?.Trim() ?? "");
 
             // Save MCP server settings
             bool mcpWasEnabled = prefs.McpEnabled;
@@ -750,6 +822,33 @@ namespace PerformanceMonitorDashboard
             }
             else
                 validationErrors.Add($"MCP port must be between 1024 and {IPEndPoint.MaxPort}.\nPorts 0–1023 are well-known privileged ports reserved by the operating system.");
+
+            // Automated analysis. Production gate (AnalysisEnabled) is independent of the
+            // notification delivery gate (AnalysisNotificationsEnabled). Bounds are also
+            // enforced at consumption (AnalysisScheduler.Configure,
+            // AnalysisNotificationService.NotifyAsync), but validating here catches typos early.
+            prefs.AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true;
+            prefs.AnalysisNotificationsEnabled = AnalysisNotificationsEnabledCheckBox.IsChecked == true;
+
+            if (int.TryParse(AnalysisIntervalMinutesTextBox.Text?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int analysisInterval)
+                && analysisInterval >= 5 && analysisInterval <= 360)
+            {
+                prefs.AnalysisIntervalMinutes = analysisInterval;
+            }
+            else
+            {
+                validationErrors.Add("Analysis interval must be between 5 and 360 minutes.");
+            }
+
+            if (double.TryParse(AnalysisNotifySeverityTextBox.Text?.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double analysisSeverity)
+                && analysisSeverity >= 0.0 && analysisSeverity <= 2.0)
+            {
+                prefs.AnalysisNotifySeverity = analysisSeverity;
+            }
+            else
+            {
+                validationErrors.Add("Analysis notify severity must be between 0.0 and 2.0.");
+            }
 
             if (validationErrors.Count > 0)
             {
@@ -874,7 +973,7 @@ namespace PerformanceMonitorDashboard
             {
                 var url = TeamsWebhookUrlTextBox.Text?.Trim() ?? "";
                 var proxy = TeamsProxyAddressTextBox.Text?.Trim();
-                var error = await WebhookAlertService.SendTestTeamsAsync(url, proxy);
+                var error = await WebhookAlertService.SendTestTeamsAsync(url, proxy, EmailAlertService.Branding);
 
                 if (error == null)
                 {
@@ -909,7 +1008,7 @@ namespace PerformanceMonitorDashboard
             {
                 var url = SlackWebhookUrlTextBox.Text?.Trim() ?? "";
                 var proxy = SlackProxyAddressTextBox.Text?.Trim();
-                var error = await WebhookAlertService.SendTestSlackAsync(url, proxy);
+                var error = await WebhookAlertService.SendTestSlackAsync(url, proxy, EmailAlertService.Branding);
 
                 if (error == null)
                 {
@@ -961,7 +1060,7 @@ namespace PerformanceMonitorDashboard
             // Save password to credential store so SendEmailAsync can read it
             if (!string.IsNullOrEmpty(SmtpPasswordBox.Password))
             {
-                EmailAlertService.SaveSmtpPassword(SmtpPasswordBox.Password, testPrefs.SmtpUsername);
+                DashboardAlertCredentials.SaveSmtpPassword(SmtpPasswordBox.Password, testPrefs.SmtpUsername);
             }
 
             TestEmailButton.IsEnabled = false;
@@ -970,8 +1069,11 @@ namespace PerformanceMonitorDashboard
 
             try
             {
-                var emailService = EmailAlertService.Current ?? new EmailAlertService((UserPreferencesService)_preferencesService);
-                var error = await emailService.SendTestEmailAsync(testPrefs);
+                /* Test before save: send with the values the user just typed (transient,
+                   form-values adapter), NOT the saved-prefs DashboardAlertSettings (MOD-1).
+                   Converged shared static — no EmailAlertService instance needed (Plan E E3c). */
+                var error = await EmailSendCore.SendTestEmailAsync(
+                    new UserPreferencesAlertSettings(testPrefs), EmailAlertService.Branding);
 
                 if (error == null)
                 {

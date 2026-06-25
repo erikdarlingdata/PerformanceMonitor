@@ -15,6 +15,7 @@ using System.Windows.Controls.Primitives;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -24,37 +25,37 @@ namespace PerformanceMonitorDashboard.Controls
         private ColumnFilterPopup? _filterPopupContent;
 
         // Active Queries filter state
-        private Dictionary<string, Models.ColumnFilterState> _activeQueriesFilters = new();
+        private Dictionary<string, ColumnFilterState> _activeQueriesFilters = new();
         private List<QuerySnapshotItem>? _activeQueriesUnfilteredData;
 
         // Current Active Queries filter state
-        private Dictionary<string, Models.ColumnFilterState> _currentActiveFilters = new();
+        private Dictionary<string, ColumnFilterState> _currentActiveFilters = new();
         private List<LiveQueryItem>? _currentActiveUnfilteredData;
 
         // Query Stats filter state
-        private Dictionary<string, Models.ColumnFilterState> _queryStatsFilters = new();
+        private Dictionary<string, ColumnFilterState> _queryStatsFilters = new();
         private List<QueryStatsItem>? _queryStatsUnfilteredData;
 
         // Procedure Stats filter state
-        private Dictionary<string, Models.ColumnFilterState> _procStatsFilters = new();
+        private Dictionary<string, ColumnFilterState> _procStatsFilters = new();
         private List<ProcedureStatsItem>? _procStatsUnfilteredData;
 
         // Query Store filter state
-        private Dictionary<string, Models.ColumnFilterState> _queryStoreFilters = new();
+        private Dictionary<string, ColumnFilterState> _queryStoreFilters = new();
         private List<QueryStoreItem>? _queryStoreUnfilteredData;
 
         // Query Store Regressions filter state
-        private Dictionary<string, Models.ColumnFilterState> _qsRegressionsFilters = new();
+        private Dictionary<string, ColumnFilterState> _qsRegressionsFilters = new();
         private List<QueryStoreRegressionItem>? _qsRegressionsUnfilteredData;
 
         // Query Trace Patterns filter state
-        private Dictionary<string, Models.ColumnFilterState> _lrqPatternsFilters = new();
+        private Dictionary<string, ColumnFilterState> _lrqPatternsFilters = new();
         private List<LongRunningQueryPatternItem>? _lrqPatternsUnfilteredData;
 
         /// <summary>
         /// Generic method to update filter button styles for any DataGrid by traversing column headers
         /// </summary>
-        private void UpdateDataGridFilterButtonStyles(DataGrid dataGrid, Dictionary<string, Models.ColumnFilterState> filters)
+        private void UpdateDataGridFilterButtonStyles(DataGrid dataGrid, Dictionary<string, ColumnFilterState> filters)
         {
             foreach (var column in dataGrid.Columns)
             {

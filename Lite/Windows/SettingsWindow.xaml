@@ -211,6 +211,9 @@
                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4"/>
                 <CheckBox x:Name="LrqExcludeMiscWaitsCheckBox"
                           Content="Exclude miscellaneous waits (XE_LIVE_TARGET_TVF)"
+                          Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4"/>
+                <CheckBox x:Name="LrqExcludeCdcCheckBox"
+                          Content="Exclude CDC capture jobs (sp_MScdc_capture_job, sp_cdc_scan)"
                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,0"/>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertTempDbSpaceCheckBox" Content="TempDB space usage over" VerticalAlignment="Center"
@@ -220,10 +223,27 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertLowDiskCheckBox" Content="Volume free space under" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertLowDiskThresholdPercentBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% or" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertLowDiskThresholdGbBox" Width="45" Text="5" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="GB free (Azure SQL DB excluded)" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <CheckBox x:Name="AlertFailedJobCheckBox" Content="Agent job failed in the last" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertFailedJobLookbackBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,10,0,0">
@@ -238,6 +258,20 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="EmailCooldownBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
                     <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <!-- #1141: deadlock/blocking notification delivery mode + per-event cap -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Deadlock/blocking delivery:" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="AlertDeliveryModeBox" Width="260" VerticalAlignment="Center">
+                        <ComboBoxItem Content="Summary — one card per cycle" Tag="Summary"/>
+                        <ComboBoxItem Content="Per-event — one notification per incident" Tag="PerEvent"/>
+                    </ComboBox>
+                    <TextBlock Text="max" VerticalAlignment="Center" Margin="8,0,4,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertPerEventMaxBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="/cycle" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
                 <TextBlock x:Name="AlertPreviewText" FontSize="11" FontStyle="Italic"
@@ -273,6 +307,34 @@
                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                 <CheckBox x:Name="LogAlertDismissalsCheckBox" Content="Log alert dismiss and mute actions"
                           Margin="20,8,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+
+                <!-- Automated Analysis -->
+                <TextBlock Text="Automated Analysis" FontWeight="SemiBold" FontSize="12"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                <TextBlock Text="Periodically run the triage engine and record findings in the Alerts tab. Notifications below are optional — analysis runs and stores findings even with notifications off."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                <CheckBox x:Name="AnalysisEnabledCheckBox" Content="Enable automated analysis"
+                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                <CheckBox x:Name="AnalysisNotificationsCheckBox" Content="Send scheduled analysis notifications"
+                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Run analysis every" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AnalysisIntervalBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Notify on finding severity at or above" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AnalysisNotifySeverityBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="(0.0 - 2.0)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
+                <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,4,0,0" TextWrapping="Wrap"/>
             </StackPanel>
         </Border>
 

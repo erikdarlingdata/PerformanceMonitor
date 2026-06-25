@@ -1,7 +1,7 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:sys="clr-namespace:System;assembly=mscorlib"
-                    xmlns:helpers="clr-namespace:PerformanceMonitorLite.Helpers">
+                    xmlns:helpers="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui">
 
     <!-- ============================================ -->
     <!-- Darling Data Light Theme                      -->
@@ -67,6 +67,17 @@
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
+    <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
+         Darker on light themes so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
+    <SolidColorBrush x:Key="WarningTextBrush" Color="#92400E"/>
+    <!-- Apex (lead-blocker) node + legend border. Darker blue on light themes so it clears >=3:1 as a
+         graphical border on the light node card (bright #4FA3FF is only ~2.6:1 on white). The LEAD BLOCKER
+         badge fill keeps the bright ApexBrush constant so the apex still pops. -->
+    <SolidColorBrush x:Key="ApexBorderBrush" Color="#1976D2"/>
+    <!-- Deadlock victim node border + VICTIM badge fill, and the "waits for" edge/arrow. Tuned per theme
+         so the victim red clears >=3:1 as a border on the light node card and the edge reads on the canvas. -->
+    <SolidColorBrush x:Key="DeadlockVictimBrush" Color="#C62828"/>
+    <SolidColorBrush x:Key="DeadlockEdgeBrush" Color="#5A6270"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}"/>
     <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
 

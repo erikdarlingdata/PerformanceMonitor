@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -46,7 +47,8 @@ public static class ActualPlanExecutor
         /* Build the repro script (includes SET options from plan XML via #233) */
         var reproScript = ReproScriptBuilder.BuildReproScript(
             queryText, databaseName, planXml, isolationLevel,
-            source: "Actual Plan Capture", isAzureSqlDb: isAzureSqlDb);
+            source: "Actual Plan Capture", isAzureSqlDb: isAzureSqlDb,
+            productName: "SQL Server Performance Monitor Lite");
 
         /* Wrap with SET STATISTICS XML ON/OFF */
         var sb = new StringBuilder();

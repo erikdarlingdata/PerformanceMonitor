@@ -102,9 +102,10 @@
         </TabItem>
         <!-- TempDB Stats Sub-Tab -->
         <TabItem Header="TempDB Stats">
-            <!-- TempDB Stats - 2 charts vertical layout -->
+            <!-- TempDB Stats - usage / size / latency charts + summary -->
             <Grid Margin="5">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
@@ -122,8 +123,20 @@
                     </Grid>
                 </Border>
 
+                <!-- TempDB Allocated Size Chart (growth trend, own scale) -->
+                <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,2">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="TempDB Allocated Size Over Time (MB)" FontWeight="Bold" FontSize="11" Margin="5,3" Foreground="{DynamicResource ForegroundBrush}"/>
+                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="TempdbSizeChart"/>
+                    </Grid>
+                </Border>
+
                 <!-- TempDB Latency Chart (Read + Write combined) -->
-                <Border Grid.Row="1" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
+                <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,2,0,0">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -135,7 +148,7 @@
                 </Border>
 
                 <!-- Summary Panel -->
-                <Border Grid.Row="2" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,8">
+                <Border Grid.Row="3" Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,8">
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                         <TextBlock Text="Sessions Using TempDB:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <TextBlock x:Name="TempdbSessionsText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>

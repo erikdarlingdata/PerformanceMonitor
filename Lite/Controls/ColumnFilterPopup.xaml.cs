@@ -11,6 +11,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Controls;
 

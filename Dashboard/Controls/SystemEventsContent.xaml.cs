@@ -21,6 +21,8 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -103,25 +105,25 @@ namespace PerformanceMonitorDashboard.Controls
         private Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
 
         // Chart hover tooltips
-        private Helpers.ChartHoverHelper? _badPagesHover;
-        private Helpers.ChartHoverHelper? _dumpRequestsHover;
-        private Helpers.ChartHoverHelper? _accessViolationsHover;
-        private Helpers.ChartHoverHelper? _writeAccessViolationsHover;
-        private Helpers.ChartHoverHelper? _nonYieldingTasksHover;
-        private Helpers.ChartHoverHelper? _latchWarningsHover;
-        private Helpers.ChartHoverHelper? _sickSpinlocksHover;
-        private Helpers.ChartHoverHelper? _cpuComparisonHover;
-        private Helpers.ChartHoverHelper? _severeErrorsHover;
-        private Helpers.ChartHoverHelper? _ioIssuesHover;
-        private Helpers.ChartHoverHelper? _longestPendingIoHover;
-        private Helpers.ChartHoverHelper? _schedulerIssuesHover;
-        private Helpers.ChartHoverHelper? _memoryConditionsHover;
-        private Helpers.ChartHoverHelper? _cpuTasksHover;
-        private Helpers.ChartHoverHelper? _memoryBrokerHover;
-        private Helpers.ChartHoverHelper? _memoryBrokerRatioHover;
-        private Helpers.ChartHoverHelper? _memoryNodeOomHover;
-        private Helpers.ChartHoverHelper? _memoryNodeOomUtilHover;
-        private Helpers.ChartHoverHelper? _memoryNodeOomMemoryHover;
+        private ChartHoverHelper? _badPagesHover;
+        private ChartHoverHelper? _dumpRequestsHover;
+        private ChartHoverHelper? _accessViolationsHover;
+        private ChartHoverHelper? _writeAccessViolationsHover;
+        private ChartHoverHelper? _nonYieldingTasksHover;
+        private ChartHoverHelper? _latchWarningsHover;
+        private ChartHoverHelper? _sickSpinlocksHover;
+        private ChartHoverHelper? _cpuComparisonHover;
+        private ChartHoverHelper? _severeErrorsHover;
+        private ChartHoverHelper? _ioIssuesHover;
+        private ChartHoverHelper? _longestPendingIoHover;
+        private ChartHoverHelper? _schedulerIssuesHover;
+        private ChartHoverHelper? _memoryConditionsHover;
+        private ChartHoverHelper? _cpuTasksHover;
+        private ChartHoverHelper? _memoryBrokerHover;
+        private ChartHoverHelper? _memoryBrokerRatioHover;
+        private ChartHoverHelper? _memoryNodeOomHover;
+        private ChartHoverHelper? _memoryNodeOomUtilHover;
+        private ChartHoverHelper? _memoryNodeOomMemoryHover;
 
         public SystemEventsContent()
         {
@@ -129,7 +131,7 @@ namespace PerformanceMonitorDashboard.Controls
             SetupChartContextMenus();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
-            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            ThemeManager.ThemeChanged += OnThemeChanged;
 
             // Apply dark theme immediately so charts don't flash white before data loads
             TabHelpers.ApplyThemeToChart(BadPagesChart);
@@ -152,25 +154,25 @@ namespace PerformanceMonitorDashboard.Controls
             TabHelpers.ApplyThemeToChart(MemoryNodeOOMUtilChart);
             TabHelpers.ApplyThemeToChart(MemoryNodeOOMMemoryChart);
 
-            _badPagesHover = new Helpers.ChartHoverHelper(BadPagesChart, "events");
-            _dumpRequestsHover = new Helpers.ChartHoverHelper(DumpRequestsChart, "events");
-            _accessViolationsHover = new Helpers.ChartHoverHelper(AccessViolationsChart, "events");
-            _writeAccessViolationsHover = new Helpers.ChartHoverHelper(WriteAccessViolationsChart, "events");
-            _nonYieldingTasksHover = new Helpers.ChartHoverHelper(NonYieldingTasksChart, "events");
-            _latchWarningsHover = new Helpers.ChartHoverHelper(LatchWarningsChart, "events");
-            _sickSpinlocksHover = new Helpers.ChartHoverHelper(SickSpinlocksChart, "backoffs");
-            _cpuComparisonHover = new Helpers.ChartHoverHelper(CpuComparisonChart, "%");
-            _severeErrorsHover = new Helpers.ChartHoverHelper(SevereErrorsChart, "events");
-            _ioIssuesHover = new Helpers.ChartHoverHelper(IOIssuesChart, "events");
-            _longestPendingIoHover = new Helpers.ChartHoverHelper(LongestPendingIOChart, "ms");
-            _schedulerIssuesHover = new Helpers.ChartHoverHelper(SchedulerIssuesChart, "ms");
-            _memoryConditionsHover = new Helpers.ChartHoverHelper(MemoryConditionsChart, "events");
-            _cpuTasksHover = new Helpers.ChartHoverHelper(CPUTasksChart, "workers");
-            _memoryBrokerHover = new Helpers.ChartHoverHelper(MemoryBrokerChart, "");
-            _memoryBrokerRatioHover = new Helpers.ChartHoverHelper(MemoryBrokerRatioChart, "");
-            _memoryNodeOomHover = new Helpers.ChartHoverHelper(MemoryNodeOOMChart, "events");
-            _memoryNodeOomUtilHover = new Helpers.ChartHoverHelper(MemoryNodeOOMUtilChart, "%");
-            _memoryNodeOomMemoryHover = new Helpers.ChartHoverHelper(MemoryNodeOOMMemoryChart, "MB");
+            _badPagesHover = new ChartHoverHelper(BadPagesChart, "events");
+            _dumpRequestsHover = new ChartHoverHelper(DumpRequestsChart, "events");
+            _accessViolationsHover = new ChartHoverHelper(AccessViolationsChart, "events");
+            _writeAccessViolationsHover = new ChartHoverHelper(WriteAccessViolationsChart, "events");
+            _nonYieldingTasksHover = new ChartHoverHelper(NonYieldingTasksChart, "events");
+            _latchWarningsHover = new ChartHoverHelper(LatchWarningsChart, "events");
+            _sickSpinlocksHover = new ChartHoverHelper(SickSpinlocksChart, "backoffs");
+            _cpuComparisonHover = new ChartHoverHelper(CpuComparisonChart, "%");
+            _severeErrorsHover = new ChartHoverHelper(SevereErrorsChart, "events");
+            _ioIssuesHover = new ChartHoverHelper(IOIssuesChart, "events");
+            _longestPendingIoHover = new ChartHoverHelper(LongestPendingIOChart, "ms");
+            _schedulerIssuesHover = new ChartHoverHelper(SchedulerIssuesChart, "ms");
+            _memoryConditionsHover = new ChartHoverHelper(MemoryConditionsChart, "events");
+            _cpuTasksHover = new ChartHoverHelper(CPUTasksChart, "workers");
+            _memoryBrokerHover = new ChartHoverHelper(MemoryBrokerChart, "");
+            _memoryBrokerRatioHover = new ChartHoverHelper(MemoryBrokerRatioChart, "");
+            _memoryNodeOomHover = new ChartHoverHelper(MemoryNodeOOMChart, "events");
+            _memoryNodeOomUtilHover = new ChartHoverHelper(MemoryNodeOOMUtilChart, "%");
+            _memoryNodeOomMemoryHover = new ChartHoverHelper(MemoryNodeOOMMemoryChart, "MB");
         }
 
         private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -209,7 +211,7 @@ namespace PerformanceMonitorDashboard.Controls
                 _filterPopupContent.FilterCleared -= FilterPopup_FilterCleared;
             }
 
-            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+            ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
         private void OnThemeChanged(string _)
@@ -345,14 +347,14 @@ namespace PerformanceMonitorDashboard.Controls
                 {
                     // Run all independent refreshes in parallel for initial load / manual refresh
                     await Task.WhenAll(
-                        RefreshSystemHealthAsync(),
-                        RefreshSevereErrorsAsync(),
-                        RefreshIOIssuesAsync(),
-                        RefreshSchedulerIssuesAsync(),
-                        RefreshMemoryConditionsAsync(),
-                        RefreshCPUTasksAsync(),
-                        RefreshMemoryBrokerAsync(),
-                        RefreshMemoryNodeOOMAsync()
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.SystemHealth", () => RefreshSystemHealthAsync()),
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.SevereErrors", () => RefreshSevereErrorsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.IOIssues", () => RefreshIOIssuesAsync()),
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.SchedulerIssues", () => RefreshSchedulerIssuesAsync()),
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.MemoryConditions", () => RefreshMemoryConditionsAsync()),
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.CPUTasks", () => RefreshCPUTasksAsync()),
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.MemoryBroker", () => RefreshMemoryBrokerAsync()),
+                        Helpers.MethodProfiler.TimeAsync("SystemEvents.MemoryNodeOOM", () => RefreshMemoryNodeOOMAsync())
                     );
                 }
                 else

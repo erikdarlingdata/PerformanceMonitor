@@ -312,6 +312,9 @@
                     <TabItem Header="FinOps" x:Name="FinOpsTab">
                         <controls:FinOpsTab x:Name="FinOpsContent"/>
                     </TabItem>
+                    <TabItem Header="Recommendations" x:Name="RecommendationsTab">
+                        <controls:RecommendationsTab x:Name="RecommendationsContent"/>
+                    </TabItem>
                     <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
                         <TabItem.Header>
                             <StackPanel Orientation="Horizontal">

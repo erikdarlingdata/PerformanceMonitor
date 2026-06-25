@@ -1,0 +1,18 @@
+* text=auto eol=crlf
+
+# Shell scripts must stay LF (this repo uses Git Bash) — CRLF breaks them.
+*.sh text eol=lf
+
+# Explicit binary markers (prevent text mis-detection / corruption):
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.dll binary
+*.exe binary
+*.pdb binary
+*.snk binary
+*.parquet binary
+*.zip binary
+*.duckdb binary

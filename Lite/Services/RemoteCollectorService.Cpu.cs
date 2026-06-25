@@ -49,23 +49,34 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
     @ms_ticks bigint,
-    @start_time datetime2(7);
+    @start_time datetime2(7),
+    @is_linux bit = 0;
 
 SELECT
     @ms_ticks = dosi.ms_ticks,
     @start_time = dosi.sqlserver_start_time
 FROM sys.dm_os_sys_info AS dosi;
 
+/* Detect SQL Server on Linux. SystemIdle is always 0 in the SCHEDULER_MONITOR
+   ring buffer on Linux, so 100 - SystemIdle - ProcessUtilization fabricates a
+   host figure that pins total CPU at 100% (Issue #1048). No DMV exposes true host
+   CPU on Linux, so other_process is stored as NULL there. sys.dm_os_host_info is
+   2017+; referenced via sp_executesql so SQL 2016 never binds it (@is_linux = 0). */
+IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
+    EXEC sys.sp_executesql
+        N'SELECT @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
+        N'@linux bit OUTPUT', @linux = @is_linux OUTPUT;
+
 SELECT TOP (60)
     sample_time = DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSDATETIME()),
-    sqlserver_cpu_utilization = t.record.value('(Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'integer'),
+    sqlserver_cpu_utilization = x.process_utilization,
     other_process_cpu_utilization =
         CASE
-            WHEN (100 - t.record.value('(Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'integer')
-                      - t.record.value('(Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'integer')) < 0
+            WHEN @is_linux = 1
+            THEN NULL
+            WHEN (100 - x.system_idle - x.process_utilization) < 0
             THEN 0
-            ELSE 100 - t.record.value('(Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'integer')
-                     - t.record.value('(Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'integer')
+            ELSE 100 - x.system_idle - x.process_utilization
         END
 FROM
 (
@@ -75,6 +86,16 @@ FROM
     FROM sys.dm_os_ring_buffers AS dorb
     WHERE dorb.ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
 ) AS t
+CROSS APPLY
+(
+    SELECT
+        process_utilization = t.record.value('(Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'integer'),
+        system_idle = t.record.value('(Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'integer')
+) AS x
+/* Skip ring-buffer records lacking a complete SystemHealth block — their
+   XML values extract as NULL and would store NULL samples (Issue #989). */
+WHERE x.process_utilization IS NOT NULL
+AND   x.system_idle IS NOT NULL
 ORDER BY t.timestamp DESC
 OPTION(RECOMPILE);";
 
@@ -150,7 +171,8 @@ OPTION(RECOMPILE);";
                        .AppendValue(GetServerNameForStorage(server))
                        .AppendValue(sampleTime)
                        .AppendValue(reader.IsDBNull(1) ? 0 : reader.GetInt32(1))
-                       .AppendValue(reader.IsDBNull(2) ? 0 : reader.GetInt32(2))
+                       /* NULL = host/other CPU not derivable (SQL on Linux, Issue #1048) */
+                       .AppendValue(reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2))
                        .EndRow();
 
                     rowsCollected++;

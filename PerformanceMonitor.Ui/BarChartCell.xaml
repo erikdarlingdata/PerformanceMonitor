@@ -1,0 +1,37 @@
+<UserControl x:Class="PerformanceMonitor.Ui.BarChartCell"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="Root">
+    <!--
+      In-grid sparkline cell: a right-aligned value over a thin proportional fill bar
+      (bar length = Value / Maximum, where Maximum is the column max supplied by the host).
+      The fill uses star-sized grid columns so it scales with the cell width and needs no
+      width math or OS ProgressBar chrome. Accent color switches when this column is the
+      active sort. Ported from PerformanceStudio's BarChartCell.
+    -->
+    <Grid Margin="6,2,6,3">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="4"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="{Binding Text, ElementName=Root}"
+                   HorizontalAlignment="Right"
+                   VerticalAlignment="Center"/>
+
+        <Border Grid.Row="1"
+                Background="{Binding TrackBrush, ElementName=Root}"
+                CornerRadius="2">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="{Binding FillWidth, ElementName=Root}"/>
+                    <ColumnDefinition Width="{Binding RestWidth, ElementName=Root}"/>
+                </Grid.ColumnDefinitions>
+                <Rectangle Grid.Column="0"
+                           Fill="{Binding EffectiveBarBrush, ElementName=Root}"
+                           RadiusX="2" RadiusY="2"/>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

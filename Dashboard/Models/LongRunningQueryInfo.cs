@@ -18,5 +18,6 @@ namespace PerformanceMonitorDashboard.Models
         public long Writes { get; set; }
         public string? WaitType { get; set; }
         public int? BlockingSessionId { get; set; }
+        public string? QueryHash { get; set; }
     }
 }

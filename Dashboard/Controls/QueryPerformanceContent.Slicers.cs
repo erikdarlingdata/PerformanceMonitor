@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitorDashboard.Models;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -59,7 +60,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         // ── Query Stats Slicer ──
 
-        private List<Models.TimeSliceBucket>? _queryStatsSlicerData;
+        private List<TimeSliceBucket>? _queryStatsSlicerData;
         private string _queryStatsSlicerMetric = "TotalCpu";
 
         private async Task LoadQueryStatsSlicerAsync()
@@ -91,7 +92,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         // ── Procedure Stats Slicer ──
 
-        private List<Models.TimeSliceBucket>? _procStatsSlicerData;
+        private List<TimeSliceBucket>? _procStatsSlicerData;
         private string _procStatsSlicerMetric = "TotalCpu";
 
         private async Task LoadProcStatsSlicerAsync()
@@ -123,7 +124,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         // ── Query Store Slicer ──
 
-        private List<Models.TimeSliceBucket>? _queryStoreSlicerData;
+        private List<TimeSliceBucket>? _queryStoreSlicerData;
         private string _queryStoreSlicerMetric = "TotalCpu";
 
         private async Task LoadQueryStoreSlicerAsync()

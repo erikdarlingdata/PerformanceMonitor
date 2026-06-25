@@ -503,7 +503,7 @@ ELSE
 BEGIN
     SET @test_passed = 0;
     PRINT '  ❌ FAIL: Procedure config.check_hung_collector_job does not exist';
-    PRINT '         Run install/34a_hung_job_monitor.sql';
+    PRINT '         Run install/44_hung_job_monitor.sql';
 END;
 
 PRINT '';
@@ -586,7 +586,7 @@ ELSE
 BEGIN
     SET @test_passed = 0;
     PRINT '  ❌ FAIL: SQL Agent job does not exist';
-    PRINT '         Run install/35_create_agent_jobs.sql';
+    PRINT '         Run install/45_create_agent_jobs.sql';
 END;
 
 PRINT '';
@@ -615,7 +615,7 @@ ELSE
 BEGIN
     SET @test_passed = 0;
     PRINT '  ❌ FAIL: Collection job does not exist';
-    PRINT '         Run install/35_create_agent_jobs.sql';
+    PRINT '         Run install/45_create_agent_jobs.sql';
 END;
 
 PRINT '';
@@ -748,7 +748,7 @@ BEGIN
     PRINT '  Next Steps:';
     PRINT '    1. Monitor is running automatically every 5 minutes';
     PRINT '    2. Collection job is protected with 30-second LOCK_TIMEOUT';
-    PRINT '    3. Review install/98_test_hung_monitor.sql for comprehensive tests';
+    PRINT '    3. Review install/97_test_procedures.sql for comprehensive tests';
     PRINT '    4. Check config.collection_log periodically for hung job alerts';
 END;
 ELSE

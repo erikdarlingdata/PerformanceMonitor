@@ -22,6 +22,85 @@ namespace PerformanceMonitorDashboard.Services
         // ============================================
 
         /// <summary>
+        /// Returns the Availability Group role of the connected instance: "Primary",
+        /// "Secondary", or "Standalone". "Standalone" is also returned for non-AG
+        /// instances and any platform where the AG state DMVs are unavailable
+        /// (e.g. Azure SQL Database), so callers can treat it as "not a secondary".
+        /// </summary>
+        private async Task<string> GetAgReplicaRoleAsync(SqlConnection connection)
+        {
+            /* The DMV is referenced only inside dynamic SQL guarded by an OBJECT_ID
+               check, so the outer batch still compiles on platforms without it. */
+            const string sql = @"
+DECLARE @role nvarchar(20) = N'Standalone';
+IF CONVERT(int, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
+   AND OBJECT_ID(N'sys.dm_hadr_availability_replica_states') IS NOT NULL
+BEGIN
+    DECLARE @detected nvarchar(20);
+    EXEC sys.sp_executesql N'
+        SELECT @r =
+            CASE
+                WHEN MAX(CASE WHEN ars.role = 1 THEN 1 ELSE 0 END) = 1 THEN N''Primary''
+                WHEN MAX(CASE WHEN ars.role = 2 THEN 1 ELSE 0 END) = 1 THEN N''Secondary''
+                ELSE N''Standalone''
+            END
+        FROM sys.dm_hadr_availability_replica_states AS ars
+        WHERE ars.is_local = 1;',
+        N'@r nvarchar(20) OUTPUT', @r = @detected OUTPUT;
+    SET @role = ISNULL(@detected, N'Standalone');
+END;
+SELECT @role;";
+            try
+            {
+                using var command = new SqlCommand(sql, connection) { CommandTimeout = 30 };
+                return await command.ExecuteScalarAsync() as string ?? "Standalone";
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[{ServerLabel}] AG replica role detection failed: {ex.Message}", ex);
+                return "Standalone";
+            }
+        }
+
+        /// <summary>
+        /// Returns the number of Always On Availability Groups hosted on this instance that
+        /// use advanced features (i.e. are NOT Basic Availability Groups). Advanced AGs are
+        /// Enterprise-only; Basic AGs run on Standard Edition. Returns 0 for non-AG instances
+        /// or any platform where the AG catalog views are unavailable.
+        /// </summary>
+        private async Task<int> GetAdvancedAgCountAsync(SqlConnection connection)
+        {
+            /* sys.availability_groups returns one row per AG the local instance hosts a
+               replica for; basic_features = 0 marks an AG that uses advanced
+               (Enterprise-only) features rather than a Basic AG. The view is referenced
+               only inside sp_executesql, guarded by IsHadrEnabled + OBJECT_ID, so the
+               batch stays safe where the view doesn't exist (e.g. Azure SQL Database).
+               basic_features ships in every supported version (2016+), so no
+               column-existence check is needed. */
+            const string sql = @"
+DECLARE @count int = 0;
+IF CONVERT(int, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
+   AND OBJECT_ID(N'sys.availability_groups') IS NOT NULL
+BEGIN
+    EXEC sys.sp_executesql
+        N'SELECT @c = COUNT(*) FROM sys.availability_groups WHERE basic_features = 0;',
+        N'@c int OUTPUT', @c = @count OUTPUT;
+END;
+SELECT @count;";
+            try
+            {
+                using var command = new SqlCommand(sql, connection) { CommandTimeout = 30 };
+                var result = await command.ExecuteScalarAsync();
+                return result != null && result != DBNull.Value ? Convert.ToInt32(result) : 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[{ServerLabel}] Advanced AG detection failed: {ex.Message}", ex);
+                return 0;
+            }
+        }
+
+        /// <summary>
         /// Runs all Phase 1 recommendation checks and returns a consolidated list.
         /// </summary>
         public async Task<List<FinOpsRecommendation>> GetFinOpsRecommendationsAsync(decimal monthlyCost)
@@ -49,11 +128,48 @@ namespace PerformanceMonitorDashboard.Services
 
                 if (edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
                 {
+                    var agRole = await GetAgReplicaRoleAsync(connection);
+
+                    /* Standard Edition offers only Basic Availability Groups, so detect
+                       advanced (non-basic) AGs to caveat any edition-downgrade guidance:
+                       a downgrade would force the workload onto Basic AG limitations (#1085).
+                       Skip the probe on a secondary, which gets its own note below. */
+                    var advancedAgCount = agRole == "Secondary" ? 0 : await GetAdvancedAgCountAsync(connection);
+                    string agDowngradeCaveat = advancedAgCount > 0
+                        ? $" Note: this instance hosts {advancedAgCount} Always On Availability Group" +
+                          (advancedAgCount == 1 ? "" : "s") + " using advanced features. Standard Edition " +
+                          "supports only Basic Availability Groups, which are limited to two replicas, a single " +
+                          "database per group, and provide no readable secondary or backups on the secondary " +
+                          "(see https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/basic-availability-groups-always-on-availability-groups#limitations). " +
+                          "Factor this into any downgrade decision."
+                        : "";
+
+                    if (agRole == "Secondary")
+                    {
+                        /* On an Availability Group secondary, a "downgrade to Standard
+                           to save money" recommendation is misleading: every replica in
+                           an AG must run the same SQL Server edition, so the decision
+                           belongs to the AG as a whole and must be evaluated on the
+                           primary. Emit an informational note instead and skip the
+                           savings estimates (#980). */
+                        recommendations.Add(new FinOpsRecommendation
+                        {
+                            Category = "Licensing",
+                            Severity = "Low",
+                            Confidence = "High",
+                            Finding = "Enterprise Edition — Availability Group secondary replica",
+                            Detail = "This instance is currently a secondary replica in an Availability Group. " +
+                                     "Every replica in an AG must run the same SQL Server edition, so edition and " +
+                                     "licensing decisions apply to the whole group and should be evaluated on the " +
+                                     "primary replica. A secondary used only for failover may also be covered by " +
+                                     "Software Assurance rather than separately licensed."
+                        });
+                    }
                     // SQL Server 2019 (major version 15) moved TDE to Standard Edition.
                     // On 2019+, dm_db_persisted_sku_features won't report TDE since it's
                     // no longer Enterprise-restricted — so we skip the TDE-specific check
                     // and give version-appropriate guidance instead.
-                    if (majorVersion >= 15)
+                    else if (majorVersion >= 15)
                     {
                         // 2019+: Most features that were Enterprise-only moved to Standard
                         // in 2016 SP1, and TDE moved in 2019. Very few Enterprise-only
@@ -62,13 +178,13 @@ namespace PerformanceMonitorDashboard.Services
                         {
                             Category = "Licensing",
                             Severity = "High",
-                            Confidence = "Medium",
+                            Confidence = advancedAgCount > 0 ? "Low" : "Medium",
                             Finding = "Enterprise Edition may not be required",
                             Detail = "Starting with SQL Server 2019, most previously Enterprise-only features " +
                                      "(including TDE, compression, partitioning, and columnstore) are available " +
                                      "in Standard Edition. Review whether remaining Enterprise-only features " +
                                      "(such as Always On availability groups with multiple secondaries) are in use " +
-                                     "before considering a downgrade to Standard Edition.",
+                                     "before considering a downgrade to Standard Edition." + agDowngradeCaveat,
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
                         });
                     }
@@ -114,11 +230,14 @@ END;", connection);
                             {
                                 Category = "Licensing",
                                 Severity = "High",
-                                Confidence = "High",
-                                Finding = "Enterprise Edition with no Enterprise-only features detected",
+                                Confidence = advancedAgCount > 0 ? "Medium" : "High",
+                                Finding = advancedAgCount > 0
+                                    ? "Enterprise Edition — review Availability Group requirements before downgrading"
+                                    : "Enterprise Edition with no Enterprise-only features detected",
                                 Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
                                          "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
-                                         "Review whether Standard Edition would meet workload requirements for potential license savings.",
+                                         "Review whether Standard Edition would meet workload requirements for potential license savings." +
+                                         agDowngradeCaveat,
                                 EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
                             });
                         }

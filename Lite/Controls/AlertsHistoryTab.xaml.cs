@@ -17,10 +17,13 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -34,6 +37,13 @@ public partial class AlertsHistoryTab : UserControl
     private readonly DispatcherTimer _staleDataTimer;
 
     public MuteRuleService? MuteRuleService { get; set; }
+
+    /// <summary>
+    /// Raised after "Dismiss All" clears the visible alerts, so the host can acknowledge the
+    /// matching server tab badge(s). The argument is the server_id filter in effect at the time
+    /// (null = all servers were shown). See issue #1092.
+    /// </summary>
+    public event Action<int?>? AlertsDismissed;
 
     public AlertsHistoryTab()
     {
@@ -69,7 +79,7 @@ public partial class AlertsHistoryTab : UserControl
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
-            var alerts = await _dataService.GetAlertHistoryAsync(hoursBack, 500, serverId);
+            var alerts = await System.Threading.Tasks.Task.Run(() => _dataService.GetAlertHistoryAsync(hoursBack, 500, serverId));
 
             if (_filterManager != null)
                 _filterManager.UpdateData(alerts);
@@ -302,12 +312,18 @@ public partial class AlertsHistoryTab : UserControl
 
         try
         {
-            var affected = await _dataService.DismissAlertsAsync(liveAlerts);
+            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAlertsAsync(liveAlerts));
             if (affected < liveAlerts.Count && App.LogAlertDismissals)
             {
                 AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {liveAlerts.Count} live alert(s) were updated");
             }
             await LoadAlertsAsync();
+
+            /* Clear the matching server tab badge(s) for the servers whose alerts were dismissed,
+               matching Dismiss All's behavior (issue #1092). Selected rows can span servers when
+               the filter is "all", so acknowledge each distinct server rather than the filter. */
+            foreach (var dismissedServerId in liveAlerts.Select(a => a.ServerId).Distinct())
+                AlertsDismissed?.Invoke(dismissedServerId);
         }
         catch (TimeoutException)
         {
@@ -360,12 +376,15 @@ public partial class AlertsHistoryTab : UserControl
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
-            var affected = await _dataService.DismissAllVisibleAlertsAsync(hoursBack, serverId);
+            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsAsync(hoursBack, serverId));
             if (affected < liveCount && App.LogAlertDismissals)
             {
                 AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {liveCount} live alert(s) were updated");
             }
             await LoadAlertsAsync();
+
+            /* Clear the matching server tab badge(s) so the indicator matches the cleared list (issue #1092). */
+            AlertsDismissed?.Invoke(serverId);
         }
         catch (TimeoutException)
         {

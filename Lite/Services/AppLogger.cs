@@ -24,6 +24,7 @@ public static class AppLogger
     private static readonly Timer s_flushTimer;
     private static string s_logDirectory = "";
     private static bool s_initialized;
+    private static readonly object s_flushLock = new();
 
     static AppLogger()
     {
@@ -111,23 +112,29 @@ public static class AppLogger
     {
         if (!s_initialized || s_buffer.IsEmpty) return;
 
-        try
+        /* Serialize flushes: the 5s timer and Shutdown() can call Flush concurrently, and two
+           File.AppendAllText calls to the same file throw — which the catch below would swallow,
+           silently dropping the lines already dequeued from the buffer. */
+        lock (s_flushLock)
         {
-            var sb = new StringBuilder();
-            while (s_buffer.TryDequeue(out var line))
+            try
             {
-                sb.AppendLine(line);
-            }
+                var sb = new StringBuilder();
+                while (s_buffer.TryDequeue(out var line))
+                {
+                    sb.AppendLine(line);
+                }
 
-            if (sb.Length > 0)
-            {
-                var logFile = Path.Combine(s_logDirectory, $"lite_{DateTime.Now:yyyyMMdd}.log");
-                File.AppendAllText(logFile, sb.ToString());
+                if (sb.Length > 0)
+                {
+                    var logFile = Path.Combine(s_logDirectory, $"lite_{DateTime.Now:yyyyMMdd}.log");
+                    File.AppendAllText(logFile, sb.ToString());
+                }
             }
-        }
-        catch
-        {
-            /* Don't let logging failures crash the app */
+            catch
+            {
+                /* Don't let logging failures crash the app */
+            }
         }
     }
 

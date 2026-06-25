@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorDashboard.Helpers;
 
 namespace PerformanceMonitorDashboard.Analysis;
@@ -168,9 +169,11 @@ public class SqlServerBaselineProvider
                     Mean = mean,
                     StdDev = stddev,
                     SampleCount = count,
-                    Tier = count >= RestoreThreshold ? BaselineTier.Full
-                         : count >= CollapseThreshold ? BaselineTier.Full
-                         : BaselineTier.HourOnly
+                    // Every bucket here is a full (hour, day-of-week) bucket; the HourOnly/Flat
+                    // tiers are assigned only on the collapse/flat paths below. A sparse full
+                    // bucket is still Full, just low-sample. (Was a copy-paste of two identical
+                    // Full branches that mislabeled sparse buckets HourOnly in baseline_tier.)
+                    Tier = BaselineTier.Full
                 };
             }
 
@@ -387,6 +390,25 @@ FROM per_interval
 GROUP BY DATEPART(HOUR, minute_bucket),
          (DATEPART(WEEKDAY, minute_bucket) + @@DATEFIRST - 1) % 7;",
 
+            // Point-in-time metric (memory pressure %) — no restart exclusion needed.
+            // Pressure = total memory SQL Server has acquired (sum of clerks) / target memory it can use.
+            // collect.memory_stats columns differ from Lite's perfmon-based view:
+            //   Lite total_server_memory_mb  -> Dashboard total_memory_mb (SUM of clerk pages_kb)
+            //   Lite target_server_memory_mb -> Dashboard committed_target_memory_mb (committed_target_kb)
+            SqlServerMetricNames.Memory => @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT DATEPART(HOUR, collection_time) AS hour_of_day,
+       (DATEPART(WEEKDAY, collection_time) + @@DATEFIRST - 1) % 7 AS day_of_week,
+       AVG(CAST(total_memory_mb AS FLOAT) / NULLIF(committed_target_memory_mb, 0) * 100) AS mean_val,
+       STDEV(CAST(total_memory_mb AS FLOAT) / NULLIF(committed_target_memory_mb, 0) * 100) AS stddev_val,
+       COUNT(*) AS sample_count
+FROM collect.memory_stats
+WHERE collection_time >= @windowStart AND collection_time < @windowEnd
+AND   committed_target_memory_mb > 0
+GROUP BY DATEPART(HOUR, collection_time),
+         (DATEPART(WEEKDAY, collection_time) + @@DATEFIRST - 1) % 7;",
+
             _ => null
         };
     }
@@ -522,4 +544,5 @@ public static class SqlServerMetricNames
     public const string IoLatency = "io_latency";
     public const string Blocking = "blocking";
     public const string Deadlock = "deadlock";
+    public const string Memory = "memory";
 }

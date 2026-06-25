@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -22,7 +23,7 @@ public sealed class McpServerInfoTools
         {
             var row = await dataService.GetLatestServerPropertiesAsync(resolved.Value.ServerId);
             if (row == null)
-                return "No server properties available. The properties collector may not have run yet.";
+                return McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
@@ -64,7 +65,7 @@ public sealed class McpServerInfoTools
         {
             var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.Value.ServerId);
             if (rows.Count == 0)
-                return "No database size data available. The size collector may not have run yet.";
+                return McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {

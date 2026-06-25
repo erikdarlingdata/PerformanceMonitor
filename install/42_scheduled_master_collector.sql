@@ -121,7 +121,20 @@ BEGIN
                 sql_version =
                     CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')) + N' - ' +
                     CONVERT(nvarchar(128), SERVERPROPERTY('ProductLevel')),
-                edition = CONVERT(nvarchar(128), SERVERPROPERTY('Edition')),
+                edition =
+                    /* Azure SQL DB reports the legacy 'SQL Azure' for SERVERPROPERTY('Edition');
+                       store the actual product name + service tier instead. */
+                    CASE
+                        WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+                        THEN N'Azure SQL Database'
+                             + ISNULL(N' (' +
+                                 CASE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Edition'))
+                                     WHEN N'GeneralPurpose'   THEN N'General Purpose'
+                                     WHEN N'BusinessCritical' THEN N'Business Critical'
+                                     ELSE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Edition'))
+                                 END + N')', N'')
+                        ELSE CONVERT(nvarchar(128), SERVERPROPERTY('Edition'))
+                    END,
                 physical_memory_mb = osi.physical_memory_kb / 1024,
                 cpu_count = osi.cpu_count,
                 environment_type =
@@ -261,7 +274,13 @@ BEGIN
                 END;
                 ELSE IF @collector_name = N'trace_management_collector'
                 BEGIN
-                    EXECUTE collect.trace_management_collector @action = N'RESTART', @debug = @debug;
+                    /*
+                    Issue #972: START, not RESTART. START is idempotent - it
+                    leaves an already-running trace alone. RESTART tore the
+                    trace down and built a fresh timestamped one every cycle,
+                    orphaning the previous trace's .trc files on disk.
+                    */
+                    EXECUTE collect.trace_management_collector @action = N'START', @debug = @debug;
                 END;
                 ELSE IF @collector_name = N'trace_analysis_collector'
                 BEGIN
@@ -318,6 +337,10 @@ BEGIN
                 ELSE IF @collector_name = N'database_size_stats_collector'
                 BEGIN
                     EXECUTE collect.database_size_stats_collector @debug = @debug;
+                END;
+                ELSE IF @collector_name = N'index_object_stats_collector'
+                BEGIN
+                    EXECUTE collect.index_object_stats_collector @debug = @debug;
                 END;
                 ELSE IF @collector_name = N'server_properties_collector'
                 BEGIN

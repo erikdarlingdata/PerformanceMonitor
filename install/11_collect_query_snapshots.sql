@@ -378,7 +378,7 @@ BEGIN
 
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Collected %d query snapshots', 0, 1, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'Collected %I64d query snapshots', 0, 1, @rows_collected) WITH NOWAIT;
         END;
 
     END TRY

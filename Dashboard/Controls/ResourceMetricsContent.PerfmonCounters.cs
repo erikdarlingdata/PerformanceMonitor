@@ -23,6 +23,8 @@ using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 using PerformanceMonitorDashboard.Helpers;
 using ScottPlot.WPF;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 
 namespace PerformanceMonitorDashboard.Controls
@@ -301,9 +303,8 @@ namespace PerformanceMonitorDashboard.Controls
                     var (xs, ys) = TabHelpers.FillTimeSeriesGaps(timePoints, values);
 
                     var scatter = PerfmonCountersChart.Plot.Add.Scatter(xs, ys);
-                    scatter.LineWidth = 2;
-                    scatter.MarkerSize = 5; // Show small markers to ensure visibility
                     scatter.Color = colors[colorIndex % colors.Length];
+                    ChartStyle.StyleScatter(scatter);
                     scatter.LegendText = counter.CounterName;
                     _perfmonHover?.Add(scatter, counter.CounterName);
 
@@ -321,7 +322,7 @@ namespace PerformanceMonitorDashboard.Controls
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = PerfmonCountersChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 

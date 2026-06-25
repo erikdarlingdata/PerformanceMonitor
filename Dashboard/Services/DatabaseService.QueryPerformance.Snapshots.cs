@@ -201,7 +201,9 @@ namespace PerformanceMonitorDashboard.Services
                     using var command = new SqlCommand(query, connection);
                     command.CommandTimeout = 120;
 
-                    command.Parameters.Add(new SqlParameter("@collectionTime", SqlDbType.DateTime2) { Value = collectionTime });
+                    // collection_time is legacy datetime(3); a DateTime2 parameter fails the exact "="
+                    // match on precision and returns zero rows ("no plan found"). Match the column type.
+                    command.Parameters.Add(new SqlParameter("@collectionTime", SqlDbType.DateTime) { Value = collectionTime });
                     command.Parameters.Add(new SqlParameter("@sessionId", SqlDbType.SmallInt) { Value = sessionId });
 
                     var result = await command.ExecuteScalarAsync();

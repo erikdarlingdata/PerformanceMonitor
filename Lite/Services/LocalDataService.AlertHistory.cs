@@ -41,7 +41,8 @@ SELECT
     send_error,
     muted,
     detail_text,
-    source
+    source,
+    context_json
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   server_id = $2
@@ -67,7 +68,8 @@ SELECT
     send_error,
     muted,
     detail_text,
-    source
+    source,
+    context_json
 FROM v_config_alert_log
 WHERE alert_time >= $1
 AND   dismissed = FALSE
@@ -94,7 +96,8 @@ LIMIT $2";
                 SendError = reader.IsDBNull(8) ? null : reader.GetString(8),
                 Muted = !reader.IsDBNull(9) && reader.GetBoolean(9),
                 DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
-                Source = reader.IsDBNull(11) ? "live" : reader.GetString(11)
+                Source = reader.IsDBNull(11) ? "live" : reader.GetString(11),
+                ContextJson = reader.IsDBNull(12) ? null : reader.GetString(12)
             });
         }
 
@@ -404,6 +407,7 @@ public class AlertHistoryRow
     public bool Muted { get; set; }
     public string? DetailText { get; set; }
     public string Source { get; set; } = "live";
+    public string? ContextJson { get; set; }
 
     public bool IsArchived => string.Equals(Source, "archive", StringComparison.OrdinalIgnoreCase);
 

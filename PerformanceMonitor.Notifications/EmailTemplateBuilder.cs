@@ -1,0 +1,333 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Net;
+using System.Text;
+
+namespace PerformanceMonitor.Notifications;
+
+/// <summary>
+/// Builds HTML and plain-text email bodies for alert notifications.
+/// Static helper — no state. Per-app branding (edition label + optional snooze
+/// hint) is supplied by the caller via <see cref="AlertBranding"/>.
+/// </summary>
+internal static class EmailTemplateBuilder
+{
+    private const string FontStack = "-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+
+    /// <summary>
+    /// Builds both HTML and plain-text bodies for an alert email.
+    /// </summary>
+    public static (string HtmlBody, string PlainTextBody) BuildAlertEmail(
+        string metricName,
+        string serverName,
+        string currentValue,
+        string thresholdValue,
+        int emailCooldownMinutes,
+        AlertBranding branding,
+        AlertContext? context = null)
+    {
+        var utcNow = DateTime.UtcNow;
+        var localNow = DateTime.Now;
+        var (accentColor, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+
+        var html = BuildHtmlBody(metricName, serverName, currentValue,
+            thresholdValue, utcNow, localNow, accentColor, badgeText, branding, context: context, emailCooldownMinutes: emailCooldownMinutes);
+
+        var plain = BuildPlainTextBody(metricName, serverName, currentValue,
+            thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context);
+
+        return (html, plain);
+    }
+
+    /// <summary>
+    /// Builds both HTML and plain-text bodies for a test email.
+    /// </summary>
+    public static (string HtmlBody, string PlainTextBody) BuildTestEmail(AlertBranding branding)
+    {
+        var localNow = DateTime.Now;
+        const string accentColor = "#2eaef1";
+        const string badgeText = "TEST";
+
+        var html = BuildHtmlBody("Test Email", "", "",
+            "", DateTime.UtcNow, localNow, accentColor, badgeText, branding, isTest: true);
+
+        var plain = $"{branding.EditionName}\r\n" +
+                    $"-------------------------------\r\n" +
+                    $"This is a test email.\r\n" +
+                    $"Sent at: {localNow:yyyy-MM-dd HH:mm:ss}\r\n";
+
+        return (html, plain);
+    }
+
+    private static string BuildHtmlBody(
+        string metricName,
+        string serverName,
+        string currentValue,
+        string thresholdValue,
+        DateTime utcNow,
+        DateTime localNow,
+        string accentColor,
+        string badgeText,
+        AlertBranding branding,
+        bool isTest = false,
+        AlertContext? context = null,
+        int emailCooldownMinutes = 15)
+    {
+        var sb = new StringBuilder(2048);
+
+        /* HTML document start */
+        sb.Append("<!DOCTYPE html>");
+        sb.Append("<html lang=\"en\">");
+        sb.Append("<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"></head>");
+        sb.Append("<body style=\"margin:0;padding:0;background-color:#1a1a1a;\">");
+
+        /* Outer wrapper table for centering */
+        sb.Append("<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\" style=\"background-color:#1a1a1a;\">");
+        sb.Append("<tr><td align=\"center\" style=\"padding:24px 12px;\">");
+
+        /* Inner content table - 600px */
+        sb.Append("<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"600\" style=\"background-color:#252525;border-radius:6px;overflow:hidden;\">");
+
+        /* Accent bar */
+        sb.Append($"<tr><td style=\"height:4px;background-color:{accentColor};font-size:0;line-height:0;\">&nbsp;</td></tr>");
+
+        /* Header */
+        sb.Append("<tr><td style=\"padding:20px 24px 12px 24px;\">");
+        sb.Append($"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\">");
+        sb.Append("<tr><td>");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:18px;font-weight:600;color:#FFFFFF;\">SQL Server Performance Monitor</span><br>");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:12px;color:#E4E6EB;\">{WebUtility.HtmlEncode(branding.EditionName)}</span>");
+        sb.Append("</td></tr></table>");
+        sb.Append("</td></tr>");
+
+        /* Separator */
+        sb.Append("<tr><td style=\"padding:0 24px;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"height:1px;background-color:#404040;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>");
+
+        /* Badge + metric name */
+        sb.Append("<tr><td style=\"padding:16px 24px 8px 24px;\">");
+        sb.Append($"<span style=\"display:inline-block;font-family:{FontStack};font-size:11px;font-weight:700;color:#FFFFFF;background-color:{accentColor};padding:3px 10px;border-radius:3px;letter-spacing:0.5px;\">{WebUtility.HtmlEncode(badgeText)}</span>");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:16px;font-weight:600;color:#FFFFFF;padding-left:10px;\">{WebUtility.HtmlEncode(metricName)}</span>");
+        sb.Append("</td></tr>");
+
+        /* Data rows */
+        sb.Append("<tr><td style=\"padding:8px 24px 20px 24px;\">");
+        sb.Append($"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\" style=\"background-color:#333333;border-radius:4px;\">");
+
+        if (isTest)
+        {
+            AppendDataRow(sb, "Status", "SMTP configuration is working correctly", false);
+            AppendDataRow(sb, "Sent at", localNow.ToString("yyyy-MM-dd HH:mm:ss"), true);
+        }
+        else
+        {
+            AppendDataRow(sb, "Server", serverName, false);
+            AppendDataRow(sb, "Current Value", currentValue, false);
+            AppendDataRow(sb, "Threshold", thresholdValue, false);
+            AppendDataRow(sb, "Time (UTC)", utcNow.ToString("yyyy-MM-dd HH:mm:ss"), false);
+            AppendDataRow(sb, "Time (Local)", localNow.ToString("yyyy-MM-dd HH:mm:ss"), true);
+        }
+
+        sb.Append("</table>");
+        sb.Append("</td></tr>");
+
+        /* Detail section (blocking chains, deadlock participants) */
+        if (context?.Details?.Count > 0)
+        {
+            AppendDetailSection(sb, context);
+        }
+
+        /* Attachment note */
+        if (!string.IsNullOrEmpty(context?.AttachmentFileName))
+        {
+            sb.Append("<tr><td style=\"padding:4px 24px 12px 24px;\">");
+            sb.Append($"<span style=\"font-family:{FontStack};font-size:12px;color:#B0B0B0;\">&#128206; Attached: {WebUtility.HtmlEncode(context.AttachmentFileName)}</span>");
+            sb.Append("</td></tr>");
+        }
+
+        /* Footer */
+        sb.Append("<tr><td style=\"padding:0 24px;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"height:1px;background-color:#404040;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>");
+        sb.Append("<tr><td style=\"padding:12px 24px 16px 24px;\">");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:11px;color:#E4E6EB;\">");
+        sb.Append($"Sent by {WebUtility.HtmlEncode(branding.EditionName)}");
+        if (!isTest)
+        {
+            sb.Append($" &middot; {emailCooldownMinutes}-minute cooldown between repeat alerts");
+        }
+        sb.Append("</span>");
+        if (!isTest && branding.SnoozeHint is not null)
+        {
+            sb.Append($"<br><span style=\"font-family:{FontStack};font-size:11px;color:#B0B0B0;\">{WebUtility.HtmlEncode(branding.SnoozeHint)}</span>");
+        }
+        sb.Append("</td></tr>");
+
+        /* Close inner table */
+        sb.Append("</table>");
+
+        /* Close outer wrapper */
+        sb.Append("</td></tr></table>");
+        sb.Append("</body></html>");
+
+        return sb.ToString();
+    }
+
+    private static void AppendDataRow(StringBuilder sb, string label, string value, bool isLast)
+    {
+        var borderStyle = isLast ? "" : "border-bottom:1px solid #404040;";
+        sb.Append("<tr>");
+        sb.Append($"<td style=\"padding:10px 16px;width:120px;{borderStyle}font-family:{FontStack};font-size:13px;color:#B0B0B0;vertical-align:top;\">{WebUtility.HtmlEncode(label)}</td>");
+        sb.Append($"<td style=\"padding:10px 16px;{borderStyle}font-family:{FontStack};font-size:13px;color:#FFFFFF;\">{WebUtility.HtmlEncode(value)}</td>");
+        sb.Append("</tr>");
+    }
+
+    private static void AppendDetailSection(StringBuilder sb, AlertContext context)
+    {
+        /* Separator + heading */
+        sb.Append("<tr><td style=\"padding:0 24px;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"height:1px;background-color:#404040;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>");
+        sb.Append("<tr><td style=\"padding:12px 24px 4px 24px;\">");
+        sb.Append($"<span style=\"font-family:{FontStack};font-size:13px;font-weight:600;color:#E4E6EB;letter-spacing:0.5px;\">DETAILS</span>");
+        sb.Append("</td></tr>");
+
+        foreach (var item in context.Details)
+        {
+            /* Detail item heading */
+            sb.Append("<tr><td style=\"padding:8px 24px 4px 24px;\">");
+            sb.Append($"<span style=\"font-family:{FontStack};font-size:14px;font-weight:600;color:#E0E0E0;\">{WebUtility.HtmlEncode(item.Heading)}</span>");
+            sb.Append("</td></tr>");
+
+            if (item.IsCodeBlock && !string.IsNullOrEmpty(item.Body))
+            {
+                /* Copy-paste code block (remediation T-SQL) — monospace, matches AppendQueryRow style. */
+                sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
+                sb.Append("<div style=\"background-color:#333333;border-radius:4px;padding:10px 16px;\">");
+                sb.Append($"<pre style=\"margin:0;font-family:'Courier New',Consolas,monospace;font-size:12px;color:#E0E0E0;white-space:pre-wrap;word-break:break-all;\">{WebUtility.HtmlEncode(item.Body)}</pre>");
+                sb.Append("</div>");
+                sb.Append("</td></tr>");
+            }
+            else if (!string.IsNullOrEmpty(item.Body))
+            {
+                /* Prose paragraphs (advice Investigation / Remediation), one <p> per blank-line chunk. */
+                sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
+                foreach (var para in item.Body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+                {
+                    sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#E0E0E0;line-height:1.5;\">{WebUtility.HtmlEncode(para)}</p>");
+                }
+                sb.Append("</td></tr>");
+            }
+            else
+            {
+                /* Detail item fields */
+                sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
+                sb.Append($"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\" style=\"background-color:#333333;border-radius:4px;\">");
+
+                for (int i = 0; i < item.Fields.Count; i++)
+                {
+                    var (label, value) = item.Fields[i];
+                    bool isLast = i == item.Fields.Count - 1;
+                    bool isQuery = label.Contains("Query") || label.Contains("SQL");
+
+                    if (isQuery && !string.IsNullOrEmpty(value))
+                    {
+                        AppendQueryRow(sb, label, value, isLast);
+                    }
+                    else
+                    {
+                        AppendDataRow(sb, label, value, isLast);
+                    }
+                }
+
+                sb.Append("</table>");
+                sb.Append("</td></tr>");
+            }
+        }
+    }
+
+    private static void AppendQueryRow(StringBuilder sb, string label, string value, bool isLast)
+    {
+        var borderStyle = isLast ? "" : "border-bottom:1px solid #404040;";
+        sb.Append("<tr>");
+        sb.Append($"<td style=\"padding:10px 16px;width:120px;{borderStyle}font-family:{FontStack};font-size:13px;color:#B0B0B0;vertical-align:top;\">{WebUtility.HtmlEncode(label)}</td>");
+        sb.Append($"<td style=\"padding:10px 16px;{borderStyle}\">");
+        sb.Append($"<pre style=\"margin:0;font-family:'Courier New',Consolas,monospace;font-size:12px;color:#E0E0E0;white-space:pre-wrap;word-break:break-all;\">{WebUtility.HtmlEncode(value)}</pre>");
+        sb.Append("</td></tr>");
+    }
+
+    private static string BuildPlainTextBody(
+        string metricName,
+        string serverName,
+        string currentValue,
+        string thresholdValue,
+        DateTime utcNow,
+        DateTime localNow,
+        int emailCooldownMinutes,
+        AlertBranding branding,
+        AlertContext? context = null)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"{branding.EditionName} Alert\r\n");
+        sb.Append($"-------------------------------\r\n");
+        sb.Append($"Server: {serverName}\r\n");
+        sb.Append($"Metric: {metricName}\r\n");
+        sb.Append($"Current Value: {currentValue}\r\n");
+        sb.Append($"Threshold: {thresholdValue}\r\n");
+        sb.Append($"Time (UTC): {utcNow:yyyy-MM-dd HH:mm:ss}\r\n");
+        sb.Append($"Time (Local): {localNow:yyyy-MM-dd HH:mm:ss}\r\n");
+
+        if (context?.Details?.Count > 0)
+        {
+            sb.Append($"\r\n--- Details ---\r\n");
+            foreach (var item in context.Details)
+            {
+                sb.Append($"\r\n  {item.Heading}\r\n");
+
+                if (item.IsCodeBlock && !string.IsNullOrEmpty(item.Body))
+                {
+                    /* Fenced block for the copy-paste remediation T-SQL. */
+                    sb.Append("  ```\r\n");
+                    foreach (var line in item.Body.Replace("\r\n", "\n").Split('\n'))
+                    {
+                        sb.Append($"  {line}\r\n");
+                    }
+                    sb.Append("  ```\r\n");
+                }
+                else if (!string.IsNullOrEmpty(item.Body))
+                {
+                    /* Prose paragraphs (advice), one indented chunk per blank-line break. */
+                    foreach (var para in item.Body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        sb.Append($"  {para}\r\n");
+                    }
+                }
+                else
+                {
+                    foreach (var (label, value) in item.Fields)
+                    {
+                        sb.Append($"  {label}: {value}\r\n");
+                    }
+                }
+            }
+        }
+
+        if (!string.IsNullOrEmpty(context?.AttachmentFileName))
+        {
+            sb.Append($"\r\nAttached: {context.AttachmentFileName}\r\n");
+        }
+
+        /* Footer — mirrors the HTML body's cooldown disclosure (BuildHtmlBody). The HTML and
+           plain-text bodies are maintained in parallel; a footer change must touch both. */
+        sb.Append($"\r\nSent by {branding.EditionName} - {emailCooldownMinutes}-minute cooldown between repeat alerts\r\n");
+
+        if (branding.SnoozeHint is not null)
+        {
+            sb.Append($"\r\n{branding.SnoozeHint}\r\n");
+        }
+
+        return sb.ToString();
+    }
+}

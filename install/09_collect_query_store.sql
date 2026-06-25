@@ -662,8 +662,12 @@ BEGIN
                     avg_tempdb_space_used,
                     min_tempdb_space_used,
                     max_tempdb_space_used,
-                    plan_type,
+                    /* Order must match the dynamic SELECT, which is bound by ordinal by
+                       INSERT...EXEC: the 2017+ block emits plan_forcing_type before the 2022+
+                       block emits plan_type. Swapping these silently stores each in the other's
+                       column. */
                     plan_forcing_type,
+                    plan_type,
                     is_forced_plan,
                     force_failure_count,
                     last_force_failure_reason_desc,
@@ -974,7 +978,7 @@ BEGIN
 
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Collected %d Query Store rows', 0, 1, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'Collected %I64d Query Store rows', 0, 1, @rows_collected) WITH NOWAIT;
         END;
     END TRY
     BEGIN CATCH

@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -26,7 +27,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserSystemHealthAsync(hours_back);
-            if (rows.Count == 0) return "No system health data found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No system health data found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -55,7 +56,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserSevereErrorsAsync(hours_back);
-            if (rows.Count == 0) return "No severe errors found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No severe errors found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -84,7 +85,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserIOIssuesAsync(hours_back);
-            if (rows.Count == 0) return "No I/O issues found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No I/O issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -113,7 +114,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserSchedulerIssuesAsync(hours_back);
-            if (rows.Count == 0) return "No scheduler issues found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No scheduler issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -142,7 +143,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserMemoryConditionsAsync(hours_back);
-            if (rows.Count == 0) return "No memory condition events found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No memory condition events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -171,7 +172,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserCPUTasksAsync(hours_back);
-            if (rows.Count == 0) return "No CPU task events found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No CPU task events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -200,7 +201,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserMemoryBrokerAsync(hours_back);
-            if (rows.Count == 0) return "No memory broker events found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No memory broker events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -229,7 +230,7 @@ public sealed class McpHealthParserTools
         try
         {
             var rows = await resolved.Value.Service.GetHealthParserMemoryNodeOOMAsync(hours_back);
-            if (rows.Count == 0) return "No memory node OOM events found in the requested time range.";
+            if (rows.Count == 0) return McpHelpers.Status("empty", "No memory node OOM events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {

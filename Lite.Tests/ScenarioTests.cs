@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -46,8 +47,10 @@ public class ScenarioTests : IDisposable
         var (stories, facts) = await RunFullPipelineAsync(s => s.SeedThreadExhaustionServerAsync());
         PrintStories("THREAD EXHAUSTION", stories);
 
-        // THREADPOOL should be in the stories (very high severity due to low threshold)
-        Assert.Contains(stories, s => s.Path.Contains("THREADPOOL"));
+        // THREADPOOL should be in the stories (very high severity due to low threshold). When it roots
+        // its own story the key is relabeled by attribution (THREADPOOL_PARALLEL/_BLOCKING/_MIXED), so
+        // match the prefix rather than the exact key.
+        Assert.Contains(stories, s => s.Path.Any(p => p.StartsWith("THREADPOOL")));
     }
 
     [Fact]
@@ -55,8 +58,9 @@ public class ScenarioTests : IDisposable
     {
         var (stories, _) = await RunFullPipelineAsync(s => s.SeedThreadExhaustionServerAsync());
 
-        // THREADPOOL should connect to CXPACKET (parallel queries consuming thread pool)
-        var threadpoolStory = stories.FirstOrDefault(s => s.RootFactKey == "THREADPOOL");
+        // THREADPOOL should connect to CXPACKET (parallel queries consuming thread pool). When it
+        // roots, the key is relabeled by attribution (THREADPOOL_PARALLEL here), so match the prefix.
+        var threadpoolStory = stories.FirstOrDefault(s => s.RootFactKey.StartsWith("THREADPOOL"));
         if (threadpoolStory != null)
         {
             Assert.Contains("CXPACKET", threadpoolStory.Path);
@@ -77,8 +81,9 @@ public class ScenarioTests : IDisposable
         Assert.NotNull(blockingStory);
         Assert.Contains("LCK", blockingStory.Path);
 
-        // THREADPOOL still appears as a separate story
-        Assert.Contains(stories, s => s.Path.Contains("THREADPOOL"));
+        // THREADPOOL still appears as a separate story, now attribution-keyed: blocking co-fired here,
+        // so the engine roots it as THREADPOOL_BLOCKING (or _MIXED if parallelism also fired).
+        Assert.Contains(stories, s => s.RootFactKey is "THREADPOOL_BLOCKING" or "THREADPOOL_MIXED");
     }
 
     [Fact]
@@ -327,6 +332,102 @@ public class ScenarioTests : IDisposable
         Assert.True(facts.ContainsKey("DEADLOCKS"), "Deadlocks should be collected");
         Assert.True(facts["BLOCKING_EVENTS"].Severity > 0, "Blocking events severity should be non-zero");
         Assert.True(facts["DEADLOCKS"].Severity > 0, "Deadlocks severity should be non-zero");
+    }
+
+    /* ── Parameter Sensitivity ── */
+
+    [Fact]
+    public async Task ParameterSensitive_FactCollectedAtHighSeverity()
+    {
+        var (stories, facts) = await RunFullPipelineAsync(s => s.SeedParameterSensitiveServerAsync());
+        PrintStories("PARAMETER SENSITIVITY", stories);
+
+        Assert.True(facts.ContainsKey("PARAMETER_SENSITIVITY"), "PARAMETER_SENSITIVITY should be collected");
+        // Worst ratio ~1000x → base severity 1.0; grant/spill/systemic amplifiers push it higher.
+        Assert.True(facts["PARAMETER_SENSITIVITY"].Severity >= 1.0,
+            $"Expected high severity, got {facts["PARAMETER_SENSITIVITY"].Severity:F2}");
+    }
+
+    [Fact]
+    public async Task ParameterSensitive_AppearsInStories()
+    {
+        var (stories, _) = await RunFullPipelineAsync(s => s.SeedParameterSensitiveServerAsync());
+        Assert.Contains(stories, s => s.Path.Contains("PARAMETER_SENSITIVITY"));
+    }
+
+    [Fact]
+    public async Task ParameterSensitive_ThreeOffendersWithDivergenceFlags()
+    {
+        var (_, facts) = await RunFullPipelineAsync(s => s.SeedParameterSensitiveServerAsync());
+
+        var fact = facts["PARAMETER_SENSITIVITY"];
+        Assert.Equal(3.0, fact.Metadata["offender_count"]);
+        // Worst offender: grant ratio ~1024x and spills on some parameter values only.
+        Assert.Equal(1.0, fact.Metadata["grant_divergence"]);
+        Assert.Equal(1.0, fact.Metadata["spill_divergence"]);
+    }
+
+    /* ── Plan Regression ── */
+
+    [Fact]
+    public async Task PlanRegression_FactCollectedAtHighSeverity()
+    {
+        var (stories, facts) = await RunFullPipelineAsync(s => s.SeedPlanRegressionServerAsync());
+        PrintStories("PLAN REGRESSION", stories);
+
+        Assert.True(facts.ContainsKey("PLAN_REGRESSION"), "PLAN_REGRESSION should be collected");
+        // Worst factor ~12x is past the critical threshold (10x) → base severity 1.0.
+        Assert.True(facts["PLAN_REGRESSION"].Severity >= 1.0,
+            $"Expected high severity, got {facts["PLAN_REGRESSION"].Severity:F2}");
+    }
+
+    [Fact]
+    public async Task PlanRegression_AppearsInStories()
+    {
+        var (stories, _) = await RunFullPipelineAsync(s => s.SeedPlanRegressionServerAsync());
+        Assert.Contains(stories, s => s.Path.Contains("PLAN_REGRESSION"));
+    }
+
+    [Fact]
+    public async Task PlanRegression_WorstFactorIsCpuDriven()
+    {
+        var (_, facts) = await RunFullPipelineAsync(s => s.SeedPlanRegressionServerAsync());
+
+        var fact = facts["PLAN_REGRESSION"];
+        // 1.2s vs 100ms CPU = 12x; 1.35s vs 120ms duration = 11.25x → CPU dimension wins.
+        Assert.Equal(12.0, fact.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(1.0, fact.Metadata["regressed_dimension"]); // 1 = cpu
+        Assert.Equal(1.0, fact.Metadata["offender_count"]);
+    }
+
+    /* ── Deep Blocking Chain ── */
+
+    [Fact]
+    public async Task DeepBlockingChain_ReconstructsDepthFourChainWithSleepingApex()
+    {
+        var (stories, facts) = await RunFullPipelineAsync(s => s.SeedDeepBlockingChainServerAsync());
+        PrintStories("DEEP BLOCKING CHAIN", stories);
+
+        Assert.True(facts.ContainsKey("BLOCKING_CHAIN"), "BLOCKING_CHAIN fact should be collected");
+        var chain = facts["BLOCKING_CHAIN"];
+        Assert.Equal(4.0, chain.Metadata["worst_chain_depth"]);
+        Assert.Equal(200.0, chain.Metadata["worst_apex_spid"]);
+        Assert.Equal(1.0, chain.Metadata["worst_apex_sleeping"]);
+    }
+
+    [Fact]
+    public async Task DeepBlockingChain_AppearsInAStory()
+    {
+        var (stories, _) = await RunFullPipelineAsync(s => s.SeedDeepBlockingChainServerAsync());
+        Assert.Contains(stories, s => s.Path.Contains("BLOCKING_CHAIN"));
+    }
+
+    [Fact]
+    public async Task DeepBlockingChain_BlockingEventsStillEmittedIndependently()
+    {
+        // The new BLOCKING_CHAIN fact must not collide with or replace BLOCKING_EVENTS.
+        var (_, facts) = await RunFullPipelineAsync(s => s.SeedDeepBlockingChainServerAsync());
+        Assert.True(facts.ContainsKey("BLOCKING_CHAIN"));
     }
 
 

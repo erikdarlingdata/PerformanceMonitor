@@ -193,6 +193,13 @@
                                          VerticalAlignment="Center"
                                          TextAlignment="Center"/>
                                 <TextBlock Text="%" VerticalAlignment="Center"/>
+                                <TextBlock Text="measured as" VerticalAlignment="Center" Margin="8,0,4,0"/>
+                                <ComboBox x:Name="CpuAlertModeBox"
+                                          Width="240"
+                                          VerticalAlignment="Center">
+                                    <ComboBoxItem Content="Total non-idle CPU (SQL + other processes)" Tag="Total"/>
+                                    <ComboBoxItem Content="SQL Server only (scheduler %)" Tag="SqlOnly"/>
+                                </ComboBox>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                 <CheckBox x:Name="NotifyOnPoisonWaitsCheckBox"
@@ -239,6 +246,9 @@
                                       Margin="0,0,0,4"/>
                             <CheckBox x:Name="LrqExcludeMiscWaitsCheckBox"
                                       Content="Exclude miscellaneous waits (XE_LIVE_TARGET_TVF)"
+                                      Margin="0,0,0,4"/>
+                            <CheckBox x:Name="LrqExcludeCdcCheckBox"
+                                      Content="Exclude CDC capture jobs (sp_MScdc_capture_job, sp_cdc_scan)"
                                       Margin="0,0,0,0"/>
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                 <CheckBox x:Name="NotifyOnTempDbSpaceCheckBox"
@@ -254,6 +264,25 @@
                                 <TextBlock Text="%" VerticalAlignment="Center"/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <CheckBox x:Name="NotifyOnLowDiskCheckBox"
+                                          Content="Volume free space under"
+                                          VerticalAlignment="Center"
+                                          Checked="NotifyOnLowDiskCheckBox_Changed"
+                                          Unchecked="NotifyOnLowDiskCheckBox_Changed"/>
+                                <TextBox x:Name="LowDiskThresholdPercentTextBox"
+                                         Width="50"
+                                         Margin="8,0,4,0"
+                                         VerticalAlignment="Center"
+                                         TextAlignment="Center"/>
+                                <TextBlock Text="% or" VerticalAlignment="Center"/>
+                                <TextBox x:Name="LowDiskThresholdGbTextBox"
+                                         Width="50"
+                                         Margin="8,0,4,0"
+                                         VerticalAlignment="Center"
+                                         TextAlignment="Center"/>
+                                <TextBlock Text="GB free (Azure SQL DB excluded)" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                 <CheckBox x:Name="NotifyOnLongRunningJobsCheckBox"
                                           Content="Agent jobs running over"
                                           VerticalAlignment="Center"
@@ -266,6 +295,19 @@
                                          TextAlignment="Center"/>
                                 <TextBlock Text="x historical average" VerticalAlignment="Center"/>
                             </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <CheckBox x:Name="NotifyOnFailedJobsCheckBox"
+                                          Content="Agent job failed in the last"
+                                          VerticalAlignment="Center"
+                                          Checked="NotifyOnFailedJobsCheckBox_Changed"
+                                          Unchecked="NotifyOnFailedJobsCheckBox_Changed"/>
+                                <TextBox x:Name="FailedJobLookbackTextBox"
+                                         Width="50"
+                                         Margin="8,0,8,0"
+                                         VerticalAlignment="Center"
+                                         TextAlignment="Center"/>
+                                <TextBlock Text="minutes" VerticalAlignment="Center"/>
+                            </StackPanel>
                             <TextBlock x:Name="AlertPreviewText" FontSize="11" FontStyle="Italic" Foreground="Gray"
                                        TextWrapping="Wrap" Margin="0,12,0,0"/>
                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
@@ -277,6 +319,17 @@
                                 <TextBlock Text="Email alert cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <TextBox x:Name="EmailCooldownTextBox" Width="50" TextAlignment="Center" VerticalAlignment="Center"/>
                                 <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                            </StackPanel>
+                            <!-- #1141: deadlock/blocking notification delivery mode + per-event cap -->
+                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                <TextBlock Text="Deadlock/blocking delivery:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <ComboBox x:Name="AlertDeliveryModeCombo" Width="260" VerticalAlignment="Center">
+                                    <ComboBoxItem Content="Summary — one card per cycle" Tag="Summary"/>
+                                    <ComboBoxItem Content="Per-event — one notification per incident" Tag="PerEvent"/>
+                                </ComboBox>
+                                <TextBlock Text="max" VerticalAlignment="Center" Margin="8,0,4,0"/>
+                                <TextBox x:Name="AlertPerEventMaxTextBox" Width="50" TextAlignment="Center" VerticalAlignment="Center"/>
+                                <TextBlock Text="/cycle" VerticalAlignment="Center" Margin="4,0,0,0"/>
                             </StackPanel>
                             <!-- Global Alert Filters -->
                             <TextBlock Text="Global Alert Filters" FontWeight="Bold" FontSize="12" Margin="0,16,0,6"/>
@@ -365,6 +418,44 @@
                                 <TextBlock Text="Works with Claude Code. Other LLMs may apply, but why would you?"
                                            FontStyle="Italic" Foreground="Gray" VerticalAlignment="Center" Margin="10,0,0,0" FontSize="11"/>
                             </StackPanel>
+                        </StackPanel>
+
+                        <!-- Automated Analysis -->
+                        <TextBlock Text="Automated Analysis" FontWeight="Bold" FontSize="13" Margin="0,20,0,5"/>
+                        <TextBlock Text="Runs the diagnostic inference engine on a schedule and records findings. Notifications are optional — analysis runs and persists findings even with notifications off. When notifications are on, high-severity findings are also routed to your configured channels (email, Teams, Slack)."
+                                   TextWrapping="Wrap" Margin="0,0,0,10" FontStyle="Italic" Foreground="Gray"/>
+                        <StackPanel>
+                            <CheckBox x:Name="AnalysisEnabledCheckBox"
+                                      Content="Enable automated analysis"
+                                      Margin="0,0,0,8"/>
+                            <CheckBox x:Name="AnalysisNotificationsEnabledCheckBox"
+                                      Content="Send automated analysis notifications"
+                                      Margin="0,0,0,8"/>
+                            <Grid Margin="20,0,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Interval (minutes):" VerticalAlignment="Center" Margin="0,0,8,6"/>
+                                <TextBox Grid.Row="0" Grid.Column="1" x:Name="AnalysisIntervalMinutesTextBox"
+                                         VerticalAlignment="Center" TextAlignment="Center" Margin="0,0,0,6"
+                                         ToolTip="How often to run analysis (5–360 minutes)."/>
+
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Notify at severity ≥:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBox Grid.Row="1" Grid.Column="1" x:Name="AnalysisNotifySeverityTextBox"
+                                         VerticalAlignment="Center" TextAlignment="Center"
+                                         ToolTip="Minimum finding severity to notify on (0.0–2.0). Default 1.5."/>
+                                <TextBlock Grid.Row="1" Grid.Column="2" Text="0.0 = everything, 1.0 = concerning, 2.0 = critical only"
+                                           FontStyle="Italic" Foreground="Gray" VerticalAlignment="Center" Margin="10,0,0,0" FontSize="11"/>
+                            </Grid>
+                            <TextBlock Text="Cooldown and timeout are configurable in preferences.json (defaults: 6h cooldown per finding, 120s timeout per server)."
+                                       FontStyle="Italic" Foreground="Gray" Margin="0,10,0,0" FontSize="11" TextWrapping="Wrap"/>
                         </StackPanel>
                     </StackPanel>
                 </ScrollViewer>

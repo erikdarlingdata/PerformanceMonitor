@@ -19,6 +19,8 @@ using System.Windows.Data;
 using System.Windows.Media;
 using Microsoft.Win32;
 using ScottPlot.WPF;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Helpers
 {
@@ -52,33 +54,13 @@ namespace PerformanceMonitorDashboard.Helpers
         }
 
         /// <summary>
-        /// Material Design 300-level color palette for chart data series.
-        /// Soft pastels optimized for dark backgrounds, ordered to map 1:1
-        /// with common ScottPlot stock colors (Blue→[0], Green→[1], etc.).
+        /// Material Design 300/200 cycling palette for arbitrary/data-driven chart series (per-DB,
+        /// per-wait-type lists, etc.), indexed by encounter order. Sourced from the shared
+        /// <see cref="ChartPalette"/> so Dashboard and Lite cycle through the SAME colors in the
+        /// same order (named fixed-meaning series use ChartPalette.SeriesColor instead).
         /// </summary>
-        public static readonly ScottPlot.Color[] ChartColors = new[]
-        {
-            ScottPlot.Color.FromHex("#4FC3F7"), // [0]  Light Blue 300
-            ScottPlot.Color.FromHex("#81C784"), // [1]  Green 300
-            ScottPlot.Color.FromHex("#FFB74D"), // [2]  Orange 300
-            ScottPlot.Color.FromHex("#E57373"), // [3]  Red 300
-            ScottPlot.Color.FromHex("#BA68C8"), // [4]  Purple 300
-            ScottPlot.Color.FromHex("#4DD0E1"), // [5]  Cyan 300
-            ScottPlot.Color.FromHex("#FFF176"), // [6]  Yellow 300
-            ScottPlot.Color.FromHex("#F06292"), // [7]  Pink 300
-            ScottPlot.Color.FromHex("#AED581"), // [8]  Light Green 300
-            ScottPlot.Color.FromHex("#90A4AE"), // [9]  Blue Grey 300
-            ScottPlot.Color.FromHex("#A1887F"), // [10] Brown 300
-            ScottPlot.Color.FromHex("#7986CB"), // [11] Indigo 300
-            ScottPlot.Color.FromHex("#FF7043"), // [12] Deep Orange 300
-            ScottPlot.Color.FromHex("#80DEEA"), // [13] Cyan 200
-            ScottPlot.Color.FromHex("#FFE082"), // [14] Amber 200
-            ScottPlot.Color.FromHex("#CE93D8"), // [15] Purple 200
-            ScottPlot.Color.FromHex("#EF9A9A"), // [16] Red 200
-            ScottPlot.Color.FromHex("#C5E1A5"), // [17] Light Green 200
-            ScottPlot.Color.FromHex("#FFCC80"), // [18] Orange 200
-            ScottPlot.Color.FromHex("#B0BEC5"), // [19] Blue Grey 200
-        };
+        public static readonly ScottPlot.Color[] ChartColors =
+            ChartPalette.CyclingPalette.Select(ScottPlot.Color.FromHex).ToArray();
 
         /// <summary>
         /// Poison waits — always selected by default. These indicate critical resource exhaustion.
@@ -147,98 +129,16 @@ namespace PerformanceMonitorDashboard.Helpers
         }
 
         /// <summary>
-        /// Applies the current color theme to a ScottPlot chart.
+        /// Applies the current color theme (chrome) to a ScottPlot chart.
+        /// Delegates to the shared <see cref="ChartStyle"/> — single source of truth across apps.
         /// </summary>
-        public static void ApplyThemeToChart(WpfPlot chart)
-        {
-            ScottPlot.Color figureBackground, dataBackground, textColor, gridColor, legendBg, legendFg, legendOutline;
-
-            if (ThemeManager.CurrentTheme == "CoolBreeze")
-            {
-                figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
-                dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
-                textColor        = ScottPlot.Color.FromHex("#1A2A3A");
-                gridColor        = ScottPlot.Color.FromHex("#A8BDD0").WithAlpha(120);
-                legendBg         = ScottPlot.Color.FromHex("#EEF4FA");
-                legendFg         = ScottPlot.Color.FromHex("#1A2A3A");
-                legendOutline    = ScottPlot.Color.FromHex("#A8BDD0");
-            }
-            else if (ThemeManager.HasLightBackground)
-            {
-                figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
-                dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
-                textColor        = ScottPlot.Color.FromHex("#1A1D23");
-                gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
-                legendBg         = ScottPlot.Color.FromHex("#FFFFFF");
-                legendFg         = ScottPlot.Color.FromHex("#1A1D23");
-                legendOutline    = ScottPlot.Color.FromHex("#DEE2E6");
-            }
-            else
-            {
-                figureBackground = ScottPlot.Color.FromHex("#22252b");
-                dataBackground   = ScottPlot.Color.FromHex("#111217");
-                textColor        = ScottPlot.Color.FromHex("#E4E6EB");
-                gridColor        = ScottPlot.Colors.White.WithAlpha(40);
-                legendBg         = ScottPlot.Color.FromHex("#22252b");
-                legendFg         = ScottPlot.Color.FromHex("#E4E6EB");
-                legendOutline    = ScottPlot.Color.FromHex("#2a2d35");
-            }
-
-            chart.Plot.FigureBackground.Color = figureBackground;
-            chart.Plot.DataBackground.Color = dataBackground;
-            chart.Plot.Axes.Color(textColor);
-            chart.Plot.Grid.MajorLineColor = gridColor;
-            chart.Plot.Legend.BackgroundColor = legendBg;
-            chart.Plot.Legend.FontColor = legendFg;
-            chart.Plot.Legend.OutlineColor = legendOutline;
-            chart.Plot.Legend.Alignment = ScottPlot.Alignment.LowerCenter;
-            chart.Plot.Legend.Orientation = ScottPlot.Orientation.Horizontal;
-            chart.Plot.Axes.Margins(bottom: 0); // No bottom margin - SetChartYLimitsWithLegendPadding handles Y-axis
-
-            // Explicitly set axis tick label colors (needed after DateTimeTicksBottom() is called)
-            chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
-            chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
-            chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
-            chart.Plot.Axes.Left.Label.ForeColor = textColor;
-            chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
-            chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
-
-            // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
-            chart.Background = new SolidColorBrush(Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
-
-            // Ensure ScottPlot renders with the correct colors the very first time it gets pixel dimensions.
-            // Without this, ScottPlot's first auto-render (triggered by SizeChanged) would show a white canvas
-            // before our FigureBackground color takes visual effect.
-            chart.Loaded -= HandleChartFirstLoaded;
-            if (!chart.IsLoaded)
-                chart.Loaded += HandleChartFirstLoaded;
-        }
-
-        private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)
-        {
-            var chart = (WpfPlot)sender;
-            chart.Loaded -= HandleChartFirstLoaded;
-            chart.Refresh();
-        }
+        public static void ApplyThemeToChart(WpfPlot chart) => ChartStyle.ApplyThemeToChart(chart);
 
         /// <summary>
-        /// Reapplies theme-appropriate text colors to chart axes.
-        /// Call this AFTER DateTimeTicksBottom() or other axis modifications.
+        /// Reapplies theme-appropriate text colors to chart axes (after DateTimeTicksBottom() etc.).
+        /// Delegates to the shared <see cref="ChartStyle"/>.
         /// </summary>
-        public static void ReapplyAxisColors(WpfPlot chart)
-        {
-            var textColor = ThemeManager.CurrentTheme == "CoolBreeze"
-                ? ScottPlot.Color.FromHex("#1A2A3A")
-                : ThemeManager.HasLightBackground
-                    ? ScottPlot.Color.FromHex("#1A1D23")
-                    : ScottPlot.Color.FromHex("#E4E6EB");
-            chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
-            chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
-            chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
-            chart.Plot.Axes.Left.Label.ForeColor = textColor;
-            chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
-            chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
-        }
+        public static void ReapplyAxisColors(WpfPlot chart) => ChartStyle.ReapplyAxisColors(chart);
 
         /// <summary>
         /// Recursively finds all WpfPlot chart controls in a visual tree.
@@ -257,53 +157,18 @@ namespace PerformanceMonitorDashboard.Helpers
         }
 
         /// <summary>
-        /// Locks the vertical axis of a chart so mouse wheel zooming only affects the time (X) axis.
-        /// Also reapplies dark mode axis colors after DateTimeTicksBottom() modifications.
+        /// Locks the vertical axis so mouse-wheel zoom only affects the time (X) axis.
+        /// Delegates to the shared <see cref="ChartStyle"/>.
         /// </summary>
-        public static void LockChartVerticalAxis(WpfPlot chart)
-        {
-            var limits = chart.Plot.Axes.GetLimits();
-            var rule = new ScottPlot.AxisRules.LockedVertical(
-                chart.Plot.Axes.Left,
-                limits.Bottom,
-                limits.Top);
-            chart.Plot.Axes.Rules.Clear();
-            chart.Plot.Axes.Rules.Add(rule);
-
-            // Reapply axis colors after DateTimeTicksBottom() may have reset them
-            ReapplyAxisColors(chart);
-        }
+        public static void LockChartVerticalAxis(WpfPlot chart) => ChartStyle.LockChartVerticalAxis(chart);
 
         /// <summary>
-        /// Sets Y-axis limits with appropriate padding for charts with horizontal legends at bottom.
-        /// Call this BEFORE LockChartVerticalAxis.
+        /// Sets Y-axis limits with padding for a bottom legend. Delegates to the shared
+        /// <see cref="ChartStyle"/> (canonical behavior keeps a small margin below a zero baseline
+        /// so flat-at-zero lines stay visible).
         /// </summary>
         public static void SetChartYLimitsWithLegendPadding(WpfPlot chart, double dataYMin = 0, double dataYMax = 0)
-        {
-            // If no explicit values provided, use auto-calculated limits
-            if (dataYMin == 0 && dataYMax == 0)
-            {
-                var limits = chart.Plot.Axes.GetLimits();
-                dataYMin = limits.Bottom;
-                dataYMax = limits.Top;
-            }
-
-            // Handle edge cases
-            if (dataYMax <= dataYMin)
-            {
-                dataYMax = dataYMin + 100;
-            }
-
-            // Calculate padding: 5% above for breathing room
-            double range = dataYMax - dataYMin;
-            double topPadding = range * 0.05;
-
-            /* Only add bottom padding if dataYMin is above zero - don't go negative */
-            double yMin = dataYMin >= 0 ? 0 : dataYMin - (range * 0.10);
-            double yMax = dataYMax + topPadding;
-
-            chart.Plot.Axes.SetLimitsY(yMin, yMax);
-        }
+            => ChartStyle.SetChartYLimitsWithLegendPadding(chart, dataYMin, dataYMax);
 
         /// <summary>
         /// Applies theme-appropriate styling to a WPF Calendar control (used by DatePicker popup).

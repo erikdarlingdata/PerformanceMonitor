@@ -9,6 +9,7 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorDashboard.Models;
 
 namespace PerformanceMonitorDashboard

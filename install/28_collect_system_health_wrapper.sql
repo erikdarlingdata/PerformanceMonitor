@@ -69,7 +69,7 @@ BEGIN
             SET @sql = N'
             IF OBJECT_ID(N''' + QUOTENAME(@procedure_database) + N'.dbo.sp_HealthParser'', N''P'') IS NOT NULL
             BEGIN
-                SELECT @healthparser_database = N''' + QUOTENAME(@procedure_database) + N''';
+                SELECT @healthparser_database = N''' + REPLACE(@procedure_database, '''', '''''') + N''';
             END;';
 
             EXECUTE sys.sp_executesql
@@ -241,7 +241,7 @@ BEGIN
         
         IF @debug = 1
         BEGIN
-            RAISERROR(N'sp_HealthParser completed - %d total rows collected across all tables', 0, 1, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'sp_HealthParser completed - %I64d total rows collected across all tables', 0, 1, @rows_collected) WITH NOWAIT;
         END;
         
     END TRY

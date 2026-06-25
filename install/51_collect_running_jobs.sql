@@ -274,7 +274,7 @@ BEGIN
         BEGIN
             IF @rows_collected > 0
             BEGIN
-                RAISERROR(N'Collected %d running jobs', 0, 1, @rows_collected) WITH NOWAIT;
+                RAISERROR(N'Collected %I64d running jobs', 0, 1, @rows_collected) WITH NOWAIT;
 
                 SELECT TOP (10)
                     rj.job_name,

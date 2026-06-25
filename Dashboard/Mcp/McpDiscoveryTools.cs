@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 

@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -29,7 +30,7 @@ public sealed class McpDiagnosticTools
         {
             var rows = await resolved.Value.Service.GetPlanCacheStatsAsync(hours_back);
             if (rows.Count == 0)
-                return "No plan cache statistics available in the requested time range.";
+                return McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
             // Service returns all snapshots (for UI charting).
             // For MCP, return only the latest snapshot per cache/object type.
@@ -92,7 +93,7 @@ public sealed class McpDiagnosticTools
         {
             var rows = await resolved.Value.Service.GetCriticalIssuesAsync(hours_back);
             if (rows.Count == 0)
-                return "No critical issues found in the requested time range.";
+                return McpHelpers.Status("empty", "No critical issues found in the requested time range.");
 
             return JsonSerializer.Serialize(new
             {
@@ -140,7 +141,7 @@ public sealed class McpDiagnosticTools
         {
             var rows = await resolved.Value.Service.GetSessionStatsAsync(hours_back);
             if (rows.Count == 0)
-                return "No session statistics available in the requested time range.";
+                return McpHelpers.Status("unavailable", "No session statistics available in the requested time range.");
 
             var latest = rows[0];
             return JsonSerializer.Serialize(new

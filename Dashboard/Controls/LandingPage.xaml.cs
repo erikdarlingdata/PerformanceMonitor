@@ -129,9 +129,23 @@ namespace PerformanceMonitorDashboard.Controls
             }
         }
 
+        private bool _isRefreshing;
+
         private async void RefreshTimer_Tick(object? sender, EventArgs e)
         {
-            await RefreshAllServersAsync();
+            /* Skip if the previous tick is still running — at the 10s minimum interval a slow
+               server (10s command timeouts, 5s connect retries) makes a tick outlast the interval,
+               so ticks overlap and stack unbounded NOC refreshes, each opening its own connections. */
+            if (_isRefreshing) return;
+            _isRefreshing = true;
+            try
+            {
+                await RefreshAllServersAsync();
+            }
+            finally
+            {
+                _isRefreshing = false;
+            }
         }
 
         private void DisplayTimer_Tick(object? sender, EventArgs e)

@@ -20,6 +20,7 @@ using Microsoft.Win32;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -27,7 +28,7 @@ public partial class FinOpsTab : UserControl
 {
     private LocalDataService? _dataService;
     private ServerManager? _serverManager;
-    private CredentialService? _credentialService;
+    private CredentialResolver? _credentialResolver;
     private List<ServerPropertyRow>? _serverInventoryCache;
     private DateTime _serverInventoryCacheTime;
 
@@ -49,6 +50,9 @@ public partial class FinOpsTab : UserControl
     private DataGridFilterManager<WaitCategorySummaryRow>? _waitCategoryFilterMgr;
     private DataGridFilterManager<ExpensiveQueryRow>? _expensiveQueriesFilterMgr;
     private DataGridFilterManager<MemoryGrantEfficiencyRow>? _memoryGrantFilterMgr;
+    private DataGridFilterManager<ObjectSizeGrowthRow>? _objectSizeGrowthFilterMgr;
+    private DataGridFilterManager<IndexUsageRow>? _indexUsageFilterMgr;
+    private DataGridFilterManager<IndexLockingRow>? _indexLockingFilterMgr;
 
     public FinOpsTab()
     {
@@ -63,7 +67,7 @@ public partial class FinOpsTab : UserControl
     {
         _dataService = dataService;
         _serverManager = serverManager;
-        _credentialService = serverManager.CredentialService;
+        _credentialResolver = serverManager.CredentialResolver;
 
         PopulateServerSelector();
         RefreshData();
@@ -113,6 +117,72 @@ public partial class FinOpsTab : UserControl
         return 0;
     }
 
+    // ── Plan navigation for the query-identifying FinOps grids ──
+    // Lazy: executeActual reads the current selected-server connection string, and Window.GetWindow(this)
+    // is only valid once the control is in the visual tree.
+    private PlanNavigationController? _planActions;
+    private PlanNavigationController PlanActions => _planActions ??= new PlanNavigationController(
+        Window.GetWindow(this)!,
+        (xml, label, qt) => Windows.PlanViewerWindow.ShowPlanAsync(Window.GetWindow(this)!, xml, label, qt),
+        (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+            GetSelectedConnectionString() ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct),
+        "the monitored server");
+
+    private string? GetSelectedConnectionString()
+        => ServerSelector.SelectedItem is ServerConnection s && _credentialResolver != null
+            ? _credentialResolver.GetConnectionString(s)
+            : null;
+
+    private async System.Threading.Tasks.Task<string?> FetchFinOpsHighImpactPlanAsync(string queryHash)
+    {
+        if (string.IsNullOrEmpty(queryHash)) return null;
+        var serverId = GetSelectedServerId();
+        string? plan = null;
+        if (serverId != 0 && _dataService != null)
+        {
+            try { plan = await System.Threading.Tasks.Task.Run(() => _dataService.GetCachedQueryPlanAsync(serverId, queryHash)); }
+            catch { /* fall through to the live server */ }
+        }
+        if (string.IsNullOrEmpty(plan))
+        {
+            var connStr = GetSelectedConnectionString();
+            if (!string.IsNullOrEmpty(connStr))
+                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash);
+        }
+        return plan;
+    }
+
+    private async void FinOpsViewPlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetFinOpsRow(sender) is HighImpactQueryRow row)
+            await PlanActions.ViewPlanAsync(
+                () => FetchFinOpsHighImpactPlanAsync(row.QueryHash),
+                $"Est Plan - {row.QueryHash}", row.FullQueryText);
+    }
+
+    private async void FinOpsGetActualPlan_Click(object sender, RoutedEventArgs e)
+    {
+        switch (GetFinOpsRow(sender))
+        {
+            case HighImpactQueryRow hi:
+                await PlanActions.GetActualPlanAsync(hi.FullQueryText, hi.DatabaseName, $"Actual Plan - {hi.QueryHash}");
+                break;
+            case ExpensiveQueryRow ex:
+                await PlanActions.GetActualPlanAsync(ex.FullQueryText, ex.DatabaseName, "Actual Plan - Expensive Query");
+                break;
+        }
+    }
+
+    private static object? GetFinOpsRow(object sender)
+    {
+        if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+        {
+            if (contextMenu.PlacementTarget is DataGridRow row) return row.DataContext;
+            if (contextMenu.PlacementTarget is DataGrid grid) return grid.CurrentCell.Item ?? grid.SelectedItem;
+        }
+        return null;
+    }
+
     /// <summary>
     /// Refreshes all FinOps data.
     /// </summary>
@@ -146,6 +216,9 @@ public partial class FinOpsTab : UserControl
             LoadApplicationConnectionsAsync(serverId),
             LoadDatabaseSizesAsync(serverId),
             LoadStorageGrowthAsync(serverId),
+            LoadObjectSizeGrowthAsync(serverId),
+            LoadIndexUsageAsync(serverId),
+            LoadIndexLockingAsync(serverId),
             LoadIdleDatabasesAsync(serverId),
             LoadTempdbSummaryAsync(serverId),
             LoadWaitCategorySummaryAsync(serverId),
@@ -157,16 +230,16 @@ public partial class FinOpsTab : UserControl
 
     private async System.Threading.Tasks.Task LoadRecommendationsAsync(int serverId)
     {
-        if (_dataService == null || _credentialService == null) return;
+        if (_dataService == null || _credentialResolver == null) return;
 
         try
         {
             var selectedServer = ServerSelector.SelectedItem as Models.ServerConnection;
-            var connectionString = selectedServer?.GetConnectionString(_credentialService);
+            var connectionString = selectedServer == null ? null : _credentialResolver.GetConnectionString(selectedServer);
             if (string.IsNullOrEmpty(connectionString)) return;
 
-            var utilityConnectionString = selectedServer!.GetUtilityConnectionString(_credentialService);
-            var data = await _dataService.GetRecommendationsAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost);
+            var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
+            var data = await Task.Run(() => _dataService.GetRecommendationsAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
             RecommendationsDataGrid.ItemsSource = data;
             RecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             RecommendationsCountIndicator.Text = data.Count > 0 ? $"{data.Count} recommendation(s)" : "";
@@ -183,14 +256,14 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetUtilizationEfficiencyAsync(serverId);
+            var data = await Task.Run(() => _dataService.GetUtilizationEfficiencyAsync(serverId));
 
             if (data != null)
             {
                 data.MonthlyCost = _currentServerMonthlyCost;
 
                 // Compute free space % for health score from database sizes
-                var dbSizes = await _dataService.GetDatabaseSizeLatestAsync(serverId);
+                var dbSizes = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
                 var totalStorageMb = dbSizes.Sum(d => d.TotalSizeMb);
                 var totalFreeMb = dbSizes.Sum(d => (d.FreeSpaceMb ?? 0m));
                 data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
@@ -202,10 +275,10 @@ public partial class FinOpsTab : UserControl
 
             if (data != null)
             {
-                TopTotalGrid.ItemsSource = await _dataService.GetTopResourceConsumersByTotalAsync(serverId);
-                TopAvgGrid.ItemsSource = await _dataService.GetTopResourceConsumersByAvgAsync(serverId);
-                DbSizeChart.ItemsSource = await _dataService.GetDatabaseSizeSummaryAsync(serverId);
-                ProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(serverId);
+                TopTotalGrid.ItemsSource = await Task.Run(() => _dataService.GetTopResourceConsumersByTotalAsync(serverId));
+                TopAvgGrid.ItemsSource = await Task.Run(() => _dataService.GetTopResourceConsumersByAvgAsync(serverId));
+                DbSizeChart.ItemsSource = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId));
+                ProvisioningTrendGrid.ItemsSource = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
             }
             else
             {
@@ -376,7 +449,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = GetResourceUsageHoursBack();
-            var data = await _dataService.GetDatabaseResourceUsageAsync(serverId, hoursBack);
+            var data = await Task.Run(() => _dataService.GetDatabaseResourceUsageAsync(serverId, hoursBack));
             _dbResourcesFilterMgr!.UpdateData(data);
             NoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             DbResourcesCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
@@ -393,7 +466,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetApplicationConnectionsAsync(serverId);
+            var data = await Task.Run(() => _dataService.GetApplicationConnectionsAsync(serverId));
             _appConnectionsFilterMgr!.UpdateData(data);
             NoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             AppConnectionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} application(s)" : "";
@@ -410,7 +483,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetDatabaseSizeLatestAsync(serverId);
+            var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
 
             // Compute proportional cost shares
             if (_currentServerMonthlyCost > 0 && data.Count > 0)
@@ -437,7 +510,7 @@ public partial class FinOpsTab : UserControl
     private async System.Threading.Tasks.Task LoadServerInventoryAsync(bool forceRefresh = false)
     {
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-ServerInventory");
-        if (_dataService == null || _serverManager == null || _credentialService == null) return;
+        if (_dataService == null || _serverManager == null || _credentialResolver == null) return;
 
         // Use cache if available and less than 5 minutes old
         if (!forceRefresh && _serverInventoryCache != null
@@ -457,7 +530,7 @@ public partial class FinOpsTab : UserControl
             {
                 try
                 {
-                    var connStr = server.GetConnectionString(_credentialService);
+                    var connStr = _credentialResolver.GetConnectionString(server);
 
                     // Step 1: Query live server properties
                     var item = await LocalDataService.GetServerPropertiesLiveAsync(connStr);
@@ -468,7 +541,7 @@ public partial class FinOpsTab : UserControl
                     try
                     {
                         var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-                        var (avgCpu, storageGb, idleDbs, status) = await _dataService!.GetServerMetricsAsync(serverId);
+                        var (avgCpu, storageGb, idleDbs, status) = await Task.Run(() => _dataService!.GetServerMetricsAsync(serverId));
                         if (avgCpu.HasValue) item.AvgCpuPct = avgCpu;
                         if (storageGb.HasValue) item.StorageTotalGb = storageGb;
                         if (idleDbs.HasValue) item.IdleDbCount = idleDbs;
@@ -519,7 +592,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetStorageGrowthAsync(serverId);
+            var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId));
             _storageGrowthFilterMgr!.UpdateData(data);
             NoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
@@ -530,13 +603,83 @@ public partial class FinOpsTab : UserControl
         }
     }
 
+    // ============================================
+    // Object/Index stats (#1103)
+    // ============================================
+
+    private async System.Threading.Tasks.Task LoadObjectSizeGrowthAsync(int serverId)
+    {
+        if (_dataService == null) return;
+        try
+        {
+            var data = await Task.Run(() => _dataService.GetObjectSizeGrowthAsync(serverId));
+            _objectSizeGrowthFilterMgr!.UpdateData(data);
+            NoObjectSizeGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            ObjectSizeGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} table(s)" : "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load object size/growth: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadIndexUsageAsync(int serverId)
+    {
+        if (_dataService == null) return;
+        try
+        {
+            var data = await Task.Run(() => _dataService.GetIndexUsageAsync(serverId));
+            _indexUsageFilterMgr!.UpdateData(data);
+            NoIndexUsageMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            IndexUsageCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load index usage: {ex.Message}");
+        }
+    }
+
+    private async System.Threading.Tasks.Task LoadIndexLockingAsync(int serverId)
+    {
+        if (_dataService == null) return;
+        try
+        {
+            var data = await Task.Run(() => _dataService.GetIndexLockingAsync(serverId));
+            _indexLockingFilterMgr!.UpdateData(data);
+            NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            IndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to load index locking: {ex.Message}");
+        }
+    }
+
+    private async void RefreshObjectSizeGrowth_Click(object sender, RoutedEventArgs e)
+    {
+        var serverId = GetSelectedServerId();
+        if (serverId != 0) await LoadObjectSizeGrowthAsync(serverId);
+    }
+
+    private async void RefreshIndexUsage_Click(object sender, RoutedEventArgs e)
+    {
+        var serverId = GetSelectedServerId();
+        if (serverId != 0) await LoadIndexUsageAsync(serverId);
+    }
+
+    private async void RefreshIndexLocking_Click(object sender, RoutedEventArgs e)
+    {
+        var serverId = GetSelectedServerId();
+        if (serverId != 0) await LoadIndexLockingAsync(serverId);
+    }
+
     private async System.Threading.Tasks.Task LoadIdleDatabasesAsync(int serverId)
     {
         if (_dataService == null) return;
 
         try
         {
-            var data = await _dataService.GetIdleDatabasesAsync(serverId);
+            var data = await Task.Run(() => _dataService.GetIdleDatabasesAsync(serverId));
             _idleDbsFilterMgr!.UpdateData(data);
             IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
@@ -553,7 +696,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetTempdbSummaryAsync(serverId);
+            var data = await Task.Run(() => _dataService.GetTempdbSummaryAsync(serverId));
             _tempdbFilterMgr!.UpdateData(data);
             TempdbPressureNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -583,7 +726,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = GetHighImpactHoursBack();
-            var data = await _dataService.GetHighImpactQueriesAsync(serverId, hoursBack);
+            var data = await Task.Run(() => _dataService.GetHighImpactQueriesAsync(serverId, hoursBack));
             _highImpactFilterMgr!.UpdateData(data);
             HighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             HighImpactCountIndicator.Text = data.Count > 0 ? $"{data.Count} high-impact query(s)" : "";
@@ -627,7 +770,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = GetWaitStatsHoursBack();
-            var data = await _dataService.GetWaitCategorySummaryAsync(serverId, hoursBack);
+            var data = await Task.Run(() => _dataService.GetWaitCategorySummaryAsync(serverId, hoursBack));
 
             // Compute proportional cost shares — scaled to time window
             if (_currentServerMonthlyCost > 0 && data.Count > 0)
@@ -657,7 +800,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             var hoursBack = GetExpensiveQueriesHoursBack();
-            var data = await _dataService.GetExpensiveQueriesAsync(serverId, hoursBack);
+            var data = await Task.Run(() => _dataService.GetExpensiveQueriesAsync(serverId, hoursBack));
 
             // Compute proportional cost shares — scaled to time window
             if (_currentServerMonthlyCost > 0 && data.Count > 0)
@@ -687,7 +830,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await _dataService.GetMemoryGrantEfficiencyAsync(serverId);
+            var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId));
             _memoryGrantFilterMgr!.UpdateData(data);
             MemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -795,14 +938,14 @@ public partial class FinOpsTab : UserControl
     private async void RunIndexAnalysis_Click(object sender, RoutedEventArgs e)
     {
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-IndexAnalysis");
-        if (_serverManager == null || _credentialService == null) return;
+        if (_serverManager == null || _credentialResolver == null) return;
 
         var server = ServerSelector.SelectedItem as ServerConnection;
         if (server == null) return;
 
         try
         {
-            var utilityConnectionString = server.GetUtilityConnectionString(_credentialService);
+            var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(server);
 
             var exists = await LocalDataService.CheckSpIndexCleanupExistsAsync(utilityConnectionString);
             if (!exists)
@@ -972,6 +1115,9 @@ public partial class FinOpsTab : UserControl
         _waitCategoryFilterMgr = new DataGridFilterManager<WaitCategorySummaryRow>(WaitCategorySummaryDataGrid);
         _expensiveQueriesFilterMgr = new DataGridFilterManager<ExpensiveQueryRow>(ExpensiveQueriesDataGrid);
         _memoryGrantFilterMgr = new DataGridFilterManager<MemoryGrantEfficiencyRow>(MemoryGrantEfficiencyDataGrid);
+        _objectSizeGrowthFilterMgr = new DataGridFilterManager<ObjectSizeGrowthRow>(ObjectSizeGrowthDataGrid);
+        _indexUsageFilterMgr = new DataGridFilterManager<IndexUsageRow>(IndexUsageDataGrid);
+        _indexLockingFilterMgr = new DataGridFilterManager<IndexLockingRow>(IndexLockingDataGrid);
 
         _filterManagers[DatabaseResourcesDataGrid] = _dbResourcesFilterMgr;
         _filterManagers[StorageGrowthDataGrid] = _storageGrowthFilterMgr;
@@ -986,6 +1132,9 @@ public partial class FinOpsTab : UserControl
         _filterManagers[WaitCategorySummaryDataGrid] = _waitCategoryFilterMgr;
         _filterManagers[ExpensiveQueriesDataGrid] = _expensiveQueriesFilterMgr;
         _filterManagers[MemoryGrantEfficiencyDataGrid] = _memoryGrantFilterMgr;
+        _filterManagers[ObjectSizeGrowthDataGrid] = _objectSizeGrowthFilterMgr;
+        _filterManagers[IndexUsageDataGrid] = _indexUsageFilterMgr;
+        _filterManagers[IndexLockingDataGrid] = _indexLockingFilterMgr;
     }
 
     private void EnsureFilterPopup()

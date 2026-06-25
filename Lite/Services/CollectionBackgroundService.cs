@@ -7,11 +7,15 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -27,12 +31,18 @@ public class CollectionBackgroundService : BackgroundService
     private readonly ServerManager? _serverManager;
     private readonly ArchiveService? _archiveService;
     private readonly RetentionService? _retentionService;
+    private readonly AnalysisNotificationService? _notificationService;
     private readonly ILogger<CollectionBackgroundService>? _logger;
 
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
     /* Start at UtcNow so maintenance tasks don't all fire on the very first cycle. */
     private DateTime _lastArchiveTime = DateTime.UtcNow;
     private DateTime _lastRetentionTime = DateTime.UtcNow;
+    private DateTime _lastAnalysisTime = DateTime.UtcNow;
+
+    /* Server IDs whose scheduled analysis is currently running — prevents relaunching
+       analysis for a server whose previous (possibly hung) pass has not finished. */
+    private readonly ConcurrentDictionary<int, byte> _analysisInFlight = new();
 
     /* Archive every hour, retention once per day */
     private static readonly TimeSpan ArchiveInterval = TimeSpan.FromHours(1);
@@ -54,6 +64,7 @@ public class CollectionBackgroundService : BackgroundService
         ArchiveService? archiveService = null,
         RetentionService? retentionService = null,
         ServerManager? serverManager = null,
+        AnalysisNotificationService? notificationService = null,
         ILogger<CollectionBackgroundService>? logger = null)
     {
         _collectorService = collectorService;
@@ -61,6 +72,7 @@ public class CollectionBackgroundService : BackgroundService
         _serverManager = serverManager;
         _archiveService = archiveService;
         _retentionService = retentionService;
+        _notificationService = notificationService;
         _logger = logger;
     }
 
@@ -115,6 +127,9 @@ public class CollectionBackgroundService : BackgroundService
 
                 /* Periodic retention cleanup */
                 RunRetentionIfDue();
+
+                /* Periodic scheduled analysis + high-severity finding notifications */
+                await RunAnalysisIfDueAsync(stoppingToken);
 
                 /* Log process memory at the end of each cycle. Lets bug reporters
                    self-report memory without Task Manager, gives us a continuous
@@ -187,6 +202,103 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Retention cleanup failed");
+        }
+    }
+
+    /// <summary>
+    /// Runs the triage engine for each enabled server on the independent
+    /// AnalysisIntervalMinutes cadence and persists findings to DuckDB. Production is
+    /// gated by App.AnalysisEnabled (default ON, D0); findings are only routed to the
+    /// notification channels when App.AnalysisNotificationsEnabled is also on.
+    /// </summary>
+    private async Task RunAnalysisIfDueAsync(CancellationToken stoppingToken)
+    {
+        /* Analysis production is gated by AnalysisEnabled, NOT by the notification toggle
+           (D0). Skip when disabled, or when dependencies aren't injected in this path. */
+        if (!App.AnalysisEnabled ||
+            _duckDb == null || _serverManager == null || _notificationService == null)
+        {
+            return;
+        }
+
+        /* D0: deliver findings only when notifications are also enabled. Analysis
+           runs+persists regardless; this inner gate controls delivery alone. */
+        var notify = App.AnalysisNotificationsEnabled;
+
+        if (DateTime.UtcNow - _lastAnalysisTime < TimeSpan.FromMinutes(App.AnalysisIntervalMinutes))
+        {
+            return;
+        }
+        _lastAnalysisTime = DateTime.UtcNow;
+
+        var timeout = TimeSpan.FromSeconds(App.AnalysisTimeoutSeconds);
+        var planFetcher = new SqlPlanFetcher(_serverManager);
+
+        foreach (var server in _serverManager.GetEnabledServers())
+        {
+            if (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            var serverName = RemoteCollectorService.GetServerNameForStorage(server);
+            var serverId = RemoteCollectorService.GetDeterministicHashCode(serverName);
+
+            /* Skip a server whose previous analysis is still running — a hung
+               connection that outlived its timeout would otherwise pile up tasks. */
+            if (!_analysisInFlight.TryAdd(serverId, 0))
+            {
+                continue;
+            }
+
+            try
+            {
+                /* Fresh AnalysisService per server: IsAnalyzing is a single instance
+                   flag, so a shared instance whose task is abandoned on timeout would
+                   block analysis for every other server. */
+                var analysisService = new AnalysisService(_duckDb, planFetcher);
+                var analyzeTask = analysisService.AnalyzeAsync(serverId, serverName, hoursBack: 4);
+
+                /* Clear the in-flight marker only when the task truly finishes — not
+                   when the timeout below moves us on — so a hung server is not relaunched. */
+                _ = analyzeTask.ContinueWith(
+                    completed => _analysisInFlight.TryRemove(serverId, out _),
+                    TaskScheduler.Default);
+
+                var finished = await Task.WhenAny(analyzeTask, Task.Delay(timeout, stoppingToken));
+
+                if (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                if (finished != analyzeTask)
+                {
+                    _logger?.LogWarning(
+                        "Scheduled analysis for {Server} exceeded {Timeout}s — skipped this cycle",
+                        serverName, App.AnalysisTimeoutSeconds);
+                    continue;
+                }
+
+                /* Analysis already persisted via SaveFindingsAsync inside AnalyzeAsync.
+                   Only route findings to the notification channels when delivery is on. */
+                var findings = await analyzeTask;
+                if (notify)
+                {
+                    await _notificationService.NotifyAsync(findings);
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Scheduled analysis failed for {Server}", serverName);
+                /* If analyzeTask was never created (e.g. ctor threw), the continuation
+                   never ran — clear the marker defensively. */
+                _analysisInFlight.TryRemove(serverId, out _);
+            }
         }
     }
 

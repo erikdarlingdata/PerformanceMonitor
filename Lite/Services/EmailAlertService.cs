@@ -7,40 +7,46 @@
  */
 
 using System;
-using System.Collections.Concurrent;
-using System.IO;
-using System.Net;
-using System.Net.Mail;
-using System.Net.Mime;
-using System.Text;
 using System.Threading.Tasks;
-using PerformanceMonitorLite.Database;
+using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// SMTP email sending service with per-metric cooldown.
-/// Uses System.Net.Mail.SmtpClient (no new NuGet packages needed).
+/// Lite's per-app alert orchestrator shell (Plan E E3c, Approach B). The shared SMTP send,
+/// cooldown, webhook fan-out, and failure counters live in <see cref="EmailSendCore"/>; this
+/// shell owns Lite's record cadence: one combined <c>config_alert_log</c> row per call (with
+/// the muted / detailText / numeric params), written via the injected
+/// <see cref="IAlertHistoryStore"/>.
 /// </summary>
-public class EmailAlertService
+public class EmailAlertService : IFindingAlertSender
 {
-    private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
-    private readonly DuckDbInitializer? _duckDb;
-    private readonly WebhookAlertService _webhookAlertService = new();
+    private static readonly AlertBranding s_branding = new(
+        "Performance Monitor Lite",
+        "To silence this alert: open Performance Monitor Lite → Settings → Manage Mute Rules");
 
-    /* Failure tracking for louder logging */
-    private int _consecutiveSmtpFailures;
-    private string? _lastSmtpError;
-    private int _consecutiveLogFailures;
+    /// <summary>Test seam: the branding this app feeds the shared email/template renderer.</summary>
+    internal static AlertBranding Branding => s_branding;
 
-    public EmailAlertService(DuckDbInitializer? duckDb = null)
+    private readonly IAlertHistoryStore _historyStore;
+    private readonly EmailSendCore _core;
+    private readonly ILogger<EmailAlertService> _logger;
+
+    public EmailAlertService(
+        IAlertSettings settings,
+        IAlertHistoryStore historyStore,
+        WebhookAlertService webhookAlertService,
+        ILogger<EmailAlertService> logger)
     {
-        _duckDb = duckDb;
+        _historyStore = historyStore;
+        _logger = logger;
+        _core = new EmailSendCore(settings, historyStore, webhookAlertService, s_branding, logger);
     }
 
     /// <summary>
-    /// Attempts to send an alert email if SMTP is enabled and cooldown has elapsed.
-    /// Never throws — logs errors via AppLogger.
+    /// Attempts to send an alert (email + webhook via the shared core) and writes Lite's single
+    /// combined <c>config_alert_log</c> row, regardless of email status. Never throws.
     /// </summary>
     public async Task TrySendAlertEmailAsync(
         string metricName,
@@ -56,222 +62,71 @@ public class EmailAlertService
     {
         try
         {
-            string? sendError = null;
-            bool sent = false;
+            var result = await _core.TrySendAsync(
+                metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted);
+
+            /* Combine the channel outcomes into Lite's single-row notification_type taxonomy:
+               muted → "muted"; email attempted → "email"; webhook delivery upgrades to
+               "email+webhook"/"webhook"; otherwise "tray". */
             var notificationType = muted ? "muted" : "tray";
+            if (result.EmailAttempted)
+                notificationType = "email";
 
-            /* Attempt email delivery if SMTP is fully configured and alert is not muted */
-            if (!muted && App.SmtpEnabled &&
-                !string.IsNullOrWhiteSpace(App.SmtpServer) &&
-                !string.IsNullOrWhiteSpace(App.SmtpFromAddress) &&
-                !string.IsNullOrWhiteSpace(App.SmtpRecipients))
-            {
-                var cooldownKey = $"{serverId}:{metricName}";
-                var withinCooldown = _cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
-                    DateTime.UtcNow - lastSent < TimeSpan.FromMinutes(App.EmailCooldownMinutes);
-
-                if (!withinCooldown)
-                {
-                    notificationType = "email";
-
-                    var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
-                    var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                        metricName, serverName, currentValue, thresholdValue, App.EmailCooldownMinutes, context);
-
-                    try
-                    {
-                        await SendEmailAsync(subject, htmlBody, plainTextBody, context);
-                        sent = true;
-                        _cooldowns[cooldownKey] = DateTime.UtcNow;
-
-                        if (_consecutiveSmtpFailures > 0)
-                        {
-                            AppLogger.Info("EmailAlert", $"Email delivery recovered after {_consecutiveSmtpFailures} failure(s)");
-                        }
-                        _consecutiveSmtpFailures = 0;
-                        _lastSmtpError = null;
-
-                        AppLogger.Info("EmailAlert", $"Alert email sent for {metricName} on {serverName}");
-                    }
-                    catch (Exception ex)
-                    {
-                        sendError = ex.Message;
-                        _consecutiveSmtpFailures++;
-                        _lastSmtpError = ex.Message;
-
-                        if (_consecutiveSmtpFailures <= 3)
-                        {
-                            AppLogger.Error("EmailAlert", $"ALERT EMAIL FAILED ({_consecutiveSmtpFailures}x): {ex.GetType().Name}: {ex.Message}");
-                        }
-                        else if (_consecutiveSmtpFailures % 50 == 0)
-                        {
-                            AppLogger.Error("EmailAlert", $"ALERT EMAIL STILL FAILING: {_consecutiveSmtpFailures} consecutive failures. Last error: {ex.Message}");
-                        }
-                    }
-                }
-            }
-
-            /* Send webhook notifications (Teams / Slack) alongside email */
-            bool webhookSent = false;
-            if (!muted)
-            {
-                webhookSent = await _webhookAlertService.TrySendWebhookAlertsAsync(
-                    metricName, serverName, currentValue, thresholdValue, serverId, context);
-            }
-
-            /* Reflect webhook delivery in notification type */
-            if (webhookSent)
+            var sent = result.EmailSent;
+            if (result.WebhookSent)
             {
                 notificationType = notificationType == "email" ? "email+webhook" : "webhook";
                 sent = true;
             }
 
-            /* Always log the alert to DuckDB, regardless of email status */
-            var logCurrent = numericCurrentValue
-                ?? (double.TryParse(currentValue.TrimEnd('%'), out var cv) ? cv : 0);
-            var logThreshold = numericThresholdValue
-                ?? (double.TryParse(thresholdValue.TrimEnd('%'), out var tv) ? tv : 0);
-            await LogAlertAsync(serverId, serverName, metricName,
-                logCurrent, logThreshold, sent, notificationType, sendError, muted, detailText);
+            /* Always log the alert, regardless of email status. The numeric current/threshold
+               resolution happens in the store (it owns the DuckDB DOUBLE columns); the record
+               carries both the display text and the optional numerics so no data is lost. The
+               structured context is persisted as JSON alongside the flat detail_text so the
+               in-app dialog can render the same advice / T-SQL / drill-down shape email and
+               webhooks show (and survive purge of the source findings). */
+            string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
+            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                serverId.ToString(), serverName, metricName,
+                currentValue, thresholdValue,
+                numericCurrentValue, numericThresholdValue,
+                sent, notificationType, result.SendError,
+                muted, detailText, contextJson));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("EmailAlert", $"TrySendAlertEmailAsync outer error: {ex.Message}");
+            _logger.LogError($"TrySendAlertEmailAsync outer error: {ex.Message}");
         }
     }
 
     /// <summary>
-    /// Sends a test email to verify SMTP configuration.
-    /// Returns null on success, or the error message on failure.
+    /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
+    /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
+    /// restarts (the analysis cooldown is stamped unconditionally, so the persisted equivalent
+    /// is the latest row for that metric_name). Delegates to the injected store.
     /// </summary>
-    public static async Task<string?> SendTestEmailAsync()
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(App.SmtpServer))
-                return "SMTP server is not configured.";
-
-            if (string.IsNullOrWhiteSpace(App.SmtpFromAddress))
-                return "From address is not configured.";
-
-            if (string.IsNullOrWhiteSpace(App.SmtpRecipients))
-                return "No recipients configured.";
-
-            var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildTestEmail();
-            await SendEmailAsync("[SQL Monitor] Test Email", htmlBody, plainTextBody);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return ex.Message;
-        }
-    }
+    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
+        => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
 
     /// <summary>
-    /// Shared SMTP send helper with multipart/alternative (HTML + plain text).
+    /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
+    /// Lite's cadence — one combined <c>config_alert_log</c> row written unconditionally by
+    /// <see cref="TrySendAlertEmailAsync"/>, which already carries the muted/detailText/numeric
+    /// params — so no separate fallback row is needed.
     /// </summary>
-    private static async Task SendEmailAsync(string subject, string htmlBody, string plainTextBody, AlertContext? context = null)
+    public Task SendFindingAlertAsync(FindingAlert alert)
     {
-        using var smtpClient = new SmtpClient(App.SmtpServer, App.SmtpPort)
-        {
-            EnableSsl = App.SmtpUseSsl,
-            DeliveryMethod = SmtpDeliveryMethod.Network,
-            Timeout = 30000
-        };
-
-        if (!string.IsNullOrWhiteSpace(App.SmtpUsername))
-        {
-            var password = App.GetSmtpPassword();
-            smtpClient.Credentials = new NetworkCredential(App.SmtpUsername, password ?? "");
-        }
-
-        using var message = new MailMessage
-        {
-            From = new MailAddress(App.SmtpFromAddress),
-            Subject = subject
-        };
-
-        /* Multipart/alternative: plain text + HTML */
-        var plainView = AlternateView.CreateAlternateViewFromString(plainTextBody, null, MediaTypeNames.Text.Plain);
-        var htmlView = AlternateView.CreateAlternateViewFromString(htmlBody, null, MediaTypeNames.Text.Html);
-        message.AlternateViews.Add(plainView);
-        message.AlternateViews.Add(htmlView);
-
-        /* XML attachment (deadlock graph, blocked process report) */
-        if (!string.IsNullOrEmpty(context?.AttachmentXml) && !string.IsNullOrEmpty(context?.AttachmentFileName))
-        {
-            var xmlBytes = Encoding.UTF8.GetBytes(context.AttachmentXml);
-            var stream = new MemoryStream(xmlBytes);
-            message.Attachments.Add(new Attachment(stream, context.AttachmentFileName, "application/xml"));
-        }
-
-        foreach (var recipient in App.SmtpRecipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            message.To.Add(recipient);
-        }
-
-        await smtpClient.SendMailAsync(message);
-    }
-
-    /// <summary>
-    /// Logs an alert to the config_alert_log table in DuckDB.
-    /// Reuses the injected DuckDbInitializer instead of creating a new one each time.
-    /// </summary>
-    private async Task LogAlertAsync(int serverId, string serverName, string metricName,
-        double currentValue, double thresholdValue, bool alertSent, string notificationType, string? sendError, bool muted = false, string? detailText = null)
-    {
-        try
-        {
-            /* Use injected initializer, fall back to creating one from App.DatabasePath */
-            var duckDb = _duckDb;
-            if (duckDb == null)
-            {
-                var dbPath = App.DatabasePath;
-                if (string.IsNullOrEmpty(dbPath)) return;
-                duckDb = new DuckDbInitializer(dbPath);
-            }
-
-            using var writeLock = duckDb.AcquireWriteLock();
-            using var connection = duckDb.CreateConnection();
-            await connection.OpenAsync();
-
-            using var command = connection.CreateCommand();
-            command.CommandText = @"
-INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
-
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverName });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = currentValue });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = thresholdValue });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = alertSent });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = notificationType });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sendError ?? (object)DBNull.Value });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = muted });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = detailText ?? (object)DBNull.Value });
-
-            await command.ExecuteNonQueryAsync();
-
-            /* Reset log failure counter on success */
-            if (_consecutiveLogFailures > 0)
-            {
-                AppLogger.Info("EmailAlert", $"Alert logging recovered after {_consecutiveLogFailures} failure(s)");
-            }
-            _consecutiveLogFailures = 0;
-        }
-        catch (Exception ex)
-        {
-            _consecutiveLogFailures++;
-            if (_consecutiveLogFailures <= 3)
-            {
-                AppLogger.Error("EmailAlert", $"Failed to log alert ({_consecutiveLogFailures}x): {ex.Message}");
-            }
-            else if (_consecutiveLogFailures % 50 == 0)
-            {
-                AppLogger.Error("EmailAlert", $"Alert logging STILL broken: {_consecutiveLogFailures} failures. Last: {ex.Message}");
-            }
-        }
+        var serverId = int.TryParse(alert.ServerId, out var sid) ? sid : 0;
+        return TrySendAlertEmailAsync(
+            alert.MetricName,
+            alert.ServerName,
+            alert.CurrentValue,
+            alert.ThresholdValue,
+            serverId,
+            alert.Context,
+            numericCurrentValue: alert.Severity,
+            numericThresholdValue: alert.NotifyThreshold,
+            muted: false,
+            detailText: alert.DetailText);
     }
 }

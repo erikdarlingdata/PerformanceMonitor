@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -33,7 +34,7 @@ public sealed class McpWaitTools
             var rows = await dataService.GetWaitStatsAsync(resolved.Value.ServerId, hours_back);
             if (rows.Count == 0)
             {
-                return "No wait stats data available for the specified time range.";
+                return McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
             }
 
             var result = rows.Take(limit).Select(r => new
@@ -113,7 +114,19 @@ public sealed class McpWaitTools
             var points = await dataService.GetWaitStatsTrendAsync(resolved.Value.ServerId, wait_type, hours_back);
             if (points.Count == 0)
             {
-                return $"No trend data for wait type '{wait_type}'.";
+                /* Same shape as get_perfmon_trend: tell the caller whether the wait type is just
+                   unknown here vs. nothing collected at all, and hand back the ones that do have data. */
+                var collected = await dataService.GetDistinctWaitTypesAsync(resolved.Value.ServerId, hours_back);
+                if (collected.Count == 0)
+                    return McpHelpers.Status(
+                        "unavailable",
+                        $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
+                        "(the collector may not have run, or delta wait stats need a second collection cycle).");
+
+                return McpHelpers.Status(
+                    "not_collected",
+                    $"No trend data for wait type '{wait_type}'. It may not be a wait type observed on this server in this window — see hints.collected_wait_types for the {collected.Count} that have data.",
+                    new { collected_wait_types = collected });
             }
 
             var result = points.Select(p => new
@@ -162,7 +175,7 @@ public sealed class McpWaitTools
             var rows = await dataService.GetWaitingTasksAsync(resolved.Value.ServerId, hours_back);
             if (rows.Count == 0)
             {
-                return "No waiting tasks found.";
+                return McpHelpers.Status("empty", "No waiting tasks found.");
             }
 
             var result = rows.Take(limit).Select(r => new

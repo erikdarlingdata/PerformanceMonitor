@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitor.Common;
 
 
 namespace PerformanceMonitorLite.Services;
@@ -48,6 +49,34 @@ public class CollectorHealthEntry
      * permissions get granted later, the next launch retries once.
      */
     public bool IsPermissionRestricted { get; set; }
+
+    /*
+     * Set when the collector's Extended Events session could not be
+     * created or started (issue #1086). Distinct from a query failure:
+     * capture is non-functional even though reads would "succeed" with
+     * zero rows. Cleared on the next successful run. MainWindow raises
+     * a one-time tray notification on the false→true transition.
+     */
+    public bool XeSessionUnavailable { get; set; }
+    public string? XeSessionMessage { get; set; }
+}
+
+/// <summary>
+/// Thrown when an Extended Events session required by a collector cannot
+/// be created or started. Raised before the collect query runs so a missing
+/// session can never be masked by a zero-row "successful" read (issue #1086).
+/// </summary>
+public class XeSessionEnsureException : Exception
+{
+    public string SessionKind { get; }
+
+    public XeSessionEnsureException(string sessionKind, SqlException inner)
+        : base($"Failed to ensure {sessionKind} XE session: {inner.Message}", inner)
+    {
+        SessionKind = sessionKind;
+    }
+
+    public new SqlException InnerException => (SqlException)base.InnerException!;
 }
 
 /// <summary>
@@ -59,6 +88,14 @@ public class CollectorHealthSummary
     public int ErroringCollectors { get; set; }
     public int LoggingFailures { get; set; }
     public List<CollectorHealthEntry> Errors { get; set; } = new();
+
+    /*
+     * Collectors whose XE session couldn't be created/started (#1086).
+     * Tracked separately from Errors because a PERMISSIONS-classified
+     * failure deliberately does not increment ConsecutiveErrors, so it
+     * would otherwise be invisible here.
+     */
+    public List<CollectorHealthEntry> XeSessionFailures { get; set; } = new();
 }
 
 public partial class RemoteCollectorService
@@ -72,7 +109,9 @@ public partial class RemoteCollectorService
     private static long s_idCounter = DateTime.UtcNow.Ticks;
 
     /// <summary>
-    /// Limits concurrent SQL connections to avoid overwhelming target servers.
+    /// Limits how many SQL connections are <em>opened</em> at once — the semaphore is released
+    /// when OpenAsync returns, not when the connection is disposed — smoothing the login storm
+    /// when many servers are polled together. It does not cap the number of open connections.
     /// </summary>
     private static readonly SemaphoreSlim s_connectionThrottle = new(7, 7);
 
@@ -174,6 +213,11 @@ public partial class RemoteCollectorService
                     summary.ErroringCollectors++;
                     summary.Errors.Add(entry);
                 }
+
+                if (entry.XeSessionUnavailable)
+                {
+                    summary.XeSessionFailures.Add(entry);
+                }
             }
 
             return summary;
@@ -213,7 +257,7 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Records a collector execution result for health tracking.
     /// </summary>
-    private void RecordCollectorResult(int serverId, string collectorName, string status, string? errorMessage = null)
+    internal void RecordCollectorResult(int serverId, string collectorName, string status, string? errorMessage = null, bool xeSessionUnavailable = false)
     {
         lock (_healthLock)
         {
@@ -223,6 +267,9 @@ public partial class RemoteCollectorService
                 entry = new CollectorHealthEntry { ServerId = serverId, CollectorName = collectorName };
                 _collectorHealth[key] = entry;
             }
+
+            entry.XeSessionUnavailable = xeSessionUnavailable;
+            entry.XeSessionMessage = xeSessionUnavailable ? errorMessage : null;
 
             if (status == "SUCCESS")
             {
@@ -343,11 +390,9 @@ public partial class RemoteCollectorService
             .Where(s => s.Enabled)
             .ToList();
 
-        /* Ensure XE sessions are set up before collecting */
+        /* XE session setup happens inside RunCollectorAsync so the background
+           collection loop also ensures/retries it, not just tab-open (#1086) */
         var serverStatus = _serverManager.GetConnectionStatus(server.Id);
-        var engineEdition = serverStatus.SqlEngineEdition;
-        await EnsureBlockedProcessXeSessionAsync(server, engineEdition, cancellationToken);
-        await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
 
         /* Persist edition/version to DuckDB for the analysis engine */
         await PersistServerMetadataAsync(server, serverStatus);
@@ -379,6 +424,7 @@ public partial class RemoteCollectorService
         var status = "SUCCESS";
         string? errorMessage = null;
         int rowsCollected = 0;
+        bool xeSessionUnavailable = false;
 
         try
         {
@@ -417,6 +463,20 @@ public partial class RemoteCollectorService
             _logger?.LogDebug("Running collector '{Collector}' for server '{Server}'",
                 collectorName, server.DisplayName);
 
+            /* Ensure the backing XE session exists before reading its ring buffer.
+               Runs on every cycle (cheap existence check when already present) so a
+               failed first attempt self-heals instead of staying broken until a manual
+               tab re-open (#1086). Throws XeSessionEnsureException on failure so the
+               zero-row read below can never record a misleading SUCCESS. */
+            if (collectorName == "blocked_process_report")
+            {
+                await EnsureBlockedProcessXeSessionAsync(server, engineEdition, cancellationToken);
+            }
+            else if (collectorName == "deadlocks")
+            {
+                await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
+            }
+
             rowsCollected = collectorName switch
             {
                 "wait_stats" => await CollectWaitStatsAsync(server, cancellationToken),
@@ -441,6 +501,7 @@ public partial class RemoteCollectorService
                 "trace_flags" => await CollectTraceFlagsAsync(server, cancellationToken),
                 "running_jobs" => await CollectRunningJobsAsync(server, cancellationToken),
                 "database_size_stats" => await CollectDatabaseSizeStatsAsync(server, cancellationToken),
+                "index_object_stats" => await CollectIndexObjectStatsAsync(server, cancellationToken),
                 "server_properties" => await CollectServerPropertiesAsync(server, cancellationToken),
                 "session_stats" => await CollectSessionStatsAsync(server, cancellationToken),
                 _ => throw new ArgumentException($"Unknown collector: {collectorName}")
@@ -450,6 +511,21 @@ public partial class RemoteCollectorService
 
             var elapsed = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
             AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{_lastSqlMs}ms, duck:{_lastDuckDbMs}ms)");
+        }
+        catch (XeSessionEnsureException ex)
+        {
+            /* XE session couldn't be created/started — capture is dead even though
+               the ring-buffer read would "succeed" with zero rows. Classify like a
+               direct SQL failure so the health indicator stops showing OK (#1086). */
+            var sqlError = ex.InnerException;
+            errorMessage = ex.Message;
+            status = (sqlError.Number == 229 || sqlError.Number == 297 || sqlError.Number == 300)
+                ? "PERMISSIONS"
+                : "ERROR";
+            xeSessionUnavailable = true;
+            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+            _logger?.LogWarning("Collector '{Collector}' XE session unavailable for server '{Server}': {Message}",
+                collectorName, server.DisplayName, ex.Message);
         }
         catch (SqlException ex)
         {
@@ -502,7 +578,7 @@ public partial class RemoteCollectorService
         }
 
         // Track collector health
-        RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage);
+        RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
 
         // Log the collection attempt
         await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, _lastSqlMs, _lastDuckDbMs);
@@ -614,7 +690,7 @@ WHERE server_id = $3";
     protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken)
     {
         var serverId = GetServerId(server);
-        var baseConnStr = server.GetConnectionString(_serverManager.CredentialService);
+        var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
         var targetDb = new SqlConnectionStringBuilder(baseConnStr).InitialCatalog;
 
         bool knownInaccessible;
@@ -750,7 +826,7 @@ WHERE server_id = $3";
     /// </summary>
     protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken)
     {
-        var baseConnStr = server.GetConnectionString(_serverManager.CredentialService);
+        var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
         var connStr = new SqlConnectionStringBuilder(baseConnStr)
         {
             ConnectTimeout = ConnectionTimeoutSeconds,
@@ -793,7 +869,7 @@ WHERE server_id = $3";
             await s_connectionThrottle.WaitAsync(cancellationToken);
             try
             {
-                var connectionString = server.GetConnectionString(_serverManager.CredentialService);
+                var connectionString = _serverManager.CredentialResolver.GetConnectionString(server);
 
             var builder = new SqlConnectionStringBuilder(connectionString)
             {
@@ -924,21 +1000,13 @@ WHERE server_id = $3";
     }
 
     /// <summary>
-    /// Deterministic hash code for a string. .NET Core randomizes string.GetHashCode()
-    /// per process, so we use a simple FNV-1a hash to get a stable value across restarts.
+    /// Deterministic hash code for a string. Forwards to the shared
+    /// <see cref="PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode"/> so Lite,
+    /// Dashboard, and the MCP paths all derive the same server id from a server name. Kept as a
+    /// thin internal wrapper to avoid churning the many existing call sites.
     /// </summary>
-    internal static int GetDeterministicHashCode(string value)
-    {
-        unchecked
-        {
-            var hash = (int)2166136261;
-            foreach (var c in value)
-            {
-                hash = (hash ^ c) * 16777619;
-            }
-            return hash;
-        }
-    }
+    internal static int GetDeterministicHashCode(string value) =>
+        PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(value);
 
     /// <summary>
     /// Checks if a collector is supported on the given SQL Server version and engine edition.

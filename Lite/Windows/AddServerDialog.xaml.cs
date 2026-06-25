@@ -7,17 +7,20 @@
  */
 
 using System;
+using System.Linq;
 using System.Windows;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Windows;
 
 public partial class AddServerDialog : Window
 {
     private readonly ServerManager _serverManager;
+    private readonly ProfileManager _profileManager;
     private static bool _isDialogOpen = false;
 
     /// <summary>
@@ -30,18 +33,37 @@ public partial class AddServerDialog : Window
     /// </summary>
     public ServerConnection? AddedServer { get; private set; }
 
-    public AddServerDialog(ServerManager serverManager)
+    public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
         InitializeComponent();
         _serverManager = serverManager;
+        _profileManager = profileManager;
         _isDialogOpen = true;
         Closed += (s, e) => _isDialogOpen = false;
+
+        PopulateProfilePicker();
+    }
+
+    /// <summary>
+    /// Populates the profile dropdown from the current profile list. Disables the "use profile"
+    /// option when no profiles exist.
+    /// </summary>
+    private void PopulateProfilePicker()
+    {
+        var profiles = _profileManager.GetAll();
+        ProfileComboBox.ItemsSource = profiles;
+        if (profiles.Count == 0)
+        {
+            UseProfileRadio.IsEnabled = false;
+            NoProfilesNote.Visibility = Visibility.Visible;
+        }
     }
 
     /// <summary>
     /// Constructor for editing an existing server.
     /// </summary>
-    public AddServerDialog(ServerManager serverManager, ServerConnection existing) : this(serverManager)
+    public AddServerDialog(ServerManager serverManager, ProfileManager profileManager, ServerConnection existing)
+        : this(serverManager, profileManager)
     {
         Title = "Edit SQL Server";
         ServerNameBox.Text = existing.ServerName;
@@ -64,6 +86,20 @@ public partial class AddServerDialog : Window
         MultiSubnetFailoverCheckBox.IsChecked = existing.MultiSubnetFailover;
         MonthlyCostBox.Text = existing.MonthlyCostUsd.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
+        // Profile-backed server (M-3 edit-load): preselect "use profile" + the dropdown, and do NOT
+        // call GetCredential(existing.Id) — there is intentionally no per-server secret to load.
+        if (!string.IsNullOrEmpty(existing.CredentialProfileId))
+        {
+            UseProfileRadio.IsChecked = true;
+            var match = _profileManager.GetProfile(existing.CredentialProfileId);
+            if (match != null)
+                ProfileComboBox.SelectedItem = ProfileComboBox.Items
+                    .Cast<CredentialProfile>().FirstOrDefault(p => p.Id == match.Id);
+            // CredentialSource_Changed (fired by IsChecked) hides the inline auth panels.
+            AddedServer = existing;
+            return;
+        }
+
         // Set authentication mode
         if (existing.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
@@ -80,7 +116,7 @@ public partial class AddServerDialog : Window
         else if (existing.AuthenticationType == AuthenticationTypes.SqlServer)
         {
             SqlAuthRadio.IsChecked = true;
-            
+
             // Load credentials if stored
             var credentialService = new CredentialService();
             var cred = credentialService.GetCredential(existing.Id);
@@ -90,6 +126,28 @@ public partial class AddServerDialog : Window
                 PasswordBox.Password = cred.Value.Password;
             }
         }
+        else if (existing.AuthenticationType == AuthenticationTypes.ServicePrincipal)
+        {
+            ServicePrincipalAuthRadio.IsChecked = true;
+            AzureClientIdBox.Text = existing.AzureClientId ?? "";
+            AzureTenantIdBox.Text = existing.AzureTenantId ?? "";
+
+            // Pre-fill the client id and secret from Credential Manager (mirrors SQL-password pre-fill).
+            var credentialService = new CredentialService();
+            var cred = credentialService.GetCredential(existing.Id);
+            if (cred.HasValue)
+            {
+                // The stored credential's username is the client id; prefer the model value when present.
+                if (string.IsNullOrEmpty(AzureClientIdBox.Text))
+                    AzureClientIdBox.Text = cred.Value.Username;
+                AzureClientSecretBox.Password = cred.Value.Password;
+            }
+        }
+        else if (existing.AuthenticationType == AuthenticationTypes.ManagedIdentity)
+        {
+            ManagedIdentityAuthRadio.IsChecked = true;
+            ManagedIdentityClientIdBox.Text = existing.ManagedIdentityClientId ?? "";
+        }
         else
         {
             WindowsAuthRadio.IsChecked = true;
@@ -98,17 +156,58 @@ public partial class AddServerDialog : Window
         AddedServer = existing;
     }
 
+    /// <summary>
+    /// Toggles between the inline per-server auth UI and the credential-profile picker. When a profile
+    /// is chosen the inline auth radios + all per-mode credential panels are hidden (O-2 — the profile
+    /// fully overrides the server's auth type + creds, so the inline panels are removed, not just ignored).
+    /// </summary>
+    private void CredentialSource_Changed(object sender, RoutedEventArgs e)
+    {
+        // Guard against early Checked events during InitializeComponent.
+        if (ProfilePickerPanel == null || InlineAuthRadios == null) return;
+
+        bool useProfile = UseProfileRadio.IsChecked == true;
+
+        ProfilePickerPanel.Visibility = useProfile ? Visibility.Visible : Visibility.Collapsed;
+        InlineAuthRadios.Visibility = useProfile ? Visibility.Collapsed : Visibility.Visible;
+
+        if (useProfile)
+        {
+            // Hide every per-mode inline credential panel.
+            if (SqlCredentialsPanel != null) SqlCredentialsPanel.Visibility = Visibility.Collapsed;
+            if (EntraMfaPanel != null) EntraMfaPanel.Visibility = Visibility.Collapsed;
+            if (ServicePrincipalPanel != null) ServicePrincipalPanel.Visibility = Visibility.Collapsed;
+            if (ManagedIdentityPanel != null) ManagedIdentityPanel.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            // Re-show the panel for the currently selected inline auth mode.
+            AuthMode_Changed(sender, e);
+        }
+    }
+
     private void AuthMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (SqlCredentialsPanel != null && EntraMfaPanel != null)
+        if (SqlCredentialsPanel != null && EntraMfaPanel != null &&
+            ServicePrincipalPanel != null && ManagedIdentityPanel != null)
         {
             // Show credentials panel for SQL Server authentication
             SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true
                 ? Visibility.Visible
                 : Visibility.Collapsed;
-            
+
             // Show MFA panel for Microsoft Entra MFA
             EntraMfaPanel.Visibility = EntraMfaAuthRadio.IsChecked == true
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
+            // Show service principal panel
+            ServicePrincipalPanel.Visibility = ServicePrincipalAuthRadio.IsChecked == true
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
+            // Show managed identity panel
+            ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true
                 ? Visibility.Visible
                 : Visibility.Collapsed;
         }
@@ -151,24 +250,69 @@ public partial class AddServerDialog : Window
             MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true
         };
 
+        // Credential-profile mode: apply the profile's auth via the SAME shared helper, sourcing every
+        // field from the profile (its auth type + non-secret fields + secret from Credential Manager).
+        // Mirrors the atomic-tuple production resolution; never reads the inline controls.
+        if (UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is CredentialProfile profile)
+        {
+            string? profUser = null;
+            string? profSecret = null;
+            if (profile.AuthType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal)
+            {
+                var cred = _profileManager.CredentialService.GetCredential(
+                    ProfileManager.ProfileCredentialId(profile.Id));
+                if (cred.HasValue)
+                {
+                    profUser = cred.Value.Username;
+                    profSecret = cred.Value.Password;
+                }
+            }
+            ServerConnection.ApplyAuthentication(builder, profile.AuthType, profUser, profSecret,
+                profile.AzureClientId, profile.ManagedIdentityClientId);
+            return builder;
+        }
+
+        // Determine auth type + per-mode credentials from the live UI controls, then apply via the
+        // SHARED helper so this Test-Connection builder never diverges from ServerConnection's
+        // production builder (the two-bodies trap). See ServerConnection.ApplyAuthentication.
+        string authType;
+        string? userId = null;
+        string? secret = null;
+        string? azureClientId = null;
+        string? managedIdentityClientId = null;
+
         if (WindowsAuthRadio.IsChecked == true)
         {
-            builder.IntegratedSecurity = true;
+            authType = AuthenticationTypes.Windows;
         }
         else if (SqlAuthRadio.IsChecked == true)
         {
-            builder.IntegratedSecurity = false;
-            builder.UserID = UsernameBox.Text.Trim();
-            builder.Password = PasswordBox.Password;
+            authType = AuthenticationTypes.SqlServer;
+            userId = UsernameBox.Text.Trim();
+            secret = PasswordBox.Password;
         }
         else if (EntraMfaAuthRadio.IsChecked == true)
         {
-            builder.IntegratedSecurity = false;
-            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryInteractive;
-            var mfaUsername = EntraMfaUsernameBox.Text.Trim();
-            if (!string.IsNullOrEmpty(mfaUsername))
-                builder.UserID = mfaUsername;
+            authType = AuthenticationTypes.EntraMFA;
+            userId = EntraMfaUsernameBox.Text.Trim();
         }
+        else if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            authType = AuthenticationTypes.ServicePrincipal;
+            userId = AzureClientIdBox.Text.Trim();
+            secret = AzureClientSecretBox.Password;
+        }
+        else if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            authType = AuthenticationTypes.ManagedIdentity;
+            managedIdentityClientId = ManagedIdentityClientIdBox.Text.Trim();
+        }
+        else
+        {
+            authType = AuthenticationTypes.SqlServer;
+        }
+
+        ServerConnection.ApplyAuthentication(builder, authType, userId, secret, azureClientId, managedIdentityClientId);
 
         return builder;
     }
@@ -274,12 +418,30 @@ public partial class AddServerDialog : Window
         if (string.IsNullOrEmpty(displayName))
             displayName = serverName;
 
+        // Credential source: a shared profile, or inline per-server auth.
+        bool useProfile = UseProfileRadio.IsChecked == true;
+        CredentialProfile? selectedProfile = null;
+
         // Determine authentication type
         string authenticationType;
         string? username = null;
         string? password = null;
 
-        if (WindowsAuthRadio.IsChecked == true)
+        if (useProfile)
+        {
+            selectedProfile = ProfileComboBox.SelectedItem as CredentialProfile;
+            if (selectedProfile == null)
+            {
+                StatusText.Text = "Select a credential profile, or choose \"Configure credentials on this server\".";
+                return;
+            }
+            // The profile fully overrides the server's auth; mirror its auth type onto the server's
+            // own AuthenticationType (display + zero-touch UpdateServer arm behavior). The actual
+            // resolution always comes from the profile via CredentialProfileId. No per-server secret
+            // is stored (username/password stay null).
+            authenticationType = selectedProfile.AuthType;
+        }
+        else if (WindowsAuthRadio.IsChecked == true)
         {
             authenticationType = AuthenticationTypes.Windows;
         }
@@ -287,6 +449,29 @@ public partial class AddServerDialog : Window
         {
             authenticationType = AuthenticationTypes.EntraMFA;
             username = EntraMfaUsernameBox.Text.Trim();
+        }
+        else if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            authenticationType = AuthenticationTypes.ServicePrincipal;
+            // For service principal, the credential is (client id, client secret).
+            username = AzureClientIdBox.Text.Trim();
+            password = AzureClientSecretBox.Password;
+
+            if (string.IsNullOrEmpty(username))
+            {
+                StatusText.Text = "Client (Application) ID is required for service principal authentication.";
+                return;
+            }
+            if (string.IsNullOrEmpty(password))
+            {
+                StatusText.Text = "Client secret is required for service principal authentication.";
+                return;
+            }
+        }
+        else if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            authenticationType = AuthenticationTypes.ManagedIdentity;
+            // No secret to store for managed identity.
         }
         else // SQL Server Authentication
         {
@@ -344,6 +529,15 @@ public partial class AddServerDialog : Window
                 AddedServer.ServerName = serverName;
                 AddedServer.DisplayName = displayName;
                 AddedServer.AuthenticationType = authenticationType;
+                AddedServer.AzureClientId = authenticationType == AuthenticationTypes.ServicePrincipal
+                    ? (string.IsNullOrWhiteSpace(AzureClientIdBox.Text) ? null : AzureClientIdBox.Text.Trim())
+                    : null;
+                AddedServer.AzureTenantId = authenticationType == AuthenticationTypes.ServicePrincipal
+                    ? (string.IsNullOrWhiteSpace(AzureTenantIdBox.Text) ? null : AzureTenantIdBox.Text.Trim())
+                    : null;
+                AddedServer.ManagedIdentityClientId = authenticationType == AuthenticationTypes.ManagedIdentity
+                    ? (string.IsNullOrWhiteSpace(ManagedIdentityClientIdBox.Text) ? null : ManagedIdentityClientIdBox.Text.Trim())
+                    : null;
                 AddedServer.IsEnabled = EnabledCheckBox.IsChecked == true;
                 AddedServer.TrustServerCertificate = TrustCertCheckBox.IsChecked == true;
                 AddedServer.EncryptMode = GetSelectedEncryptMode();
@@ -356,7 +550,23 @@ public partial class AddServerDialog : Window
                 if (decimal.TryParse(MonthlyCostBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
                     AddedServer.MonthlyCostUsd = editCost;
 
-                _serverManager.UpdateServer(AddedServer, username, password);
+                AddedServer.CredentialProfileId = useProfile ? selectedProfile!.Id : null;
+
+                if (useProfile)
+                {
+                    // M-3: assigning a profile unconditionally scrubs the per-server identity REGARDLESS
+                    // of AuthenticationType — delete the per-server secret and null the per-server Azure/MI
+                    // fields, so a later "switch back to inline" can't silently resurrect a stale secret.
+                    AddedServer.AzureClientId = null;
+                    AddedServer.AzureTenantId = null;
+                    AddedServer.ManagedIdentityClientId = null;
+                    _serverManager.UpdateServer(AddedServer, null, null);
+                    _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                }
+                else
+                {
+                    _serverManager.UpdateServer(AddedServer, username, password);
+                }
             }
             else
             {
@@ -370,6 +580,15 @@ public partial class AddServerDialog : Window
                     ServerName = serverName,
                     DisplayName = displayName,
                     AuthenticationType = authenticationType,
+                    AzureClientId = authenticationType == AuthenticationTypes.ServicePrincipal
+                        ? (string.IsNullOrWhiteSpace(AzureClientIdBox.Text) ? null : AzureClientIdBox.Text.Trim())
+                        : null,
+                    AzureTenantId = authenticationType == AuthenticationTypes.ServicePrincipal
+                        ? (string.IsNullOrWhiteSpace(AzureTenantIdBox.Text) ? null : AzureTenantIdBox.Text.Trim())
+                        : null,
+                    ManagedIdentityClientId = authenticationType == AuthenticationTypes.ManagedIdentity
+                        ? (string.IsNullOrWhiteSpace(ManagedIdentityClientIdBox.Text) ? null : ManagedIdentityClientIdBox.Text.Trim())
+                        : null,
                     IsEnabled = EnabledCheckBox.IsChecked == true,
                     TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
                     EncryptMode = GetSelectedEncryptMode(),
@@ -379,10 +598,19 @@ public partial class AddServerDialog : Window
                     UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim(),
                     ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true,
                     MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
-                    MonthlyCostUsd = monthlyCost
+                    MonthlyCostUsd = monthlyCost,
+                    CredentialProfileId = useProfile ? selectedProfile!.Id : null
                 };
 
-                _serverManager.AddServer(AddedServer, username, password);
+                if (useProfile)
+                {
+                    // Profile-backed: store no per-server secret; the profile supplies credentials.
+                    _serverManager.AddServer(AddedServer, null, null);
+                }
+                else
+                {
+                    _serverManager.AddServer(AddedServer, username, password);
+                }
             }
 
             DialogResult = true;

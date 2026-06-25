@@ -12,6 +12,7 @@ using System.Reflection;
 using System.Windows;
 using PerformanceMonitorLite.Services;
 using Velopack;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Windows;
 

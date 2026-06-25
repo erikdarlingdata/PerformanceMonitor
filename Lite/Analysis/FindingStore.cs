@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Analysis;
@@ -29,9 +30,18 @@ public class FindingStore
     public async Task<List<AnalysisFinding>> SaveFindingsAsync(
         List<AnalysisStory> stories, AnalysisContext context)
     {
-        var mutedHashes = await GetMutedHashesAsync(context.ServerId);
         var analysisTime = DateTime.UtcNow;
         var saved = new List<AnalysisFinding>();
+
+        /* One read lock + one connection per save call, reused for the mute-filter read
+           and every insert. The previous per-finding pattern acquired the lock and opened
+           a fresh connection for each row. The lock is NoRecursion, so the helpers below
+           operate on the passed connection and must NOT re-acquire it. */
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+
+        var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
 
         foreach (var story in stories)
         {
@@ -48,6 +58,7 @@ public class FindingStore
                 AnalysisTime = analysisTime,
                 ServerId = context.ServerId,
                 ServerName = context.ServerName,
+                DatabaseName = story.DatabaseName,
                 TimeRangeStart = context.TimeRangeStart,
                 TimeRangeEnd = context.TimeRangeEnd,
                 Severity = story.Severity,
@@ -55,6 +66,7 @@ public class FindingStore
                 Category = story.Category,
                 StoryPath = story.StoryPath,
                 StoryPathHash = story.StoryPathHash,
+                IncidentId = story.IncidentId,
                 StoryText = story.StoryText,
                 RootFactKey = story.RootFactKey,
                 RootFactValue = story.RootFactValue,
@@ -64,7 +76,7 @@ public class FindingStore
                 RootFactMetadata = story.RootFactMetadata
             };
 
-            await InsertFindingAsync(finding);
+            await InsertFindingAsync(connection, finding);
             saved.Add(finding);
         }
 
@@ -88,7 +100,7 @@ public class FindingStore
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
        story_path, story_path_hash, story_text,
-       root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count
+       root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count, incident_id
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time >= $2
@@ -121,7 +133,8 @@ LIMIT $3";
                 RootFactValue = reader.IsDBNull(14) ? null : reader.GetDouble(14),
                 LeafFactKey = reader.IsDBNull(15) ? null : reader.GetString(15),
                 LeafFactValue = reader.IsDBNull(16) ? null : reader.GetDouble(16),
-                FactCount = reader.GetInt32(17)
+                FactCount = reader.GetInt32(17),
+                IncidentId = reader.IsDBNull(18) ? string.Empty : reader.GetString(18)
             });
         }
 
@@ -144,7 +157,7 @@ LIMIT $3";
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
        story_path, story_path_hash, story_text,
-       root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count
+       root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count, incident_id
 FROM analysis_findings
 WHERE server_id = $1
 AND   analysis_time = (
@@ -176,7 +189,8 @@ ORDER BY severity DESC";
                 RootFactValue = reader.IsDBNull(14) ? null : reader.GetDouble(14),
                 LeafFactKey = reader.IsDBNull(15) ? null : reader.GetString(15),
                 LeafFactValue = reader.IsDBNull(16) ? null : reader.GetDouble(16),
-                FactCount = reader.GetInt32(17)
+                FactCount = reader.GetInt32(17),
+                IncidentId = reader.IsDBNull(18) ? string.Empty : reader.GetString(18)
             });
         }
 
@@ -237,13 +251,14 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task<HashSet<string>> GetMutedHashesAsync(int serverId)
+    /// <summary>
+    /// Reads muted story hashes on an already-open connection. The caller owns the read
+    /// lock and connection (NoRecursion lock — do not re-acquire here). Used by
+    /// SaveFindingsAsync so the mute-filter read reuses the save connection.
+    /// </summary>
+    private static async Task<HashSet<string>> GetMutedHashesAsync(DuckDBConnection connection, int serverId)
     {
         var hashes = new HashSet<string>();
-
-        using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -259,20 +274,21 @@ WHERE server_id = $1 OR server_id IS NULL";
         return hashes;
     }
 
-    private async Task InsertFindingAsync(AnalysisFinding finding)
+    /// <summary>
+    /// Inserts one finding on an already-open connection. The caller owns the read lock
+    /// and connection, so a batch of inserts in one SaveFindingsAsync call shares a
+    /// single lock acquisition and connection.
+    /// </summary>
+    private static async Task InsertFindingAsync(DuckDBConnection connection, AnalysisFinding finding)
     {
-        using var readLock = _duckDb.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO analysis_findings
     (finding_id, analysis_time, server_id, server_name, database_name,
      time_range_start, time_range_end, severity, confidence, category,
      story_path, story_path_hash, story_text,
-     root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)";
+     root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count, incident_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.FindingId });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.AnalysisTime });
@@ -292,6 +308,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.LeafFactKey ?? (object)DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.LeafFactValue ?? (object)DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.FactCount });
+        cmd.Parameters.Add(new DuckDBParameter { Value = finding.IncidentId ?? string.Empty });
 
         await cmd.ExecuteNonQueryAsync();
     }

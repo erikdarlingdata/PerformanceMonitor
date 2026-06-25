@@ -6,9 +6,21 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorDashboard.Models
 {
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum CpuAlertMode
+    {
+        /// <summary>sql_server_cpu + other_process_cpu — matches OS user+system, "is the box in trouble".</summary>
+        Total,
+        /// <summary>SQL Server scheduler ProcessUtilization only.</summary>
+        SqlOnly
+    }
+
     public class UserPreferences
     {
         // Time display mode: ServerTime, LocalTime, UTC
@@ -81,6 +93,7 @@ namespace PerformanceMonitorDashboard.Models
         public int DeadlockThreshold { get; set; } = 1; // Alert when deadlocks >= X since last check
         public bool NotifyOnHighCpu { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 90; // Alert when CPU > X%
+        public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.Total; // Total non-idle CPU (default) or SQL scheduler only
         public bool NotifyOnPoisonWaits { get; set; } = true;
         public int PoisonWaitThresholdMs { get; set; } = 500; // Alert when avg ms per wait > X
         public bool NotifyOnLongRunningQueries { get; set; } = true;
@@ -90,10 +103,16 @@ namespace PerformanceMonitorDashboard.Models
         public bool LongRunningQueryExcludeWaitFor { get; set; } = true;
         public bool LongRunningQueryExcludeBackups { get; set; } = true;
         public bool LongRunningQueryExcludeMiscWaits { get; set; } = true;
+        public bool LongRunningQueryExcludeCdc { get; set; } = true; // Exclude CDC capture jobs (sp_MScdc_capture_job / sp_cdc_scan)
         public bool NotifyOnTempDbSpace { get; set; } = true;
         public int TempDbSpaceThresholdPercent { get; set; } = 80; // Alert when TempDB used > X%
+        public bool NotifyOnLowDisk { get; set; } = true;
+        public int LowDiskThresholdPercent { get; set; } = 10; // Alert when a volume's free space < X% (0 disables this check)
+        public int LowDiskThresholdGb { get; set; } = 5;        // Alert when a volume's free space < X GB (0 disables this check)
         public bool NotifyOnLongRunningJobs { get; set; } = true;
         public int LongRunningJobMultiplier { get; set; } = 3; // Alert when job runs > Nx historical average
+        public bool NotifyOnFailedJobs { get; set; } = true; // Alert when a SQL Agent job has recently failed
+        public int FailedJobLookbackMinutes { get; set; } = 60; // Look back this many minutes for failed Agent job runs
         private int _alertCooldownMinutes = 5;
         public int AlertCooldownMinutes
         {
@@ -106,6 +125,16 @@ namespace PerformanceMonitorDashboard.Models
         {
             get => _emailCooldownMinutes;
             set => _emailCooldownMinutes = Math.Clamp(value, 1, 120);
+        }
+
+        /* #1141: deadlock/blocking notification delivery — Summary (one batched card per cycle, the
+           default) or PerEvent (one notification per distinct incident, capped). */
+        public AlertNotificationMode AlertDeliveryMode { get; set; } = AlertNotificationMode.Summary;
+        private int _alertPerEventMaxPerCycle = 10;
+        public int AlertPerEventMaxPerCycle
+        {
+            get => _alertPerEventMaxPerCycle;
+            set => _alertPerEventMaxPerCycle = Math.Clamp(value, 1, 100);
         }
 
         // SMTP email alert settings
@@ -130,6 +159,23 @@ namespace PerformanceMonitorDashboard.Models
         // MCP server settings
         public bool McpEnabled { get; set; } = false;
         public int McpPort { get; set; } = 5150;
+
+        // Automated analysis production (D0): run the triage engine and persist
+        // findings on the independent AnalysisIntervalMinutes cadence. Decoupled from
+        // notification *delivery* (AnalysisNotificationsEnabled) — analysis runs and
+        // persists regardless of whether findings are delivered. Default ON so the
+        // Recommendations surface has data without the user opting in to alerts.
+        public bool AnalysisEnabled { get; set; } = true;
+
+        // Automated analysis notifications (Stage 2)
+        // Bounds are enforced where these are consumed (the scheduler and the
+        // notification service), not here — keeps the prefs surface simple and
+        // lets clamps be visible at the consumption sites.
+        public bool AnalysisNotificationsEnabled { get; set; } = false;
+        public int AnalysisIntervalMinutes { get; set; } = 30;
+        public double AnalysisNotifySeverity { get; set; } = 1.5;
+        public int AnalysisNotifyCooldownMinutes { get; set; } = 360;
+        public int AnalysisTimeoutSeconds { get; set; } = 120;
 
         // CSV export settings
         public string CsvSeparator { get; set; } = GetDefaultCsvSeparator();
@@ -164,6 +210,13 @@ namespace PerformanceMonitorDashboard.Models
 
         // Acknowledged alert baselines (persisted, keyed by "serverId:tabName")
         public Dictionary<string, AlertBaseline> AcknowledgedBaselines { get; set; } = new();
+
+        /* Failed-Agent-job tray watermark (persisted, keyed by serverId): the newest already-alerted
+           failure's server-local run time, stored as DateTime.Ticks. Seeds the in-memory watermark
+           on restart so a reopen does not re-fire toasts for failures still inside the lookback window
+           that the user already saw and dismissed (the failed-job equivalent of #1145). Ticks keep the
+           value basis-exact across JSON round-trips, free of DateTimeKind ambiguity. */
+        public Dictionary<string, long> FailedJobAlertWatermarkTicks { get; set; } = new();
     }
 
     /// <summary>
@@ -177,5 +230,10 @@ namespace PerformanceMonitorDashboard.Models
         public long DeadlocksSinceLastCheck { get; set; }
         public int RequestsWaitingForMemory { get; set; }
         public int? TotalCpuPercent { get; set; }
+
+        /* Snapshot of the disk/failed-job badge conditions at acknowledge time (#754/#749), so the
+           Overview badge stays hidden after ack until a NEW such condition appears (false -> true). */
+        public bool HasLowDiskAlert { get; set; }
+        public bool HasFailedJobAlert { get; set; }
     }
 }

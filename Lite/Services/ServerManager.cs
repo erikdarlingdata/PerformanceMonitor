@@ -17,6 +17,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -50,6 +51,29 @@ public class ServerManager
     /// Gets the credential service instance.
     /// </summary>
     public CredentialService CredentialService => _credentialService;
+
+    /// <summary>
+    /// Full path to this manager's servers.json. Used by <see cref="ProfileManager"/> to colocate
+    /// profiles.json in the same (shared) config directory.
+    /// </summary>
+    public string ConfigFilePath => _configFilePath;
+
+    /// <summary>
+    /// Late-injected profile lookup (§3.1, B1-R2). Default null = today's no-profile behavior: every
+    /// server resolves to its own inline auth. When wired (after <see cref="ProfileManager"/> exists),
+    /// <see cref="CheckConnectionAsync"/> resolves profile-backed servers through the SAME fail-closed
+    /// atomic-tuple logic as the external consumers, rather than flipping them "Offline" under the
+    /// wrong identity. <see cref="ServerManager"/> holds only this abstraction — never ProfileManager —
+    /// so coupling stays acyclic.
+    /// </summary>
+    public IProfileLookup? ProfileLookup { get; set; }
+
+    /// <summary>
+    /// A resolver bound to this manager's credential service + current profile lookup. Hand this to
+    /// connection-string consumers (ServerTab, FinOpsTab, the collector, the MCP path, etc.) so they
+    /// all resolve through the same profile-or-self/fail-closed path.
+    /// </summary>
+    public CredentialResolver CredentialResolver => new(_credentialService, ProfileLookup);
 
     /// <summary>
     /// Gets all servers sorted by favorite status and last connected time.
@@ -122,6 +146,16 @@ public class ServerManager
                 throw new InvalidOperationException("Failed to save username to Windows Credential Manager");
             }
         }
+        else if (server.AuthenticationType == AuthenticationTypes.ServicePrincipal && !string.IsNullOrEmpty(username) && password != null)
+        {
+            // For service principal, save client id (username) + client secret (password).
+            // The secret lives ONLY in Windows Credential Manager (DPAPI), never in servers.json.
+            if (!_credentialService.SaveCredential(server.Id, username, password))
+            {
+                throw new InvalidOperationException("Failed to save service principal secret to Windows Credential Manager");
+            }
+        }
+        // ManagedIdentity stores nothing (no secret).
 
         // Initialize status as unknown for new server
         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
@@ -164,9 +198,28 @@ public class ServerManager
                 throw new InvalidOperationException("Failed to update username in Windows Credential Manager");
             }
         }
-        else if (server.AuthenticationType == AuthenticationTypes.Windows)
+        else if (server.AuthenticationType == AuthenticationTypes.ServicePrincipal && !string.IsNullOrEmpty(username) && password != null)
         {
-            // For Windows auth, remove any stored credentials
+            // For service principal, update client id (username) + client secret (password).
+            // The secret lives ONLY in Windows Credential Manager (DPAPI), never in servers.json.
+            if (!_credentialService.UpdateCredential(server.Id, username, password))
+            {
+                throw new InvalidOperationException("Failed to update service principal secret in Windows Credential Manager");
+            }
+        }
+        else if (server.AuthenticationType == AuthenticationTypes.Windows ||
+                 server.AuthenticationType == AuthenticationTypes.ManagedIdentity ||
+                 server.AuthenticationType == AuthenticationTypes.EntraMFA)
+        {
+            // Zero-touch auth (Windows / Managed Identity): remove any stored credential.
+            // This also deletes an orphaned secret left behind when switching away from
+            // SqlServer or ServicePrincipal (e.g. SP -> MI, SP -> Windows).
+            //
+            // EntraMFA reaches this arm ONLY when the MFA username is blank, because the
+            // earlier EntraMFA arm (which requires a non-blank username) runs first and stores
+            // the username. The blank-username case is exactly the orphan case: switching e.g.
+            // SP -> EntraMFA with no username must delete the stale SP client secret rather than
+            // leaving it in Credential Manager indefinitely.
             _credentialService.DeleteCredential(server.Id);
         }
 
@@ -319,7 +372,10 @@ public class ServerManager
 
         try
         {
-            var connectionString = server.GetConnectionString(_credentialService);
+            // Resolve through the same fail-closed atomic-tuple logic as the external consumers
+            // (§3.1). A profile-backed server with a dangling/missing profile throws here rather than
+            // silently connecting under the server's own stale inline auth.
+            var connectionString = ServerConnection.ResolveConnectionString(server, _credentialService, ProfileLookup);
 
             // Modify connection string to use short timeout for connectivity check
             var builder = new SqlConnectionStringBuilder(connectionString)

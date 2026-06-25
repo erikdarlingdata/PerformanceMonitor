@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -33,7 +34,7 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentDeadlocksAsync(resolved.Value.ServerId, hours_back);
             if (rows.Count == 0)
             {
-                return "No deadlocks found in the specified time range.";
+                return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
             }
 
             var result = rows.Take(limit).Select(r => new
@@ -86,7 +87,7 @@ public sealed class McpBlockingTools
             var withXml = rows.Where(r => r.HasDeadlockXml).Take(limit).ToList();
             if (withXml.Count == 0)
             {
-                return "No deadlock XML available in the specified time range.";
+                return McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
             }
 
             var result = withXml.Select(r => new
@@ -135,7 +136,7 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.Value.ServerId, hours_back);
             if (rows.Count == 0)
             {
-                return "No blocked process reports found.";
+                return McpHelpers.Status("empty", "No blocked process reports found.");
             }
 
             var result = rows.Take(limit).Select(r => new
@@ -214,7 +215,7 @@ public sealed class McpBlockingTools
             var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
             if (withXml.Count == 0)
             {
-                return "No blocked process report XML available in the specified time range.";
+                return McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
             }
 
             var result = withXml.Select(r => new

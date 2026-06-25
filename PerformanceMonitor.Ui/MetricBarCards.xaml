@@ -1,0 +1,49 @@
+<UserControl x:Class="PerformanceMonitor.Ui.MetricBarCards"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="Root">
+    <!--
+      A compact "per-entity bar cards" list (ported from PerformanceStudio's per-DB bar cards):
+      one row per item = label | horizontal proportional bar (entity-colored) | formatted value.
+      The bar fills to Value / Maximum using star-sized grid columns (scales with width, no math).
+      Bind Items to a list of MetricBarItem. All text uses the inherited theme foreground so it
+      stays readable on every theme; the bar itself carries the entity identity color.
+    -->
+    <ItemsControl ItemsSource="{Binding Items, ElementName=Root}">
+        <ItemsControl.ItemTemplate>
+            <DataTemplate>
+                <Grid Height="22" Margin="0,1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="170"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="90"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0"
+                               Text="{Binding Label}"
+                               VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"
+                               Margin="2,0,6,0"
+                               ToolTip="{Binding Label}"/>
+
+                    <Border Grid.Column="1" CornerRadius="2" ClipToBounds="True" VerticalAlignment="Center" Height="14">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="{Binding FillWidth}"/>
+                                <ColumnDefinition Width="{Binding RestWidth}"/>
+                            </Grid.ColumnDefinitions>
+                            <Rectangle Grid.Column="0" Fill="{Binding BarBrush}" RadiusX="2" RadiusY="2"/>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock Grid.Column="2"
+                               Text="{Binding ValueText}"
+                               HorizontalAlignment="Right"
+                               VerticalAlignment="Center"
+                               Margin="6,0,2,0"
+                               FontSize="11"/>
+                </Grid>
+            </DataTemplate>
+        </ItemsControl.ItemTemplate>
+    </ItemsControl>
+</UserControl>

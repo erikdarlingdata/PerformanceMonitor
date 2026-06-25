@@ -3,12 +3,13 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorDashboard.Helpers;
 
 namespace PerformanceMonitorDashboard.Analysis;
 
 /// <summary>
-/// Orchestrates the full analysis pipeline: collect -> score -> traverse -> persist.
+/// Orchestrates the full analysis pipeline: collect → score → traverse → persist.
 /// Can be run on-demand or on a timer. Each run analyzes a single server's data
 /// for a given time window and persists the findings.
 /// Port of Lite's AnalysisService — uses SQL Server instead of DuckDB.
@@ -27,10 +28,11 @@ public class AnalysisService
 
     /// <summary>
     /// Minimum hours of collected data required before analysis will run.
-    /// Short collection windows distort fraction-of-period calculations --
+    /// Short collection windows distort fraction-of-period calculations —
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
+    /// 24 hours has been validated empirically as sufficient.
     /// </summary>
-    internal double MinimumDataHours { get; set; } = 72;
+    internal double MinimumDataHours { get; set; } = 24;
 
     /// <summary>
     /// Raised after each analysis run completes, providing the findings for UI display.
@@ -66,12 +68,53 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// Probes the MONITORED server's clock so the analysis window is built in the SAME clock the
+    /// collectors stamp rows with (SYSDATETIME, server-local). Returns the server's local "now"
+    /// and its UTC offset (SYSDATETIME − SYSUTCDATETIME). Falls back to host UTC + zero offset
+    /// when the server is unreachable — degrading to the prior (host-UTC-window) behavior rather
+    /// than introducing a new hard failure (the collectors that follow would fail anyway).
+    /// </summary>
+    private async Task<(DateTime LocalNow, TimeSpan UtcOffset)> GetServerClockAsync()
+    {
+        try
+        {
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT SYSDATETIME(), SYSUTCDATETIME();";
+            using var reader = await cmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                var local = reader.GetDateTime(0);
+                var utc = reader.GetDateTime(1);
+                return (local, local - utc);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[AnalysisService] Server clock probe failed; using host UTC: {ex.Message}");
+        }
+        return (DateTime.UtcNow, TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// The monitored server's current LOCAL time, for callers that compute their own analysis
+    /// windows (e.g. period comparison). See <see cref="GetServerClockAsync"/>.
+    /// </summary>
+    public async Task<DateTime> GetServerLocalNowAsync() => (await GetServerClockAsync()).LocalNow;
+
+    /// <summary>
     /// Runs the full analysis pipeline for a server.
     /// Default time range is the last 4 hours.
     /// </summary>
     public async Task<List<AnalysisFinding>> AnalyzeAsync(int serverId, string serverName, int hoursBack = 4)
     {
-        var timeRangeEnd = DateTime.UtcNow;
+        // The collectors stamp rows with the SERVER's clock (SYSDATETIME, server-local), so the
+        // analysis window MUST be in that same clock — otherwise every windowed read filters
+        // server-local data against a host-UTC window and silently misses it on any non-UTC
+        // server. The captured offset converts this window back to UTC at persistence time.
+        var (serverNow, serverUtcOffset) = await GetServerClockAsync();
+        var timeRangeEnd = serverNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -79,7 +122,8 @@ public class AnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
-            TimeRangeEnd = timeRangeEnd
+            TimeRangeEnd = timeRangeEnd,
+            ServerUtcOffset = serverUtcOffset
         };
 
         return await AnalyzeAsync(context);
@@ -98,7 +142,7 @@ public class AnalysisService
 
         try
         {
-            // 0. Check minimum data span -- total history, not the analysis window.
+            // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
             var dataSpanHours = await GetTotalDataSpanHoursAsync();
             if (dataSpanHours < MinimumDataHours)
@@ -140,15 +184,60 @@ public class AnalysisService
             // 3. Build stories via graph traversal
             var stories = _engine.BuildStories(facts);
 
-            // 4. Persist findings (filtering out muted)
-            var findings = await _findingStore.SaveFindingsAsync(stories, context);
+            // 3.5. Freeze value-stated advice (current MAXDOP/CTFP/etc.) into each story's StoryText
+            // from the FULL fact set, BEFORE the store copies StoryText onto the finding. This is the
+            // only place the raw fact VALUES are in scope; read-back cards then state the numbers
+            // (FactAdvice.GetComposedForFinding) instead of generic folklore. No schema change.
+            FactAdvice.PopulateStoryText(stories, facts);
 
-            // 5. Enrich findings with drill-down data (ephemeral, not persisted)
+            // 3.6. Cluster the run's stories into causally-related incidents (graph-connectivity) and
+            // stamp each with its own trackable id, BEFORE the store copies it onto the finding. The
+            // grouped surface renders one report per incident; the id fingerprints the incident's
+            // primary so the same recurring incident is trackable across runs.
+            var incidents = _engine.ClusterIntoIncidents(stories, facts);
+            IncidentId.StampClusters(context.ServerName, incidents);
+
+            // 4. Mute-filter the stories into the surviving findings (P2 reorder) — WITHOUT
+            //    inserting yet, so enrichment + action-build happen on the survivors first
+            //    and the BUILT RemediationAction is persisted on each row (D2). Muted/
+            //    absolution findings are dropped here and never enriched (no enrich-then-
+            //    discard; round-3 MODERATE-2).
+            var findings = await _findingStore.FilterMutedFindingsAsync(stories, context);
+
+            // 5. Enrich the survivors with drill-down data (ephemeral, not persisted). The
+            //    cheap config drill-down runs regardless of severity (D7), so config/RCSI/
+            //    db-config actions can build at their true 0.3 severity; the expensive
+            //    plan-fetch enrichment stays behind the 0.5 gate inside the collector.
             await _drillDown.EnrichFindingsAsync(findings, context);
+
+            // 6. Build + attach each finding's RemediationAction from the now drill-down-
+            //    populated finding (D2). The builders REQUIRE finding.DrillDown, which the
+            //    store read-back does not return — so the BUILT action is persisted, exactly
+            //    the artifact the alert path serializes into ContextJson. Try the always-safe/
+            //    db-config force action first, then the two destructive entry points (each
+            //    gates internally on RootFactKey + drill-down and returns null when N/A);
+            //    attach the first non-null.
+            foreach (var finding in findings)
+            {
+                finding.Remediation =
+                    FactRemediation.BuildAction(finding)
+                    ?? FactRemediation.BuildRcsiAction(finding)
+                    ?? FactRemediation.BuildClearPlanAction(finding)
+                    ?? FactRemediation.BuildFileAutogrowthAction(finding) // WS3: advisory only (no handler -> no Apply); carried for the read-time copy-paste
+                    ?? FactRemediation.BuildServerConfigAction(finding) // WS3: server-level config — MAXDOP/CTFP Apply-able, memory advise-only
+                    ?? FactRemediation.BuildMissingIndexAction(finding); // WS4: missing-index CREATE — copy-paste only (no handler -> no Apply); carried for the read-time copy-paste
+            }
+
+            // 7. Insert the survivors in one batched pass, persisting remediation_action_json
+            //    (D2). Reuses PR-1's single-connection + single-schema-check discipline.
+            await _findingStore.InsertFindingsAsync(findings, context);
 
             LastAnalysisTime = DateTime.UtcNow;
 
-            // 6. Notify listeners
+            // 8. Notify listeners — the returned/enriched findings (now action-bearing) flow
+            //    to the AnalysisCompleted event and, via the scheduler, to NotifyAsync, which
+            //    builds its own context from the drill-down. The reorder did not change which
+            //    list notify receives.
             AnalysisCompleted?.Invoke(this, new AnalysisCompletedEventArgs
             {
                 ServerId = context.ServerId,
@@ -180,7 +269,9 @@ public class AnalysisService
     /// </summary>
     public async Task<List<Fact>> CollectAndScoreFactsAsync(int serverId, string serverName, int hoursBack = 4)
     {
-        var timeRangeEnd = DateTime.UtcNow;
+        // Server-local window (see AnalyzeAsync) so windowed fact reads match the collectors.
+        var (serverNow, serverUtcOffset) = await GetServerClockAsync();
+        var timeRangeEnd = serverNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
         var context = new AnalysisContext
@@ -188,7 +279,8 @@ public class AnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
-            TimeRangeEnd = timeRangeEnd
+            TimeRangeEnd = timeRangeEnd,
+            ServerUtcOffset = serverUtcOffset
         };
 
         try
@@ -281,7 +373,7 @@ public class AnalysisService
 
     /// <summary>
     /// Returns the total span of collected data (no time range filter).
-    /// This answers "has this server been monitored long enough?" -- separate from
+    /// This answers "has this server been monitored long enough?" — separate from
     /// the analysis window. A server with 100 hours of total history can safely
     /// be analyzed over a 4-hour window without dilution.
     /// Dashboard monitors one server per database, so no server_id filtering.

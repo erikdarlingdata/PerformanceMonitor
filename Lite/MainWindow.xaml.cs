@@ -17,12 +17,15 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Threading;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Windows;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite;
 
@@ -30,28 +33,43 @@ public partial class MainWindow : Window
 {
     private readonly DuckDbInitializer _databaseInitializer;
     private readonly ServerManager _serverManager;
+    private readonly ProfileManager _profileManager;
     private readonly ScheduleManager _scheduleManager;
     private RemoteCollectorService? _collectorService;
     private CollectionBackgroundService? _backgroundService;
     private CancellationTokenSource? _backgroundCts;
     private SystemTrayService? _trayService;
+    private WindowResumeGuard? _resumeGuard;
     private readonly Dictionary<string, TabItem> _openServerTabs = new();
     private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<int> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
+    /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
+       ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
+       blocking/deadlock tab refresh and the sweep funnel through UpdateTabBadge, so the badge
+       reflects all conditions. _lastBadgeCounts lets the sweep re-render with the last-known
+       blocking/deadlock counts seen by the tab refresh. */
+    private readonly Dictionary<string, bool> _badgeLowDisk = new();
+    private readonly Dictionary<string, bool> _badgeFailedJob = new();
+    private readonly Dictionary<string, (int Blocking, int Deadlock, DateTime? LatestEvent)> _lastBadgeCounts = new();
     private readonly Dictionary<string, bool> _previousConnectionStates = new();
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
+    private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly Dictionary<string, DateTime> _lastCpuAlert = new();
     private readonly Dictionary<string, DateTime> _lastBlockingAlert = new();
     private readonly Dictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly Dictionary<string, DateTime> _lastPoisonWaitAlert = new();
     private readonly Dictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly Dictionary<string, DateTime> _lastTempDbSpaceAlert = new();
+    private readonly Dictionary<string, DateTime> _lastLowDiskAlert = new();
     private readonly Dictionary<string, DateTime> _lastLongRunningJobAlert = new();
     private readonly DispatcherTimer _statusTimer;
     private LocalDataService? _dataService;
     private McpHostService? _mcpService;
     private readonly AlertStateService _alertStateService = new();
+    private readonly IAlertSettings _alertSettings = new AppAlertSettings();
     private readonly MuteRuleService _muteRuleService;
     private EmailAlertService _emailAlertService;
+    /* Held so the edge-trigger watermark seed/persist (#1145) can reach the store directly. */
+    private readonly DuckDbAlertHistoryStore _alertHistoryStore;
 
     /* Track active alert states for resolved notifications */
     private readonly Dictionary<string, bool> _activeCpuAlert = new();
@@ -60,7 +78,35 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, bool> _activePoisonWaitAlert = new();
     private readonly Dictionary<string, bool> _activeLongRunningQueryAlert = new();
     private readonly Dictionary<string, bool> _activeTempDbSpaceAlert = new();
+    private readonly Dictionary<string, bool> _activeLowDiskAlert = new();
+    /* Worst free-% captured at the last low-disk alert per server (#754 follow-up): see the
+       Dashboard counterpart. Without it a standing full volume re-fired — and re-recorded an
+       alert-history row, defeating Dismiss — every cooldown. Gated by LowDiskAlertGate; removed on resolve. */
+    private readonly Dictionary<string, double> _lastAlertedLowDiskPercent = new();
     private readonly Dictionary<string, bool> _activeLongRunningJobAlert = new();
+    private readonly Dictionary<string, DateTime> _lastFailedJobAlert = new();
+    /* Watermark of the most-recent failed-job run time already alerted per server. A failed run
+       lingers in the lookback window for the whole window, so a plain level check would re-fire
+       every cooldown; we only notify when a strictly newer failure appears. Bounded by server
+       count, so no pruning needed. (Server-local run times mean a fall-back DST hour / NTP step
+       could let one new failure tie the watermark and be skipped — a once-a-year, one-hour edge.) */
+    private readonly Dictionary<string, DateTime> _lastAlertedFailedJobTime = new();
+
+    /* Edge-trigger watermarks (#1091): the rolling 1-hour blocking/deadlock counts stay
+       above the threshold for the whole hour an event lingers in the window, so a plain
+       level check re-fires the same alert every cooldown. These hold the count at the last
+       fired alert; we only re-notify when the count climbs past it (a genuinely new event),
+       and reset to 0 when the window empties so the next event alerts again. */
+    private readonly Dictionary<string, int> _lastAlertedBlockingCount = new();
+    private readonly Dictionary<string, int> _lastAlertedDeadlockCount = new();
+
+    /* Persistence for the two watermarks above (#1145): seeded from the alert store at
+       startup (SeedEdgeTriggerWatermarksAsync) and upserted on change, so a restart does
+       not reset the watermark to 0 and re-fire / re-post a webhook for events still
+       lingering in the rolling 1-hour lookback window. The metric_name values are the
+       persisted-row keys; they need not match the alert "Detected" metric names. */
+    private const string BlockingWatermarkMetric = "Blocking Detected";
+    private const string DeadlockWatermarkMetric = "Deadlocks Detected";
 
     public MainWindow()
     {
@@ -68,9 +114,27 @@ public partial class MainWindow : Window
 
         // Initialize services (with loggers wired to AppLogger)
         _databaseInitializer = new DuckDbInitializer(App.DatabasePath, new AppLoggerAdapter<DuckDbInitializer>());
-        _emailAlertService = new EmailAlertService(_databaseInitializer);
-        _muteRuleService = new MuteRuleService(_databaseInitializer);
+        /* Webhook service is constructed first and injected into the email service
+           (Plan E E3c): the shared send core fans out to it. The history store is shared
+           by both so the webhook service can seed its cooldown across restart (#1145). */
+        _alertHistoryStore = new DuckDbAlertHistoryStore(_databaseInitializer);
+        var webhookAlertService = new WebhookAlertService(
+            _alertSettings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>(), _alertHistoryStore);
+        _emailAlertService = new EmailAlertService(
+            _alertSettings,
+            _alertHistoryStore,
+            webhookAlertService,
+            new AppLoggerAdapter<EmailAlertService>());
+        _muteRuleService = new MuteRuleService(
+            new DuckDbMuteRuleStore(_databaseInitializer),
+            new AppLoggerAdapter<MuteRuleService>());
         _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
+        // Two-phase wiring (§3.1): build the ProfileManager (one-way ServerManager injection for the
+        // referential-integrity query), then late-inject it back as the ServerManager's IProfileLookup
+        // so CheckConnectionAsync resolves profile-backed servers through the same fail-closed logic.
+        // Coupling stays acyclic: ServerManager → IProfileLookup ← ProfileManager, ProfileManager → ServerManager.
+        _profileManager = new ProfileManager(_serverManager, new AppLoggerAdapter<ProfileManager>());
+        _serverManager.ProfileLookup = _profileManager;
         _scheduleManager = new ScheduleManager(App.ConfigDirectory);
 
         // Status bar update timer
@@ -92,6 +156,22 @@ public partial class MainWindow : Window
         ServerTabControl.SelectionChanged += ServerTabControl_SelectionChanged;
     }
 
+    /// <summary>
+    /// The one true window-restore path. Minimize-to-tray calls <see cref="Window.Hide"/>, which
+    /// sets WPF <see cref="UIElement.Visibility"/> = Hidden. Only <see cref="Window.Show"/> reconciles
+    /// that state and re-runs layout/render — a raw Win32 ShowWindow leaves the HWND visible but the
+    /// WPF tree un-arranged, i.e. a blank window (#1050). Every restore entry point — tray double-click,
+    /// the "Show Window" menu, the sleep/unlock resume guard, and the second-instance signal — routes
+    /// here so the window can never be left visible-but-blank. Must be called on the UI thread.
+    /// </summary>
+    public void RestoreFromTray()
+    {
+        Show();
+        ShowInTaskbar = true;
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         try
@@ -100,6 +180,14 @@ public partial class MainWindow : Window
 
             // Initialize the DuckDB database
             await _databaseInitializer.InitializeAsync();
+
+            /* Restore edge-trigger watermarks now — after the DB (and the watermark table)
+               exist, but before ANY alert sweep can read the watermark dicts. RefreshServerList()
+               below ends in a fire-and-forget RefreshOverviewAsync() → CheckPerformanceAlerts, so
+               seeding here (not just before the explicit RefreshOverviewAsync later) keeps a
+               restart from re-firing / re-posting alerts for events still in the lookback
+               window (#1145), independent of whether the DuckDB reads ever yield. */
+            await SeedEdgeTriggerWatermarksAsync();
 
             // Initialize the collection engine (with loggers wired to AppLogger)
             _collectorService = new RemoteCollectorService(
@@ -111,17 +199,35 @@ public partial class MainWindow : Window
             var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
             var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
 
+            // Routes high-severity analysis findings to email/Slack/Teams; the background
+            // service runs scheduled analysis and hands findings to it.
+            /* serverId resolver: Lite uses the finding's stable int id as a string (Plan E E3c). */
+            var analysisNotificationService = new AnalysisNotificationService(
+                _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>());
+
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,
+                analysisNotificationService,
                 new AppLoggerAdapter<CollectionBackgroundService>());
 
-            // Start background collection
+            // Start background collection.
+            // Off the UI thread on purpose: DuckDB.NET is synchronous and Lite has no
+            // ConfigureAwait(false), so starting this from the Loaded handler would run the entire
+            // collection/checkpoint/archive pipeline on the WPF dispatcher (per-minute jank, and a
+            // multi-second-to-minutes freeze on archive/reset). A pool thread has no
+            // SynchronizationContext, so StartAsync and every subsequent continuation stay off-UI.
+            // Safe: the pipeline only touches DuckDB + the email/webhook notification service; the
+            // UI reads data by polling DuckDB on its own timers, fully decoupled.
             _backgroundCts = new CancellationTokenSource();
-            _ = _backgroundService.StartAsync(_backgroundCts.Token);
+            _ = Task.Run(() => _backgroundService.StartAsync(_backgroundCts.Token));
 
             // Initialize system tray
-            _trayService = new SystemTrayService(this, _backgroundService);
+            _trayService = new SystemTrayService(this, RestoreFromTray, _backgroundService);
             _trayService.Initialize();
+
+            /* #1050: restore the window from the tray on resume/unlock if a sleep- or lock-driven
+               minimize hid it. ??= so a repeated Loaded can't double-subscribe (static SystemEvents). */
+            _resumeGuard ??= new WindowResumeGuard(this, RestoreFromTray);
 
             // Initialize data service for overview
             _dataService = new LocalDataService(_databaseInitializer);
@@ -132,9 +238,13 @@ public partial class MainWindow : Window
             // Initialize alerts history tab
             AlertsHistoryContent.Initialize(_dataService);
             AlertsHistoryContent.MuteRuleService = _muteRuleService;
+            AlertsHistoryContent.AlertsDismissed += OnAlertHistoryDismissed;
 
             // Initialize FinOps tab
             FinOpsContent.Initialize(_dataService, _serverManager);
+
+            // Initialize Recommendations tab (advise-only)
+            RecommendationsContent.Initialize(_databaseInitializer, _serverManager);
 
             // Start MCP server if enabled
             await StartMcpServerAsync();
@@ -148,6 +258,10 @@ public partial class MainWindow : Window
 
             await RefreshOverviewAsync();
             StatusText.Text = "Ready - Collection active";
+
+            /* Now past the risky DuckDB init — open the single-instance "exit for upgrade" channel so a
+               newer build can ask us to step aside cleanly (#single-instance-upgrade-handoff). */
+            (Application.Current as App)?.EnableUpgradeHandoff();
 
             _ = CheckForUpdatesOnStartupAsync();
         }
@@ -208,9 +322,23 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool _closingCleanupStarted;
+    private bool _closingCleanupDone;
+
     private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        /* async void Closing handler: at the first await WPF would otherwise proceed to close the
+           window — and since this is the last window, begin app shutdown — so the cleanup
+           continuations below could be abandoned mid-flight (the graceful collector stop was
+           effectively dead on the common close path). Cancel this close, run the cleanup to
+           completion, then Close() again; the second pass returns early and closes for real. */
+        if (_closingCleanupDone) return;
+        e.Cancel = true;
+        if (_closingCleanupStarted) return;
+        _closingCleanupStarted = true;
+
         // Dispose system tray
+        _resumeGuard?.Dispose();
         _trayService?.Dispose();
 
         // Stop background collection with timeout
@@ -241,6 +369,17 @@ public partial class MainWindow : Window
         }
 
         _statusTimer.Stop();
+
+        _closingCleanupDone = true;
+
+        /* Re-close on the next dispatcher cycle, not synchronously here. If the awaits above all
+           completed without ever suspending (MCP off, collector already idle), we're still inside
+           WPF's Closing event with Window._isClosing == true, and a synchronous Close() re-enters
+           InternalClose → VerifyNotClosing() throws "Cannot ... call Close ... while a Window is
+           closing" (#1050 follow-up). BeginInvoke lets this Closing event fully unwind — clearing
+           _isClosing — before the real close runs; the second pass returns early on
+           _closingCleanupDone and the window closes for real. */
+        _ = Dispatcher.BeginInvoke(new Action(Close));
     }
 
     private void ServerTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -259,6 +398,12 @@ public partial class MainWindow : Window
         if (ServerTabControl.SelectedItem == AlertsTab)
         {
             AlertsHistoryContent.RefreshAlerts();
+        }
+
+        /* Refresh recommendations tab when selected (picks up newly-collected findings) */
+        if (ServerTabControl.SelectedItem == RecommendationsTab)
+        {
+            _ = RecommendationsContent.RefreshDataAsync();
         }
 
         UpdateCollectorHealth();
@@ -332,6 +477,7 @@ public partial class MainWindow : Window
 
         // Refresh FinOps server dropdown when server list changes
         FinOpsContent.RefreshServerList();
+        RecommendationsContent.RefreshServerList();
 
         // Refresh overview when server list changes
         _ = RefreshOverviewAsync();
@@ -420,6 +566,17 @@ public partial class MainWindow : Window
                 string.Join("\n", health.Errors.Select(e =>
                     $"{e.CollectorName}: {e.ConsecutiveErrors}x consecutive - {e.LastErrorMessage}"));
         }
+        else if (health.XeSessionFailures.Count > 0)
+        {
+            /* XE session couldn't be created (#1086). Permission failures don't
+               increment ConsecutiveErrors, so without this branch the status bar
+               would show OK while blocking/deadlock capture is dead. */
+            var names = string.Join(", ", health.XeSessionFailures.Select(e => e.CollectorName));
+            CollectorHealthText.Text = $"Capture down: {names}";
+            CollectorHealthText.Foreground = System.Windows.Media.Brushes.OrangeRed;
+            CollectorHealthText.ToolTip = string.Join("\n", health.XeSessionFailures.Select(e =>
+                $"{e.CollectorName}: {e.XeSessionMessage}"));
+        }
         else
         {
             CollectorHealthText.Text = $"Collectors: {health.TotalCollectors} OK";
@@ -443,7 +600,7 @@ public partial class MainWindow : Window
                 try
                 {
                     var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-                    var summary = await _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent);
+                    var summary = await Task.Run(() => _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent));
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
@@ -523,7 +680,7 @@ public partial class MainWindow : Window
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
-        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialService, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition == 5);
+        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition == 5);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
         {
@@ -593,7 +750,7 @@ public partial class MainWindow : Window
             StatusText.Text = $"Collecting data from {server.DisplayNameWithIntent}...";
             try
             {
-                await _collectorService.RunAllCollectorsForServerAsync(server);
+                await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
                 StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Data loaded";
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
@@ -631,6 +788,7 @@ public partial class MainWindow : Window
             Margin = new Thickness(0, 0, 4, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Visibility = Visibility.Collapsed,
+            Cursor = Cursors.Hand,
             Child = new TextBlock
             {
                 FontSize = 10,
@@ -686,6 +844,15 @@ public partial class MainWindow : Window
         };
 
         badge.ContextMenu = contextMenu;
+
+        /* Left-click the badge to acknowledge/clear it — the right-click menu was
+           undiscoverable, so a plain click is the obvious affordance (issue #1092). */
+        badge.MouseLeftButtonUp += (s, e) =>
+        {
+            AcknowledgeServerBadge(serverId);
+            e.Handled = true;
+        };
+
         panel.Children.Add(badge);
 
         var closeButton = new Button
@@ -706,10 +873,17 @@ public partial class MainWindow : Window
     {
         var totalAlerts = blockingCount + deadlockCount;
 
+        /* Remember the blocking/deadlock counts so the alert sweep can re-render this badge with
+           them when it updates the low-disk / failed-job state (#754/#749). */
+        _lastBadgeCounts[serverId] = (blockingCount, deadlockCount, latestEventTime);
+
+        bool hasLowDisk = _badgeLowDisk.TryGetValue(serverId, out var ld) && ld;
+        bool hasFailedJob = _badgeFailedJob.TryGetValue(serverId, out var fj) && fj;
+
         /* Delegate count tracking and acknowledgement clearing to AlertStateService.
            Uses latestEventTime to only clear ack when genuinely new events arrive,
            not when the user just switches time ranges. */
-        bool shouldShow = _alertStateService.UpdateAlertCounts(serverId, blockingCount, deadlockCount, latestEventTime);
+        bool shouldShow = _alertStateService.UpdateAlertCounts(serverId, blockingCount, deadlockCount, hasLowDisk, hasFailedJob, latestEventTime);
 
         foreach (var child in tabHeader.Children)
         {
@@ -724,8 +898,17 @@ public partial class MainWindow : Window
 
                     if (border.Child is TextBlock text)
                     {
-                        text.Text = totalAlerts > 99 ? "99+" : totalAlerts.ToString();
-                        text.ToolTip = $"Blocking: {blockingCount}, Deadlocks: {deadlockCount}\nRight-click to dismiss";
+                        /* Blocking+deadlock count, or "!" when the only live condition is a low-disk
+                           breach / failed job (those aren't counts). */
+                        text.Text = totalAlerts > 0
+                            ? (totalAlerts > 99 ? "99+" : totalAlerts.ToString())
+                            : "!";
+
+                        var extras = new System.Collections.Generic.List<string>();
+                        if (hasLowDisk) extras.Add("low disk");
+                        if (hasFailedJob) extras.Add("failed job");
+                        var extraLine = extras.Count > 0 ? $"\n{string.Join(", ", extras)}" : "";
+                        text.ToolTip = $"Blocking: {blockingCount}, Deadlocks: {deadlockCount}{extraLine}\nClick to dismiss · Right-click for options";
                     }
                 }
                 else
@@ -737,23 +920,74 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Re-renders a server's tab badge from the alert sweep after its low-disk / failed-job state
+    /// changed (#754/#749), reusing the last blocking/deadlock counts the tab refresh saw so the two
+    /// inputs stay combined. No-op when the server has no open tab. Keyed by ServerConnection GUID.
+    /// </summary>
+    private void RefreshServerBadgeExtras(string serverId)
+    {
+        if (!_openServerTabs.TryGetValue(serverId, out var tab) || tab.Header is not StackPanel tabHeader)
+            return;
+
+        var (b, d, ev) = _lastBadgeCounts.TryGetValue(serverId, out var counts)
+            ? counts
+            : (0, 0, (DateTime?)null);
+        UpdateTabBadge(tabHeader, serverId, b, d, ev);
+    }
+
     private void AcknowledgeServerAlert_Click(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem menuItem && menuItem.Tag is string serverId)
         {
-            _alertStateService.AcknowledgeAlert(serverId);
+            AcknowledgeServerBadge(serverId);
+        }
+    }
 
-            /* Find and hide the badge for this server */
-            if (_openServerTabs.TryGetValue(serverId, out var tab) && tab.Header is StackPanel panel)
+    /// <summary>
+    /// Acknowledges a server's alerts and immediately hides its tab badge.
+    /// Shared by the badge left-click, the right-click "Acknowledge" menu, and
+    /// Alert History "Dismiss All" so every path clears the badge consistently (issue #1092).
+    /// </summary>
+    private void AcknowledgeServerBadge(string serverId)
+    {
+        _alertStateService.AcknowledgeAlert(serverId);
+        HideServerBadge(serverId);
+    }
+
+    /// <summary>
+    /// Collapses the alert badge on a server's tab header, if one is present.
+    /// </summary>
+    private void HideServerBadge(string serverId)
+    {
+        if (_openServerTabs.TryGetValue(serverId, out var tab) && tab.Header is StackPanel panel)
+        {
+            foreach (var child in panel.Children)
             {
-                foreach (var child in panel.Children)
+                if (child is System.Windows.Controls.Border border && border.Tag as string == "AlertBadge")
                 {
-                    if (child is System.Windows.Controls.Border border && border.Tag as string == "AlertBadge")
-                    {
-                        border.Visibility = Visibility.Collapsed;
-                        break;
-                    }
+                    border.Visibility = Visibility.Collapsed;
+                    break;
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// When alerts are cleared from Alert History via "Dismiss All", acknowledge the matching
+    /// server tab badge(s) so the at-a-glance indicator stays consistent with the cleared list
+    /// (issue #1092). The argument is the DB server_id filter that was in effect; null means the
+    /// list spanned all servers, so every open tab is acknowledged. The badge tracks blocking/
+    /// deadlock counts (a separate system from the notification alerts the list shows), so this
+    /// uses the same acknowledge-until-new-event semantics as the badge's own context menu.
+    /// </summary>
+    private void OnAlertHistoryDismissed(int? dbServerId)
+    {
+        foreach (var kvp in _openServerTabs)
+        {
+            if (kvp.Value.Content is ServerTab st && (dbServerId == null || st.ServerId == dbServerId.Value))
+            {
+                AcknowledgeServerBadge(kvp.Key);
             }
         }
     }
@@ -817,6 +1051,12 @@ public partial class MainWindow : Window
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);
 
+            /* #1128 review fix: drop the per-server badge state so a stale low-disk / failed-job flag
+               doesn't flash on reopen, and the dicts don't grow with tab churn. */
+            _badgeLowDisk.Remove(serverId);
+            _badgeFailedJob.Remove(serverId);
+            _lastBadgeCounts.Remove(serverId);
+
             // Show empty state if no tabs open
             if (_openServerTabs.Count == 0)
             {
@@ -832,7 +1072,7 @@ public partial class MainWindow : Window
 
     private void AddServerButton_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new AddServerDialog(_serverManager) { Owner = this };
+        var dialog = new AddServerDialog(_serverManager, _profileManager) { Owner = this };
         if (dialog.ShowDialog() == true && dialog.AddedServer != null)
         {
             RefreshServerList();
@@ -842,7 +1082,7 @@ public partial class MainWindow : Window
 
     private void ManageServersButton_Click(object sender, RoutedEventArgs e)
     {
-        var window = new ManageServersWindow(_serverManager) { Owner = this };
+        var window = new ManageServersWindow(_serverManager, _profileManager) { Owner = this };
         window.ShowDialog();
 
         if (window.ServersChanged)
@@ -954,6 +1194,24 @@ public partial class MainWindow : Window
             // Import server connections (upsert by server name)
             var (imported, skipped) = _serverManager.ImportServersFromFile(serversJsonPath);
 
+            // Import credential profiles from the SHARED config dir (M-1: NOT the per-user copy loop
+            // below — profiles.json, like servers.json, lives in App.SharedConfigDirectory, so it must
+            // be imported via ProfileManager which is backed by that dir). Source path is built from
+            // the SAME oldConfigDir variable serversJsonPath uses (M1-R2).
+            int profilesImported = 0;
+            var profilesJsonPath = System.IO.Path.Combine(oldConfigDir, "profiles.json");
+            if (System.IO.File.Exists(profilesJsonPath))
+            {
+                try
+                {
+                    (profilesImported, _) = _profileManager.ImportProfilesFromFile(profilesJsonPath);
+                }
+                catch (Exception pex)
+                {
+                    AppLogger.Warn("Import", $"Failed to import profiles.json: {pex.Message}");
+                }
+            }
+
             // Copy config files that don't already exist in the current install
             var settingsFiles = new[] { "settings.json", "collection_schedule.json", "ignored_wait_types.json" };
             int settingsCopied = 0;
@@ -982,10 +1240,14 @@ public partial class MainWindow : Window
             var message = $"Imported {imported} server connection(s).";
             if (skipped > 0)
                 message += $"\nSkipped {skipped} duplicate(s) (already configured).";
+            if (profilesImported > 0)
+                message += $"\nImported {profilesImported} credential profile(s).";
             if (settingsCopied > 0)
                 message += $"\nCopied {settingsCopied} settings file(s).";
             if (imported > 0)
                 message += "\n\nCredentials from the previous install are preserved.\nIf any connections fail to authenticate, re-enter the password in Manage Servers.";
+            if (profilesImported > 0)
+                message += "\n\nCredential profile secrets are NOT importable (they live only in Windows Credential Manager, per user).\nEdit each imported profile once in Manage Servers → Credential Profiles to re-enter its secret.";
             if (settingsCopied > 0)
                 message += "\n\nRestart the application to apply imported settings.";
 
@@ -1139,7 +1401,7 @@ public partial class MainWindow : Window
         var server = GetServerFromContextMenu(sender);
         if (server == null) return;
 
-        var dialog = new AddServerDialog(_serverManager, server) { Owner = this };
+        var dialog = new AddServerDialog(_serverManager, _profileManager, server) { Owner = this };
         if (dialog.ShowDialog() == true)
         {
             RefreshServerList();
@@ -1224,8 +1486,10 @@ public partial class MainWindow : Window
                 if (status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;
-                bool hasErrors = _collectorService != null && isOnline
-                    && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
+                var healthSummary = _collectorService != null && isOnline
+                    ? _collectorService.GetHealthSummary(server)
+                    : null;
+                bool hasErrors = healthSummary?.ErroringCollectors > 0;
                 server.HasCollectorErrors = hasErrors;
 
                 if (_previousConnectionStates.TryGetValue(server.Id, out var wasOnline))
@@ -1262,6 +1526,25 @@ public partial class MainWindow : Window
                 if (_previousCollectorErrorStates.TryGetValue(server.Id, out var prevHasErrors) && prevHasErrors != hasErrors)
                     needsRefresh = true;
 
+                /* One-time balloon when blocking/deadlock capture can't start because the
+                   XE session couldn't be created (#1086). Edge-triggered on the false→true
+                   transition so it doesn't re-fire every poll while the condition persists. */
+                bool xeSessionDown = healthSummary?.XeSessionFailures.Count > 0;
+                _previousXeSessionFailureStates.TryGetValue(server.Id, out var wasXeSessionDown);
+
+                if (App.AlertsEnabled && xeSessionDown && !wasXeSessionDown)
+                {
+                    var captures = string.Join(" and ", healthSummary!.XeSessionFailures
+                        .Select(f => f.CollectorName == "blocked_process_report" ? "blocking" : "deadlock"));
+                    var reason = healthSummary.XeSessionFailures[0].XeSessionMessage ?? "unknown error";
+
+                    _trayService?.ShowNotification(
+                        "Capture Not Running",
+                        $"{server.DisplayNameWithIntent}: {captures} capture can't start — {reason}",
+                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
+                }
+
+                _previousXeSessionFailureStates[server.Id] = xeSessionDown;
                 _previousConnectionStates[server.Id] = isOnline;
                 _previousCollectorErrorStates[server.Id] = hasErrors;
             }
@@ -1277,712 +1560,43 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void CheckPerformanceAlerts(ServerSummaryItem summary)
+    /// <summary>
+    /// Seeds the in-memory edge-trigger watermarks from the persisted store (#1145) so a
+    /// restart does not reset them to 0 and re-fire / re-post a webhook for blocking/deadlock
+    /// events still lingering in the rolling 1-hour lookback window. Runs once at startup,
+    /// after the DB is initialized and before the first alert sweep.
+    /// </summary>
+    private async Task SeedEdgeTriggerWatermarksAsync()
     {
-        if (!App.AlertsEnabled || _trayService == null) return;
-
-        var key = summary.ServerId.ToString();
-        var now = DateTime.UtcNow;
-        var alertCooldown = TimeSpan.FromMinutes(App.AlertCooldownMinutes);
-
-        /* Skip popup/email alerts if user has acknowledged or silenced this server */
-        bool suppressPopups = !_alertStateService.ShouldShowAlerts(key);
-
-        /* CPU alerts — uses the metric the user selected (Total non-idle CPU by default, or SQL Server only). */
-        var alertCpuValue = summary.CpuPercentForAlert;
-        string cpuMetricLabel = App.AlertCpuMode == CpuAlertMode.Total ? "Total CPU" : "SQL CPU";
-        bool cpuExceeded = App.AlertCpuEnabled
-            && alertCpuValue.HasValue
-            && alertCpuValue.Value >= App.AlertCpuThreshold;
-
-        if (cpuExceeded)
+        try
         {
-            _activeCpuAlert[key] = true;
-            if (!suppressPopups && (!_lastCpuAlert.TryGetValue(key, out var lastCpu) || now - lastCpu >= alertCooldown))
+            var rows = await _alertHistoryStore.LoadEdgeTriggerWatermarksAsync();
+            foreach (var (serverId, metricName, watermark) in rows)
             {
-                var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "High CPU" };
-                bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
-                _lastCpuAlert[key] = now;
-
-                if (!isMuted)
+                var key = serverId.ToString();
+                if (metricName == BlockingWatermarkMetric)
                 {
-                    _trayService.ShowSnoozableNotification(
-                        "High CPU",
-                        $"{summary.DisplayName}: {cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {App.AlertCpuThreshold}%)",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
-                        summary.DisplayName,
-                        "High CPU",
-                        _muteRuleService);
+                    _lastAlertedBlockingCount[key] = watermark;
                 }
+                else if (metricName == DeadlockWatermarkMetric)
+                {
+                    _lastAlertedDeadlockCount[key] = watermark;
+                }
+            }
 
-                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {App.AlertCpuThreshold}%";
-
-                await _emailAlertService.TrySendAlertEmailAsync(
-                    "High CPU",
-                    summary.DisplayName,
-                    $"{alertCpuValue:F0}%",
-                    $"{App.AlertCpuThreshold}%",
-                    summary.ServerId,
-                    muted: isMuted,
-                    detailText: cpuDetailText);
+            /* Failed-job watermark (time-based): seed so a restart does not re-fire tray toasts
+               for failures still inside the lookback window that the user already saw and dismissed
+               before the restart — the failed-job equivalent of the blocking/deadlock seed above. */
+            var failedJobRows = await _alertHistoryStore.LoadFailedJobWatermarksAsync();
+            foreach (var (serverId, watermark) in failedJobRows)
+            {
+                _lastAlertedFailedJobTime[serverId.ToString()] = watermark;
             }
         }
-        else if (_activeCpuAlert.TryGetValue(key, out var wasCpu) && wasCpu)
+        catch (Exception ex)
         {
-            _activeCpuAlert[key] = false;
-            _trayService.ShowNotification(
-                "CPU Resolved",
-                $"{summary.DisplayName}: {cpuMetricLabel} back to {alertCpuValue:F0}%",
-                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
-        }
-
-        /* Blocking alerts */
-        var effectiveBlockingCount = summary.BlockingCount;
-        if (App.AlertBlockingEnabled && App.AlertExcludedDatabases.Count > 0
-            && summary.BlockingCount >= App.AlertBlockingThreshold && _dataService != null)
-        {
-            try
-            {
-                var blockingRows = await _dataService.GetRecentBlockedProcessReportsAsync(summary.ServerId, hoursBack: 1);
-                effectiveBlockingCount = blockingRows
-                    .Count(r => string.IsNullOrEmpty(r.DatabaseName) ||
-                        !App.AlertExcludedDatabases.Any(e =>
-                            string.Equals(e, r.DatabaseName, StringComparison.OrdinalIgnoreCase)));
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Alerts", $"Failed to filter blocking count for {summary.DisplayName}: {ex.Message}");
-            }
-        }
-
-        bool blockingExceeded = App.AlertBlockingEnabled
-            && effectiveBlockingCount >= App.AlertBlockingThreshold;
-
-        if (blockingExceeded)
-        {
-            _activeBlockingAlert[key] = true;
-            if (!suppressPopups && (!_lastBlockingAlert.TryGetValue(key, out var lastBlocking) || now - lastBlocking >= alertCooldown))
-            {
-                var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Blocking Detected" };
-                bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
-                _lastBlockingAlert[key] = now;
-
-                if (!isMuted)
-                {
-                    _trayService.ShowSnoozableNotification(
-                        "Blocking Detected",
-                        $"{summary.DisplayName}: {effectiveBlockingCount} blocking session(s)",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
-                        summary.DisplayName,
-                        "Blocking Detected",
-                        _muteRuleService);
-                }
-
-                var blockingContext = await BuildBlockingContextAsync(summary.ServerId);
-                var detailText = ContextToDetailText(blockingContext);
-
-                await _emailAlertService.TrySendAlertEmailAsync(
-                    "Blocking Detected",
-                    summary.DisplayName,
-                    effectiveBlockingCount.ToString(),
-                    App.AlertBlockingThreshold.ToString(),
-                    summary.ServerId,
-                    blockingContext,
-                    muted: isMuted,
-                    detailText: detailText);
-            }
-        }
-        else if (_activeBlockingAlert.TryGetValue(key, out var wasBlocking) && wasBlocking)
-        {
-            _activeBlockingAlert[key] = false;
-            _trayService.ShowNotification(
-                "Blocking Cleared",
-                $"{summary.DisplayName}: No active blocking",
-                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
-        }
-
-        /* Deadlock alerts */
-        var effectiveDeadlockCount = summary.DeadlockCount;
-        if (App.AlertDeadlockEnabled && App.AlertExcludedDatabases.Count > 0
-            && summary.DeadlockCount >= App.AlertDeadlockThreshold && _dataService != null)
-        {
-            try
-            {
-                var deadlockRows = await _dataService.GetRecentDeadlocksAsync(summary.ServerId, hoursBack: 1);
-                effectiveDeadlockCount = deadlockRows
-                    .Count(r => !IsDeadlockExcluded(r, App.AlertExcludedDatabases));
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Alerts", $"Failed to filter deadlock count for {summary.DisplayName}: {ex.Message}");
-            }
-        }
-
-        bool deadlocksExceeded = App.AlertDeadlockEnabled
-            && effectiveDeadlockCount >= App.AlertDeadlockThreshold;
-
-        if (deadlocksExceeded)
-        {
-            _activeDeadlockAlert[key] = true;
-            if (!suppressPopups && (!_lastDeadlockAlert.TryGetValue(key, out var lastDeadlock) || now - lastDeadlock >= alertCooldown))
-            {
-                var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Deadlocks Detected" };
-                bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
-                _lastDeadlockAlert[key] = now;
-
-                if (!isMuted)
-                {
-                    _trayService.ShowSnoozableNotification(
-                        "Deadlocks Detected",
-                        $"{summary.DisplayName}: {effectiveDeadlockCount} deadlock(s) in the last hour",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error,
-                        summary.DisplayName,
-                        "Deadlocks Detected",
-                        _muteRuleService);
-                }
-
-                var deadlockContext = await BuildDeadlockContextAsync(summary.ServerId);
-                var detailText = ContextToDetailText(deadlockContext);
-
-                await _emailAlertService.TrySendAlertEmailAsync(
-                    "Deadlocks Detected",
-                    summary.DisplayName,
-                    effectiveDeadlockCount.ToString(),
-                    App.AlertDeadlockThreshold.ToString(),
-                    summary.ServerId,
-                    deadlockContext,
-                    muted: isMuted,
-                    detailText: detailText);
-            }
-        }
-        else if (_activeDeadlockAlert.TryGetValue(key, out var wasDeadlock) && wasDeadlock)
-        {
-            _activeDeadlockAlert[key] = false;
-            _trayService.ShowNotification(
-                "Deadlocks Cleared",
-                $"{summary.DisplayName}: No deadlocks in the last hour",
-                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
-        }
-
-        /* Poison wait alerts */
-        if (App.AlertPoisonWaitEnabled && _dataService != null)
-        {
-            try
-            {
-                var poisonWaits = await _dataService.GetLatestPoisonWaitAvgsAsync(summary.ServerId);
-                var triggered = poisonWaits.FindAll(w => w.AvgMsPerWait >= App.AlertPoisonWaitThresholdMs);
-
-                if (triggered.Count > 0)
-                {
-                    _activePoisonWaitAlert[key] = true;
-                    if (!suppressPopups && (!_lastPoisonWaitAlert.TryGetValue(key, out var lastPoisonWait) || now - lastPoisonWait >= alertCooldown))
-                    {
-                        var worst = triggered[0];
-                        var allWaitNames = string.Join(", ", triggered.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)"));
-
-                        /* Poison wait mute check uses the worst (highest avg ms/wait) triggered wait type.
-                           Limitation: if a user mutes a specific wait type that isn't the worst, the alert
-                           still fires. Conversely, muting the worst type suppresses the entire alert even
-                           if other unmuted poison waits are present. */
-                        var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Poison Wait", WaitType = worst.WaitType };
-                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
-                        _lastPoisonWaitAlert[key] = now;
-
-                        if (!isMuted)
-                        {
-                            _trayService.ShowSnoozableNotification(
-                                "Poison Wait",
-                                $"{summary.DisplayName}: {worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error,
-                                summary.DisplayName,
-                                "Poison Wait",
-                                _muteRuleService);
-                        }
-
-                        var poisonContext = BuildPoisonWaitContext(triggered);
-                        var detailText = ContextToDetailText(poisonContext);
-
-                        await _emailAlertService.TrySendAlertEmailAsync(
-                            "Poison Wait",
-                            summary.DisplayName,
-                            allWaitNames,
-                            $"{App.AlertPoisonWaitThresholdMs}ms avg",
-                            summary.ServerId,
-                            poisonContext,
-                            numericCurrentValue: worst.AvgMsPerWait,
-                            numericThresholdValue: App.AlertPoisonWaitThresholdMs,
-                            muted: isMuted,
-                            detailText: detailText);
-                    }
-                }
-                else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait)
-                {
-                    _activePoisonWaitAlert[key] = false;
-                    _trayService.ShowNotification(
-                        "Poison Waits Cleared",
-                        $"{summary.DisplayName}: Poison wait avg below threshold",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
-                }
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Alerts", $"Failed to check poison waits for {summary.DisplayName}: {ex.Message}");
-            }
-        }
-
-        /* Long-running query alerts */
-        if (App.AlertLongRunningQueryEnabled && _dataService != null)
-        {
-            try
-            {
-                var longRunning = await _dataService.GetLongRunningQueriesAsync(summary.ServerId, App.AlertLongRunningQueryThresholdMinutes, App.AlertLongRunningQueryMaxResults, App.AlertLongRunningQueryExcludeSpServerDiagnostics, App.AlertLongRunningQueryExcludeWaitFor, App.AlertLongRunningQueryExcludeBackups, App.AlertLongRunningQueryExcludeMiscWaits);
-
-                if (App.AlertExcludedDatabases.Count > 0)
-                {
-                    longRunning = longRunning
-                        .Where(q => string.IsNullOrEmpty(q.DatabaseName) ||
-                            !App.AlertExcludedDatabases.Any(e =>
-                                string.Equals(e, q.DatabaseName, StringComparison.OrdinalIgnoreCase)))
-                        .ToList();
-                }
-
-                if (longRunning.Count > 0)
-                {
-                    _activeLongRunningQueryAlert[key] = true;
-                    if (!suppressPopups && (!_lastLongRunningQueryAlert.TryGetValue(key, out var lastLrq) || now - lastLrq >= alertCooldown))
-                    {
-                        var worst = longRunning[0];
-                        var elapsedMinutes = worst.ElapsedSeconds / 60;
-                        var preview = TruncateText(worst.QueryText, 80);
-                        var previewSuffix = string.IsNullOrEmpty(preview) ? "" : $" — {preview}";
-
-                        var muteCtx = new AlertMuteContext
-                        {
-                            ServerName = summary.DisplayName,
-                            MetricName = "Long-Running Query",
-                            DatabaseName = worst.DatabaseName,
-                            QueryText = worst.QueryText
-                        };
-                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
-                        _lastLongRunningQueryAlert[key] = now;
-
-                        if (!isMuted)
-                        {
-                            _trayService.ShowSnoozableNotification(
-                                "Long-Running Query",
-                                $"{summary.DisplayName}: Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
-                                summary.DisplayName,
-                                "Long-Running Query",
-                                _muteRuleService);
-                        }
-
-                        var lrqContext = BuildLongRunningQueryContext(longRunning);
-                        var detailText = ContextToDetailText(lrqContext);
-
-                        await _emailAlertService.TrySendAlertEmailAsync(
-                            "Long-Running Query",
-                            summary.DisplayName,
-                            $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
-                            $"{App.AlertLongRunningQueryThresholdMinutes}m",
-                            summary.ServerId,
-                            lrqContext,
-                            numericCurrentValue: elapsedMinutes,
-                            numericThresholdValue: App.AlertLongRunningQueryThresholdMinutes,
-                            muted: isMuted,
-                            detailText: detailText);
-                    }
-                }
-                else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning)
-                {
-                    _activeLongRunningQueryAlert[key] = false;
-                    _trayService.ShowNotification(
-                        "Long-Running Queries Cleared",
-                        $"{summary.DisplayName}: No queries over threshold",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
-                }
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Alerts", $"Failed to check long-running queries for {summary.DisplayName}: {ex.Message}");
-            }
-        }
-
-        /* TempDB space alerts */
-        if (App.AlertTempDbSpaceEnabled && _dataService != null)
-        {
-            try
-            {
-                var tempDb = await _dataService.GetLatestTempDbSpaceAsync(summary.ServerId);
-
-                if (tempDb != null && tempDb.UsedPercent >= App.AlertTempDbSpaceThresholdPercent)
-                {
-                    _activeTempDbSpaceAlert[key] = true;
-                    if (!suppressPopups && (!_lastTempDbSpaceAlert.TryGetValue(key, out var lastTempDb) || now - lastTempDb >= alertCooldown))
-                    {
-                        var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "TempDB Space" };
-                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
-                        _lastTempDbSpaceAlert[key] = now;
-
-                        if (!isMuted)
-                        {
-                            _trayService.ShowSnoozableNotification(
-                                "TempDB Space",
-                                $"{summary.DisplayName}: TempDB {tempDb.UsedPercent:F0}% used",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
-                                summary.DisplayName,
-                                "TempDB Space",
-                                _muteRuleService);
-                        }
-
-                        var tempDbContext = BuildTempDbSpaceContext(tempDb);
-                        var detailText = ContextToDetailText(tempDbContext);
-
-                        await _emailAlertService.TrySendAlertEmailAsync(
-                            "TempDB Space",
-                            summary.DisplayName,
-                            $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
-                            $"{App.AlertTempDbSpaceThresholdPercent}%",
-                            summary.ServerId,
-                            tempDbContext,
-                            numericCurrentValue: tempDb.UsedPercent,
-                            numericThresholdValue: App.AlertTempDbSpaceThresholdPercent,
-                            muted: isMuted,
-                            detailText: detailText);
-                    }
-                }
-                else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb)
-                {
-                    _activeTempDbSpaceAlert[key] = false;
-                    var pct = tempDb != null ? $"{tempDb.UsedPercent:F0}%" : "N/A";
-                    _trayService.ShowNotification(
-                        "TempDB Space Resolved",
-                        $"{summary.DisplayName}: TempDB usage back to {pct}",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
-                }
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Alerts", $"Failed to check TempDB space for {summary.DisplayName}: {ex.Message}");
-            }
-        }
-
-        /* Anomalous Agent job alerts */
-        if (App.AlertLongRunningJobEnabled && _dataService != null)
-        {
-            try
-            {
-                var anomalousJobs = await _dataService.GetAnomalousJobsAsync(summary.ServerId, App.AlertLongRunningJobMultiplier);
-
-                if (anomalousJobs.Count > 0)
-                {
-                    _activeLongRunningJobAlert[key] = true;
-                    var worst = anomalousJobs[0];
-                    var jobKey = $"{key}:{worst.JobId}:{worst.StartTime:O}";
-
-                    if (!suppressPopups && (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastJob) || now - lastJob >= alertCooldown))
-                    {
-                        var currentMinutes = worst.CurrentDurationSeconds / 60;
-
-                        var muteCtx = new AlertMuteContext { ServerName = summary.DisplayName, MetricName = "Long-Running Job", JobName = worst.JobName };
-                        bool isMuted = _muteRuleService.IsAlertMuted(muteCtx);
-                        _lastLongRunningJobAlert[jobKey] = now;
-
-                        if (!isMuted)
-                        {
-                            _trayService.ShowSnoozableNotification(
-                                "Long-Running Job",
-                                $"{summary.DisplayName}: {worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)",
-                                Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning,
-                                summary.DisplayName,
-                                "Long-Running Job",
-                                _muteRuleService);
-                        }
-
-                        var jobContext = BuildAnomalousJobContext(anomalousJobs);
-                        var detailText = ContextToDetailText(jobContext);
-
-                        await _emailAlertService.TrySendAlertEmailAsync(
-                            "Long-Running Job",
-                            summary.DisplayName,
-                            $"{anomalousJobs.Count} job(s) exceeding {App.AlertLongRunningJobMultiplier}x average",
-                            $"{App.AlertLongRunningJobMultiplier}x historical avg",
-                            summary.ServerId,
-                            jobContext,
-                            numericCurrentValue: (double)(worst.PercentOfAverage ?? 0),
-                            numericThresholdValue: App.AlertLongRunningJobMultiplier * 100,
-                            muted: isMuted,
-                            detailText: detailText);
-                    }
-                }
-                else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob)
-                {
-                    _activeLongRunningJobAlert[key] = false;
-                    _trayService.ShowNotification(
-                        "Long-Running Jobs Cleared",
-                        $"{summary.DisplayName}: No jobs exceeding threshold",
-                        Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
-                }
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Alerts", $"Failed to check anomalous jobs for {summary.DisplayName}: {ex.Message}");
-            }
+            AppLogger.Error("Alerts", $"Failed to seed edge-trigger watermarks: {ex.Message}");
         }
     }
-
-        private static string TruncateText(string text, int maxLength = 300)
-        {
-            if (string.IsNullOrEmpty(text)) return "";
-            text = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
-        }
-
-        private static string? ContextToDetailText(AlertContext? context)
-        {
-            if (context == null || context.Details.Count == 0) return null;
-            var sb = new System.Text.StringBuilder();
-            foreach (var detail in context.Details)
-            {
-                if (sb.Length > 0) sb.AppendLine();
-                sb.AppendLine(detail.Heading);
-                foreach (var (label, value) in detail.Fields)
-                    sb.AppendLine($"  {label}: {value}");
-            }
-            return sb.ToString().TrimEnd();
-        }
-
-        private async Task<AlertContext?> BuildBlockingContextAsync(int serverId)
-        {
-            try
-            {
-                if (_dataService == null) return null;
-
-                var events = await _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack: 1);
-                if (events == null || events.Count == 0) return null;
-
-                if (App.AlertExcludedDatabases.Count > 0)
-                {
-                    events = events
-                        .Where(e => string.IsNullOrEmpty(e.DatabaseName) ||
-                            !App.AlertExcludedDatabases.Any(ex =>
-                                string.Equals(ex, e.DatabaseName, StringComparison.OrdinalIgnoreCase)))
-                        .ToList();
-                    if (events.Count == 0) return null;
-                }
-
-                var context = new AlertContext();
-                var firstXml = (string?)null;
-
-                foreach (var e in events.Take(3))
-                {
-                    var item = new AlertDetailItem
-                    {
-                        Heading = $"Blocked #{e.BlockedSpid} by #{e.BlockingSpid}",
-                        Fields = new()
-                    };
-
-                    if (!string.IsNullOrEmpty(e.DatabaseName))
-                        item.Fields.Add(("Database", e.DatabaseName));
-                    if (!string.IsNullOrEmpty(e.BlockedSqlText))
-                        item.Fields.Add(("Blocked Query", TruncateText(e.BlockedSqlText)));
-                    if (!string.IsNullOrEmpty(e.BlockingSqlText))
-                        item.Fields.Add(("Blocking Query", TruncateText(e.BlockingSqlText)));
-                    item.Fields.Add(("Wait Time", e.WaitTimeFormatted));
-                    if (!string.IsNullOrEmpty(e.LockMode))
-                        item.Fields.Add(("Lock Mode", e.LockMode));
-
-                    context.Details.Add(item);
-                    if (firstXml == null && e.HasReportXml)
-                        firstXml = e.BlockedProcessReportXml;
-                }
-
-                if (!string.IsNullOrEmpty(firstXml))
-                {
-                    context.AttachmentXml = firstXml;
-                    context.AttachmentFileName = "blocked_process_report.xml";
-                }
-
-                return context;
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("EmailAlert", $"Failed to fetch blocking detail for email: {ex.Message}");
-                return null;
-            }
-        }
-
-        private async Task<AlertContext?> BuildDeadlockContextAsync(int serverId)
-        {
-            try
-            {
-                if (_dataService == null) return null;
-
-                var deadlocks = await _dataService.GetRecentDeadlocksAsync(serverId, hoursBack: 1);
-                if (deadlocks == null || deadlocks.Count == 0) return null;
-
-                if (App.AlertExcludedDatabases.Count > 0)
-                {
-                    deadlocks = deadlocks
-                        .Where(d => !IsDeadlockExcluded(d, App.AlertExcludedDatabases))
-                        .ToList();
-                    if (deadlocks.Count == 0) return null;
-                }
-
-                var context = new AlertContext();
-                var firstGraph = (string?)null;
-
-                foreach (var d in deadlocks.Take(3))
-                {
-                    var item = new AlertDetailItem
-                    {
-                        Heading = "Deadlock Victim",
-                        Fields = new()
-                    };
-
-                    if (!string.IsNullOrEmpty(d.VictimSqlText))
-                        item.Fields.Add(("Victim SQL", TruncateText(d.VictimSqlText)));
-                    if (!string.IsNullOrEmpty(d.ProcessSummary))
-                        item.Fields.Add(("Processes", d.ProcessSummary));
-
-                    context.Details.Add(item);
-                    if (firstGraph == null && d.HasDeadlockXml)
-                        firstGraph = d.DeadlockGraphXml;
-                }
-
-                if (!string.IsNullOrEmpty(firstGraph))
-                {
-                    context.AttachmentXml = firstGraph;
-                    context.AttachmentFileName = "deadlock_graph.xml";
-                }
-
-                return context;
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("EmailAlert", $"Failed to fetch deadlock detail for email: {ex.Message}");
-                return null;
-            }
-        }
-
-        private static bool IsDeadlockExcluded(DeadlockRow row, List<string> excludedDatabases)
-        {
-            if (string.IsNullOrEmpty(row.DeadlockGraphXml)) return false;
-            try
-            {
-                var doc = XElement.Parse(row.DeadlockGraphXml);
-                var dbNames = doc.Descendants("process")
-                    .Select(p => p.Attribute("currentdbname")?.Value)
-                    .Where(n => !string.IsNullOrEmpty(n))
-                    .Cast<string>()
-                    .ToList();
-                if (dbNames.Count == 0) return false;
-                return dbNames.All(db => excludedDatabases.Any(e =>
-                    string.Equals(e, db, StringComparison.OrdinalIgnoreCase)));
-            }
-            catch { return false; }
-        }
-
-        private static AlertContext? BuildPoisonWaitContext(List<PoisonWaitDelta> triggeredWaits)
-        {
-            if (triggeredWaits.Count == 0) return null;
-
-            var context = new AlertContext();
-            foreach (var w in triggeredWaits)
-            {
-                context.Details.Add(new AlertDetailItem
-                {
-                    Heading = w.WaitType,
-                    Fields = new()
-                    {
-                        ("Avg ms/wait", $"{w.AvgMsPerWait:F1}"),
-                        ("Delta wait ms", $"{w.DeltaMs:N0}"),
-                        ("Delta tasks", $"{w.DeltaTasks:N0}")
-                    }
-                });
-            }
-            return context;
-        }
-
-        private static AlertContext? BuildLongRunningQueryContext(List<LongRunningQueryInfo> queries)
-        {
-            if (queries.Count == 0) return null;
-
-            var context = new AlertContext();
-            foreach (var q in queries.GetRange(0, Math.Min(3, queries.Count)))
-            {
-                var item = new AlertDetailItem
-                {
-                    Heading = $"Session #{q.SessionId} — {q.ElapsedSeconds / 60}m {q.ElapsedSeconds % 60}s",
-                    Fields = new()
-                };
-
-                if (!string.IsNullOrEmpty(q.DatabaseName))
-                    item.Fields.Add(("Database", q.DatabaseName));
-                if (!string.IsNullOrEmpty(q.QueryText))
-                    item.Fields.Add(("Query", TruncateText(q.QueryText)));
-                item.Fields.Add(("CPU Time", $"{q.CpuTimeMs:N0} ms"));
-                item.Fields.Add(("Reads", $"{q.Reads:N0}"));
-                item.Fields.Add(("Writes", $"{q.Writes:N0}"));
-                if (!string.IsNullOrEmpty(q.WaitType))
-                    item.Fields.Add(("Wait Type", q.WaitType));
-                if (q.BlockingSessionId.HasValue && q.BlockingSessionId.Value > 0)
-                    item.Fields.Add(("Blocked By", $"Session #{q.BlockingSessionId.Value}"));
-
-                context.Details.Add(item);
-            }
-            return context;
-        }
-
-        private static AlertContext? BuildTempDbSpaceContext(TempDbSpaceInfo tempDb)
-        {
-            var context = new AlertContext();
-            context.Details.Add(new AlertDetailItem
-            {
-                Heading = $"TempDB — {tempDb.UsedPercent:F0}% Used",
-                Fields = new()
-                {
-                    ("Total Reserved", $"{tempDb.TotalReservedMb:F0} MB"),
-                    ("Unallocated", $"{tempDb.UnallocatedMb:F0} MB"),
-                    ("User Objects", $"{tempDb.UserObjectReservedMb:F0} MB"),
-                    ("Internal Objects", $"{tempDb.InternalObjectReservedMb:F0} MB"),
-                    ("Version Store", $"{tempDb.VersionStoreReservedMb:F0} MB"),
-                    ("Top Consumer", tempDb.TopConsumerSessionId > 0
-                        ? $"Session #{tempDb.TopConsumerSessionId} ({tempDb.TopConsumerMb:F0} MB)"
-                        : "None")
-                }
-            });
-            return context;
-        }
-
-        private static AlertContext? BuildAnomalousJobContext(List<AnomalousJobInfo> jobs)
-        {
-            if (jobs.Count == 0) return null;
-
-            var context = new AlertContext();
-            foreach (var j in jobs.GetRange(0, Math.Min(3, jobs.Count)))
-            {
-                context.Details.Add(new AlertDetailItem
-                {
-                    Heading = j.JobName,
-                    Fields = new()
-                    {
-                        ("Current Duration", FormatDuration(j.CurrentDurationSeconds)),
-                        ("Avg Duration", FormatDuration(j.AvgDurationSeconds)),
-                        ("P95 Duration", FormatDuration(j.P95DurationSeconds)),
-                        ("% of Average", j.PercentOfAverage.HasValue ? $"{j.PercentOfAverage:F0}%" : "N/A"),
-                        ("Started", j.StartTime.ToString("yyyy-MM-dd HH:mm:ss"))
-                    }
-                });
-            }
-            return context;
-        }
-
-        private static string FormatDuration(long seconds)
-        {
-            if (seconds < 60) return $"{seconds}s";
-            if (seconds < 3600) return $"{seconds / 60}m {seconds % 60}s";
-            return $"{seconds / 3600}h {(seconds % 3600) / 60}m";
-        }
 
     }

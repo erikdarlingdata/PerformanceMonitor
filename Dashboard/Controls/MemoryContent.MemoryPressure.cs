@@ -21,6 +21,8 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -86,10 +88,10 @@ namespace PerformanceMonitorDashboard.Controls
                 var osMediumBars = new List<ScottPlot.Bar>();
                 var osSevereBars = new List<ScottPlot.Bar>();
 
-                var sqlMediumColor = ScottPlot.Color.FromHex("#FFB74D");  // orange 300
-                var sqlSevereColor = ScottPlot.Color.FromHex("#E65100");  // orange 900
-                var osMediumColor = ScottPlot.Color.FromHex("#E57373");   // red 300
-                var osSevereColor = ScottPlot.Color.FromHex("#B71C1C");   // red 900
+                var sqlMediumColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureMedium"));
+                var sqlSevereColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureSevere"));
+                var osMediumColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OsPressureMedium"));
+                var osSevereColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OsPressureSevere"));
 
                 foreach (var g in grouped)
                 {
@@ -196,7 +198,7 @@ namespace PerformanceMonitorDashboard.Controls
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = MemoryPressureEventsChart.Plot.Add.Text("No memory pressure events in selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 

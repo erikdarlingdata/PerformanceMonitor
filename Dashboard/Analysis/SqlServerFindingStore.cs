@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorDashboard.Helpers;
 
 namespace PerformanceMonitorDashboard.Analysis;
@@ -48,12 +50,14 @@ BEGIN
         category nvarchar(256) NOT NULL,
         story_path nvarchar(2000) NOT NULL,
         story_path_hash nvarchar(256) NOT NULL,
-        story_text nvarchar(4000) NOT NULL,
+        story_text nvarchar(max) NOT NULL,
         root_fact_key nvarchar(256) NOT NULL,
         root_fact_value float NULL,
         leaf_fact_key nvarchar(256) NULL,
         leaf_fact_value float NULL,
         fact_count integer NOT NULL,
+        incident_id nvarchar(64) NULL,
+        remediation_action_json nvarchar(max) NULL,
         CONSTRAINT PK_analysis_findings PRIMARY KEY CLUSTERED (finding_id)
             WITH (DATA_COMPRESSION = PAGE)
     );
@@ -80,57 +84,129 @@ BEGIN
     CREATE INDEX IX_analysis_muted_server_hash
     ON config.analysis_muted (server_id, story_path_hash)
         WITH (DATA_COMPRESSION = PAGE);
-END;";
+END;
+
+/* Recommendations rebuild D2: existing DBs created before this column get it added
+   idempotently. The Recommendations surface reads it back to drive Apply + the
+   two-sided consent gate (the built RemediationAction, not raw drill-down). */
+IF COL_LENGTH(N'config.analysis_findings', N'remediation_action_json') IS NULL
+    ALTER TABLE config.analysis_findings ADD remediation_action_json nvarchar(max) NULL;
+
+/* Compose-from-facts: story_text now carries the serialized value-stated advice for EVERY finding
+   (it was previously written empty), so widen it from nvarchar(4000) to nvarchar(max) on existing
+   DBs — removes the truncation cliff and matches Lite's unbounded story_text. COL_LENGTH returns
+   -1 for nvarchar(max); any other value means the column still needs widening. NOT NULL is kept. */
+IF COL_LENGTH(N'config.analysis_findings', N'story_text') <> -1
+    ALTER TABLE config.analysis_findings ALTER COLUMN story_text nvarchar(max) NOT NULL;
+
+/* Correlate-and-focus slice 2: the incident grouping id, added idempotently on existing DBs. */
+IF COL_LENGTH(N'config.analysis_findings', N'incident_id') IS NULL
+    ALTER TABLE config.analysis_findings ADD incident_id nvarchar(64) NULL;";
 
         await cmd.ExecuteNonQueryAsync();
     }
 
     /// <summary>
-    /// Saves analysis stories as findings, filtering out any that match muted hashes.
-    /// Returns the list of findings that were actually saved (non-muted).
+    /// Mute-filters the stories and materializes the SURVIVING findings, WITHOUT inserting
+    /// them (recommendations rebuild D2 / P2 reorder). The orchestrator then enriches these
+    /// survivors and builds + attaches each finding's RemediationAction before calling
+    /// <see cref="InsertFindingsAsync"/>, so the BUILT action is persisted on the row.
+    /// Mute/dedup/ordering and the <c>_nextId</c> sequencing are identical to the previous
+    /// single-pass save; only the insert is deferred. Muted (and absolution) findings are
+    /// dropped here and never enriched (no enrich-then-discard).
     /// </summary>
-    public async Task<List<AnalysisFinding>> SaveFindingsAsync(
+    public async Task<List<AnalysisFinding>> FilterMutedFindingsAsync(
         List<AnalysisStory> stories, AnalysisContext context)
     {
-        var mutedHashes = await GetMutedHashesAsync(context.ServerId);
         var analysisTime = DateTime.UtcNow;
-        var saved = new List<AnalysisFinding>();
+        var survivors = new List<AnalysisFinding>();
 
-        foreach (var story in stories)
+        try
         {
-            // Skip absolution stories (severity 0) -- they confirm health, not problems
-            if (story.Severity <= 0)
-                continue;
+            /* One connection for the mute read. EnsureTablesExistAsync runs ONCE here (not
+               per finding). Mandatory under D0's default-on analysis. */
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+            await EnsureTablesExistAsync(connection);
 
-            if (mutedHashes.Contains(story.StoryPathHash))
-                continue;
+            var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
 
-            var finding = new AnalysisFinding
+            foreach (var story in stories)
             {
-                FindingId = _nextId++,
-                AnalysisTime = analysisTime,
-                ServerId = context.ServerId,
-                ServerName = context.ServerName,
-                TimeRangeStart = context.TimeRangeStart,
-                TimeRangeEnd = context.TimeRangeEnd,
-                Severity = story.Severity,
-                Confidence = story.Confidence,
-                Category = story.Category,
-                StoryPath = story.StoryPath,
-                StoryPathHash = story.StoryPathHash,
-                StoryText = story.StoryText,
-                RootFactKey = story.RootFactKey,
-                RootFactValue = story.RootFactValue,
-                LeafFactKey = story.LeafFactKey,
-                LeafFactValue = story.LeafFactValue,
-                FactCount = story.FactCount
-            };
+                // Skip absolution stories (severity 0) -- they confirm health, not problems
+                if (story.Severity <= 0)
+                    continue;
 
-            await InsertFindingAsync(finding);
-            saved.Add(finding);
+                if (mutedHashes.Contains(story.StoryPathHash))
+                    continue;
+
+                survivors.Add(new AnalysisFinding
+                {
+                    FindingId = _nextId++,
+                    AnalysisTime = analysisTime,
+                    ServerId = context.ServerId,
+                    ServerName = context.ServerName,
+                    // The context window is in the SERVER's local clock (so windowed reads match
+                    // the collectors' SYSDATETIME rows); convert back to UTC for persistence so the
+                    // stored time_range_* stay UTC — the reader's AsUtc, the deep-link offset math,
+                    // and the retention purge all continue to assume UTC. (offset = SYSDATETIME −
+                    // SYSUTCDATETIME, so local − offset = UTC.)
+                    TimeRangeStart = context.TimeRangeStart - context.ServerUtcOffset,
+                    TimeRangeEnd = context.TimeRangeEnd - context.ServerUtcOffset,
+                    Severity = story.Severity,
+                    Confidence = story.Confidence,
+                    Category = story.Category,
+                    StoryPath = story.StoryPath,
+                    StoryPathHash = story.StoryPathHash,
+                    IncidentId = story.IncidentId,
+                    StoryText = story.StoryText,
+                    RootFactKey = story.RootFactKey,
+                    RootFactValue = story.RootFactValue,
+                    LeafFactKey = story.LeafFactKey,
+                    LeafFactValue = story.LeafFactValue,
+                    FactCount = story.FactCount,
+                    // Carried in-memory only; no analysis_findings column for it.
+                    RootFactMetadata = story.RootFactMetadata
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerFindingStore] FilterMutedFindingsAsync failed: {ex.Message}");
         }
 
-        return saved;
+        return survivors;
+    }
+
+    /// <summary>
+    /// Inserts the (already mute-filtered, enriched, and action-attached) findings in one
+    /// batched pass (recommendations rebuild D2 / P2 reorder). Each row persists its BUILT
+    /// <see cref="AnalysisFinding.Remediation"/> as <c>remediation_action_json</c> via the
+    /// shared <see cref="AlertContextSerializer"/>. One connection + one
+    /// EnsureTablesExistAsync for the whole batch (PR-1's discipline). Returns the same list
+    /// for caller convenience; the in-memory findings are unchanged.
+    /// </summary>
+    public async Task<List<AnalysisFinding>> InsertFindingsAsync(
+        List<AnalysisFinding> findings, AnalysisContext context)
+    {
+        if (findings.Count == 0)
+            return findings;
+
+        try
+        {
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+            await EnsureTablesExistAsync(connection);
+
+            foreach (var finding in findings)
+                await InsertFindingAsync(connection, finding);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerFindingStore] InsertFindingsAsync failed: {ex.Message}");
+        }
+
+        return findings;
     }
 
     /// <summary>
@@ -155,7 +231,8 @@ SELECT TOP (@limit)
     finding_id, analysis_time, server_id, server_name, database_name,
     time_range_start, time_range_end, severity, confidence, category,
     story_path, story_path_hash, story_text,
-    root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count
+    root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count,
+    incident_id, remediation_action_json
 FROM config.analysis_findings
 WHERE server_id = @serverId
 AND   analysis_time >= @cutoff
@@ -200,7 +277,8 @@ SELECT
     finding_id, analysis_time, server_id, server_name, database_name,
     time_range_start, time_range_end, severity, confidence, category,
     story_path, story_path_hash, story_text,
-    root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count
+    root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count,
+    incident_id
 FROM config.analysis_findings
 WHERE server_id = @serverId
 AND   analysis_time = (
@@ -299,16 +377,17 @@ VALUES (@muteId, @serverId, @storyPathHash, @storyPath, @mutedDate, @reason);";
         }
     }
 
-    private async Task<HashSet<string>> GetMutedHashesAsync(int serverId)
+    /// <summary>
+    /// Reads muted story hashes for a server on an already-open connection. The caller
+    /// owns the connection and is responsible for EnsureTablesExistAsync. Used by
+    /// FilterMutedFindingsAsync so the mute-filter read reuses its connection.
+    /// </summary>
+    private static async Task<HashSet<string>> GetMutedHashesAsync(SqlConnection connection, int serverId)
     {
         var hashes = new HashSet<string>();
 
         try
         {
-            using var connection = new SqlConnection(_connectionString);
-            await connection.OpenAsync();
-            await EnsureTablesExistAsync(connection);
-
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -330,26 +409,29 @@ WHERE server_id = @serverId OR server_id IS NULL;";
         return hashes;
     }
 
-    private async Task InsertFindingAsync(AnalysisFinding finding)
+    /// <summary>
+    /// Inserts one finding on an already-open connection. The caller owns the connection
+    /// and has already run EnsureTablesExistAsync, so a batch of inserts in one
+    /// InsertFindingsAsync call shares a single connection and a single schema check.
+    /// </summary>
+    private static async Task InsertFindingAsync(SqlConnection connection, AnalysisFinding finding)
     {
         try
         {
-            using var connection = new SqlConnection(_connectionString);
-            await connection.OpenAsync();
-            await EnsureTablesExistAsync(connection);
-
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 INSERT INTO config.analysis_findings
     (finding_id, analysis_time, server_id, server_name, database_name,
      time_range_start, time_range_end, severity, confidence, category,
      story_path, story_path_hash, story_text,
-     root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count)
+     root_fact_key, root_fact_value, leaf_fact_key, leaf_fact_value, fact_count,
+     incident_id, remediation_action_json)
 VALUES
     (@findingId, @analysisTime, @serverId, @serverName, @databaseName,
      @timeRangeStart, @timeRangeEnd, @severity, @confidence, @category,
      @storyPath, @storyPathHash, @storyText,
-     @rootFactKey, @rootFactValue, @leafFactKey, @leafFactValue, @factCount);";
+     @rootFactKey, @rootFactValue, @leafFactKey, @leafFactValue, @factCount,
+     @incidentId, @remediationActionJson);";
 
             cmd.Parameters.Add(new SqlParameter("@findingId", finding.FindingId));
             cmd.Parameters.Add(new SqlParameter("@analysisTime", finding.AnalysisTime));
@@ -369,6 +451,12 @@ VALUES
             cmd.Parameters.Add(new SqlParameter("@leafFactKey", (object?)finding.LeafFactKey ?? DBNull.Value));
             cmd.Parameters.Add(new SqlParameter("@leafFactValue", (object?)finding.LeafFactValue ?? DBNull.Value));
             cmd.Parameters.Add(new SqlParameter("@factCount", finding.FactCount));
+            cmd.Parameters.Add(new SqlParameter("@incidentId",
+                (object?)(string.IsNullOrEmpty(finding.IncidentId) ? null : finding.IncidentId) ?? DBNull.Value));
+            // D2: persist the BUILT action (mirrors the alert path's ContextJson) so the
+            // Recommendations reader can drive Apply + consent from a stored finding.
+            cmd.Parameters.Add(new SqlParameter("@remediationActionJson",
+                (object?)AlertContextSerializer.SerializeAction(finding.Remediation) ?? DBNull.Value));
 
             await cmd.ExecuteNonQueryAsync();
         }
@@ -383,7 +471,7 @@ VALUES
     /// </summary>
     private static AnalysisFinding ReadFinding(SqlDataReader reader)
     {
-        return new AnalysisFinding
+        var finding = new AnalysisFinding
         {
             FindingId = reader.GetInt64(0),
             AnalysisTime = reader.GetDateTime(1),
@@ -402,7 +490,18 @@ VALUES
             RootFactValue = reader.IsDBNull(14) ? null : reader.GetDouble(14),
             LeafFactKey = reader.IsDBNull(15) ? null : reader.GetString(15),
             LeafFactValue = reader.IsDBNull(16) ? null : reader.GetDouble(16),
-            FactCount = reader.GetInt32(17)
+            FactCount = reader.GetInt32(17),
+            // incident_id is ordinal 18 in BOTH SELECTs (correlate-and-focus slice 2).
+            IncidentId = reader.FieldCount > 18 && !reader.IsDBNull(18) ? reader.GetString(18) : string.Empty
         };
+
+        // D2: GetRecentFindingsAsync selects remediation_action_json (now ordinal 19, after
+        // incident_id); GetLatestFindingsAsync omits it, so guard by field count before reading. The
+        // BUILT action is deserialized via the SAME serializer the alert path uses, so the
+        // Recommendations surface can drive Apply + the two-sided consent gate from storage.
+        if (reader.FieldCount > 19 && !reader.IsDBNull(19))
+            finding.Remediation = AlertContextSerializer.DeserializeAction(reader.GetString(19));
+
+        return finding;
     }
 }

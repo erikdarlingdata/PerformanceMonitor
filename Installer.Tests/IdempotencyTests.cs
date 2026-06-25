@@ -71,9 +71,17 @@ public class IdempotencyTests : IAsyncLifetime
             {
                 var name = Path.GetFileName(f);
                 if (!pattern.IsMatch(name)) return false;
+                // Server-scoped scripts create instance-wide objects (SQL Agent jobs,
+                // server-level XE sessions, sp_configure) that can't be namespaced to the
+                // test database. Run against a real instance they leak orphaned jobs/XE
+                // sessions and clobber a production install's identically-named jobs. Their
+                // errors are already swallowed by IsExpectedTestFailure, so excluding them
+                // loses no real coverage.
                 if (name.StartsWith("00_", StringComparison.Ordinal) ||
                     name.StartsWith("97_", StringComparison.Ordinal) ||
-                    name.StartsWith("99_", StringComparison.Ordinal))
+                    name.StartsWith("99_", StringComparison.Ordinal) ||
+                    name.Equals("21_setup_blocked_process_xe.sql", StringComparison.Ordinal) ||
+                    name.Equals("45_create_agent_jobs.sql", StringComparison.Ordinal))
                     return false;
                 return true;
             })

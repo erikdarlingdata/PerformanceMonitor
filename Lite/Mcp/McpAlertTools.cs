@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -26,7 +28,7 @@ public sealed class McpAlertTools
 
             if (rows.Count == 0)
             {
-                return "No alerts found in the specified time range.";
+                return McpHelpers.Status("empty", "No alerts found in the specified time range.");
             }
 
             var alerts = rows.Select(r => new

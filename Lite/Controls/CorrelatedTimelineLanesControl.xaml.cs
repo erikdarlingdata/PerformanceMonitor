@@ -15,9 +15,12 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -54,14 +57,67 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             ApplyTheme(chart);
             // Disable zoom/pan/drag but keep mouse events for crosshair
             chart.UserInputProcessor.UserActionResponses.Clear();
+            SetupLaneDrillDown(chart);
         }
 
         _crosshairManager = new CorrelatedCrosshairManager();
-        _crosshairManager.AddLane(CpuChart, "CPU", "%");
+        _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
         _crosshairManager.AddLane(BlockingChart, "Blocking", "events");
         _crosshairManager.AddLane(MemoryChart, "Buffer Pool", "MB");
         _crosshairManager.AddLane(FileIoChart, "I/O Latency", "ms");
+    }
+
+    /// <summary>
+    /// Raised when the user picks "Show Active Queries at This Time" on a lane. The argument is the
+    /// clicked time in the lanes' (server-local) X-axis space; the host navigates to Active Queries.
+    /// </summary>
+    public event Action<DateTime>? ShowActiveQueriesRequested;
+
+    /// <summary>
+    /// Adds a minimal right-click menu (just the Active Queries drill-down) to a lane. The lanes are a
+    /// stripped-chrome view with pan/zoom disabled, so the clicked time is read straight from the X axis.
+    /// </summary>
+    private void SetupLaneDrillDown(ScottPlot.WPF.WpfPlot chart)
+    {
+        var menu = new ContextMenu();
+        var item = new MenuItem { Header = "Show Active Queries at This Time" };
+        menu.Items.Add(item);
+
+        menu.Opened += (s, _) =>
+        {
+            try
+            {
+                var pos = System.Windows.Input.Mouse.GetPosition(chart);
+                var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(chart);
+                var pixel = new ScottPlot.Pixel((float)(pos.X * dpi.DpiScaleX), (float)(pos.Y * dpi.DpiScaleY));
+                var t = DateTime.FromOADate(chart.Plot.GetCoordinates(pixel).X);
+                // Empty-state lanes set the X axis to [-1, 1] (~year 1899); only offer the drill-down
+                // when the click resolves to a real timestamp.
+                bool valid = t.Year >= 2000;
+                item.Tag = valid ? t : (DateTime?)null;
+                item.IsEnabled = valid;
+            }
+            catch
+            {
+                item.Tag = null;
+                item.IsEnabled = false;
+            }
+        };
+
+        item.Click += (s, _) =>
+        {
+            if (item.Tag is DateTime t)
+                ShowActiveQueriesRequested?.Invoke(t);
+        };
+
+        chart.PreviewMouseRightButtonDown += (s, e) =>
+        {
+            e.Handled = true;
+            menu.PlacementTarget = chart;
+            menu.Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint;
+            menu.IsOpen = true;
+        };
     }
 
     /// <summary>
@@ -77,19 +133,19 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             _crosshairManager?.PrepareForRefresh();
 
-            var cpuTask = _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate);
-            var waitTask = _dataService.GetTotalWaitTrendAsync(_serverId, hoursBack, fromDate, toDate);
-            var blockingTask = _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate);
-            var deadlockTask = _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate);
-            var memoryTask = _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate);
-            var fileIoTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate);
+            var cpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate));
+            var waitTask = Task.Run(() => _dataService.GetTotalWaitTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var blockingTask = Task.Run(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var deadlockTask = Task.Run(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var memoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var fileIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
             // Fetch baselines for band rendering — chart-unit-matched metrics
             var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
-            var cpuBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime);
-            var waitBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime);
-            var ioBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime);
-            var blockingBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.BlockingPerMinute, referenceTime);
+            var cpuBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime));
+            var waitBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime));
+            var ioBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime));
+            var blockingBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.BlockingPerMinute, referenceTime));
 
             try
             {
@@ -111,9 +167,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             // minAnomalyValue: absolute floor below which dots/arrows are suppressed even if outside band.
             // Prevents "1% CPU above 0.5% baseline" false alarms on idle servers.
             if (cpuTask.IsCompletedSuccessfully)
-                UpdateLane(CpuChart, "CPU %",
-                    cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)d.SqlServerCpu)).ToList(),
-                    "#4FC3F7", 0, 105, cpuBaseline, minAnomalyValue: 10);
+            {
+                var sqlSeries = cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)d.SqlServerCpu)).ToList();
+                var totalSeries = cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)d.TotalCpu)).ToList();
+                UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
+            }
             else
                 ShowEmpty(CpuChart, "CPU %");
 
@@ -161,11 +219,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 // Time shift: offset to align reference data with current chart X axis
                 var timeShift = (fromDate ?? DateTime.UtcNow.AddHours(-hoursBack)) - refFrom;
 
-                var refCpuTask = _dataService.GetCpuUtilizationAsync(_serverId, 0, refFrom, refTo);
-                var refWaitTask = _dataService.GetTotalWaitTrendAsync(_serverId, 0, refFrom, refTo);
-                var refBlockingTask = _dataService.GetBlockingTrendAsync(_serverId, 0, refFrom, refTo);
-                var refMemoryTask = _dataService.GetMemoryTrendAsync(_serverId, 0, refFrom, refTo);
-                var refIoTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, 0, refFrom, refTo);
+                var refCpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, 0, refFrom, refTo));
+                var refWaitTask = Task.Run(() => _dataService.GetTotalWaitTrendAsync(_serverId, 0, refFrom, refTo));
+                var refBlockingTask = Task.Run(() => _dataService.GetBlockingTrendAsync(_serverId, 0, refFrom, refTo));
+                var refMemoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, 0, refFrom, refTo));
+                var refIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, 0, refFrom, refTo));
 
                 try { await Task.WhenAll(refCpuTask, refWaitTask, refBlockingTask, refMemoryTask, refIoTask); }
                 catch (Exception ex) { AppLogger.Info("CorrelatedLanes", $"Comparison fetch failed: {ex.Message}"); }
@@ -176,7 +234,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
                 if (refCpuTask.IsCompletedSuccessfully && refCpuTask.Result != null)
                     AddGhostLine(CpuChart, refCpuTask.Result
-                        .Select(d => (d.SampleTime.Add(timeShift).ToOADate(), (double)d.SqlServerCpu)).ToList(), "#4FC3F7");
+                        .Select(d => (d.SampleTime.Add(timeShift).ToOADate(), (double)d.TotalCpu)).ToList(), "#FF7043");
 
                 if (refWaitTask.IsCompletedSuccessfully && refWaitTask.Result != null)
                     AddGhostLine(WaitStatsChart, refWaitTask.Result
@@ -258,14 +316,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 Position = d.Time,
                 Value = d.Value,
                 Size = barWidth,
-                FillColor = ScottPlot.Color.FromHex("#E57373"),
+                FillColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking")),
                 LineWidth = 0
             }).ToArray();
             BlockingChart.Plot.Add.Bars(bars);
             maxCount = Math.Max(maxCount, blockingData.Max(d => d.Value));
         }
 
-        // Deadlock bars — yellow/amber, slightly narrower so both are visible
+        // Deadlock bars — slightly narrower so both are visible over the blocking bars
         if (deadlockData.Count > 0)
         {
             var bars = deadlockData.Select(d => new ScottPlot.Bar
@@ -273,7 +331,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 Position = d.Time,
                 Value = d.Value,
                 Size = barWidth * 0.6,
-                FillColor = ScottPlot.Color.FromHex("#FFD54F"),
+                FillColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks")),
                 LineWidth = 0
             }).ToArray();
             BlockingChart.Plot.Add.Bars(bars);
@@ -289,11 +347,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             _crosshairManager?.SetLaneBaseline(BlockingChart, lower, upper, isEventBased: true);
 
             var band = BlockingChart.Plot.Add.HorizontalSpan(lower, upper);
-            band.FillStyle.Color = ScottPlot.Color.FromHex("#E57373").WithAlpha(25);
+            band.FillStyle.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(25);
             band.LineStyle.Width = 0;
 
             var meanLine = BlockingChart.Plot.Add.HorizontalLine(baseline.Mean);
-            meanLine.Color = ScottPlot.Color.FromHex("#E57373").WithAlpha(60);
+            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(60);
             meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
             meanLine.LineWidth = 1;
         }
@@ -309,6 +367,106 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         BlockingChart.Plot.Axes.SetLimitsY(0, Math.Max(maxCount * 1.3, 2));
 
         BlockingChart.Refresh();
+    }
+
+    /* Two-series CPU lane: SQL CPU (blue) + Total non-idle CPU (orange).
+       Total is what the alert evaluates by default (see CpuAlertMode), so
+       plotting it directly avoids the "alert says 95% but chart shows 60%"
+       confusion (PM #1004). Baseline band + anomaly markers stay on SQL
+       because that's the metric the CPU baseline was computed from. */
+    private void UpdateCpuLane(
+        List<(double Time, double Value)> sqlData,
+        List<(double Time, double Value)> totalData,
+        BaselineBucket? baseline = null)
+    {
+        ClearChart(CpuChart);
+        ApplyTheme(CpuChart);
+
+        if (sqlData.Count == 0 && totalData.Count == 0)
+        {
+            ShowEmpty(CpuChart, "CPU %");
+            return;
+        }
+
+        var sqlTimes = sqlData.Select(d => d.Time).ToArray();
+        var sqlValues = sqlData.Select(d => d.Value).ToArray();
+        var totalTimes = totalData.Select(d => d.Time).ToArray();
+        var totalValues = totalData.Select(d => d.Value).ToArray();
+
+        // Register SQL as the first (lane-default-named) series, Total as a named second series
+        _crosshairManager?.SetLaneData(CpuChart, sqlTimes, sqlValues);
+        _crosshairManager?.AddLaneSeries(CpuChart, "Total", "%", totalTimes, totalValues);
+
+        // Baseline band — applies to SQL CPU (what the baseline was computed on)
+        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        {
+            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
+            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+
+            _crosshairManager?.SetLaneBaseline(CpuChart, lower, upper, 10);
+
+            var band = CpuChart.Plot.Add.HorizontalSpan(lower, upper);
+            band.FillStyle.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineCpu")).WithAlpha(25);
+            band.LineStyle.Width = 0;
+
+            var meanLine = CpuChart.Plot.Add.HorizontalLine(baseline.Mean);
+            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineCpu")).WithAlpha(60);
+            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
+            meanLine.LineWidth = 1;
+
+            // Anomaly markers on SQL series only
+            var anomalyIndices = new List<int>();
+            for (int i = 0; i < sqlValues.Length; i++)
+            {
+                if ((sqlValues[i] > upper && sqlValues[i] >= 10) || sqlValues[i] < lower)
+                    anomalyIndices.Add(i);
+            }
+
+            if (anomalyIndices.Count > 0)
+            {
+                var anomalyTimes = anomalyIndices.Select(i => sqlTimes[i]).ToArray();
+                var anomalyVals = anomalyIndices.Select(i => sqlValues[i]).ToArray();
+                var anomalyScatter = CpuChart.Plot.Add.Scatter(anomalyTimes, anomalyVals);
+                anomalyScatter.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
+                anomalyScatter.MarkerSize = 6;
+                anomalyScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
+                anomalyScatter.LineWidth = 0;
+            }
+        }
+
+        if (totalValues.Length > 0)
+        {
+            var totalScatter = CpuChart.Plot.Add.Scatter(totalTimes, totalValues);
+            totalScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TotalCpu"));
+            totalScatter.MarkerSize = 0;
+            totalScatter.LineWidth = 1.5f;
+            totalScatter.LegendText = "Total";
+            totalScatter.ConnectStyle = ScottPlot.ConnectStyle.Straight;
+        }
+
+        if (sqlValues.Length > 0)
+        {
+            var sqlScatter = CpuChart.Plot.Add.Scatter(sqlTimes, sqlValues);
+            sqlScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlCpu"));
+            sqlScatter.MarkerSize = 0;
+            sqlScatter.LineWidth = 1.5f;
+            sqlScatter.LegendText = "SQL";
+            sqlScatter.ConnectStyle = ScottPlot.ConnectStyle.Straight;
+        }
+
+        CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        if (CpuChart != FileIoChart)
+            CpuChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+
+        ReapplyAxisColors(CpuChart);
+
+        CpuChart.Plot.Title("");
+        CpuChart.Plot.YLabel("");
+        CpuChart.Plot.Legend.IsVisible = false;
+        CpuChart.Plot.Axes.Margins(bottom: 0);
+        CpuChart.Plot.Axes.SetLimitsY(0, 105);
+
+        CpuChart.Refresh();
     }
 
     private void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
@@ -358,7 +516,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var anomalyTimes = anomalyIndices.Select(i => times[i]).ToArray();
                 var anomalyValues = anomalyIndices.Select(i => values[i]).ToArray();
                 var anomalyScatter = chart.Plot.Add.Scatter(anomalyTimes, anomalyValues);
-                anomalyScatter.Color = ScottPlot.Color.FromHex("#FF5252");
+                anomalyScatter.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
                 anomalyScatter.MarkerSize = 6;
                 anomalyScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
                 anomalyScatter.LineWidth = 0;
@@ -441,7 +599,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         var scatter = chart.Plot.Add.Scatter(times, values);
         // White-ish ghost line — distinct from the primary colored line
-        scatter.Color = ScottPlot.Colors.White.WithAlpha(140);
+        scatter.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("GhostLine")).WithAlpha(140);
         scatter.MarkerSize = 0;
         scatter.LineWidth = 1.5f;
         scatter.LinePattern = ScottPlot.LinePattern.Dashed;
@@ -470,7 +628,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     {
         ReapplyAxisColors(chart);
         var text = chart.Plot.Add.Text($"{title}\nNo Data", 0, 0);
-        text.LabelFontColor = ScottPlot.Color.FromHex("#888888");
+        text.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
         text.LabelFontSize = 12;
         text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
         chart.Plot.HideGrid();
@@ -497,55 +655,30 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
     private static void ApplyTheme(ScottPlot.WPF.WpfPlot chart)
     {
-        ScottPlot.Color figureBackground, dataBackground, textColor, gridColor;
-
-        if (ThemeManager.CurrentTheme == "CoolBreeze")
-        {
-            figureBackground = ScottPlot.Color.FromHex("#EEF4FA");
-            dataBackground   = ScottPlot.Color.FromHex("#DAE6F0");
-            textColor        = ScottPlot.Color.FromHex("#1A2A3A");
-            gridColor        = ScottPlot.Color.FromHex("#A8BDD0").WithAlpha(120);
-        }
-        else if (ThemeManager.HasLightBackground)
-        {
-            figureBackground = ScottPlot.Color.FromHex("#FFFFFF");
-            dataBackground   = ScottPlot.Color.FromHex("#F5F7FA");
-            textColor        = ScottPlot.Color.FromHex("#1A1D23");
-            gridColor        = ScottPlot.Colors.Black.WithAlpha(20);
-        }
-        else
-        {
-            figureBackground = ScottPlot.Color.FromHex("#22252b");
-            dataBackground   = ScottPlot.Color.FromHex("#111217");
-            textColor        = ScottPlot.Color.FromHex("#E4E6EB");
-            gridColor        = ScottPlot.Colors.White.WithAlpha(40);
-        }
-
-        chart.Plot.FigureBackground.Color = figureBackground;
-        chart.Plot.DataBackground.Color = dataBackground;
-        chart.Plot.Axes.Color(textColor);
-        chart.Plot.Grid.MajorLineColor = gridColor;
+        // Lanes are a deliberately stripped chrome variant (legend hidden, no font-size / first-render
+        // hook). Colors come from the shared ChartStyle so the per-theme hexes can't drift.
+        var c = ChartStyle.GetThemeColors();
+        chart.Plot.FigureBackground.Color = c.FigureBackground;
+        chart.Plot.DataBackground.Color = c.DataBackground;
+        chart.Plot.Axes.Color(c.Text);
+        chart.Plot.Grid.MajorLineColor = c.Grid;
         chart.Plot.Legend.IsVisible = false;
         chart.Plot.Axes.Margins(bottom: 0);
-        chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
-        chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
-        chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
-        chart.Plot.Axes.Left.Label.ForeColor = textColor;
+        chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = c.Text;
+        chart.Plot.Axes.Left.TickLabelStyle.ForeColor = c.Text;
+        chart.Plot.Axes.Bottom.Label.ForeColor = c.Text;
+        chart.Plot.Axes.Left.Label.ForeColor = c.Text;
 
         chart.Background = new System.Windows.Media.SolidColorBrush(
-            System.Windows.Media.Color.FromRgb(figureBackground.R, figureBackground.G, figureBackground.B));
+            System.Windows.Media.Color.FromRgb(c.FigureBackground.R, c.FigureBackground.G, c.FigureBackground.B));
     }
 
     private static void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
-        var textColor = ThemeManager.CurrentTheme == "CoolBreeze"
-            ? ScottPlot.Color.FromHex("#1A2A3A")
-            : ThemeManager.HasLightBackground
-                ? ScottPlot.Color.FromHex("#1A1D23")
-                : ScottPlot.Color.FromHex("#E4E6EB");
-        chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = textColor;
-        chart.Plot.Axes.Left.TickLabelStyle.ForeColor = textColor;
-        chart.Plot.Axes.Bottom.Label.ForeColor = textColor;
-        chart.Plot.Axes.Left.Label.ForeColor = textColor;
+        var text = ChartStyle.GetThemeColors().Text;
+        chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = text;
+        chart.Plot.Axes.Left.TickLabelStyle.ForeColor = text;
+        chart.Plot.Axes.Bottom.Label.ForeColor = text;
+        chart.Plot.Axes.Left.Label.ForeColor = text;
     }
 }

@@ -21,6 +21,8 @@ using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
 using ScottPlot.WPF;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -69,6 +71,16 @@ namespace PerformanceMonitorDashboard.Controls
         private DateTime? _activeQueriesFromDate;
         private DateTime? _activeQueriesToDate;
         private bool _isDrillDownActive;
+        // Guards the Active Queries auto-refresh: SelectActiveQueriesForDrillDown() sets this before
+        // a drill-down flips the sub-tab to Active Queries, so the SelectionChanged handler skips its
+        // refresh and doesn't clobber the filtered snapshot the drill-down loads next (async race).
+        private bool _suppressActiveQueriesAutoRefresh;
+
+        // Sub-tabs whose heavy summary grid has been lazily loaded in the current refresh cycle.
+        // Query Stats (3) / Proc Stats (4) / Query Store (5) are deferred out of the full refresh —
+        // their per-row plan/text DECOMPRESS dominated the Queries-tab open cost — and load only when
+        // their sub-tab is viewed. Cleared on each full refresh so manual refresh re-fetches.
+        private readonly HashSet<int> _lazyLoadedGridTabs = new();
 
         // Query Stats state
         private int _queryStatsHoursBack = 24;
@@ -104,10 +116,10 @@ namespace PerformanceMonitorDashboard.Controls
         private Dictionary<ScottPlot.WPF.WpfPlot, ScottPlot.IPanel?> _legendPanels = new();
 
         // Chart hover tooltips
-        private Helpers.ChartHoverHelper? _queryDurationHover;
-        private Helpers.ChartHoverHelper? _procDurationHover;
-        private Helpers.ChartHoverHelper? _qsDurationHover;
-        private Helpers.ChartHoverHelper? _execTrendsHover;
+        private ChartHoverHelper? _queryDurationHover;
+        private ChartHoverHelper? _procDurationHover;
+        private ChartHoverHelper? _qsDurationHover;
+        private ChartHoverHelper? _execTrendsHover;
 
         // Query heatmap
         private HeatmapResult? _lastHeatmapResult;
@@ -123,22 +135,34 @@ namespace PerformanceMonitorDashboard.Controls
         {
             InitializeComponent();
             SetupChartSaveMenus();
+            SetupBarCellMaxes();
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
-            SubTabControl.SelectionChanged += (s, e) =>
+            SubTabControl.SelectionChanged += async (s, e) =>
             {
-                if (e.Source == SubTabControl)
+                if (e.Source != SubTabControl) return;
+
+                _isDrillDownActive = false;
+                SubTabChanged?.Invoke();
+
+                // Lazily load the deferred sub-tab (heavy grids, regressions, patterns, heatmap) on first view.
+                await EnsureDeferredSubTabLoadedAsync(SubTabControl.SelectedIndex);
+
+                // Re-run Active Queries whenever it becomes the active sub-tab so the live snapshot
+                // grid is fresh on view. Drill-downs route through SelectActiveQueriesForDrillDown(),
+                // which sets _suppressActiveQueriesAutoRefresh first so this doesn't clobber the
+                // filtered snapshot they load via an async race.
+                if (SubTabControl.SelectedIndex == 1 && !_suppressActiveQueriesAutoRefresh)
                 {
-                    _isDrillDownActive = false;
-                    SubTabChanged?.Invoke();
+                    await RefreshActiveQueriesAsync();
                 }
             };
-            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            ThemeManager.ThemeChanged += OnThemeChanged;
 
-            _queryDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsQueryChart, "ms/sec");
-            _procDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsProcChart, "ms/sec");
-            _qsDurationHover = new Helpers.ChartHoverHelper(QueryPerfTrendsQsChart, "ms/sec");
-            _execTrendsHover = new Helpers.ChartHoverHelper(QueryPerfTrendsExecChart, "/sec");
+            _queryDurationHover = new ChartHoverHelper(QueryPerfTrendsQueryChart, "ms/sec");
+            _procDurationHover = new ChartHoverHelper(QueryPerfTrendsProcChart, "ms/sec");
+            _qsDurationHover = new ChartHoverHelper(QueryPerfTrendsQsChart, "ms/sec");
+            _execTrendsHover = new ChartHoverHelper(QueryPerfTrendsExecChart, "/sec");
 
             // Heatmap popup tooltip
             _heatmapPopupText = new System.Windows.Controls.TextBlock
@@ -205,7 +229,7 @@ namespace PerformanceMonitorDashboard.Controls
                     // Query also uses server time (same as collection_time in SQL Server)
                     var queryFrom = serverFrom;
                     var queryTo = serverTo;
-                    SubTabControl.SelectedIndex = 1; // Active Queries
+                    SelectActiveQueriesForDrillDown();
                     await RefreshActiveQueriesWithRangeAsync(queryFrom, queryTo);
                 }
             };
@@ -253,7 +277,7 @@ namespace PerformanceMonitorDashboard.Controls
             _procDurationHover?.Dispose();
             _qsDurationHover?.Dispose();
             _execTrendsHover?.Dispose();
-            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+            ThemeManager.ThemeChanged -= OnThemeChanged;
         }
 
         private void OnThemeChanged(string _)
@@ -570,9 +594,21 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         /// <summary>
-        /// Sets the time range for all sub-tabs.
+        /// Switches to the Active Queries sub-tab for a drill-down, suppressing the SelectionChanged
+        /// auto-refresh so it doesn't clobber the filtered snapshot the caller loads next (async race).
         /// </summary>
-        public void SelectSubTab(int index) => SubTabControl.SelectedIndex = index;
+        public void SelectActiveQueriesForDrillDown()
+        {
+            _suppressActiveQueriesAutoRefresh = true;
+            try
+            {
+                SubTabControl.SelectedIndex = 1; // Active Queries
+            }
+            finally
+            {
+                _suppressActiveQueriesAutoRefresh = false;
+            }
+        }
 
         public void SetTimeRange(int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
         {
@@ -617,7 +653,7 @@ namespace PerformanceMonitorDashboard.Controls
         {
             try
             {
-                using var _ = Helpers.MethodProfiler.StartTiming("QueryPerformance");
+                using var profiler = Helpers.MethodProfiler.StartTiming("QueryPerformance");
 
                 if (_databaseService == null) return;
 
@@ -639,70 +675,26 @@ namespace PerformanceMonitorDashboard.Controls
                     return;
                 }
 
-                // Full refresh — all sub-tabs in parallel
-
-                // Only show loading overlay on initial load (no existing data)
-                if (QueryStatsDataGrid.ItemsSource == null)
-                {
-                    QueryStatsLoading.IsLoading = true;
-                    QueryStatsNoDataMessage.Visibility = Visibility.Collapsed;
-                }
-
-                // Fetch grid data (summary views aggregated per query/procedure)
-                var queryStatsTask = _databaseService.GetQueryStatsAsync(_queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
-                var procStatsTask = _databaseService.GetProcedureStatsAsync(_procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
-                var queryStoreTask = _databaseService.GetQueryStoreDataAsync(_queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
+                // Full refresh. Only the Performance Trends charts and the Active Queries snapshot load
+                // eagerly. The heavy summary grids (Query Stats / Proc Stats / Query Store), the
+                // Regressions and Long-Running Patterns grids, and the Heatmap are all separate sub-tabs
+                // whose queries dominate the tab-open cost, so they load lazily when first viewed
+                // (EnsureDeferredSubTabLoadedAsync). The currently-visible deferred sub-tab loads at the end.
+                _lazyLoadedGridTabs.Clear();
 
                 // Fetch chart data (time-series aggregated per collection_time)
-                var queryDurationTrendsTask = _databaseService.GetQueryDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
-                var procDurationTrendsTask = _databaseService.GetProcedureDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
-                var qsDurationTrendsTask = _databaseService.GetQueryStoreDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
-                var execTrendsTask = _databaseService.GetExecutionTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
+                var queryDurationTrendsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryDurationTrends", () => _databaseService.GetQueryDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate));
+                var procDurationTrendsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcDurationTrends", () => _databaseService.GetProcedureDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate));
+                var qsDurationTrendsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QsDurationTrends", () => _databaseService.GetQueryStoreDurationTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate));
+                var execTrendsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ExecutionTrends", () => _databaseService.GetExecutionTrendsAsync(_perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate));
 
-                // Fetch grid-only data in parallel
-                var activeTask = RefreshActiveQueriesAsync();
-                var regressionsTask = RefreshQueryStoreRegressionsAsync();
-                var patternsTask = RefreshLongRunningPatternsAsync();
+                // Active Queries is the live snapshot most users land on — keep it eager.
+                var activeTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ActiveQueries", () => RefreshActiveQueriesAsync());
 
-                // Wait for all fetches to complete
                 await Task.WhenAll(
-                    queryStatsTask, procStatsTask, queryStoreTask,
                     queryDurationTrendsTask, procDurationTrendsTask, qsDurationTrendsTask, execTrendsTask,
-                    activeTask, regressionsTask, patternsTask
+                    activeTask
                 );
-
-                // Populate grids from summary data
-                // If slicer is narrowed, re-query with slicer dates instead of global range
-                if (QueryStatsSlicer.HasNarrowedSelection)
-                {
-                    var slicerData = await _databaseService.GetQueryStatsAsync(0, QueryStatsSlicer.SelectionStart, QueryStatsSlicer.SelectionEnd, fromSlicer: true);
-                    PopulateQueryStatsGrid(slicerData);
-                }
-                else
-                {
-                    PopulateQueryStatsGrid(await queryStatsTask);
-                }
-                LoadQueryStatsSlicerAsync().ConfigureAwait(false);
-                if (ProcStatsSlicer.HasNarrowedSelection)
-                {
-                    var slicerProcData = await _databaseService.GetProcedureStatsAsync(0, ProcStatsSlicer.SelectionStart, ProcStatsSlicer.SelectionEnd, fromSlicer: true);
-                    PopulateProcStatsGrid(slicerProcData);
-                }
-                else
-                {
-                    PopulateProcStatsGrid(await procStatsTask);
-                }
-                LoadProcStatsSlicerAsync().ConfigureAwait(false);
-                if (QueryStoreSlicer.HasNarrowedSelection)
-                {
-                    var slicerQsData = await _databaseService.GetQueryStoreDataAsync(0, QueryStoreSlicer.SelectionStart, QueryStoreSlicer.SelectionEnd, fromSlicer: true);
-                    PopulateQueryStoreGrid(slicerQsData);
-                }
-                else
-                {
-                    PopulateQueryStoreGrid(await queryStoreTask);
-                }
-                LoadQueryStoreSlicerAsync().ConfigureAwait(false);
 
                 // Populate charts from time-series data
                 LoadDurationChart(QueryPerfTrendsQueryChart, await queryDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[0], _queryDurationHover);
@@ -710,12 +702,54 @@ namespace PerformanceMonitorDashboard.Controls
                 LoadDurationChart(QueryPerfTrendsQsChart, await qsDurationTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate, "Duration (ms/sec)", TabHelpers.ChartColors[4], _qsDurationHover);
                 LoadExecChart(await execTrendsTask, _perfTrendsHoursBack, _perfTrendsFromDate, _perfTrendsToDate);
 
-                // Heatmap
-                await RefreshQueryHeatmapAsync();
+                // Load whichever deferred sub-tab is currently in view (heavy grids, regressions,
+                // patterns, or heatmap); the rest load when the user first opens them.
+                await EnsureDeferredSubTabLoadedAsync(SubTabControl.SelectedIndex);
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error refreshing QueryPerformance data: {ex.Message}", ex);
+            }
+            finally
+            {
+                QueryStatsLoading.IsLoading = false;
+            }
+        }
+
+        /// <summary>
+        /// Loads one of the heavy summary grids (Query Stats / Proc Stats / Query Store) the first time
+        /// its sub-tab is viewed in the current refresh cycle. Deferred out of the full refresh because
+        /// their per-row plan/text DECOMPRESS dominated the Queries-tab open time.
+        /// </summary>
+        private async Task EnsureDeferredSubTabLoadedAsync(int subTabIndex)
+        {
+            // 3/4/5 = heavy summary grids; 6 = regressions, 7 = long-running patterns, 8 = heatmap.
+            if (subTabIndex is not (3 or 4 or 5 or 6 or 7 or 8)) return;
+            if (_databaseService == null) return;
+            if (!_lazyLoadedGridTabs.Add(subTabIndex)) return;   // already loaded this refresh cycle
+
+            try
+            {
+                if (subTabIndex == 3 && QueryStatsDataGrid.ItemsSource == null)
+                {
+                    QueryStatsLoading.IsLoading = true;
+                    QueryStatsNoDataMessage.Visibility = Visibility.Collapsed;
+                }
+
+                switch (subTabIndex)
+                {
+                    case 3: await Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => RefreshQueryStatsGridAsync()); break;
+                    case 4: await Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => RefreshProcStatsGridAsync()); break;
+                    case 5: await Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => RefreshQueryStoreGridAsync()); break;
+                    case 6: await Helpers.MethodProfiler.TimeAsync("QueryPerformance.Regressions", () => RefreshQueryStoreRegressionsAsync()); break;
+                    case 7: await Helpers.MethodProfiler.TimeAsync("QueryPerformance.Patterns", () => RefreshLongRunningPatternsAsync()); break;
+                    case 8: await Helpers.MethodProfiler.TimeAsync("QueryPerformance.Heatmap", () => RefreshQueryHeatmapAsync()); break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error loading Query Performance grid (sub-tab {subTabIndex}): {ex.Message}", ex);
+                _lazyLoadedGridTabs.Remove(subTabIndex);          // allow a retry next time the sub-tab is viewed
             }
             finally
             {
@@ -749,7 +783,7 @@ namespace PerformanceMonitorDashboard.Controls
             else
                 data = await _databaseService.GetQueryStatsAsync(_queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate);
             PopulateQueryStatsGrid(data);
-            LoadQueryStatsSlicerAsync().ConfigureAwait(false);
+            _ = LoadQueryStatsSlicerAsync(); // fire-and-forget: detached slicer refresh, self-handles errors
         }
 
         private async Task RefreshProcStatsGridAsync()
@@ -761,7 +795,7 @@ namespace PerformanceMonitorDashboard.Controls
             else
                 data = await _databaseService.GetProcedureStatsAsync(_procStatsHoursBack, _procStatsFromDate, _procStatsToDate);
             PopulateProcStatsGrid(data);
-            LoadProcStatsSlicerAsync().ConfigureAwait(false);
+            _ = LoadProcStatsSlicerAsync(); // fire-and-forget: detached slicer refresh, self-handles errors
         }
 
         private async Task RefreshQueryStoreGridAsync()
@@ -773,7 +807,7 @@ namespace PerformanceMonitorDashboard.Controls
             else
                 data = await _databaseService.GetQueryStoreDataAsync(_queryStoreHoursBack, _queryStoreFromDate, _queryStoreToDate);
             PopulateQueryStoreGrid(data);
-            LoadQueryStoreSlicerAsync().ConfigureAwait(false);
+            _ = LoadQueryStoreSlicerAsync(); // fire-and-forget: detached slicer refresh, self-handles errors
         }
 
         private void PopulateQueryStatsGrid(List<QueryStatsItem> data)
@@ -851,7 +885,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private async Task RefreshActiveQueriesAsync()
         {
-            using var _ = Helpers.MethodProfiler.StartTiming("QueryPerf-ActiveQueries");
+            using var profiler = Helpers.MethodProfiler.StartTiming("QueryPerf-ActiveQueries");
             if (_databaseService == null) return;
             if (_isDrillDownActive) return;
 
@@ -879,7 +913,7 @@ namespace PerformanceMonitorDashboard.Controls
                 SetItemsSourcePreservingSort(ActiveQueriesDataGrid, data);
                 ActiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                 SetStatus($"Loaded {data.Count} query snapshots");
-                LoadActiveQueriesSlicerAsync().ConfigureAwait(false);
+                _ = LoadActiveQueriesSlicerAsync(); // fire-and-forget: detached slicer refresh, self-handles errors
             }
             catch (Exception ex)
             {
@@ -967,7 +1001,8 @@ namespace PerformanceMonitorDashboard.Controls
                     "Query Store",
                     _queryStoreHoursBack,
                     _queryStoreFromDate,
-                    _queryStoreToDate
+                    _queryStoreToDate,
+                    item.QueryText
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();
@@ -999,7 +1034,8 @@ namespace PerformanceMonitorDashboard.Controls
                     "Query Store",
                     _queryStoreHoursBack,
                     _queryStoreFromDate,
-                    _queryStoreToDate
+                    _queryStoreToDate,
+                    item.QueryTextSample
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();
@@ -1066,7 +1102,8 @@ namespace PerformanceMonitorDashboard.Controls
                     item.QueryHash,
                     _queryStatsHoursBack,
                     _queryStatsFromDate,
-                    _queryStatsToDate
+                    _queryStatsToDate,
+                    item.QueryText
                 );
                 historyWindow.Owner = Window.GetWindow(this);
                 historyWindow.ShowDialog();
@@ -1156,7 +1193,7 @@ namespace PerformanceMonitorDashboard.Controls
         /// Renders a duration trend chart from time-series data (per-collection_time aggregation).
         /// Replaces the old per-query-summary approach that produced too few data points.
         /// </summary>
-        private void LoadDurationChart(WpfPlot chart, IEnumerable<DurationTrendItem> trendData, int hoursBack, DateTime? fromDate, DateTime? toDate, string legendText, ScottPlot.Color color, Helpers.ChartHoverHelper? hover = null)
+        private void LoadDurationChart(WpfPlot chart, IEnumerable<DurationTrendItem> trendData, int hoursBack, DateTime? fromDate, DateTime? toDate, string legendText, ScottPlot.Color color, ChartHoverHelper? hover = null)
         {
             try
             {
@@ -1183,9 +1220,8 @@ namespace PerformanceMonitorDashboard.Controls
                     dataList.Select(d => d.AvgDurationMs));
 
                 var scatter = chart.Plot.Add.Scatter(xs, ys);
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 5;
                 scatter.Color = color;
+                ChartStyle.StyleScatter(scatter);
                 scatter.LegendText = legendText;
                 hover?.Add(scatter, legendText);
 
@@ -1194,7 +1230,7 @@ namespace PerformanceMonitorDashboard.Controls
                     double xCenter = xMin + (xMax - xMin) / 2;
                     var noDataText = chart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                     noDataText.LabelFontSize = 14;
-                    noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                    noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                     noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
                 }
 
@@ -1238,9 +1274,8 @@ namespace PerformanceMonitorDashboard.Controls
                 dataList.Select(d => (double)d.ExecutionsPerSecond));
 
             var scatter = QueryPerfTrendsExecChart.Plot.Add.Scatter(xs, ys);
-            scatter.LineWidth = 2;
-            scatter.MarkerSize = 5;
-            scatter.Color = TabHelpers.ChartColors[0];
+            scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MetricTrend"));
+            ChartStyle.StyleScatter(scatter);
             scatter.LegendText = "Executions/sec";
             _execTrendsHover?.Add(scatter, "Executions/sec");
 
@@ -1249,7 +1284,7 @@ namespace PerformanceMonitorDashboard.Controls
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = QueryPerfTrendsExecChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -1261,6 +1296,17 @@ namespace PerformanceMonitorDashboard.Controls
             QueryPerfTrendsExecChart.Plot.YLabel("Executions/sec");
             TabHelpers.LockChartVerticalAxis(QueryPerfTrendsExecChart);
             QueryPerfTrendsExecChart.Refresh();
+        }
+
+        /// <summary>
+        /// Selects the Active Queries sub-tab and scopes it to [<paramref name="from"/>,
+        /// <paramref name="to"/>] (server-local time). Public entry point for a deep-link from the
+        /// Recommendations surface (WS1b-1); reuses the same range-refresh the chart drill-down uses.
+        /// </summary>
+        public async Task ShowActiveQueriesForRange(DateTime from, DateTime to)
+        {
+            SelectActiveQueriesForDrillDown();
+            await RefreshActiveQueriesWithRangeAsync(from, to);
         }
 
         private async Task RefreshActiveQueriesWithRangeAsync(DateTime from, DateTime to)
@@ -1276,7 +1322,7 @@ namespace PerformanceMonitorDashboard.Controls
             var snapshots = await _databaseService.GetQuerySnapshotsAsync(0, from, to);
             SetItemsSourcePreservingSort(ActiveQueriesDataGrid, snapshots);
             ActiveQueriesNoDataMessage.Visibility = snapshots.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            LoadActiveQueriesSlicerAsync().ConfigureAwait(false);
+            _ = LoadActiveQueriesSlicerAsync(); // fire-and-forget: detached slicer refresh, self-handles errors
         }
     }
 }

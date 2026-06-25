@@ -297,7 +297,7 @@ BEGIN
                 IF @debug = 1
                 BEGIN
                     DECLARE @events_from_file bigint = ROWCOUNT_BIG();
-                    RAISERROR(N'Retrieved %d events from this trace file', 0, 1, @events_from_file) WITH NOWAIT;
+                    RAISERROR(N'Retrieved %I64d events from this trace file', 0, 1, @events_from_file) WITH NOWAIT;
                 END;
 
             END TRY
@@ -319,7 +319,7 @@ BEGIN
 
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Found %d traces, collected %d total events', 0, 1, @trace_count, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'Found %d traces, collected %I64d total events', 0, 1, @trace_count, @rows_collected) WITH NOWAIT;
         END;
 
         IF @trace_count = 0
@@ -413,7 +413,7 @@ BEGIN
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'Inserted %d new trace analysis records', 0, 1, @rows_collected) WITH NOWAIT;
+                RAISERROR(N'Inserted %I64d new trace analysis records', 0, 1, @rows_collected) WITH NOWAIT;
             END;
         END;
         ELSE

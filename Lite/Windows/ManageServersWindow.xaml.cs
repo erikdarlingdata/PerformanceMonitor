@@ -17,16 +17,18 @@ namespace PerformanceMonitorLite.Windows;
 public partial class ManageServersWindow : Window
 {
     private readonly ServerManager _serverManager;
+    private readonly ProfileManager _profileManager;
 
     /// <summary>
     /// Set to true if servers were modified so the caller knows to refresh.
     /// </summary>
     public bool ServersChanged { get; private set; }
 
-    public ManageServersWindow(ServerManager serverManager)
+    public ManageServersWindow(ServerManager serverManager, ProfileManager profileManager)
     {
         InitializeComponent();
         _serverManager = serverManager;
+        _profileManager = profileManager;
         RefreshGrid();
     }
 
@@ -58,7 +60,7 @@ public partial class ManageServersWindow : Window
 
     private void AddButton_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new AddServerDialog(_serverManager) { Owner = this };
+        var dialog = new AddServerDialog(_serverManager, _profileManager) { Owner = this };
         if (dialog.ShowDialog() == true)
         {
             ServersChanged = true;
@@ -83,10 +85,21 @@ public partial class ManageServersWindow : Window
             return;
         }
 
-        var dialog = new AddServerDialog(_serverManager, selected) { Owner = this };
+        var dialog = new AddServerDialog(_serverManager, _profileManager, selected) { Owner = this };
         if (dialog.ShowDialog() == true)
         {
             ServersChanged = true;
+            RefreshGrid();
+        }
+    }
+
+    private void CredentialProfiles_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new ManageCredentialProfilesDialog(_profileManager) { Owner = this };
+        dialog.ShowDialog();
+        if (dialog.ProfilesChanged)
+        {
+            // Server rows may display which profile they use; refresh to reflect reassignments.
             RefreshGrid();
         }
     }

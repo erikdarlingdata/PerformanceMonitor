@@ -16,6 +16,7 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -137,7 +138,13 @@ namespace PerformanceMonitorDashboard.Controls
 
             switch (item)
             {
-                case QuerySnapshotItem snap when !string.IsNullOrEmpty(snap.QueryPlan):
+                case QuerySnapshotItem snap:
+                    // Active-query plans are fetched on demand (not loaded with the grid), so pull it
+                    // here the same way the Download button does — otherwise View Plan silently no-ops.
+                    if (string.IsNullOrEmpty(snap.QueryPlan) && _databaseService != null)
+                    {
+                        snap.QueryPlan = await _databaseService.GetQuerySnapshotPlanAsync(snap.CollectionTime, snap.SessionId);
+                    }
                     planXml = snap.QueryPlan;
                     queryText = snap.QueryText;
                     label = $"Est Plan - SPID {snap.SessionId}";
@@ -152,7 +159,11 @@ namespace PerformanceMonitorDashboard.Controls
                     queryText = live.QueryText;
                     label = $"Est Plan - SPID {live.SessionId}";
                     break;
-                case QueryStatsItem stats when !string.IsNullOrEmpty(stats.QueryPlanXml):
+                case QueryStatsItem stats:
+                    if (string.IsNullOrEmpty(stats.QueryPlanXml) && _databaseService != null && !string.IsNullOrEmpty(stats.QueryHash))
+                    {
+                        stats.QueryPlanXml = await _databaseService.GetQueryStatsPlanXmlAsync(stats.DatabaseName, stats.QueryHash);
+                    }
                     planXml = stats.QueryPlanXml;
                     queryText = stats.QueryText;
                     label = $"Est Plan - {stats.QueryHash}";
@@ -179,6 +190,18 @@ namespace PerformanceMonitorDashboard.Controls
                     planXml = reg.QueryPlanXml;
                     queryText = reg.QueryTextSample;
                     label = $"Est Plan - QS {reg.QueryId}";
+                    break;
+                case QueryStatsComparisonItem comp:
+                    queryText = comp.QueryText;
+                    label = $"Est Plan - {comp.QueryHash}";
+                    if (_databaseService != null && !string.IsNullOrEmpty(comp.QueryHash))
+                        planXml = await _databaseService.GetQueryStatsPlanXmlAsync(comp.DatabaseName, comp.QueryHash);
+                    break;
+                case ProcedureStatsComparisonItem procComp:
+                    queryText = procComp.FullName;
+                    label = $"Est Plan - {procComp.FullName}";
+                    if (_databaseService != null && !string.IsNullOrEmpty(procComp.ObjectName))
+                        planXml = await _databaseService.GetProcedureStatsPlanXmlByNameAsync(procComp.DatabaseName, procComp.SchemaName, procComp.ObjectName);
                     break;
             }
 
@@ -236,6 +259,10 @@ namespace PerformanceMonitorDashboard.Controls
                 case QueryStatsItem stats:
                     queryText = stats.QueryText;
                     databaseName = stats.DatabaseName;
+                    if (string.IsNullOrEmpty(stats.QueryPlanXml) && _databaseService != null && !string.IsNullOrEmpty(stats.QueryHash))
+                    {
+                        stats.QueryPlanXml = await _databaseService.GetQueryStatsPlanXmlAsync(stats.DatabaseName, stats.QueryHash);
+                    }
                     planXml = stats.QueryPlanXml;
                     label = $"Actual Plan - {stats.QueryHash}";
                     break;
@@ -259,6 +286,11 @@ namespace PerformanceMonitorDashboard.Controls
                     queryText = lrq.SampleQueryText;
                     databaseName = lrq.DatabaseName;
                     label = $"Actual Plan - Pattern";
+                    break;
+                case QueryStatsComparisonItem comp:
+                    queryText = comp.QueryText;
+                    databaseName = comp.DatabaseName;
+                    label = $"Actual Plan - {comp.QueryHash}";
                     break;
             }
 

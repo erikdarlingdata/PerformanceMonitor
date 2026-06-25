@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorDashboard.Helpers;
 
 namespace PerformanceMonitorDashboard.Analysis;
@@ -12,7 +13,7 @@ namespace PerformanceMonitorDashboard.Analysis;
 ///
 /// Two detection patterns:
 /// - Z-score: (observed - mean) / stddev — used for continuous metrics
-///   (CPU, batch requests, I/O latency, session counts, query duration)
+///   (CPU, batch requests, I/O latency, session counts, query duration, memory)
 /// - Ratio: currentRate / baselineRate — used for rate/event metrics
 ///   (wait stats, blocking, deadlocks)
 ///
@@ -20,7 +21,6 @@ namespace PerformanceMonitorDashboard.Analysis;
 ///
 /// Port of Lite's AnomalyDetector — uses SQL Server collect.* tables instead of DuckDB views.
 /// No server_id filtering — Dashboard monitors one server per database.
-/// No memory metric — Dashboard doesn't collect memory stats.
 /// </summary>
 public class SqlServerAnomalyDetector
 {
@@ -100,8 +100,249 @@ public class SqlServerAnomalyDetector
         await DetectBatchRequestAnomalies(context, anomalies);
         await DetectSessionAnomalies(context, anomalies);
         await DetectQueryDurationAnomalies(context, anomalies);
+        await DetectMemoryAnomalies(context, anomalies);
+        await DetectObjectStatsAnomalies(context, anomalies);
 
         return anomalies;
+    }
+
+    /// <summary>
+    /// Day-over-day object/index detection (delta-based, not stddev-baseline) since the
+    /// index_object_stats collector runs daily and its counters are cumulative. Emits
+    /// ANOMALY_OBJECT_GROWTH for the biggest table grower over threshold and
+    /// ANOMALY_OBJECT_CONTENTION for the index with the largest new lock-wait time.
+    /// </summary>
+    private const decimal ObjectGrowthMbThreshold = 100m;
+    private const double ObjectGrowthPctThreshold = 20.0;
+    private const long ObjectLockWaitMsDeltaThreshold = 60000;
+
+    private async Task DetectObjectStatsAnomalies(AnalysisContext context, List<Fact> anomalies)
+    {
+        try
+        {
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+WITH
+    snaps AS
+    (
+        SELECT TOP (2)
+            collection_time
+        FROM
+        (
+            SELECT DISTINCT
+                collection_time
+            FROM collect.index_object_stats
+        ) AS d
+        ORDER BY
+            collection_time DESC
+    ),
+    boundaries AS
+    (
+        SELECT
+            latest_time = MAX(collection_time),
+            prior_time = MIN(collection_time)
+        FROM snaps
+    ),
+    cur AS
+    (
+        SELECT
+            database_name,
+            object_id,
+            schema_name = MAX(schema_name),
+            table_name = MAX(table_name),
+            mb = SUM(reserved_mb)
+        FROM collect.index_object_stats
+        WHERE collection_time =
+        (
+            SELECT b.latest_time
+            FROM boundaries AS b
+        )
+        GROUP BY
+            database_name,
+            object_id
+    ),
+    prv AS
+    (
+        SELECT
+            database_name,
+            object_id,
+            mb = SUM(reserved_mb)
+        FROM collect.index_object_stats
+        WHERE collection_time =
+        (
+            SELECT b.prior_time
+            FROM boundaries AS b
+        )
+        GROUP BY
+            database_name,
+            object_id
+    )
+SELECT TOP (1)
+    cur.database_name,
+    cur.schema_name,
+    cur.table_name,
+    prior_mb = prv.mb,
+    current_mb = cur.mb,
+    growth_mb = cur.mb - prv.mb,
+    growth_pct =
+        CASE
+            WHEN prv.mb > 0
+            THEN (cur.mb - prv.mb) * 100.0 / prv.mb
+            ELSE 0
+        END
+FROM cur
+JOIN prv
+  ON  prv.database_name = cur.database_name
+  AND prv.object_id = cur.object_id
+CROSS JOIN boundaries AS b
+WHERE b.latest_time <> b.prior_time
+AND   cur.mb - prv.mb >= @growthMb
+AND   CASE WHEN prv.mb > 0 THEN (cur.mb - prv.mb) * 100.0 / prv.mb ELSE 0 END >= @growthPct
+ORDER BY
+    cur.mb - prv.mb DESC
+OPTION(MAXDOP 1, RECOMPILE);";
+                cmd.Parameters.Add(new SqlParameter("@growthMb", ObjectGrowthMbThreshold));
+                cmd.Parameters.Add(new SqlParameter("@growthPct", ObjectGrowthPctThreshold));
+
+                using var reader = await cmd.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    var db = reader.GetString(0);
+                    var growthMb = Convert.ToDouble(reader.GetValue(5));
+                    var growthPct = Convert.ToDouble(reader.GetValue(6));
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_OBJECT_GROWTH",
+                        Value = growthMb,
+                        ServerId = context.ServerId,
+                        DatabaseName = db,
+                        Metadata = new Dictionary<string, double>
+                        {
+                            ["prior_mb"] = Convert.ToDouble(reader.GetValue(3)),
+                            ["current_mb"] = Convert.ToDouble(reader.GetValue(4)),
+                            ["growth_mb"] = growthMb,
+                            ["growth_pct"] = growthPct,
+                            ["growth_ratio"] = growthPct / ObjectGrowthPctThreshold
+                        }
+                    });
+                }
+            }
+
+            // Contention: index with the largest new row-lock wait time (no reset).
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+WITH
+    snaps AS
+    (
+        SELECT TOP (2)
+            collection_time
+        FROM
+        (
+            SELECT DISTINCT
+                collection_time
+            FROM collect.index_object_stats
+        ) AS d
+        ORDER BY
+            collection_time DESC
+    ),
+    boundaries AS
+    (
+        SELECT
+            latest_time = MAX(collection_time),
+            prior_time = MIN(collection_time)
+        FROM snaps
+    ),
+    cur AS
+    (
+        SELECT
+            database_name,
+            object_id,
+            index_id,
+            schema_name,
+            table_name,
+            index_name,
+            ms = ISNULL(row_lock_wait_in_ms, 0),
+            esc = ISNULL(index_lock_promotion_count, 0)
+        FROM collect.index_object_stats
+        WHERE collection_time =
+        (
+            SELECT b.latest_time
+            FROM boundaries AS b
+        )
+    ),
+    prv AS
+    (
+        SELECT
+            database_name,
+            object_id,
+            index_id,
+            ms = ISNULL(row_lock_wait_in_ms, 0),
+            esc = ISNULL(index_lock_promotion_count, 0)
+        FROM collect.index_object_stats
+        WHERE collection_time =
+        (
+            SELECT b.prior_time
+            FROM boundaries AS b
+        )
+    )
+SELECT TOP (1)
+    cur.database_name,
+    cur.schema_name,
+    cur.table_name,
+    cur.index_name,
+    ms_delta = cur.ms - prv.ms,
+    esc_delta = cur.esc - prv.esc
+FROM cur
+JOIN prv
+  ON  prv.database_name = cur.database_name
+  AND prv.object_id = cur.object_id
+  AND prv.index_id = cur.index_id
+CROSS JOIN boundaries AS b
+WHERE b.latest_time <> b.prior_time
+AND   cur.ms >= prv.ms
+AND   cur.ms - prv.ms >= @msDelta
+ORDER BY
+    cur.ms - prv.ms DESC
+OPTION(MAXDOP 1, RECOMPILE);";
+                cmd.Parameters.Add(new SqlParameter("@msDelta", ObjectLockWaitMsDeltaThreshold));
+
+                using var reader = await cmd.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    var db = reader.GetString(0);
+                    var msDelta = Convert.ToDouble(reader.GetValue(4));
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_OBJECT_CONTENTION",
+                        Value = msDelta,
+                        ServerId = context.ServerId,
+                        DatabaseName = db,
+                        Metadata = new Dictionary<string, double>
+                        {
+                            ["lock_wait_ms_delta"] = msDelta,
+                            ["escalation_delta"] = Convert.ToDouble(reader.GetValue(5)),
+                            ["contention_ratio"] = msDelta / ObjectLockWaitMsDeltaThreshold
+                        }
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerAnomalyDetector] Object stats anomaly detection failed: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -331,17 +572,27 @@ SELECT
             var currentBlocking = Convert.ToInt64(reader.GetValue(0));
             var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
 
+            /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
+               day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
+               so normalize them to per-hour before the ratio — otherwise the ratio scales with the
+               window length, not the workload, and a steady event rate trips the spike threshold. */
+            var windowHours = (context.TimeRangeEnd - context.TimeRangeStart).TotalHours;
+            if (windowHours <= 0) windowHours = 1;
+            var currentBlockingPerHour = currentBlocking / windowHours;
+            var currentDeadlocksPerHour = currentDeadlocks / windowHours;
+
+            // Baseline mean = events per hour for this hour+dow bucket
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
             var baselineDeadlockRate = deadlockBaseline.SampleCount > 0 ? deadlockBaseline.Mean : 0;
 
-            // Blocking spike: at least 5 events AND 3x baseline rate (or no baseline)
-            if (currentBlocking >= 5 && (baselineBlockingRate <= 0 || currentBlocking / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
+            // Blocking spike: at least 5 events in the window AND per-hour rate >= 3x baseline (or no baseline)
+            if (currentBlocking >= 5 && (baselineBlockingRate <= 0 || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
                 var metadata = new Dictionary<string, double>
                 {
                     ["current_count"] = currentBlocking,
                     ["baseline_rate"] = baselineBlockingRate,
-                    ["ratio"] = baselineBlockingRate > 0 ? currentBlocking / baselineBlockingRate : 100.0
+                    ["ratio"] = baselineBlockingRate > 0 ? currentBlockingPerHour / baselineBlockingRate : 100.0
                 };
                 AddBaselineContext(metadata, blockingBaseline);
 
@@ -355,14 +606,14 @@ SELECT
                 });
             }
 
-            // Deadlock spike: at least 3 events AND 3x baseline rate (or no baseline)
-            if (currentDeadlocks >= 3 && (baselineDeadlockRate <= 0 || currentDeadlocks / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
+            // Deadlock spike: at least 3 events in the window AND per-hour rate >= 3x baseline (or no baseline)
+            if (currentDeadlocks >= 3 && (baselineDeadlockRate <= 0 || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
             {
                 var metadata = new Dictionary<string, double>
                 {
                     ["current_count"] = currentDeadlocks,
                     ["baseline_rate"] = baselineDeadlockRate,
-                    ["ratio"] = baselineDeadlockRate > 0 ? currentDeadlocks / baselineDeadlockRate : 100.0
+                    ["ratio"] = baselineDeadlockRate > 0 ? currentDeadlocksPerHour / baselineDeadlockRate : 100.0
                 };
                 AddBaselineContext(metadata, deadlockBaseline);
 
@@ -703,6 +954,79 @@ FROM per_collection;";
         catch (Exception ex)
         {
             Logger.Error($"[SqlServerAnomalyDetector] Query duration anomaly detection failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Detects memory utilization anomalies using z-score against time-bucketed baseline.
+    /// Measures total_memory_mb / committed_target_memory_mb as memory pressure %
+    /// (the SQL Server analog of Lite's total_server_memory_mb / target_server_memory_mb).
+    /// </summary>
+    private async Task DetectMemoryAnomalies(AnalysisContext context, List<Fact> anomalies)
+    {
+        try
+        {
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                SqlServerMetricNames.Memory, context.TimeRangeStart);
+
+            if (baseline.SampleCount == 0) return;
+            var effectiveStdDev = baseline.EffectiveStdDev;
+            if (effectiveStdDev <= 0) return;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT
+    AVG(CAST(total_memory_mb AS FLOAT) / NULLIF(committed_target_memory_mb, 0) * 100) AS avg_pressure,
+    MAX(CAST(total_memory_mb AS FLOAT) / NULLIF(committed_target_memory_mb, 0) * 100) AS peak_pressure,
+    COUNT(*) AS sample_count
+FROM collect.memory_stats
+WHERE collection_time >= @windowStart AND collection_time <= @windowEnd
+AND   committed_target_memory_mb > 0;";
+
+            cmd.Parameters.Add(new SqlParameter("@windowStart", context.TimeRangeStart));
+            cmd.Parameters.Add(new SqlParameter("@windowEnd", context.TimeRangeEnd));
+
+            using var reader = await cmd.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return;
+
+            var avgPressure = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
+            var peakPressure = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+
+            if (windowSamples == 0) return;
+
+            var deviation = (peakPressure - baseline.Mean) / effectiveStdDev;
+            if (deviation < GetDeviationThreshold(SqlServerMetricNames.Memory)) return;
+
+            var metadata = new Dictionary<string, double>
+            {
+                ["peak_memory_pressure_pct"] = peakPressure,
+                ["avg_memory_pressure_pct"] = avgPressure,
+                ["baseline_mean"] = baseline.Mean,
+                ["baseline_stddev"] = effectiveStdDev,
+                ["deviation_sigma"] = deviation,
+                ["baseline_samples"] = baseline.SampleCount,
+                ["window_samples"] = windowSamples
+            };
+            AddBaselineContext(metadata, baseline);
+
+            anomalies.Add(new Fact
+            {
+                Source = "anomaly",
+                Key = "ANOMALY_MEMORY_PRESSURE",
+                Value = peakPressure,
+                ServerId = context.ServerId,
+                Metadata = metadata
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerAnomalyDetector] Memory anomaly detection failed: {ex.Message}");
         }
     }
 }

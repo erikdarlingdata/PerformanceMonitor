@@ -12,6 +12,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite;
 
@@ -38,6 +39,12 @@ public partial class MainWindow : Window
 
     private void MainWindowPlanViewerClose_Click(object sender, RoutedEventArgs e)
     {
+        // Each plan sub-tab's viewer is rooted by the static ThemeChanged event —
+        // Cleanup() each before clearing the tab control so none leak.
+        foreach (var item in MainWindowPlanTabControl.Items)
+            if (item is TabItem { Content: Grid g } && g.Children.Count > 1
+                && g.Children[1] is PlanViewerControl pv)
+                pv.Cleanup();
         // Reset inner tab control so next open starts fresh
         MainWindowPlanTabControl.Items.Clear();
         _planTabControlInitialized = false;
@@ -154,7 +161,7 @@ public partial class MainWindow : Window
         emptyState.Children.Add(emptyStack);
 
         // --- Viewer layer (hidden until a plan is loaded) ---
-        var viewer = new Controls.PlanViewerControl
+        var viewer = new PlanViewerControl
         {
             Visibility = Visibility.Collapsed
         };
@@ -182,6 +189,7 @@ public partial class MainWindow : Window
         subCloseBtn.Tag = subTab;
         subCloseBtn.Click += (_, _) =>
         {
+            (subTabContent.Children[1] as PlanViewerControl)?.Cleanup();
             MainWindowPlanTabControl.Items.Remove(subTab);
             // If only the "+" tab remains, open a fresh empty sub-tab
             if (MainWindowPlanTabControl.Items.Count == 1 &&
@@ -253,9 +261,21 @@ public partial class MainWindow : Window
     /// <summary>
     /// Loads plan XML into an existing sub-tab (replacing whatever was there before).
     /// </summary>
-    private void LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
+    private async void LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
     {
-        try { System.Xml.Linq.XDocument.Parse(planXml); }
+        if (subTab.Content is not Grid subTabContent) return;
+        if (subTabContent.Children.Count < 2) return;
+
+        var emptyState = subTabContent.Children[0] as FrameworkElement;
+        var viewer = subTabContent.Children[1] as PlanViewerControl;
+        if (viewer == null) return;
+
+        try
+        {
+            /* LoadPlan parses+analyzes off the UI thread; XmlException replaces the redundant
+               up-front XDocument.Parse validation. */
+            await viewer.LoadPlan(planXml, label, queryText);
+        }
         catch (System.Xml.XmlException ex)
         {
             MessageBox.Show(
@@ -265,15 +285,15 @@ public partial class MainWindow : Window
                 MessageBoxImage.Warning);
             return;
         }
-
-        if (subTab.Content is not Grid subTabContent) return;
-        if (subTabContent.Children.Count < 2) return;
-
-        var emptyState = subTabContent.Children[0] as FrameworkElement;
-        var viewer = subTabContent.Children[1] as Controls.PlanViewerControl;
-        if (viewer == null) return;
-
-        viewer.LoadPlan(planXml, label, queryText);
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"Failed to load the execution plan:\n\n{ex.Message}",
+                "Plan Load Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
         emptyState!.Visibility = Visibility.Collapsed;
         viewer.Visibility = Visibility.Visible;
 

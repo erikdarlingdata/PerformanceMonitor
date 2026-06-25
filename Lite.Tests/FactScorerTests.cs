@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -222,6 +223,31 @@ public class FactScorerTests : IDisposable
     }
 
     /* ── Helper ── */
+
+    /* ── Blocking-chain & compile-wait scoring ── */
+
+    [Theory]
+    [InlineData(0.10, 1.0)]    // at the critical threshold → 1.0
+    [InlineData(0.055, 0.75)]  // midway between concerning (0.01) and critical (0.10)
+    public void Score_ResourceSemaphoreQueryCompile_Ramped(double value, double expected)
+    {
+        var fact = new Fact { Source = "waits", Key = "RESOURCE_SEMAPHORE_QUERY_COMPILE", Value = value };
+        new FactScorer().ScoreAll(new List<Fact> { fact });
+        Assert.Equal(expected, fact.BaseSeverity, precision: 2);
+    }
+
+    [Fact]
+    public async Task Score_DeepBlockingChain_HighSeverityWithSleepingApexAmplifier()
+    {
+        var facts = await CollectAndScoreAsync(s => s.SeedDeepBlockingChainServerAsync());
+        var chain = facts.First(f => f.Key == "BLOCKING_CHAIN");
+
+        // Worst chain is depth 4 → ApplyThresholdFormula(4, 3, 8) = 0.6 base.
+        Assert.Equal(0.6, chain.BaseSeverity, precision: 2);
+        // Sleeping apex, deadlocks, and THREADPOOL all amplify above the base.
+        Assert.True(chain.Severity > chain.BaseSeverity,
+            "BLOCKING_CHAIN should be amplified by the sleeping apex and corroborating facts");
+    }
 
     private async Task<List<Fact>> CollectAndScoreAsync(Func<TestDataSeeder, Task> seedAction)
     {

@@ -37,6 +37,7 @@ ALTER PROCEDURE
     @duration_threshold_ms bigint = 2000000, /*minimum duration in microseconds (2 seconds)*/
     @cpu_threshold_ms integer = 1000, /*minimum CPU time in milliseconds (1 second)*/
     @max_file_size_mb bigint = 200, /*maximum trace file size in MB*/
+    @max_files integer = 5, /*max rollover files to keep; SQL Server deletes the oldest beyond this (issue #972)*/
     @debug bit = 0 /*prints additional diagnostic information*/
 )
 WITH RECOMPILE
@@ -50,6 +51,7 @@ BEGIN
     */
     DECLARE
         @trace_id integer = NULL,
+        @trace_stoptime datetime = NULL, /*sp_trace_create requires @stoptime once @filecount is passed; NULL = run until stopped*/
         @file_path nvarchar(4000) = N'',
         @trace_search_pattern nvarchar(4000) = N'',
         @error_log_path nvarchar(4000) = N'',
@@ -81,6 +83,16 @@ BEGIN
         IF @cpu_threshold_ms < 0 OR @cpu_threshold_ms > 3600000 -- 1 hour
         BEGIN
             SET @error_message = N'@cpu_threshold_ms must be between 0 and 3,600,000 (1 hour)';
+            RAISERROR(@error_message, 16, 1);
+            RETURN;
+        END;
+
+        /*
+        SQL Trace requires a rollover file count greater than 1 (issue #972).
+        */
+        IF @max_files < 2 OR @max_files > 1000
+        BEGIN
+            SET @error_message = N'@max_files must be between 2 and 1000';
             RAISERROR(@error_message, 16, 1);
             RETURN;
         END;
@@ -225,9 +237,22 @@ BEGIN
         ELSE IF @action IN (N'START', N'RESTART')
         BEGIN
             /*
-            Stop ALL existing traces first if RESTART (regardless of timestamp)
+            Stop existing traces before creating a fresh one. Runs for RESTART,
+            and for START when the running trace has no rollover file-count cap
+            (one created by versions <= 2.11.0), so the issue #972 fix
+            self-heals without waiting for a SQL Server restart.
             */
             IF @action = N'RESTART'
+            OR EXISTS
+            (
+                SELECT
+                    1/0
+                FROM sys.traces AS t
+                WHERE t.path LIKE @trace_search_pattern
+                AND   t.is_default = 0
+                AND   t.status = 1
+                AND   ISNULL(t.max_files, 0) < 2
+            )
             BEGIN
                 DECLARE @restart_cursor CURSOR;
 
@@ -273,8 +298,10 @@ BEGIN
             END;
 
             /*
-            Check for existing running traces (any with this trace name)
-            If already running, return success (idempotent behavior for scheduled operation)
+            START is idempotent: if a bounded trace (one created with a
+            rollover file-count cap) is already running, leave it alone. An
+            unbounded trace from an older version was stopped just above, so it
+            no longer matches here and a fresh capped trace is created (#972).
             */
             IF @action = N'START'
             AND EXISTS
@@ -285,6 +312,7 @@ BEGIN
                 WHERE t.path LIKE @trace_search_pattern
                 AND   t.is_default = 0
                 AND   t.status = 1
+                AND   ISNULL(t.max_files, 0) > 1
             )
             BEGIN
                 /*
@@ -346,7 +374,9 @@ BEGIN
                 @traceid = @trace_id OUTPUT,
                 @options = 2, /*file rollover enabled*/
                 @tracefile = @file_path,
-                @maxfilesize = @max_file_size_mb;
+                @maxfilesize = @max_file_size_mb,
+                @stoptime = @trace_stoptime,
+                @filecount = @max_files; /*issue #972: bound rollover so SQL Server deletes the oldest file itself*/
 
             IF @debug = 1
             BEGIN
@@ -439,7 +469,7 @@ BEGIN
 
             IF @debug = 1
             BEGIN
-                RAISERROR(N'Started trace ID: %d with filters - Duration >= %d microseconds OR CPU >= %d ms', 0, 1,
+                RAISERROR(N'Started trace ID: %d with filters - Duration >= %I64d microseconds OR CPU >= %d ms', 0, 1,
                          @trace_id, @duration_threshold_ms, @cpu_threshold_ms) WITH NOWAIT;
             END;
         END;

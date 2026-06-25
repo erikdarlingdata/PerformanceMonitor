@@ -12,7 +12,9 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorDashboard.Interfaces;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Services
 {
@@ -27,7 +29,7 @@ namespace PerformanceMonitorDashboard.Services
         {
             _mainWindow = mainWindow;
             _preferencesService = preferencesService ?? new UserPreferencesService();
-            Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+            ThemeManager.ThemeChanged += OnThemeChanged;
         }
 
         public void Initialize()
@@ -42,7 +44,7 @@ namespace PerformanceMonitorDashboard.Services
 
             _trayIcon = new TaskbarIcon();
 
-            bool HasLightBackground = Helpers.ThemeManager.HasLightBackground;
+            bool HasLightBackground = ThemeManager.HasLightBackground;
 
             /* Custom tooltip styled to match current theme.
                Note: Hardcodet TrayToolTip can rarely trigger a race condition in Popup.CreateWindow
@@ -142,6 +144,73 @@ namespace PerformanceMonitorDashboard.Services
             }
         }
 
+        /// <summary>
+        /// Shows a themed, button-less balloon (the same card chrome as the snoozable condition cards)
+        /// for resolved/cleared conditions, so an "all clear" toast no longer renders as a plain,
+        /// unthemed Windows balloon. Pass <see cref="ToastSeverity.Success"/> for a green-check "resolved"
+        /// accent. Honors the notifications-enabled pref and marshals to the UI thread, like
+        /// <see cref="ShowNotification"/>.
+        /// </summary>
+        public void ShowStyledNotification(string title, string message, ToastSeverity severity)
+        {
+            if (_trayIcon == null) return;
+
+            var prefs = _preferencesService.GetPreferences();
+            if (!prefs.NotificationsEnabled) return;
+
+            void Show()
+            {
+                var trayIcon = _trayIcon;
+                if (trayIcon == null) return;
+                var balloon = new Controls.StyledBalloon(title, message, severity);
+                trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 10000);
+            }
+
+            if (_mainWindow.Dispatcher.CheckAccess())
+                Show();
+            else
+                _mainWindow.Dispatcher.Invoke(Show);
+        }
+
+        /// <summary>
+        /// Shows a custom interactive popup with Snooze 15m / 1h / 4h and Dismiss buttons.
+        /// Snooze buttons create a temporary mute rule scoped to <paramref name="serverName"/> + <paramref name="metricName"/>.
+        /// </summary>
+        public void ShowSnoozableNotification(
+            string title,
+            string message,
+            NotificationType type,
+            string serverName,
+            string metricName,
+            MuteRuleService muteRuleService)
+        {
+            if (_trayIcon == null) return;
+
+            var prefs = _preferencesService.GetPreferences();
+            if (!prefs.NotificationsEnabled) return;
+
+            var icon = type switch
+            {
+                NotificationType.Error => BalloonIcon.Error,
+                NotificationType.Warning => BalloonIcon.Warning,
+                NotificationType.Success => BalloonIcon.Info,
+                _ => BalloonIcon.Info
+            };
+
+            void Show()
+            {
+                var trayIcon = _trayIcon;
+                if (trayIcon == null) return;
+                var balloon = new Controls.SnoozeBalloon(title, message, icon, serverName, metricName, muteRuleService, () => trayIcon.CloseBalloon());
+                trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 15000);
+            }
+
+            if (_mainWindow.Dispatcher.CheckAccess())
+                Show();
+            else
+                _mainWindow.Dispatcher.Invoke(Show);
+        }
+
         public void ShowServerOnlineNotification(string serverName)
         {
             ShowNotification(
@@ -170,86 +239,10 @@ namespace PerformanceMonitorDashboard.Services
                 NotificationType.Success);
         }
 
-        public void ShowBlockingNotification(string serverName, int blockedSessions, int durationSeconds)
-        {
-            var prefs = _preferencesService.GetPreferences();
-            if (!prefs.NotifyOnBlocking) return;
-
-            ShowNotification(
-                "Blocking Detected",
-                $"{serverName}: {blockedSessions} blocked session(s), longest {durationSeconds}s",
-                NotificationType.Warning);
-        }
-
-        public void ShowDeadlockNotification(string serverName, int deadlockCount)
-        {
-            var prefs = _preferencesService.GetPreferences();
-            if (!prefs.NotifyOnDeadlock) return;
-
-            var plural = deadlockCount == 1 ? "" : "s";
-            ShowNotification(
-                "Deadlock Detected",
-                $"{serverName}: {deadlockCount} deadlock{plural} detected",
-                NotificationType.Error);
-        }
-
-        public void ShowHighCpuNotification(string serverName, int cpuPercent)
-        {
-            var prefs = _preferencesService.GetPreferences();
-            if (!prefs.NotifyOnHighCpu) return;
-
-            ShowNotification(
-                "High CPU",
-                $"{serverName}: CPU at {cpuPercent}%",
-                NotificationType.Warning);
-        }
-
-        public void ShowPoisonWaitNotification(string serverName, string waitType, double avgMs)
-        {
-            var prefs = _preferencesService.GetPreferences();
-            if (!prefs.NotifyOnPoisonWaits) return;
-
-            ShowNotification(
-                "Poison Wait",
-                $"{serverName}: {waitType} avg {avgMs:F0}ms/wait",
-                NotificationType.Error);
-        }
-
-        public void ShowLongRunningQueryNotification(string serverName, int sessionId, long elapsedMinutes, string queryPreview)
-        {
-            var prefs = _preferencesService.GetPreferences();
-            if (!prefs.NotifyOnLongRunningQueries) return;
-
-            var preview = string.IsNullOrEmpty(queryPreview) ? "" : $" — {queryPreview}";
-            ShowNotification(
-                "Long-Running Query",
-                $"{serverName}: Session #{sessionId} running {elapsedMinutes}m{preview}",
-                NotificationType.Warning);
-        }
-
-        public void ShowTempDbSpaceNotification(string serverName, double usedPercent)
-        {
-            var prefs = _preferencesService.GetPreferences();
-            if (!prefs.NotifyOnTempDbSpace) return;
-
-            ShowNotification(
-                "TempDB Space",
-                $"{serverName}: TempDB {usedPercent:F0}% used",
-                NotificationType.Warning);
-        }
-
-        public void ShowLongRunningJobNotification(string serverName, string jobName, long currentMinutes, decimal percentOfAvg)
-        {
-            var prefs = _preferencesService.GetPreferences();
-            if (!prefs.NotifyOnLongRunningJobs) return;
-
-            ShowNotification(
-                "Long-Running Job",
-                $"{serverName}: {jobName} at {percentOfAvg:F0}% of avg ({currentMinutes}m)",
-                NotificationType.Warning);
-        }
-
-        private void ShowMainWindow()
+        /// <summary>
+        /// Restores the main window from the tray. Also used as the #1050 resume-restore callback.
+        /// </summary>
+        internal void ShowMainWindow()
         {
             _mainWindow.Show();
             _mainWindow.WindowState = WindowState.Normal;
@@ -291,7 +284,7 @@ namespace PerformanceMonitorDashboard.Services
 
             if (disposing)
             {
-                Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+                ThemeManager.ThemeChanged -= OnThemeChanged;
 
                 if (_trayIcon != null)
                 {

@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Shapes;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -35,6 +36,9 @@ public partial class TimeRangeSlicerControl : UserControl
 
     private enum DragMode { None, MoveRange, DragStart, DragEnd }
     private DragMode _dragMode = DragMode.None;
+
+    private enum HandleHover { None, Start, End }
+    private HandleHover _hoveredHandle = HandleHover.None;
     private double _dragOriginX;
     private double _dragOriginRangeStart;
     private double _dragOriginRangeEnd;
@@ -132,8 +136,8 @@ public partial class TimeRangeSlicerControl : UserControl
 
     // ── Time mapping ──
 
-    private DateTime DataStartUtc => _requestedStartUtc ?? _data[0].BucketTimeUtc;
-    private DateTime DataEndUtc => _requestedEndUtc ?? _data[^1].BucketTimeUtc.AddHours(1);
+    private DateTime DataStartUtc => _requestedStartUtc ?? _data[0].BucketTime;
+    private DateTime DataEndUtc => _requestedEndUtc ?? _data[^1].BucketTime.AddHours(1);
 
     /// <summary>
     /// Fills in zero-value buckets for hours with no data so the slicer
@@ -151,7 +155,7 @@ public partial class TimeRangeSlicerControl : UserControl
 
         var existing = new Dictionary<long, TimeSliceBucket>();
         foreach (var b in data)
-            existing[FloorToHour(b.BucketTimeUtc).Ticks] = b;
+            existing[FloorToHour(b.BucketTime).Ticks] = b;
 
         var result = new List<TimeSliceBucket>();
         for (var t = floorStart; t <= floorEnd; t = t.AddHours(1))
@@ -159,7 +163,7 @@ public partial class TimeRangeSlicerControl : UserControl
             if (existing.TryGetValue(t.Ticks, out var bucket))
                 result.Add(bucket);
             else
-                result.Add(new TimeSliceBucket { BucketTimeUtc = t });
+                result.Add(new TimeSliceBucket { BucketTime = t });
         }
 
         return result;
@@ -204,7 +208,7 @@ public partial class TimeRangeSlicerControl : UserControl
         var linePoints = new List<Point>(n);
         for (int i = 0; i < n; i++)
         {
-            var x = NormAtUtc(_data[i].BucketTimeUtc) * w;
+            var x = NormAtUtc(_data[i].BucketTime) * w;
             var y = chartBottom - (values[i] / max) * chartHeight;
             linePoints.Add(new Point(x, y));
         }
@@ -259,6 +263,7 @@ public partial class TimeRangeSlicerControl : UserControl
         var overlayBrush = FindBrush("SlicerOverlayBrush", "#99000000");
         var selectedBrush = FindBrush("SlicerSelectedBrush", "#22FFFFFF");
         var handleBrush = FindBrush("SlicerHandleBrush", "#E4E6EB");
+        var handleHoverBrush = FindBrush("SlicerHandleHoverBrush", "#2EAEF1");
 
         var selLeft = _rangeStart * w;
         var selRight = _rangeEnd * w;
@@ -267,8 +272,8 @@ public partial class TimeRangeSlicerControl : UserControl
         if (selRight < w) AddRect(selRight, 0, w - selRight, h, overlayBrush);
         AddRect(selLeft, 0, Math.Max(0, selRight - selLeft), h, selectedBrush);
 
-        DrawHandle(selLeft, h, handleBrush);
-        DrawHandle(selRight - HandleWidthPx, h, handleBrush);
+        DrawHandle(selLeft, h, _hoveredHandle == HandleHover.Start ? handleHoverBrush : handleBrush);
+        DrawHandle(selRight - HandleWidthPx, h, _hoveredHandle == HandleHover.End ? handleHoverBrush : handleBrush);
 
         AddLine(selLeft, 0, selRight, 0, handleBrush, 0.5);
         AddLine(selLeft, h, selRight, h, handleBrush, 0.5);
@@ -280,8 +285,8 @@ public partial class TimeRangeSlicerControl : UserControl
             if (overlayMax <= 0) overlayMax = 1;
 
             var dotBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF6F00"));
-            var firstBucket = _data[0].BucketTimeUtc;
-            var lastBucket = _data[^1].BucketTimeUtc;
+            var firstBucket = _data[0].BucketTime;
+            var lastBucket = _data[^1].BucketTime;
             foreach (var pt in _overlayData)
             {
                 if (pt.TimeUtc < firstBucket || pt.TimeUtc > lastBucket) continue;
@@ -363,6 +368,33 @@ public partial class TimeRangeSlicerControl : UserControl
 
     private void Toggle_Click(object sender, RoutedEventArgs e) => IsExpanded = !IsExpanded;
 
+    /// <summary>
+    /// Quick-range chip: selects the last N minutes of the loaded window (Tag = minutes), or the
+    /// full window when Tag is 0 ("All"). A duration longer than the window clamps to the start.
+    /// </summary>
+    private void QuickRange_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button b || _data.Count < 2) return;
+        if (b.Tag is not string tag || !int.TryParse(tag, out int minutes)) return;
+
+        if (minutes <= 0)
+        {
+            _rangeStart = 0;
+            _rangeEnd = 1.0;
+        }
+        else
+        {
+            var start = DataEndUtc.AddMinutes(-minutes);
+            if (start < DataStartUtc) start = DataStartUtc;
+            _rangeStart = NormAtUtc(start);
+            _rangeEnd = 1.0;
+        }
+
+        UpdateRangeLabel();
+        Redraw();
+        FireRangeChanged();
+    }
+
     private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (_data.Count < 2) return;
@@ -396,12 +428,16 @@ public partial class TimeRangeSlicerControl : UserControl
         {
             var selLeft = _rangeStart * w;
             var selRight = _rangeEnd * w;
-            if (Math.Abs(pos.X - selLeft) <= HandleGripWidthPx || Math.Abs(pos.X - selRight) <= HandleGripWidthPx)
-                SlicerCanvas.Cursor = Cursors.SizeWE;
+            HandleHover newHover = HandleHover.None;
+            if (Math.Abs(pos.X - selLeft) <= HandleGripWidthPx)
+            { SlicerCanvas.Cursor = Cursors.SizeWE; newHover = HandleHover.Start; }
+            else if (Math.Abs(pos.X - selRight) <= HandleGripWidthPx)
+            { SlicerCanvas.Cursor = Cursors.SizeWE; newHover = HandleHover.End; }
             else if (pos.X >= selLeft && pos.X <= selRight)
                 SlicerCanvas.Cursor = Cursors.SizeAll;
             else
                 SlicerCanvas.Cursor = Cursors.Arrow;
+            if (newHover != _hoveredHandle) { _hoveredHandle = newHover; Redraw(); }
             return;
         }
 
@@ -428,6 +464,15 @@ public partial class TimeRangeSlicerControl : UserControl
         UpdateRangeLabel();
         Redraw();
         e.Handled = true;
+    }
+
+    private void Canvas_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (_dragMode == DragMode.None && _hoveredHandle != HandleHover.None)
+        {
+            _hoveredHandle = HandleHover.None;
+            Redraw();
+        }
     }
 
     private void Canvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)

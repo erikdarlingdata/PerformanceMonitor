@@ -11,7 +11,7 @@ public static class AnalysisSchema
     /// <summary>
     /// Analysis schema version. Independent of main schema version.
     /// </summary>
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     public const string CreateAnalysisFindingsTable = @"
 CREATE TABLE IF NOT EXISTS analysis_findings (
@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS analysis_findings (
     root_fact_value DOUBLE,
     leaf_fact_key VARCHAR,
     leaf_fact_value DOUBLE,
-    fact_count INTEGER NOT NULL
+    fact_count INTEGER NOT NULL,
+    incident_id VARCHAR
 )";
 
     public const string CreateAnalysisMutedTable = @"
@@ -108,6 +109,13 @@ CREATE INDEX IF NOT EXISTS idx_analysis_thresholds_lookup
             // v2: Add server metadata columns for edition-aware analysis
             yield return "ALTER TABLE servers ADD COLUMN IF NOT EXISTS sql_engine_edition INTEGER DEFAULT 0";
             yield return "ALTER TABLE servers ADD COLUMN IF NOT EXISTS sql_major_version INTEGER DEFAULT 0";
+        }
+
+        if (fromVersion < 3)
+        {
+            // v3: incident grouping (correlate-and-focus slice 2). Nullable — DuckDB ADD COLUMN
+            // cannot be NOT NULL; the writer always supplies a value (empty for healthy runs).
+            yield return "ALTER TABLE analysis_findings ADD COLUMN IF NOT EXISTS incident_id VARCHAR";
         }
     }
 

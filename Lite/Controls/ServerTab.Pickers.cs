@@ -17,13 +17,14 @@ using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
 {
     private static readonly HashSet<string> _defaultPerfmonCounters = new(
-        Helpers.PerfmonPacks.Packs["General Throughput"],
+        PerfmonPacks.Packs["General Throughput"],
         StringComparer.OrdinalIgnoreCase);
 
     /* ========== Wait Stats Picker ========== */
@@ -136,8 +137,14 @@ public partial class ServerTab : UserControl
         _ = UpdateWaitStatsChartFromPickerAsync();
     }
 
+    private int _waitStatsPickerGen;
+
     private async System.Threading.Tasks.Task UpdateWaitStatsChartFromPickerAsync()
     {
+        /* Bump a generation on entry; after each (now genuinely async) query, bail if a newer
+           invocation has started — rapid checkbox toggling otherwise interleaves two runs and
+           double-plots the series. */
+        var gen = ++_waitStatsPickerGen;
         try
         {
             var selected = _waitTypeItems.Where(i => i.IsSelected).Take(20).ToList();
@@ -166,10 +173,13 @@ public partial class ServerTab : UserControl
             }
             double globalMax = 0;
 
+            // Batched fetch: one query for all selected wait types (was an N+1 query-per-type loop).
+            var trendsByType = await Task.Run(() => _dataService.GetWaitStatsTrendsByTypesAsync(_serverId, selected.Select(s => s.DisplayName).ToList(), hoursBack, fromDate, toDate));
+            if (gen != _waitStatsPickerGen) return;
+
             for (int i = 0; i < selected.Count; i++)
             {
-                var trend = await _dataService.GetWaitStatsTrendAsync(_serverId, selected[i].DisplayName, hoursBack, fromDate, toDate);
-                if (trend.Count == 0) continue;
+                if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
                 var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
                 var values = useAvgPerWait
@@ -179,6 +189,7 @@ public partial class ServerTab : UserControl
                 var plot = WaitStatsChart.Plot.Add.Scatter(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                ChartStyle.StyleScatter(plot);
                 _waitStatsHover?.Add(plot, selected[i].DisplayName);
 
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
@@ -283,8 +294,11 @@ public partial class ServerTab : UserControl
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
 
+    private int _memoryClerksPickerGen;
+
     private async System.Threading.Tasks.Task UpdateMemoryClerksChartFromPickerAsync()
     {
+        var gen = ++_memoryClerksPickerGen;
         try
         {
             var selected = _memoryClerkItems.Where(i => i.IsSelected).Take(20).ToList();
@@ -320,10 +334,13 @@ public partial class ServerTab : UserControl
             string topNonBpClerk = "";
             double topNonBpMb = 0;
 
+            // Batched fetch: one query for all selected clerk types (was an N+1 query-per-clerk loop).
+            var trendsByType = await Task.Run(() => _dataService.GetMemoryClerkTrendsByTypesAsync(_serverId, selected.Select(s => s.DisplayName).ToList(), hoursBack, fromDate, toDate));
+            if (gen != _memoryClerksPickerGen) return;
+
             for (int i = 0; i < selected.Count; i++)
             {
-                var trend = await _dataService.GetMemoryClerkTrendAsync(_serverId, selected[i].DisplayName, hoursBack, fromDate, toDate);
-                if (trend.Count == 0) continue;
+                if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
                 var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
@@ -331,6 +348,7 @@ public partial class ServerTab : UserControl
                 var plot = MemoryClerksChart.Plot.Add.Scatter(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                ChartStyle.StyleScatter(plot);
                 _memoryClerksHover?.Add(plot, selected[i].DisplayName);
 
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
@@ -384,7 +402,7 @@ public partial class ServerTab : UserControl
         /* Initialize pack ComboBox once */
         if (PerfmonPackCombo.Items.Count == 0)
         {
-            PerfmonPackCombo.ItemsSource = Helpers.PerfmonPacks.PackNames;
+            PerfmonPackCombo.ItemsSource = PerfmonPacks.PackNames;
             PerfmonPackCombo.SelectedItem = "General Throughput";
         }
 
@@ -413,7 +431,7 @@ public partial class ServerTab : UserControl
         foreach (var item in _perfmonCounterItems)
             item.IsSelected = false;
 
-        if (pack == Helpers.PerfmonPacks.AllCounters)
+        if (pack == PerfmonPacks.AllCounters)
         {
             /* "All Counters" selects the General Throughput defaults */
             foreach (var item in _perfmonCounterItems)
@@ -422,7 +440,7 @@ public partial class ServerTab : UserControl
                     item.IsSelected = true;
             }
         }
-        else if (Helpers.PerfmonPacks.Packs.TryGetValue(pack, out var packCounters))
+        else if (PerfmonPacks.Packs.TryGetValue(pack, out var packCounters))
         {
             var packSet = new HashSet<string>(packCounters, StringComparer.OrdinalIgnoreCase);
             int count = 0;
@@ -499,8 +517,11 @@ public partial class ServerTab : UserControl
         _ = UpdatePerfmonChartFromPickerAsync();
     }
 
+    private int _perfmonPickerGen;
+
     private async System.Threading.Tasks.Task UpdatePerfmonChartFromPickerAsync()
     {
+        var gen = ++_perfmonPickerGen;
         try
         {
             var selected = _perfmonCounterItems.Where(i => i.IsSelected).Take(12).ToList();
@@ -526,10 +547,13 @@ public partial class ServerTab : UserControl
             }
             double globalMax = 0;
 
+            // Batched fetch: one query for all selected counters (was an N+1 query-per-counter loop).
+            var trendsByCounter = await Task.Run(() => _dataService.GetPerfmonTrendsByCountersAsync(_serverId, selected.Select(s => s.DisplayName).ToList(), hoursBack, fromDate, toDate));
+            if (gen != _perfmonPickerGen) return;
+
             for (int i = 0; i < selected.Count; i++)
             {
-                var trend = await _dataService.GetPerfmonTrendAsync(_serverId, selected[i].DisplayName, hoursBack, fromDate, toDate);
-                if (trend.Count == 0) continue;
+                if (!trendsByCounter.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
                 var times = trend.Select(t => t.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
                 var values = trend.Select(t => (double)t.DeltaValue).ToArray();
@@ -537,6 +561,7 @@ public partial class ServerTab : UserControl
                 var plot = PerfmonChart.Plot.Add.Scatter(times, values);
                 plot.LegendText = selected[i].DisplayName;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
+                ChartStyle.StyleScatter(plot);
                 _perfmonHover?.Add(plot, selected[i].DisplayName);
 
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());

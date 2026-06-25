@@ -7,7 +7,7 @@
   <a href="https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest"><img src="https://img.shields.io/github/v/release/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="Latest Release"></a>
   <a href="https://github.com/erikdarlingdata/PerformanceMonitor/issues"><img src="https://img.shields.io/github/issues/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="Open Issues"></a>
   <a href="https://github.com/erikdarlingdata/PerformanceMonitor/commits/main"><img src="https://img.shields.io/github/last-commit/erikdarlingdata/PerformanceMonitor?style=for-the-badge" alt="Last Commit"></a>
-  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/erikdarlingdata/PerformanceMonitor/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="https://github.com/erikdarlingdata/PerformanceMonitor/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/erikdarlingdata/PerformanceMonitor/build.yml?style=for-the-badge&label=CI" alt="CI"></a>
 </p>
 <p align="center">
   <a href="https://x.com/erikdarlingdata"><img src="https://img.shields.io/badge/Follow_%40ErikDarlingData-black?style=for-the-badge&logo=x&logoColor=white" alt="Follow @ErikDarlingData on X"></a>
@@ -33,7 +33,7 @@
 
 | | **[Full Edition](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** | **[Lite Edition](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** |
 |---|---|---|
-| **What it does** | Installs a `PerformanceMonitor` database with 30 T-SQL collectors running via SQL Agent. Separate dashboard app connects to view everything. | Single desktop app that monitors remotely. Stores data locally in DuckDB + Parquet. Nothing touches your server. |
+| **What it does** | Installs a `PerformanceMonitor` database with 33 T-SQL collectors running via SQL Agent. Separate dashboard app connects to view everything. | Single desktop app that monitors remotely. Stores data locally in DuckDB + Parquet. Nothing touches your server. |
 | **Best for** | Production 24/7 monitoring, long-term baselining | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting |
 | **Requires** | SQL Agent running ([see permissions](#permissions)) | `VIEW SERVER STATE` ([see permissions](#permissions)) |
 | **Get started** | Run the installer, open the dashboard | Download, run, add a server, done |
@@ -56,7 +56,7 @@ All release binaries are digitally signed via [SignPath](https://signpath.io) �
 
 ## What You Get
 
-🔍 **32 specialized T-SQL collectors** running on configurable schedules with named presets (Off, Aggressive, Balanced, Low-Impact) — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments. Switch presets with a pair of SQL Agent jobs to get quiet-hours / overnight windows without writing any code.
+🔍 **33 specialized T-SQL collectors** running on configurable schedules with named presets (Off, Aggressive, Balanced, Low-Impact) — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments. Switch presets with a pair of SQL Agent jobs to get quiet-hours / overnight windows without writing any code.
 
 🚨 **Real-time alerts** for blocking, deadlocks, and high CPU — system tray notifications, styled HTML emails with full XML attachments, and webhook notifications for external integrations
 
@@ -64,7 +64,9 @@ All release binaries are digitally signed via [SignPath](https://signpath.io) �
 
 📋 **Graphical plan viewer** with native ShowPlan rendering, 30-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
 
-🤖 **Built-in MCP server** with 51-63 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
+💡 **Recommendations engine (advise-and-act)** — a dedicated Recommendations tab surfaces prioritized findings from your own monitoring data with the reasoning behind each one, and can apply selected fixes directly. Destructive changes (like enabling Read Committed Snapshot Isolation) are gated behind an informed-consent dialog that spells out both the risk of acting and the risk of doing nothing.
+
+🤖 **Built-in MCP server** with 55-66 read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
 
 🧰 **Community tools installed automatically** — sp_WhoIsActive, sp_BlitzLock, sp_HealthParser, sp_HumanEventsBlockViewer
 
@@ -104,7 +106,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-24 collectors run on independent, configurable schedules:
+25 collectors run on independent, configurable schedules:
 
 | Collector | Default | Source |
 |---|---|---|
@@ -128,6 +130,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
 | database_size_stats | 15 min | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
 | server_properties | 15 min | `SERVERPROPERTY()` hardware and licensing metadata |
+| index_object_stats | Daily | `sys.dm_db_partition_stats` + `sys.dm_db_index_usage_stats` + `sys.dm_db_index_operational_stats` |
 | server_config | On connect | `sys.configurations` |
 | database_config | On connect | `sys.databases` |
 | database_scoped_config | On connect | Database-scoped configurations |
@@ -184,6 +187,12 @@ PerformanceMonitorInstaller.exe YourServerName --reinstall
 PerformanceMonitorInstaller.exe YourServerName sa YourPassword --reinstall
 ```
 
+Custom data/log file locations (applied only when the database is first created):
+
+```
+PerformanceMonitorInstaller.exe YourServerName --data-path D:\SQLData --log-path E:\SQLLogs
+```
+
 Uninstall (removes database, Agent jobs, and XE sessions):
 
 ```
@@ -208,7 +217,11 @@ The installer automatically tests the connection, checks the SQL Server version 
 | `--preserve-jobs` | Keep existing SQL Agent job schedules during upgrade |
 | `--encrypt=optional\|mandatory\|strict` | Connection encryption level (default: mandatory) |
 | `--trust-cert` | Trust server certificate without validation (default: require valid cert) |
+| `--data-path DIR` | Server-side directory for the data (`.mdf`) file (used only on first install) |
+| `--log-path DIR` | Server-side directory for the log (`.ldf`) file (used only on first install) |
 | `--help` | Show usage information and exit |
+
+> **Custom file locations:** `--data-path` / `--log-path` set where SQL Server places the PerformanceMonitor data and log files. They take effect **only when the database is first created** — if the database already exists they are ignored. Either flag may be supplied independently; an omitted one falls back to the instance default (`SERVERPROPERTY('InstanceDefaultDataPath')` / `InstanceDefaultLogPath`). The directory is a path **on the SQL Server host** and must already exist, with the SQL Server service account holding write permission. Both `--data-path D:\SQLData` and `--data-path=D:\SQLData` forms are accepted; quote paths containing spaces. Not applicable to Azure SQL Managed Instance, which always uses its managed file layout.
 
 **Environment variable:** Set `PM_SQL_PASSWORD` to avoid passing the password on the command line.
 
@@ -244,7 +257,7 @@ ORDER BY collection_time DESC;
 ### What Gets Installed
 
 - **PerformanceMonitor database** with collection tables and reporting views
-- **32 collector stored procedures** for gathering metrics (including SQL Agent job monitoring)
+- **33 collector stored procedures** for gathering metrics (including SQL Agent job monitoring)
 - **Configurable collection** — query text and execution plan capture can be disabled per-collector via `config.collection_schedule` (`collect_query`, `collect_plan` columns) for sensitive or high-volume environments
 - **Delta framework** for calculating per-second rates from cumulative DMVs
 - **Community dependencies:** sp_WhoIsActive, sp_HealthParser, sp_HumanEventsBlockViewer, sp_BlitzLock
@@ -314,7 +327,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | AWS RDS for SQL Server | Supported | Supported |
 | Azure SQL Database | Not supported | Supported |
 | Multi-server from one seat | Per-server install | Built-in |
-| Collectors | 32 | 24 |
+| Collectors | 33 | 25 |
 | Agent job monitoring | Duration vs historical avg/p95 | Duration vs historical avg/p95 |
 | Data storage | SQL Server (on target) | DuckDB + Parquet (local) |
 | Execution plans | Collected and stored (can be disabled per-collector) | Download on demand |
@@ -325,7 +338,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 | Dashboard | Separate app | Built-in |
 | Themes | Dark and light | Dark and light |
 | Portability | Server-bound | Single executable |
-| MCP server (LLM integration) | Built into Dashboard (63 tools) | Built-in (52 tools) |
+| MCP server (LLM integration) | Built into Dashboard (66 tools) | Built-in (55 tools) |
 
 ---
 
@@ -335,7 +348,7 @@ The Full Edition supports Azure SQL Managed Instance and AWS RDS for SQL Server 
 
 | Tab | Contents |
 |---|---|
-| **Overview** | Resource overview, daily summary, critical issues, server config changes, database config changes, trace flag changes, collection health |
+| **Overview** | Resource overview, daily summary, critical issues, recommendations, server config changes, database config changes, trace flag changes, collection health |
 | **Performance** | Performance trends, expensive queries, active queries, query stats, procedure stats, Query Store, Query Store regressions, query trace patterns, query heatmap |
 | **Resource Metrics** | Server trends, wait stats, TempDB, file I/O latency, perfmon counters, default trace events, trace analysis, session stats, latch stats, spinlock stats |
 | **Memory** | Memory overview, grants, clerks, plan cache, memory pressure events |
@@ -359,7 +372,8 @@ Plus a NOC-style landing page with server health cards (green/yellow/red severit
 | **Blocking** | Blocking/deadlock trends, blocked process reports, deadlock history |
 | **Perfmon** | Selectable SQL Server performance counters over time |
 | **Configuration** | Server configuration, database configuration, scoped configuration, trace flags |
-| **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, application connections, server inventory, cost optimization recommendations (enterprise feature audit, CPU/memory right-sizing, compression savings, dormant databases, dev/test detection), column-level filtering on all grids |
+| **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, per-object table/index size, growth, usage, and locking/contention analysis, application connections, server inventory, cost optimization recommendations (enterprise feature audit, CPU/memory right-sizing, compression savings, dormant databases, dev/test detection), column-level filtering on all grids |
+| **Recommendations** | Prioritized findings drawn from collected metrics, grouped by severity, each card showing the affected database, the recommendation, the reasoning behind it, and a copyable MCP investigation prompt |
 
 Both editions feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes, and timezone display options (server time, local time, or UTC).
 
@@ -380,6 +394,8 @@ Both editions include a real-time alert engine that monitors for performance iss
 | **TempDB space** | 80% | Fires when TempDB usage exceeds the percentage threshold |
 | **Long-running agent jobs** | 3× average | Fires when a job's current duration exceeds a multiple of its historical average |
 | **High CPU** | 90% (Full), 80% (Lite) | Fires when total CPU (SQL + other) exceeds the threshold |
+| **Volume free space** | 10% or 5 GB free | Fires when a monitored volume's free space drops below the percentage or absolute threshold (either check can be disabled). Never fires on Azure SQL Database. |
+| **Failed agent job** | 60-minute lookback | Fires when a SQL Agent job run fails within the lookback window. Skipped on Azure SQL Database. |
 | **Server unreachable** | N/A | Fires when a monitored server goes offline or comes back online (tray + email) |
 
 All thresholds are configurable in Settings.
@@ -455,7 +471,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-Full Edition exposes 63 tools, Lite Edition exposes 52. Core tools are shared across both editions.
+Full Edition exposes 66 tools, Lite Edition exposes 55. Core tools are shared across both editions.
 
 | Category | Tools |
 |---|---|
@@ -475,6 +491,7 @@ Full Edition exposes 63 tools, Lite Edition exposes 52. Core tools are shared ac
 | Configuration | `get_server_config`\*, `get_database_config`\*, `get_database_scoped_config`\*, `get_trace_flags`\* |
 | Config History | `get_server_config_changes`\*\*, `get_database_config_changes`\*\*, `get_trace_flag_changes`\*\* |
 | Server Info | `get_server_properties`, `get_database_sizes` |
+| Object/Index Stats | `get_table_index_sizes`, `get_index_usage`, `get_object_locking` |
 | Sessions | `get_session_stats` |
 | Scheduler | `get_cpu_scheduler_pressure`\*\* |
 | Latch/Spinlock | `get_latch_stats`\*\*, `get_spinlock_stats`\*\* |
@@ -482,7 +499,7 @@ Full Edition exposes 63 tools, Lite Edition exposes 52. Core tools are shared ac
 | System Events | `get_default_trace_events`\*\*, `get_trace_analysis`\*\*, `get_memory_pressure_events` |
 | Health Parser | `get_health_parser_system_health`\*\*, `get_health_parser_severe_errors`\*\*, `get_health_parser_io_issues`\*\*, `get_health_parser_scheduler_issues`\*\*, `get_health_parser_memory_conditions`\*\*, `get_health_parser_cpu_tasks`\*\*, `get_health_parser_memory_broker`\*\*, `get_health_parser_memory_node_oom`\*\* |
 | Plan Analysis | `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`, `get_plan_xml` |
-| Diagnostic Analysis | `analyze_server`\*, `get_analysis_facts`\*, `compare_analysis`\*, `audit_config`\*, `get_analysis_findings`\*, `mute_analysis_finding`\* |
+| Diagnostic Analysis | `analyze_server`, `get_analysis_facts`, `compare_analysis`, `audit_config`, `get_analysis_findings`, `mute_analysis_finding` |
 
 \* Lite only | \*\* Full only
 
@@ -529,6 +546,15 @@ FROM PerformanceMonitor.config.collection_log
 WHERE collection_status = 'ERROR'
 ORDER BY collection_time DESC;
 ```
+
+**Orphaned `Monitor_LongQueries_*.trc` files (issue #972)** — versions through 2.11.0 accumulated stale SQL Trace files in the SQL Server error log directory. Newer versions bound the long-query trace with a rollover file-count cap, so SQL Server prunes its own files going forward — but trace files already on disk are not removed automatically (`xp_delete_file` cannot delete `.trc` files). Sweep them once with `tools/Remove-OrphanedTraceFiles.ps1`, run **on the SQL Server host** as a local Administrator or the SQL Server service account:
+
+```powershell
+.\Remove-OrphanedTraceFiles.ps1 -WhatIf    # preview what would be deleted
+.\Remove-OrphanedTraceFiles.ps1            # delete
+```
+
+It skips files belonging to a running trace and files that are in use.
 
 ### Lite Edition
 
@@ -657,7 +683,7 @@ Use the RDS master user for installation. The master user has the necessary perm
 Monitor/
 │
 │   Full Edition (server-installed collectors + separate dashboard)
-├── install/          # 58 SQL installation scripts
+├── install/          # 59 SQL installation scripts
 ├── upgrades/         # Version-specific upgrade scripts
 ├── Installer/        # CLI installer for Full Edition database (C#)
 ├── Installer.Core/   # Shared installation library (CLI + Dashboard)

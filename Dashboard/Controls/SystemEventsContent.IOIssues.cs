@@ -21,6 +21,8 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 
 namespace PerformanceMonitorDashboard.Controls
@@ -84,9 +86,8 @@ namespace PerformanceMonitorDashboard.Controls
                     {
                         var (xs, ys) = TabHelpers.FillTimeSeriesGaps(timePoints, latchTimeouts.Select(c => c));
                         var scatter = IOIssuesChart.Plot.Add.Scatter(xs, ys);
-                        scatter.LineWidth = 2;
-                        scatter.MarkerSize = 5;
-                        scatter.Color = TabHelpers.ChartColors[3];
+                        scatter.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(3));
+                        ChartStyle.StyleScatter(scatter);
                         scatter.LegendText = "Latch Timeouts";
                         _ioIssuesHover?.Add(scatter, "Latch Timeouts");
                     }
@@ -95,9 +96,8 @@ namespace PerformanceMonitorDashboard.Controls
                     {
                         var (xs, ys) = TabHelpers.FillTimeSeriesGaps(timePoints, longIos.Select(c => c));
                         var scatter = IOIssuesChart.Plot.Add.Scatter(xs, ys);
-                        scatter.LineWidth = 2;
-                        scatter.MarkerSize = 5;
-                        scatter.Color = TabHelpers.ChartColors[2];
+                        scatter.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(2));
+                        ChartStyle.StyleScatter(scatter);
                         scatter.LegendText = "Long IOs";
                         _ioIssuesHover?.Add(scatter, "Long IOs");
                     }
@@ -112,7 +112,7 @@ namespace PerformanceMonitorDashboard.Controls
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = IOIssuesChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -187,9 +187,8 @@ namespace PerformanceMonitorDashboard.Controls
                                 durations.Select(d => d));
 
                             var scatter = LongestPendingIOChart.Plot.Add.Scatter(xs, ys);
-                            scatter.LineWidth = 2;
-                            scatter.MarkerSize = 5;
                             scatter.Color = colors[colorIndex % colors.Length];
+                            ChartStyle.StyleScatter(scatter);
                             scatter.LegendText = fileName;
                             _longestPendingIoHover?.Add(scatter, fileName);
                             colorIndex++;
@@ -206,7 +205,7 @@ namespace PerformanceMonitorDashboard.Controls
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = LongestPendingIOChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 

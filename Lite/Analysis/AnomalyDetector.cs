@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 
@@ -99,8 +100,125 @@ public class AnomalyDetector
         await DetectSessionAnomalies(context, anomalies);
         await DetectQueryDurationAnomalies(context, anomalies);
         await DetectMemoryAnomalies(context, anomalies);
+        await DetectObjectStatsAnomalies(context, anomalies);
 
         return anomalies;
+    }
+
+    /// <summary>
+    /// Day-over-day object/index detection (delta-based, not stddev-baseline) since the
+    /// index_object_stats collector runs daily and its counters are cumulative.
+    /// Emits ANOMALY_OBJECT_GROWTH for the biggest table grower over threshold and
+    /// ANOMALY_OBJECT_CONTENTION for the index with the largest new lock-wait time.
+    /// </summary>
+    private const decimal ObjectGrowthMbThreshold = 100m;   // ignore tables that grew less than 100 MB
+    private const double ObjectGrowthPctThreshold = 20.0;   // ...and less than 20% day-over-day
+    private const long ObjectLockWaitMsDeltaThreshold = 60000; // 1 minute of new lock waits
+
+    private async Task DetectObjectStatsAnomalies(AnalysisContext context, List<Fact> anomalies)
+    {
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock();
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+
+            // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 2),
+latest AS (SELECT MAX(collection_time) t FROM snaps),
+prior AS (SELECT MIN(collection_time) t FROM snaps),
+cur AS (SELECT database_name, object_id, MAX(schema_name) schema_name, MAX(table_name) table_name, SUM(reserved_mb) mb
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM latest) GROUP BY database_name, object_id),
+prv AS (SELECT database_name, object_id, SUM(reserved_mb) mb
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM prior) GROUP BY database_name, object_id)
+SELECT cur.database_name, cur.schema_name, cur.table_name, prv.mb AS prior_mb, cur.mb AS current_mb,
+       cur.mb - prv.mb AS growth_mb,
+       CASE WHEN prv.mb > 0 THEN (cur.mb - prv.mb) * 100.0 / prv.mb ELSE 0 END AS growth_pct
+FROM cur JOIN prv ON cur.database_name = prv.database_name AND cur.object_id = prv.object_id
+WHERE (SELECT t FROM latest) <> (SELECT t FROM prior)
+AND   cur.mb - prv.mb >= $2
+AND   (CASE WHEN prv.mb > 0 THEN (cur.mb - prv.mb) * 100.0 / prv.mb ELSE 0 END) >= $3
+ORDER BY growth_mb DESC LIMIT 1";
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthMbThreshold });
+                cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthPctThreshold });
+
+                using var reader = await cmd.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    var db = reader.GetString(0);
+                    var growthMb = Convert.ToDouble(reader.GetValue(5));
+                    var growthPct = Convert.ToDouble(reader.GetValue(6));
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_OBJECT_GROWTH",
+                        Value = growthMb,
+                        ServerId = context.ServerId,
+                        DatabaseName = db,
+                        Metadata = new Dictionary<string, double>
+                        {
+                            ["prior_mb"] = Convert.ToDouble(reader.GetValue(3)),
+                            ["current_mb"] = Convert.ToDouble(reader.GetValue(4)),
+                            ["growth_mb"] = growthMb,
+                            ["growth_pct"] = growthPct,
+                            ["growth_ratio"] = growthPct / ObjectGrowthPctThreshold
+                        }
+                    });
+                }
+            }
+
+            // Contention: index with the largest new row-lock wait time (no reset).
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 2),
+latest AS (SELECT MAX(collection_time) t FROM snaps),
+prior AS (SELECT MIN(collection_time) t FROM snaps),
+cur AS (SELECT database_name, object_id, index_id, schema_name, table_name, index_name,
+               COALESCE(row_lock_wait_in_ms,0) ms, COALESCE(index_lock_promotion_count,0) esc
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM latest)),
+prv AS (SELECT database_name, object_id, index_id, COALESCE(row_lock_wait_in_ms,0) ms, COALESCE(index_lock_promotion_count,0) esc
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM prior))
+SELECT cur.database_name, cur.schema_name, cur.table_name, cur.index_name,
+       cur.ms - prv.ms AS ms_delta, cur.esc - prv.esc AS esc_delta
+FROM cur JOIN prv ON cur.database_name = prv.database_name AND cur.object_id = prv.object_id AND cur.index_id = prv.index_id
+WHERE (SELECT t FROM latest) <> (SELECT t FROM prior)
+AND   cur.ms >= prv.ms
+AND   cur.ms - prv.ms >= $2
+ORDER BY ms_delta DESC LIMIT 1";
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = ObjectLockWaitMsDeltaThreshold });
+
+                using var reader = await cmd.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    var db = reader.GetString(0);
+                    var msDelta = Convert.ToDouble(reader.GetValue(4));
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_OBJECT_CONTENTION",
+                        Value = msDelta,
+                        ServerId = context.ServerId,
+                        DatabaseName = db,
+                        Metadata = new Dictionary<string, double>
+                        {
+                            ["lock_wait_ms_delta"] = msDelta,
+                            ["escalation_delta"] = Convert.ToDouble(reader.GetValue(5)),
+                            ["contention_ratio"] = msDelta / ObjectLockWaitMsDeltaThreshold
+                        }
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("AnomalyDetector", $"Object stats anomaly detection failed: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -332,18 +450,27 @@ SELECT
             var currentBlocking = Convert.ToInt64(reader.GetValue(0));
             var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
 
-            // Baseline mean = events per day for this hour+dow bucket
+            /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
+               day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
+               so normalize them to per-hour before the ratio — otherwise the ratio scales with the
+               window length, not the workload, and a steady event rate trips the spike threshold. */
+            var windowHours = (context.TimeRangeEnd - context.TimeRangeStart).TotalHours;
+            if (windowHours <= 0) windowHours = 1;
+            var currentBlockingPerHour = currentBlocking / windowHours;
+            var currentDeadlocksPerHour = currentDeadlocks / windowHours;
+
+            // Baseline mean = events per hour for this hour+dow bucket
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
             var baselineDeadlockRate = deadlockBaseline.SampleCount > 0 ? deadlockBaseline.Mean : 0;
 
-            // Blocking spike: at least 5 events AND 3x baseline rate (or no baseline)
-            if (currentBlocking >= 5 && (baselineBlockingRate <= 0 || currentBlocking / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
+            // Blocking spike: at least 5 events in the window AND per-hour rate >= 3x baseline (or no baseline)
+            if (currentBlocking >= 5 && (baselineBlockingRate <= 0 || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
                 var metadata = new Dictionary<string, double>
                 {
                     ["current_count"] = currentBlocking,
                     ["baseline_rate"] = baselineBlockingRate,
-                    ["ratio"] = baselineBlockingRate > 0 ? currentBlocking / baselineBlockingRate : 100.0
+                    ["ratio"] = baselineBlockingRate > 0 ? currentBlockingPerHour / baselineBlockingRate : 100.0
                 };
                 AddBaselineContext(metadata, blockingBaseline);
 
@@ -357,14 +484,14 @@ SELECT
                 });
             }
 
-            // Deadlock spike: at least 3 events AND 3x baseline rate (or no baseline)
-            if (currentDeadlocks >= 3 && (baselineDeadlockRate <= 0 || currentDeadlocks / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
+            // Deadlock spike: at least 3 events in the window AND per-hour rate >= 3x baseline (or no baseline)
+            if (currentDeadlocks >= 3 && (baselineDeadlockRate <= 0 || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
             {
                 var metadata = new Dictionary<string, double>
                 {
                     ["current_count"] = currentDeadlocks,
                     ["baseline_rate"] = baselineDeadlockRate,
-                    ["ratio"] = baselineDeadlockRate > 0 ? currentDeadlocks / baselineDeadlockRate : 100.0
+                    ["ratio"] = baselineDeadlockRate > 0 ? currentDeadlocksPerHour / baselineDeadlockRate : 100.0
                 };
                 AddBaselineContext(metadata, deadlockBaseline);
 

@@ -131,6 +131,8 @@ namespace PerformanceMonitorDashboard.Services
             bool excludeWaitFor = true,
             bool excludeBackups = true,
             bool excludeMiscWaits = true,
+            bool excludeCdc = true,
+            int failedJobLookbackMinutes = 60,
             IReadOnlyList<string>? excludedDatabases = null)
         {
             var result = new AlertHealthResult();
@@ -149,13 +151,21 @@ namespace PerformanceMonitorDashboard.Services
                     ? GetFilteredDeadlockCountAsync(connection, excludedDatabases)
                     : null;
                 var poisonWaitTask = GetPoisonWaitDeltasAsync(connection);
-                var longRunningTask = GetLongRunningQueriesAsync(connection, longRunningQueryThresholdMinutes, longRunningQueryMaxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits);
+                var longRunningTask = GetLongRunningQueriesAsync(connection, longRunningQueryThresholdMinutes, longRunningQueryMaxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc);
                 var tempDbTask = GetTempDbSpaceAsync(connection);
+                var volumeTask = GetVolumeFreeSpaceAsync(connection);
                 var anomalousJobTask = GetAnomalousJobsAsync(connection, longRunningJobMultiplier);
+                /* Azure SQL DB has no SQL Agent, so msdb.dbo.sysjobhistory doesn't exist there —
+                   skip the live failed-job query entirely (the other queries already gate Azure
+                   the same way via engineEdition). */
+                var failedJobTask = engineEdition == 5
+                    ? Task.FromResult(new List<FailedJobInfo>())
+                    : GetRecentlyFailedJobsAsync(connection, failedJobLookbackMinutes);
+                var missingCaptureTask = GetMissingCaptureSessionsAsync(connection);
 
                 var allTasks = filteredDeadlockTask != null
-                    ? new Task[] { cpuTask, blockingTask, deadlockTask, filteredDeadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask }
-                    : new Task[] { cpuTask, blockingTask, deadlockTask, poisonWaitTask, longRunningTask, tempDbTask, anomalousJobTask };
+                    ? new Task[] { cpuTask, blockingTask, deadlockTask, filteredDeadlockTask, poisonWaitTask, longRunningTask, tempDbTask, volumeTask, anomalousJobTask, failedJobTask, missingCaptureTask }
+                    : new Task[] { cpuTask, blockingTask, deadlockTask, poisonWaitTask, longRunningTask, tempDbTask, volumeTask, anomalousJobTask, failedJobTask, missingCaptureTask };
                 await Task.WhenAll(allTasks);
 
                 var cpuResult = await cpuTask;
@@ -172,7 +182,10 @@ namespace PerformanceMonitorDashboard.Services
                 result.PoisonWaits = await poisonWaitTask;
                 result.LongRunningQueries = await longRunningTask;
                 result.TempDbSpace = await tempDbTask;
+                result.Volumes = await volumeTask;
                 result.AnomalousJobs = await anomalousJobTask;
+                result.RecentlyFailedJobs = await failedJobTask;
+                result.MissingCaptureSessions = await missingCaptureTask;
             }
             catch (Exception ex)
             {
@@ -181,6 +194,52 @@ namespace PerformanceMonitorDashboard.Services
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Returns capture types ("Blocking", "Deadlock") whose collector most recently
+        /// logged SESSION_MISSING — the XE session is absent and couldn't be created,
+        /// so capture is non-functional even though reads "succeed" with zero rows (#1086).
+        /// </summary>
+        private async Task<List<string>> GetMissingCaptureSessionsAsync(SqlConnection connection)
+        {
+            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT
+                    x.collector_name
+                FROM
+                (
+                    SELECT
+                        cl.collector_name,
+                        cl.collection_status,
+                        n = ROW_NUMBER() OVER (PARTITION BY cl.collector_name ORDER BY cl.log_id DESC)
+                    FROM config.collection_log AS cl
+                    WHERE cl.collector_name IN (N'blocked_process_xml_collector', N'deadlock_xml_collector')
+                ) AS x
+                WHERE x.n = 1
+                AND   x.collection_status = N'SESSION_MISSING'
+                OPTION(RECOMPILE);";
+
+            var missing = new List<string>();
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    var collectorName = reader.GetString(0);
+                    missing.Add(collectorName == "blocked_process_xml_collector" ? "Blocking" : "Deadlock");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to check capture session status: {ex.Message}");
+            }
+
+            return missing;
         }
 
         /// <summary>
@@ -252,6 +311,22 @@ namespace PerformanceMonitorDashboard.Services
                 OPTION(MAXDOP 1);"
                 : @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+                DECLARE @is_linux bit = 0;
+
+                /* SystemIdle is always 0 in the SCHEDULER_MONITOR ring buffer on SQL Server
+                   on Linux, so 100 - SystemIdle - ProcessUtilization fabricates a host figure
+                   that pins total CPU at 100% forever (Issue #1048). No DMV exposes true host
+                   CPU on Linux, so report other/host CPU as NULL there and let the alert engine
+                   fall back to the SQL-only figure. sys.dm_os_host_info is 2017+; referenced via
+                   sp_executesql so SQL 2016 (no Linux build) never binds it (@is_linux stays 0). */
+                IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
+                BEGIN
+                    EXEC sys.sp_executesql
+                        N'SELECT @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
+                        N'@linux bit OUTPUT',
+                        @linux = @is_linux OUTPUT;
+                END;
+
                 SELECT TOP (1)
                     sql_cpu_percent =
                         x.rb.value
@@ -260,17 +335,21 @@ namespace PerformanceMonitorDashboard.Services
                             'integer'
                         ),
                     other_cpu_percent =
-                        100
-                        - x.rb.value
-                        (
-                            '(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]',
-                            'integer'
-                        )
-                        - x.rb.value
-                        (
-                            '(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]',
-                            'integer'
-                        )
+                        CASE
+                            WHEN @is_linux = 1
+                            THEN NULL
+                            ELSE 100
+                                 - x.rb.value
+                                 (
+                                     '(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]',
+                                     'integer'
+                                 )
+                                 - x.rb.value
+                                 (
+                                     '(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]',
+                                     'integer'
+                                 )
+                        END
                 FROM
                 (
                     SELECT
@@ -473,7 +552,9 @@ namespace PerformanceMonitorDashboard.Services
                     filtered_deadlock_count =
                         COALESCE(SUM(bds.deadlock_count_delta), 0)
                 FROM collect.blocking_deadlock_stats AS bds
-                WHERE bds.collection_time >= DATEADD(MINUTE, -5, SYSUTCDATETIME())
+                /* collection_time is server-local (SYSDATETIME default); match that clock, not UTC,
+                   or the window is hours off and the COALESCE(...,0) silently zeroes deadlock alerts. */
+                WHERE bds.collection_time >= DATEADD(MINUTE, -5, SYSDATETIME())
                 AND   bds.deadlock_count_delta IS NOT NULL
                 {dbFilter}
                 OPTION(MAXDOP 1, RECOMPILE);";
@@ -681,7 +762,8 @@ namespace PerformanceMonitorDashboard.Services
             bool excludeSpServerDiagnostics = true,
             bool excludeWaitFor = true,
             bool excludeBackups = true,
-            bool excludeMiscWaits = true)
+            bool excludeMiscWaits = true,
+            bool excludeCdc = true)
         {
             maxResults = Math.Clamp(maxResults, 1, 1000);
 
@@ -693,9 +775,45 @@ namespace PerformanceMonitorDashboard.Services
                 ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
             string miscWaitsFilter = excludeMiscWaits
                 ? "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')" : "";
+            // CDC capture runs continuously as a SQL Agent job (EXEC sys.sp_MScdc_capture_job -> sys.sp_cdc_scan),
+            // so it permanently exceeds the duration threshold and none of the wait_type filters above catch it.
+            //
+            // Primary signal: resolve the capture job_id(s) from msdb.dbo.cdc_jobs and match the running session via
+            // its SQL Agent program_name ('SQLAgent - TSQL JobStep (Job 0x<job_id> : Step N)'). This is CDC-specific
+            // and never hides unrelated Agent jobs. The msdb reference is deferred through sp_executesql inside
+            // TRY/CATCH so a login without msdb access gets a *catchable* error (not an uncatchable cross-db 916) and
+            // cleanly falls back to a text match on the whole batch/object text.
+            string cdcSetup = excludeCdc ? @"
+                DECLARE @cdc_capture_jobs TABLE (job_id uniqueidentifier PRIMARY KEY);
+                DECLARE @cdc_readable bit = 0;
+                BEGIN TRY
+                    INSERT @cdc_capture_jobs (job_id)
+                    EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
+                    SET @cdc_readable = 1;
+                END TRY
+                BEGIN CATCH
+                    SET @cdc_readable = 0;
+                END CATCH;
+" : "";
+            string cdcFilter = excludeCdc ? @"
+                    AND NOT
+                    (
+                        (
+                            @cdc_readable = 1
+                            AND s.program_name LIKE N'SQLAgent - TSQL JobStep (Job 0x%'
+                            AND TRY_CONVERT(uniqueidentifier, TRY_CONVERT(binary(16), SUBSTRING(s.program_name, 32, 32), 2))
+                                IN (SELECT j.job_id FROM @cdc_capture_jobs AS j)
+                        )
+                        OR
+                        (
+                            @cdc_readable = 0
+                            AND t.text IS NOT NULL
+                            AND (t.text LIKE N'%sp_MScdc_capture_job%' OR t.text LIKE N'%sp_cdc_scan%')
+                        )
+                    )" : "";
 
             string query = @$"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
+                {cdcSetup}
                 SELECT TOP(@maxResults)
                     r.session_id,
                     DB_NAME(r.database_id) AS database_name,
@@ -706,7 +824,8 @@ namespace PerformanceMonitorDashboard.Services
                     r.reads,
                     r.writes,
                     r.wait_type,
-                    r.blocking_session_id
+                    r.blocking_session_id,
+                    CONVERT(varchar(18), r.query_hash, 1) AS query_hash
                 FROM sys.dm_exec_requests AS r
                 CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
                 JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
@@ -717,6 +836,7 @@ namespace PerformanceMonitorDashboard.Services
                     {waitForFilter}
                     {backupsFilter}
                     {miscWaitsFilter}
+                    {cdcFilter}
                 ORDER BY r.total_elapsed_time DESC
                 OPTION(MAXDOP 1, RECOMPILE);";
 
@@ -743,7 +863,8 @@ namespace PerformanceMonitorDashboard.Services
                         Reads = Convert.ToInt64(reader.GetValue(6), System.Globalization.CultureInfo.InvariantCulture),
                         Writes = Convert.ToInt64(reader.GetValue(7), System.Globalization.CultureInfo.InvariantCulture),
                         WaitType = reader.IsDBNull(8) ? null : reader.GetString(8),
-                        BlockingSessionId = reader.IsDBNull(9) ? null : (int?)Convert.ToInt32(reader.GetValue(9), System.Globalization.CultureInfo.InvariantCulture)
+                        BlockingSessionId = reader.IsDBNull(9) ? null : (int?)Convert.ToInt32(reader.GetValue(9), System.Globalization.CultureInfo.InvariantCulture),
+                        QueryHash = reader.IsDBNull(10) ? null : reader.GetString(10)
                     });
                 }
             }
@@ -806,6 +927,89 @@ namespace PerformanceMonitorDashboard.Services
             return results;
         }
 
+        /// <summary>
+        /// Live query against the monitored server's msdb for SQL Agent job runs (step_id = 0
+        /// outcome row, run_status = 0 = Failed) that failed within the lookback window.
+        /// run_date/run_time integers are converted to a server-local datetime and filtered to the
+        /// last N minutes. Degrades gracefully: a login without msdb / SQLAgentReaderRole access
+        /// raises a catchable SqlException (916/229/297/300) that returns an empty list rather than
+        /// failing the alert cycle. Azure SQL DB (no Agent) is skipped by the caller.
+        /// </summary>
+        private async Task<List<FailedJobInfo>> GetRecentlyFailedJobsAsync(SqlConnection connection, int lookbackMinutes)
+        {
+            var results = new List<FailedJobInfo>();
+
+            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT TOP (50)
+                    job_name = j.name,
+                    job_id = CONVERT(varchar(36), j.job_id),
+                    run_datetime =
+                        DATEADD
+                        (
+                            SECOND,
+                            (jh.run_time / 10000) * 3600 +
+                            ((jh.run_time / 100) % 100) * 60 +
+                            (jh.run_time % 100),
+                            CONVERT(datetime, CONVERT(varchar(8), jh.run_date))
+                        ),
+                    step_id = jh.step_id,
+                    step_name = jh.step_name,
+                    message = jh.message
+                FROM msdb.dbo.sysjobhistory AS jh
+                JOIN msdb.dbo.sysjobs AS j
+                  ON j.job_id = jh.job_id
+                WHERE jh.step_id = 0
+                AND   jh.run_status = 0
+                AND   jh.run_date >= CONVERT(integer, CONVERT(varchar(8), DATEADD(MINUTE, -@lookback_minutes, GETDATE()), 112))
+                AND   DATEADD
+                      (
+                          SECOND,
+                          (jh.run_time / 10000) * 3600 +
+                          ((jh.run_time / 100) % 100) * 60 +
+                          (jh.run_time % 100),
+                          CONVERT(datetime, CONVERT(varchar(8), jh.run_date))
+                      ) >= DATEADD(MINUTE, -@lookback_minutes, GETDATE())
+                ORDER BY
+                    run_datetime DESC
+                OPTION(RECOMPILE);";
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                cmd.Parameters.Add(new SqlParameter("@lookback_minutes", SqlDbType.Int) { Value = lookbackMinutes });
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    results.Add(new FailedJobInfo
+                    {
+                        JobName = reader.GetString(0),
+                        JobId = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        RunDateTime = reader.GetDateTime(2),
+                        StepId = reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture),
+                        StepName = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                        Message = reader.IsDBNull(5) ? "" : reader.GetString(5)
+                    });
+                }
+            }
+            catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 229 or 297 or 300 or 916)
+            {
+                /* Login lacks msdb / SQLAgentReaderRole access — expected for read-only monitoring
+                   accounts; hit every alert cycle, so log at Info (not Warning) to avoid burying real warnings. */
+                Logger.Info($"Skipping recently-failed-job check (msdb/SQLAgentReaderRole access needed): {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                /* Unexpected error (timeout, transient, etc.) — surface at Warning so a genuine read
+                   failure can't masquerade as "no failed jobs". Still returns empty so the cycle continues. */
+                Logger.Warning($"Recently-failed-job check errored: {ex.Message}");
+            }
+
+            return results;
+        }
+
         private async Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(SqlConnection connection)
         {
             const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -848,6 +1052,61 @@ namespace PerformanceMonitorDashboard.Services
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Returns latest free space for each distinct volume (mount point), worst (lowest free %)
+        /// first, for the low-disk alert. Files on the same volume collapse to one row. Volumes with
+        /// no mount point (Azure SQL DB has no volume stats) are excluded, so Azure yields no rows.
+        /// </summary>
+        private async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(SqlConnection connection)
+        {
+            const string query = @"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+                SELECT
+                    volume_mount_point,
+                    volume_total_mb =
+                        MAX(volume_total_mb),
+                    volume_free_mb =
+                        MIN(volume_free_mb)
+                FROM collect.database_size_stats
+                WHERE collection_time =
+                (
+                    SELECT MAX(collection_time)
+                    FROM collect.database_size_stats
+                )
+                AND   volume_mount_point IS NOT NULL
+                AND   volume_total_mb > 0
+                GROUP BY
+                    volume_mount_point
+                ORDER BY
+                    MIN(volume_free_mb) / MAX(volume_total_mb)
+                OPTION(MAXDOP 1);";
+
+            var results = new List<VolumeFreeSpaceInfo>();
+
+            try
+            {
+                using var cmd = new SqlCommand(query, connection);
+                cmd.CommandTimeout = 10;
+                using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    results.Add(new VolumeFreeSpaceInfo
+                    {
+                        MountPoint = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        TotalMb = reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture),
+                        FreeMb = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture)
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to get volume free space: {ex.Message}");
+            }
+
+            return results;
         }
     }
 }

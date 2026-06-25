@@ -78,7 +78,7 @@ namespace PerformanceMonitorDashboard.Controls
             for (int i = 0; i < numCols; i += xStep)
             {
                 var t = result.TimeBuckets[i];
-                xTicks.AddMajor(i, t.ToString("M/d\nh:mm tt"));
+                xTicks.AddMajor(i, t.ToString("M/d\nHH:mm"));
             }
             QueryHeatmapChart.Plot.Axes.Bottom.TickGenerator = xTicks;
 

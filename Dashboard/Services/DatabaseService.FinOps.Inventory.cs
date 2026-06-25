@@ -126,7 +126,20 @@ END;
 
 SELECT
     edition =
-        CONVERT(nvarchar(256), SERVERPROPERTY('Edition')),
+        /* Azure SQL DB reports the legacy 'SQL Azure' for SERVERPROPERTY('Edition');
+           show the actual product name + service tier instead. Mirrors Lite's
+           LocalDataService.FinOps.ServerProperties. */
+        CASE
+            WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+            THEN N'Azure SQL Database'
+                 + ISNULL(N' (' +
+                     CASE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Edition'))
+                         WHEN N'GeneralPurpose'   THEN N'General Purpose'
+                         WHEN N'BusinessCritical' THEN N'Business Critical'
+                         ELSE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Edition'))
+                     END + N')', N'')
+            ELSE CONVERT(nvarchar(256), SERVERPROPERTY('Edition'))
+        END,
     product_version =
         CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
     product_level =

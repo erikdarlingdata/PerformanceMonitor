@@ -97,7 +97,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 25;
+    internal const int CurrentSchemaVersion = 32;
 
     private readonly string _archivePath;
 
@@ -116,7 +116,7 @@ public class DuckDbInitializer
         "query_snapshots", "cpu_utilization_stats", "file_io_stats", "memory_stats",
         "memory_clerks", "memory_pressure_events", "tempdb_stats", "perfmon_stats",
         "deadlocks", "blocked_process_reports", "memory_grant_stats", "waiting_tasks",
-        "running_jobs", "database_size_stats", "server_properties",
+        "running_jobs", "database_size_stats", "index_object_stats", "server_properties",
         "session_stats", "server_config", "database_config",
         "database_scoped_config", "trace_flags", "config_alert_log",
         "collection_log"
@@ -158,22 +158,9 @@ public class DuckDbInitializer
             _logger?.LogInformation("Created archive directory: {ArchivePath}", archivePath);
         }
 
-        /* Try to open the database. If the DuckDB storage version has changed,
-           this will throw. We handle it by exporting to Parquet, rebuilding, and importing. */
-        DuckDBConnection connection;
-        try
-        {
-            connection = new DuckDBConnection(ConnectionString);
-            await connection.OpenAsync();
-        }
-        catch (Exception ex) when (IsStorageVersionError(ex))
-        {
-            _logger?.LogWarning("DuckDB storage version mismatch detected. Migrating data via Parquet export/import.");
-            await MigrateViaParquetAsync(archivePath);
-
-            connection = new DuckDBConnection(ConnectionString);
-            await connection.OpenAsync();
-        }
+        /* Open the database. Only a genuine storage-version mismatch triggers the
+           destructive Parquet rebuild; transient lock contention is retried instead. */
+        DuckDBConnection connection = await OpenDatabaseAsync(archivePath);
 
         using (connection)
         {
@@ -215,21 +202,84 @@ public class DuckDbInitializer
     }
 
     /// <summary>
-    /// Checks if an exception is a DuckDB storage version mismatch.
+    /// Opens the DuckDB database, handling the two failure modes distinctly:
+    /// a genuine storage-version mismatch is migrated via Parquet export/import,
+    /// while transient lock contention (e.g. an instance that was just killed,
+    /// or antivirus holding the file) is retried before giving up.
+    /// Any other open failure is rethrown — it must NOT trigger the destructive
+    /// Parquet rebuild, which would move the live database aside (Issue #977).
+    /// </summary>
+    private async Task<DuckDBConnection> OpenDatabaseAsync(string archivePath)
+    {
+        const int maxLockRetries = 5;
+        const int lockRetryDelayMs = 1000;
+
+        for (int attempt = 1; ; attempt++)
+        {
+            var connection = new DuckDBConnection(ConnectionString);
+            try
+            {
+                await connection.OpenAsync();
+                return connection;
+            }
+            catch (Exception ex) when (IsStorageVersionError(ex))
+            {
+                connection.Dispose();
+                _logger?.LogWarning("DuckDB storage version mismatch detected. Migrating data via Parquet export/import.");
+                await MigrateViaParquetAsync(archivePath);
+
+                var migrated = new DuckDBConnection(ConnectionString);
+                await migrated.OpenAsync();
+                return migrated;
+            }
+            catch (Exception ex) when (IsTransientLockError(ex) && attempt < maxLockRetries)
+            {
+                connection.Dispose();
+                _logger?.LogWarning(
+                    "DuckDB database is locked (attempt {Attempt}/{Max}); retrying in {Delay}ms. {Error}",
+                    attempt, maxLockRetries, lockRetryDelayMs, ex.Message);
+                await Task.Delay(lockRetryDelayMs);
+            }
+            catch
+            {
+                connection.Dispose();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks if an exception is a genuine DuckDB storage-version mismatch — an
+    /// incompatible on-disk format that cannot be opened as-is and must be
+    /// rebuilt. Deliberately narrow: generic open failures and lock contention
+    /// must NOT match, or the destructive Parquet rebuild fires on a database
+    /// that is merely locked or recovering a WAL from an unclean shutdown.
     /// </summary>
     private static bool IsStorageVersionError(Exception ex)
     {
-        /* DuckDB version mismatch errors include:
-           - "Serialization Error: Failed to deserialize" (incompatible storage format)
-           - "IO Error: Trying to read a database file with version number X, but we can only read version Y"
-           Note: Since DuckDB v0.10+, backward compatibility is maintained (newer reads older).
-           This primarily catches forward-incompatibility (older library, newer file). */
+        /* DuckDB reports a genuine version mismatch as one of:
+           - "Serialization Error: Failed to deserialize: ..." (incompatible storage format)
+           - "IO Error: Trying to read a database file with version number X,
+              but we can only read version Y"
+           Since DuckDB v0.10+, newer libraries read older files, so this almost
+           always means an older library was pointed at a newer file. */
         var message = ex.ToString().ToLowerInvariant();
-        return message.Contains("serialization error")
-            || message.Contains("failed to deserialize")
+        return message.Contains("failed to deserialize")
             || message.Contains("trying to read a database file with version")
-            || message.Contains("storage version")
-            || message.Contains("unable to open database");
+            || message.Contains("storage version");
+    }
+
+    /// <summary>
+    /// Checks if an exception is transient lock contention on the database file —
+    /// another process (a just-killed prior instance, antivirus) is holding it.
+    /// These are safe to retry and must never trigger the Parquet rebuild.
+    /// </summary>
+    private static bool IsTransientLockError(Exception ex)
+    {
+        var message = ex.ToString().ToLowerInvariant();
+        return message.Contains("conflicting lock")
+            || message.Contains("could not set lock")
+            || message.Contains("being used by another process");
     }
 
     /// <summary>
@@ -652,6 +702,111 @@ public class DuckDbInitializer
             /* v25: Added memory_pressure_events table for RING_BUFFER_RESOURCE_MONITOR notifications.
                     New table only — created by GetAllTableStatements(). */
             _logger?.LogInformation("Running migration to v25: adding memory_pressure_events table");
+        }
+
+        if (fromVersion < 26)
+        {
+            _logger?.LogInformation("Running migration to v26: adding context_json column to alert log");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_alert_log ADD COLUMN IF NOT EXISTS context_json VARCHAR");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v26 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 27)
+        {
+            _logger?.LogInformation("Running migration to v27: adding server-health columns (LPIM/IFI/memory dumps) to server_properties");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE server_properties ADD COLUMN IF NOT EXISTS lock_pages_in_memory BOOLEAN");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE server_properties ADD COLUMN IF NOT EXISTS instant_file_initialization_enabled BOOLEAN");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE server_properties ADD COLUMN IF NOT EXISTS memory_dump_count INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Migration to v27 failed");
+                throw;
+            }
+        }
+
+        if (fromVersion < 28)
+        {
+            /* v28: Added is_cdc_capture flag to query_snapshots so the long-running query
+                    alert can exclude CDC capture sessions. The collector computes the flag
+                    server-side (program_name -> job_id via msdb.dbo.cdc_jobs, text fallback).
+                    Appended at the end to match the DuckDB appender's positional order. */
+            _logger?.LogInformation("Running migration to v28: adding is_cdc_capture column to query_snapshots");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS is_cdc_capture BOOLEAN DEFAULT false");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v28 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 30)
+        {
+            /* v30 (#1140): dedup-fingerprint support. blocked_process_reports gains the contentious
+               object the blocked_process_report event already carries (object_id/database_id) plus the
+               resolved name; query_snapshots gains query_hash for the long-running-query dedup key.
+               Appended at the end to keep the positional appender aligned; the v_ views union BY NAME
+               so old parquet reads back NULL for these. */
+            _logger?.LogInformation("Running migration to v30: dedup fingerprint columns (#1140)");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE blocked_process_reports ADD COLUMN IF NOT EXISTS object_id INTEGER");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE blocked_process_reports ADD COLUMN IF NOT EXISTS database_id INTEGER");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE blocked_process_reports ADD COLUMN IF NOT EXISTS contentious_object VARCHAR");
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE query_snapshots ADD COLUMN IF NOT EXISTS query_hash VARCHAR");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v30 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 31)
+        {
+            /* v31: failed-Agent-job watermark persistence. The blocking/deadlock edge-trigger
+               watermarks already survive restart (#1145); the failed-job watermark did not, so a
+               reopen re-fired tray toasts for failures still inside the lookback window that the
+               user had already seen and dismissed. Adds a nullable watermark_time column to the
+               existing watermark table to hold the newest already-alerted failure's server-local
+               run time. Only ALTER if the table exists — fresh installs get the column from
+               GetAllTableStatements(). */
+            _logger?.LogInformation("Running migration to v31: failed-job watermark column");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE config_edge_trigger_watermarks ADD COLUMN IF NOT EXISTS watermark_time TIMESTAMP");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v31 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 32)
+        {
+            /* v32: block-chain reconstruction now keys sessions by spid:ecid within monitor_loop (mirroring
+               sp_HumanEventsBlockViewer). blocked_process_reports gains monitor_loop (the blocked-process-report
+               episode). Appended at the end to keep the positional appender aligned; the v_ view (SELECT *,
+               recreated on startup) surfaces it; old parquet reads back NULL (union BY NAME). The collector
+               appender now writes monitor_loop, so an un-migrated DB would mis-align — this ALTER is required. */
+            _logger?.LogInformation("Running migration to v32: blocked_process_reports.monitor_loop");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "ALTER TABLE blocked_process_reports ADD COLUMN IF NOT EXISTS monitor_loop INTEGER");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v32 encountered an error (non-fatal): {Error}", ex.Message);
+            }
         }
     }
 

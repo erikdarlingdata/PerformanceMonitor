@@ -34,8 +34,28 @@ namespace PerformanceMonitorDashboard.Models
         public List<PoisonWaitDelta> PoisonWaits { get; set; } = new();
         public List<LongRunningQueryInfo> LongRunningQueries { get; set; } = new();
         public TempDbSpaceInfo? TempDbSpace { get; set; }
+
+        /// <summary>
+        /// Free space per distinct volume on the server, ordered worst (lowest free %) first.
+        /// Empty on Azure SQL DB (no volume stats collected). Used by the low-disk alert.
+        /// </summary>
+        public List<VolumeFreeSpaceInfo> Volumes { get; set; } = new();
         public List<AnomalousJobInfo> AnomalousJobs { get; set; } = new();
+
+        /// <summary>
+        /// SQL Agent job runs that failed within the failed-job lookback window. Live
+        /// msdb query — empty on Azure SQL DB (no Agent) or when the login lacks msdb /
+        /// SQLAgentReaderRole access.
+        /// </summary>
+        public List<FailedJobInfo> RecentlyFailedJobs { get; set; } = new();
         public bool IsOnline { get; set; } = true;
+
+        /// <summary>
+        /// Capture types ("Blocking", "Deadlock") whose XE session is missing —
+        /// the collector's latest collection_log status is SESSION_MISSING (#1086).
+        /// Empty when both sessions are healthy.
+        /// </summary>
+        public List<string> MissingCaptureSessions { get; set; } = new();
 
         /// <summary>
         /// Total CPU = SQL + Other.

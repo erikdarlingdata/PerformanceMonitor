@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
@@ -23,14 +24,18 @@ public class SqlPlanFetcher : IPlanFetcher
     {
         if (string.IsNullOrEmpty(planHandle)) return null;
 
-        // serverId is a hash — find the server by matching the hash
+        // serverId is the deterministic FNV hash of the storage name (host[:db][:RO]) produced by
+        // RemoteCollectorService.GetServerId. Match with the same function — string.GetHashCode()
+        // is randomized per process and also ignores the db/RO suffixes, so it would never match.
         var server = _serverManager.GetAllServers()
-            .FirstOrDefault(s => s.ServerName.GetHashCode() == serverId);
+            .FirstOrDefault(s =>
+                RemoteCollectorService.GetDeterministicHashCode(
+                    RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
         if (server == null) return null;
 
         try
         {
-            var connectionString = server.GetConnectionString(_serverManager.CredentialService);
+            var connectionString = _serverManager.CredentialResolver.GetConnectionString(server);
             var builder = new SqlConnectionStringBuilder(connectionString)
             {
                 ConnectTimeout = 10,

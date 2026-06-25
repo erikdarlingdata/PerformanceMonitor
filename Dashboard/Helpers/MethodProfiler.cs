@@ -10,6 +10,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitorDashboard.Helpers
 {
@@ -99,6 +100,37 @@ namespace PerformanceMonitorDashboard.Helpers
             [CallerLineNumber] int lineNumber = 0)
         {
             return new MethodTimingContext(context, memberName, filePath, lineNumber);
+        }
+
+        /// <summary>
+        /// Times an async operation under <paramref name="context"/>, logging it if it exceeds the
+        /// slow-method threshold. Use for per-section profiling of parallel data loads, e.g.:
+        /// <code>var task = MethodProfiler.TimeAsync("Overview.DefaultTrace", () => LoadDefaultTraceAsync());</code>
+        /// The timing covers the full wall-clock of the operation (including any connection-throttle wait).
+        /// </summary>
+        public static async Task<T> TimeAsync<T>(
+            string context,
+            Func<Task<T>> operation,
+            [CallerMemberName] string memberName = "",
+            [CallerFilePath] string filePath = "",
+            [CallerLineNumber] int lineNumber = 0)
+        {
+            using var _ = StartTiming(context, memberName, filePath, lineNumber);
+            return await operation();
+        }
+
+        /// <summary>
+        /// Void-returning overload of <see cref="TimeAsync{T}"/>.
+        /// </summary>
+        public static async Task TimeAsync(
+            string context,
+            Func<Task> operation,
+            [CallerMemberName] string memberName = "",
+            [CallerFilePath] string filePath = "",
+            [CallerLineNumber] int lineNumber = 0)
+        {
+            using var _ = StartTiming(context, memberName, filePath, lineNumber);
+            await operation();
         }
 
         /// <summary>

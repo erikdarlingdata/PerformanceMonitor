@@ -16,6 +16,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard
 {
@@ -71,7 +72,7 @@ namespace PerformanceMonitorDashboard
                     {
                         if (column is DataGridBoundColumn boundColumn)
                         {
-                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
+                            headers.Add(DataGridClipboardBehavior.GetHeaderText(column));
                         }
                     }
                     sb.AppendLine(string.Join("	", headers));
@@ -114,7 +115,7 @@ namespace PerformanceMonitorDashboard
                             {
                                 if (column is DataGridBoundColumn)
                                 {
-                                    headers.Add(EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column)));
+                                    headers.Add(EscapeCsvField(DataGridClipboardBehavior.GetHeaderText(column)));
                                 }
                             }
                             sb.AppendLine(string.Join(",", headers));

@@ -13,24 +13,26 @@ using System.Windows.Controls;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using ScottPlot.WPF;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard
 {
     public partial class ServerTab : UserControl
     {
         // Chart hover tooltips
-        private Helpers.ChartHoverHelper? _resourceOverviewCpuHover;
-        private Helpers.ChartHoverHelper? _resourceOverviewMemoryHover;
-        private Helpers.ChartHoverHelper? _resourceOverviewIoHover;
-        private Helpers.ChartHoverHelper? _resourceOverviewWaitHover;
-        private Helpers.ChartHoverHelper? _lockWaitStatsHover;
-        private Helpers.ChartHoverHelper? _blockingEventsHover;
-        private Helpers.ChartHoverHelper? _blockingDurationHover;
-        private Helpers.ChartHoverHelper? _deadlocksHover;
-        private Helpers.ChartHoverHelper? _deadlockWaitTimeHover;
-        private Helpers.ChartHoverHelper? _collectorDurationHover;
-        private Helpers.ChartHoverHelper? _currentWaitsDurationHover;
-        private Helpers.ChartHoverHelper? _currentWaitsBlockedHover;
+        private ChartHoverHelper? _resourceOverviewCpuHover;
+        private ChartHoverHelper? _resourceOverviewMemoryHover;
+        private ChartHoverHelper? _resourceOverviewIoHover;
+        private ChartHoverHelper? _resourceOverviewWaitHover;
+        private ChartHoverHelper? _lockWaitStatsHover;
+        private ChartHoverHelper? _blockingEventsHover;
+        private ChartHoverHelper? _blockingDurationHover;
+        private ChartHoverHelper? _deadlocksHover;
+        private ChartHoverHelper? _deadlockWaitTimeHover;
+        private ChartHoverHelper? _collectorDurationHover;
+        private ChartHoverHelper? _currentWaitsDurationHover;
+        private ChartHoverHelper? _currentWaitsBlockedHover;
 
         private void OnThemeChanged(string _)
         {
@@ -119,9 +121,8 @@ namespace PerformanceMonitorDashboard
             if (blockingXs.Length > 0)
             {
                 var scatter = BlockingStatsBlockingEventsChart.Plot.Add.Scatter(blockingXs, blockingYs);
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 5;
-                scatter.Color = TabHelpers.ChartColors[0];
+                scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
+                ChartStyle.StyleScatter(scatter);
                 _blockingEventsHover?.Add(scatter, "Blocking Events");
             }
             else
@@ -129,7 +130,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = BlockingStatsBlockingEventsChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
             BlockingStatsBlockingEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
@@ -148,9 +149,8 @@ namespace PerformanceMonitorDashboard
             if (durationXs.Length > 0)
             {
                 var scatter = BlockingStatsDurationChart.Plot.Add.Scatter(durationXs, durationYs);
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 5;
-                scatter.Color = TabHelpers.ChartColors[2];
+                scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BlockingDuration"));
+                ChartStyle.StyleScatter(scatter);
                 _blockingDurationHover?.Add(scatter, "Blocking Duration");
             }
             else
@@ -158,7 +158,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = BlockingStatsDurationChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
             BlockingStatsDurationChart.Plot.Axes.DateTimeTicksBottomDateChange();
@@ -177,9 +177,8 @@ namespace PerformanceMonitorDashboard
             if (deadlockXs.Length > 0)
             {
                 var scatter = BlockingStatsDeadlocksChart.Plot.Add.Scatter(deadlockXs, deadlockYs);
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 5;
-                scatter.Color = TabHelpers.ChartColors[3];
+                scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
+                ChartStyle.StyleScatter(scatter);
                 _deadlocksHover?.Add(scatter, "Deadlocks");
             }
             else
@@ -187,7 +186,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = BlockingStatsDeadlocksChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
             BlockingStatsDeadlocksChart.Plot.Axes.DateTimeTicksBottomDateChange();
@@ -206,9 +205,8 @@ namespace PerformanceMonitorDashboard
             if (deadlockWaitXs.Length > 0)
             {
                 var scatter = BlockingStatsDeadlockWaitTimeChart.Plot.Add.Scatter(deadlockWaitXs, deadlockWaitYs);
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 5;
-                scatter.Color = TabHelpers.ChartColors[4];
+                scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("DeadlockWaitTime"));
+                ChartStyle.StyleScatter(scatter);
                 _deadlockWaitTimeHover?.Add(scatter, "Deadlock Wait Time");
             }
             else
@@ -216,7 +214,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = BlockingStatsDeadlockWaitTimeChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
             BlockingStatsDeadlockWaitTimeChart.Plot.Axes.DateTimeTicksBottomDateChange();
@@ -309,9 +307,8 @@ namespace PerformanceMonitorDashboard
                         waitTypeData.Select(d => (double)d.WaitTimeMsPerSecond));
 
                     var scatter = LockWaitStatsChart.Plot.Add.Scatter(xs, ys);
-                    scatter.LineWidth = 2;
-                    scatter.MarkerSize = 5;
                     scatter.Color = colors[colorIndex % colors.Length];
+                    ChartStyle.StyleScatter(scatter);
                     var lockLabel = waitType.Replace("LCK_M_", "").Replace("LCK_", "");
                     scatter.LegendText = lockLabel;
                     _lockWaitStatsHover?.Add(scatter, lockLabel);
@@ -324,7 +321,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = LockWaitStatsChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -367,9 +364,8 @@ namespace PerformanceMonitorDashboard
                         waitTypeData.Select(d => (double)d.TotalWaitMs));
 
                     var scatter = CurrentWaitsDurationChart.Plot.Add.Scatter(xs, ys);
-                    scatter.LineWidth = 2;
-                    scatter.MarkerSize = 5;
                     scatter.Color = colors[colorIndex % colors.Length];
+                    ChartStyle.StyleScatter(scatter);
                     scatter.LegendText = waitType;
                     _currentWaitsDurationHover?.Add(scatter, waitType);
                     colorIndex++;
@@ -381,7 +377,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = CurrentWaitsDurationChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -424,9 +420,8 @@ namespace PerformanceMonitorDashboard
                         dbData.Select(d => (double)d.BlockedCount));
 
                     var scatter = CurrentWaitsBlockedChart.Plot.Add.Scatter(xs, ys);
-                    scatter.LineWidth = 2;
-                    scatter.MarkerSize = 5;
                     scatter.Color = colors[colorIndex % colors.Length];
+                    ChartStyle.StyleScatter(scatter);
                     scatter.LegendText = db;
                     _currentWaitsBlockedHover?.Add(scatter, db);
                     colorIndex++;
@@ -438,7 +433,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = CurrentWaitsBlockedChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -469,19 +464,28 @@ namespace PerformanceMonitorDashboard
 
             var dataList = cpuData?.OrderBy(d => d.SampleTime).ToList() ?? new List<CpuDataPoint>();
 
-            // Build time series with boundary points for continuous lines
-            var (xs, ys) = TabHelpers.FillTimeSeriesGaps(
+            // Build time series with boundary points for continuous lines.
+            // Two series: SQL CPU (blue) + Total non-idle CPU (orange) — matches the alert metric (PM#1004).
+            var (xsTotal, ysTotal) = TabHelpers.FillTimeSeriesGaps(
+                dataList.Select(d => d.SampleTime),
+                dataList.Select(d => (double)d.TotalCpu));
+            var (xsSql, ysSql) = TabHelpers.FillTimeSeriesGaps(
                 dataList.Select(d => d.SampleTime),
                 dataList.Select(d => (double)d.SqlServerCpu));
 
-            if (xs.Length > 0)
+            if (xsTotal.Length > 0)
             {
-                var scatter = ResourceOverviewCpuChart.Plot.Add.Scatter(xs, ys);
-                scatter.LineWidth = 2;
-                scatter.MarkerSize = 5;
-                scatter.Color = TabHelpers.ChartColors[0];
-                scatter.LegendText = "SQL CPU %";
-                _resourceOverviewCpuHover?.Add(scatter, "SQL CPU %");
+                var totalScatter = ResourceOverviewCpuChart.Plot.Add.Scatter(xsTotal, ysTotal);
+                totalScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TotalCpu"));
+                ChartStyle.StyleScatter(totalScatter);
+                totalScatter.LegendText = "Total CPU %";
+                _resourceOverviewCpuHover?.Add(totalScatter, "Total CPU %");
+
+                var sqlScatter = ResourceOverviewCpuChart.Plot.Add.Scatter(xsSql, ysSql);
+                sqlScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlCpu"));
+                ChartStyle.StyleScatter(sqlScatter);
+                sqlScatter.LegendText = "SQL CPU %";
+                _resourceOverviewCpuHover?.Add(sqlScatter, "SQL CPU %");
 
                 _legendPanels[ResourceOverviewCpuChart] = ResourceOverviewCpuChart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
                 ResourceOverviewCpuChart.Plot.Legend.FontSize = 12;
@@ -491,7 +495,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = ResourceOverviewCpuChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -533,16 +537,14 @@ namespace PerformanceMonitorDashboard
             if (bufferXs.Length > 0)
             {
                 var bufferScatter = ResourceOverviewMemoryChart.Plot.Add.Scatter(bufferXs, bufferYs);
-                bufferScatter.LineWidth = 2;
-                bufferScatter.MarkerSize = 5;
-                bufferScatter.Color = TabHelpers.ChartColors[4];
+                bufferScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BufferPool"));
+                ChartStyle.StyleScatter(bufferScatter);
                 bufferScatter.LegendText = "Buffer Pool";
                 _resourceOverviewMemoryHover?.Add(bufferScatter, "Buffer Pool");
 
                 var grantsScatter = ResourceOverviewMemoryChart.Plot.Add.Scatter(grantsXs, grantsYs);
-                grantsScatter.LineWidth = 2;
-                grantsScatter.MarkerSize = 5;
-                grantsScatter.Color = TabHelpers.ChartColors[2];
+                grantsScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MemoryGrants"));
+                ChartStyle.StyleScatter(grantsScatter);
                 grantsScatter.LegendText = "Memory Grants";
                 _resourceOverviewMemoryHover?.Add(grantsScatter, "Memory Grants");
 
@@ -554,7 +556,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = ResourceOverviewMemoryChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -610,16 +612,14 @@ namespace PerformanceMonitorDashboard
             if (readXs.Length > 0)
             {
                 var readScatter = ResourceOverviewIoChart.Plot.Add.Scatter(readXs, readYs);
-                readScatter.LineWidth = 2;
-                readScatter.MarkerSize = 5;
-                readScatter.Color = TabHelpers.ChartColors[1];
+                readScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("ReadLatency"));
+                ChartStyle.StyleScatter(readScatter);
                 readScatter.LegendText = "Read ms";
                 _resourceOverviewIoHover?.Add(readScatter, "Read ms");
 
                 var writeScatter = ResourceOverviewIoChart.Plot.Add.Scatter(writeXs, writeYs);
-                writeScatter.LineWidth = 2;
-                writeScatter.MarkerSize = 5;
-                writeScatter.Color = TabHelpers.ChartColors[2];
+                writeScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("WriteLatency"));
+                ChartStyle.StyleScatter(writeScatter);
                 writeScatter.LegendText = "Write ms";
                 _resourceOverviewIoHover?.Add(writeScatter, "Write ms");
 
@@ -631,7 +631,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = ResourceOverviewIoChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -686,9 +686,8 @@ namespace PerformanceMonitorDashboard
                         waitTypeData.Select(d => (double)d.WaitTimeMsPerSecond));
 
                     var scatter = ResourceOverviewWaitChart.Plot.Add.Scatter(xs, ys);
-                    scatter.LineWidth = 2;
-                    scatter.MarkerSize = 5;
                     scatter.Color = colors[colorIndex % colors.Length];
+                    ChartStyle.StyleScatter(scatter);
                     var waitLabel = waitType.Length > 15 ? waitType.Substring(0, 15) + "..." : waitType;
                     scatter.LegendText = waitLabel;
                     _resourceOverviewWaitHover?.Add(scatter, waitLabel);
@@ -703,7 +702,7 @@ namespace PerformanceMonitorDashboard
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = ResourceOverviewWaitChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 

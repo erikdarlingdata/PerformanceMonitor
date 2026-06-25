@@ -60,9 +60,11 @@ namespace PerformanceMonitorLite.Services
         /// <summary>
         /// Updates alert counts and returns whether the badge should be shown.
         /// Clears acknowledgement only if latestEventTime is newer than the ack timestamp,
-        /// meaning genuinely new events arrived (not just a time-range change).
+        /// meaning genuinely new events arrived (not just a time-range change). The badge also
+        /// shows for a standing low-disk breach or a failed Agent job in the lookback window
+        /// (#754/#749), not just blocking/deadlock events.
         /// </summary>
-        public bool UpdateAlertCounts(string serverId, int blockingCount, int deadlockCount, DateTime? latestEventTimeUtc)
+        public bool UpdateAlertCounts(string serverId, int blockingCount, int deadlockCount, bool hasLowDisk, bool hasFailedJob, DateTime? latestEventTimeUtc)
         {
             lock (_lock)
             {
@@ -75,8 +77,8 @@ namespace PerformanceMonitorLite.Services
                     Save();
                 }
 
-                int totalAlerts = blockingCount + deadlockCount;
-                return totalAlerts > 0 && ShouldShowAlertsInternal(serverId);
+                bool hasAny = (blockingCount + deadlockCount) > 0 || hasLowDisk || hasFailedJob;
+                return hasAny && ShouldShowAlertsInternal(serverId);
             }
         }
 
@@ -92,6 +94,24 @@ namespace PerformanceMonitorLite.Services
                 Save();
             }
             SuppressionStateChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Clears a server's acknowledgement when a genuinely new badge condition (a fresh low-disk
+        /// breach or failed Agent job) appears. Those booleans have no event timestamp of their own,
+        /// so the timestamp-based clear in <see cref="UpdateAlertCounts"/> never fires for them; the
+        /// caller detects the false-&gt;true transition and calls this so the badge re-lights —
+        /// matching the Dashboard's re-show on a new disk/job condition (#1128 review).
+        /// </summary>
+        public void ClearAcknowledgementForNewCondition(string serverId)
+        {
+            bool changed;
+            lock (_lock)
+            {
+                changed = _acknowledgedAlerts.Remove(serverId);
+                if (changed) Save();
+            }
+            if (changed) SuppressionStateChanged?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>

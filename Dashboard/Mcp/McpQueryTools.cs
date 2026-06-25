@@ -7,6 +7,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -41,7 +42,7 @@ public sealed class McpQueryTools
             var rows = await resolved.Value.Service.GetQueryStatsForMcpAsync(hours_back, top, database_name, parallel_only, min_dop);
             if (rows.Count == 0)
             {
-                return "No query stats available for the specified time range.";
+                return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
             var result = rows.Select(r => new
@@ -113,7 +114,7 @@ public sealed class McpQueryTools
             var rows = await resolved.Value.Service.GetProcedureStatsForMcpAsync(hours_back, top, database_name);
             if (rows.Count == 0)
             {
-                return "No procedure stats available for the specified time range.";
+                return McpHelpers.Status("unavailable", "No procedure stats available for the specified time range.");
             }
 
             var result = rows.Select(r => new
@@ -180,7 +181,7 @@ public sealed class McpQueryTools
             var rows = await resolved.Value.Service.GetQueryStoreDataForMcpAsync(hours_back, top, database_name, parallel_only, min_dop);
             if (rows.Count == 0)
             {
-                return "No Query Store data available. Query Store may not be enabled on target databases.";
+                return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
             var result = rows.Select(r => new
@@ -244,7 +245,7 @@ public sealed class McpQueryTools
             var rows = await resolved.Value.Service.GetExpensiveQueriesAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No expensive query data available.";
+                return McpHelpers.Status("unavailable", "No expensive query data available.");
             }
 
             IEnumerable<ExpensiveQueryItem> filtered = rows;
@@ -303,7 +304,7 @@ public sealed class McpQueryTools
             var rows = await resolved.Value.Service.GetQueryStatsHistoryAsync(database_name, query_hash);
             if (rows.Count == 0)
             {
-                return $"No history found for query_hash '{query_hash}' in database '{database_name}'.";
+                return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}'.");
             }
 
             var result = rows.Select(r => new

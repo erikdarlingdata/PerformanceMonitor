@@ -125,6 +125,62 @@ ORDER BY collection_time";
         return items;
     }
 
+    /// <summary>
+    /// Batched sibling of <see cref="GetPerfmonTrendAsync"/>: fetches the trend for ALL selected
+    /// counters in ONE query (replacing an N+1 query-per-counter loop), grouped by counter name.
+    /// </summary>
+    public async Task<Dictionary<string, List<PerfmonTrendPoint>>> GetPerfmonTrendsByCountersAsync(int serverId, List<string> counterNames, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var _q = TimeQuery("GetPerfmonTrendsByCountersAsync", "v_perfmon_stats trends batched by counter");
+        var result = new Dictionary<string, List<PerfmonTrendPoint>>();
+        if (counterNames.Count == 0) return result;
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var nameParams = string.Join(", ", counterNames.Select((_, i) => "$" + (i + 4)));
+
+        command.CommandText = $@"
+SELECT
+    counter_name,
+    collection_time,
+    SUM(cntr_value) AS cntr_value,
+    SUM(delta_cntr_value) AS delta_cntr_value
+FROM v_perfmon_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   counter_name IN ({nameParams})
+GROUP BY counter_name, collection_time
+ORDER BY counter_name, collection_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        foreach (var cn in counterNames)
+            command.Parameters.Add(new DuckDBParameter { Value = cn });
+
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var cn = reader.GetString(0);
+            if (!result.TryGetValue(cn, out var list))
+            {
+                list = new List<PerfmonTrendPoint>();
+                result[cn] = list;
+            }
+            list.Add(new PerfmonTrendPoint
+            {
+                CollectionTime = reader.GetDateTime(1),
+                Value = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3)
+            });
+        }
+
+        return result;
+    }
+
 }
 
 public class PerfmonRow

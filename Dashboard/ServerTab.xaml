@@ -48,6 +48,7 @@
                 <MenuItem.Icon><TextBlock Text="📊"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
+            <MenuItem Header="View Block Chain" Click="ViewBlockChain_Click"/>
             <MenuItem Header="View Blocked Plan" Click="ViewBlockedSidePlan_Click"/>
             <MenuItem Header="View Blocking Plan" Click="ViewBlockingSidePlan_Click"/>
         </ContextMenu>
@@ -68,6 +69,7 @@
                 <MenuItem.Icon><TextBlock Text="📊"/></MenuItem.Icon>
             </MenuItem>
             <Separator/>
+            <MenuItem Header="View Deadlock Graph" Click="ViewDeadlockGraph_Click"/>
             <MenuItem Header="View Plan" Click="ViewDeadlockProcessPlan_Click"/>
         </ContextMenu>
 
@@ -280,9 +282,9 @@
                         <controls:DailySummaryContent x:Name="DailySummaryTab" />
                     </TabItem>
 
-                    <!-- Critical Issues Sub-Tab -->
-                    <TabItem Header="Critical Issues">
-                        <controls:CriticalIssuesContent x:Name="CriticalIssuesTab" />
+                    <!-- Recommendations Sub-Tab -->
+                    <TabItem Header="Recommendations">
+                        <controls:RecommendationsContent x:Name="RecommendationsTab" />
                     </TabItem>
 
                     <!-- Default Trace Sub-Tab -->
@@ -665,6 +667,7 @@
                             </Grid.RowDefinitions>
                             <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
                         <DataGrid x:Name="BlockingEventsDataGrid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                                      MouseDoubleClick="BlockingEventsDataGrid_MouseDoubleClick"
                                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       RowStyle="{StaticResource BlockingEventsPlanRowStyle}"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
@@ -839,7 +842,7 @@
                                             <DataTemplate>
                                                 <Button Content="Download"
                                                         Click="DownloadBlockingXml_Click"
-                                                        IsEnabled="{Binding BlockedProcessReportXml, Converter={StaticResource NullToBooleanConverter}}"
+                                                        IsEnabled="{Binding HasBlockedProcessReport}"
                                                         Width="75" Height="22" FontSize="11" Foreground="{DynamicResource ForegroundBrush}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -861,6 +864,7 @@
                         <DataGrid x:Name="DeadlocksDataGrid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
                                       RowHeight="28" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                                       RowStyle="{StaticResource DeadlocksPlanRowStyle}"
+                                      MouseDoubleClick="DeadlocksDataGrid_MouseDoubleClick"
                                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding EventDate, Converter={StaticResource ServerTimeConverter}}" Width="150">
@@ -1042,9 +1046,10 @@
                                     <DataGridTemplateColumn Header="Graph" Width="90">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
+                                                <!-- Always enabled: the graph is fetched on demand (deferred out of the grid query); a deadlock always has one. -->
                                                 <Button Content="Download"
                                                         Click="DownloadDeadlockGraph_Click"
-                                                        IsEnabled="{Binding DeadlockGraph, Converter={StaticResource NullToBooleanConverter}}"
+                                                        IsEnabled="True"
                                                         Width="75" Height="22" FontSize="11" Foreground="{DynamicResource ForegroundBrush}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>

@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -32,7 +33,7 @@ public sealed class McpCpuTools
             var rows = await resolved.Value.Service.GetCpuUtilizationAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No CPU utilization data available.";
+                return McpHelpers.Status("unavailable", "No CPU utilization data available.");
             }
 
             /* Downsample to 1-minute buckets to avoid overwhelming LLM context */

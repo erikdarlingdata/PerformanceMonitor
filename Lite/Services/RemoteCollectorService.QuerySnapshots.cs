@@ -25,6 +25,17 @@ public partial class RemoteCollectorService
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 1000;
 
+DECLARE @cdc_capture_jobs TABLE (job_id uniqueidentifier PRIMARY KEY);
+DECLARE @cdc_readable bit = 0;
+BEGIN TRY
+    INSERT @cdc_capture_jobs (job_id)
+    EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
+    SET @cdc_readable = 1;
+END TRY
+BEGIN CATCH
+    SET @cdc_readable = 0;
+END CATCH;
+
 SELECT /* PerformanceMonitorLite */
     der.session_id,
     database_name = d.name,
@@ -68,7 +79,22 @@ SELECT /* PerformanceMonitorLite */
     des.host_name,
     des.program_name,
     des.open_transaction_count,
-    der.percent_complete
+    der.percent_complete,
+    is_cdc_capture =
+        CONVERT(bit,
+            CASE
+                WHEN @cdc_readable = 1
+                     AND des.program_name LIKE N'SQLAgent - TSQL JobStep (Job 0x%'
+                     AND TRY_CONVERT(uniqueidentifier, TRY_CONVERT(binary(16), SUBSTRING(des.program_name, 32, 32), 2))
+                         IN (SELECT j.job_id FROM @cdc_capture_jobs AS j)
+                THEN 1
+                WHEN @cdc_readable = 0
+                     AND dest.text IS NOT NULL
+                     AND (dest.text LIKE N'%sp_MScdc_capture_job%' OR dest.text LIKE N'%sp_cdc_scan%')
+                THEN 1
+                ELSE 0
+            END),
+    query_hash = CONVERT(varchar(18), der.query_hash, 1) /* #1140 long-running-query dedup key */
 FROM sys.dm_exec_requests AS der
 JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
@@ -123,7 +149,8 @@ SELECT
     der.transaction_isolation_level,
     der.dop,
     der.parallel_worker_count,
-    der.percent_complete
+    der.percent_complete,
+    der.query_hash
 INTO #req
 FROM sys.dm_exec_requests AS der
 WHERE der.session_id <> @@SPID
@@ -174,7 +201,10 @@ SELECT /* PerformanceMonitorLite */
     des.host_name,
     des.program_name,
     des.open_transaction_count,
-    der.percent_complete
+    der.percent_complete,
+    /* Azure SQL Database has no SQL Agent / msdb.dbo.cdc_jobs (CDC there is scheduler-based), so no capture job to exclude. */
+    is_cdc_capture = CONVERT(bit, 0),
+    query_hash = CONVERT(varchar(18), der.query_hash, 1) /* #1140 long-running-query dedup key */
 FROM #req AS der
 JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
@@ -300,6 +330,8 @@ DROP TABLE #req;
                    .AppendValue(reader.IsDBNull(22) ? (string?)null : reader.GetString(22))                /* program_name */
                    .AppendValue(reader.IsDBNull(23) ? 0 : Convert.ToInt32(reader.GetValue(23)))            /* open_transaction_count */
                    .AppendValue(reader.IsDBNull(24) ? 0m : Convert.ToDecimal(reader.GetValue(24)))        /* percent_complete */
+                   .AppendValue(!reader.IsDBNull(25) && Convert.ToBoolean(reader.GetValue(25)))           /* is_cdc_capture */
+                   .AppendValue(reader.IsDBNull(26) ? (string?)null : reader.GetString(26))                /* query_hash (#1140) */
                    .EndRow();
 
                 rowsCollected++;

@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -25,7 +26,7 @@ public sealed class McpServerInventoryTools
         {
             var rows = await resolved.Value.Service.GetFinOpsDatabaseSizeStatsAsync();
             if (rows.Count == 0)
-                return "No database size data available. The size collector may not have run yet.";
+                return McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {

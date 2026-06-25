@@ -12,8 +12,10 @@ using System.Data;
 using System.Globalization;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Services
 {
@@ -184,10 +186,10 @@ namespace PerformanceMonitorDashboard.Services
                     return items;
                 }
 
-                public async Task<List<Models.TimeSliceBucket>> GetBlockingSlicerDataAsync(
+                public async Task<List<TimeSliceBucket>> GetBlockingSlicerDataAsync(
                     int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
                 {
-                    var items = new List<Models.TimeSliceBucket>();
+                    var items = new List<TimeSliceBucket>();
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
@@ -218,7 +220,7 @@ ORDER BY bucket_hour;";
                     while (await reader.ReadAsync())
                     {
                         var eventCount = Convert.ToInt64(reader.GetValue(1));
-                        items.Add(new Models.TimeSliceBucket
+                        items.Add(new TimeSliceBucket
                         {
                             BucketTime = reader.GetDateTime(0),
                             SessionCount = eventCount,
@@ -232,10 +234,10 @@ ORDER BY bucket_hour;";
                     return items;
                 }
 
-                public async Task<List<Models.TimeSliceBucket>> GetDeadlockSlicerDataAsync(
+                public async Task<List<TimeSliceBucket>> GetDeadlockSlicerDataAsync(
                     int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
                 {
-                    var items = new List<Models.TimeSliceBucket>();
+                    var items = new List<TimeSliceBucket>();
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
@@ -263,7 +265,7 @@ ORDER BY bucket_hour;";
                     while (await reader.ReadAsync())
                     {
                         var count = Convert.ToInt64(reader.GetValue(1));
-                        items.Add(new Models.TimeSliceBucket
+                        items.Add(new TimeSliceBucket
                         {
                             BucketTime = reader.GetDateTime(0),
                             SessionCount = count,
@@ -274,10 +276,10 @@ ORDER BY bucket_hour;";
                     return items;
                 }
 
-                public async Task<List<Models.TimeSliceBucket>> GetActiveQuerySlicerDataAsync(
+                public async Task<List<TimeSliceBucket>> GetActiveQuerySlicerDataAsync(
                     int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
                 {
-                    var items = new List<Models.TimeSliceBucket>();
+                    var items = new List<TimeSliceBucket>();
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
@@ -310,7 +312,7 @@ ORDER BY bucket_hour;";
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
-                        items.Add(new Models.TimeSliceBucket
+                        items.Add(new TimeSliceBucket
                         {
                             BucketTime = reader.GetDateTime(0),
                             SessionCount = Convert.ToInt64(reader.GetValue(1)),
@@ -325,10 +327,10 @@ ORDER BY bucket_hour;";
                     return items;
                 }
 
-                public async Task<List<Models.TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
+                public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
                     int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
                 {
-                    var items = new List<Models.TimeSliceBucket>();
+                    var items = new List<TimeSliceBucket>();
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
@@ -361,7 +363,7 @@ ORDER BY bucket_hour;";
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
-                        items.Add(new Models.TimeSliceBucket
+                        items.Add(new TimeSliceBucket
                         {
                             BucketTime = reader.GetDateTime(0),
                             SessionCount = Convert.ToInt64(reader.GetValue(1)),
@@ -376,10 +378,10 @@ ORDER BY bucket_hour;";
                     return items;
                 }
 
-                public async Task<List<Models.TimeSliceBucket>> GetProcStatsSlicerDataAsync(
+                public async Task<List<TimeSliceBucket>> GetProcStatsSlicerDataAsync(
                     int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
                 {
-                    var items = new List<Models.TimeSliceBucket>();
+                    var items = new List<TimeSliceBucket>();
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
@@ -412,7 +414,7 @@ ORDER BY bucket_hour;";
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
-                        items.Add(new Models.TimeSliceBucket
+                        items.Add(new TimeSliceBucket
                         {
                             BucketTime = reader.GetDateTime(0),
                             SessionCount = Convert.ToInt64(reader.GetValue(1)),
@@ -427,10 +429,10 @@ ORDER BY bucket_hour;";
                     return items;
                 }
 
-                public async Task<List<Models.TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
+                public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
                     int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
                 {
-                    var items = new List<Models.TimeSliceBucket>();
+                    var items = new List<TimeSliceBucket>();
                     await using var tc = await OpenThrottledConnectionAsync();
                     var connection = tc.Connection;
 
@@ -463,7 +465,7 @@ ORDER BY bucket_hour;";
                     using var reader = await command.ExecuteReaderAsync();
                     while (await reader.ReadAsync())
                     {
-                        items.Add(new Models.TimeSliceBucket
+                        items.Add(new TimeSliceBucket
                         {
                             BucketTime = reader.GetDateTime(0),
                             SessionCount = Convert.ToInt64(reader.GetValue(1)),
@@ -500,6 +502,37 @@ ORDER BY bucket_hour;";
 
                     command.Parameters.Add(new SqlParameter("@databaseName", SqlDbType.NVarChar, 128) { Value = databaseName });
                     command.Parameters.Add(new SqlParameter("@queryId", SqlDbType.BigInt) { Value = queryId });
+
+                    var result = await command.ExecuteScalarAsync();
+                    return result == DBNull.Value ? null : result as string;
+                }
+
+                /// <summary>
+                /// Fetches (and DECOMPRESSes) the cached plan XML for a single query_stats row on demand.
+                /// GetQueryStatsAsync deliberately does NOT hydrate plan XML for its TOP (500) grid rows
+                /// (that DECOMPRESS cost ~7s of CPU); the plan is fetched here only when a plan is opened.
+                /// </summary>
+                public async Task<string?> GetQueryStatsPlanXmlAsync(string databaseName, string queryHash)
+                {
+                    await using var tc = await OpenThrottledConnectionAsync();
+                    var connection = tc.Connection;
+
+                    string query = @"
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+        SELECT TOP (1)
+            query_plan_xml = CAST(DECOMPRESS(qs.query_plan_text) AS nvarchar(max))
+        FROM collect.query_stats AS qs
+        WHERE qs.query_hash = CONVERT(binary(8), @queryHash, 1)
+        AND   qs.database_name = @databaseName
+        AND   qs.query_plan_text IS NOT NULL
+        ORDER BY qs.collection_time DESC;";
+
+                    using var command = new SqlCommand(query, connection);
+                    command.CommandTimeout = 120;
+
+                    command.Parameters.Add(new SqlParameter("@databaseName", SqlDbType.NVarChar, 128) { Value = databaseName });
+                    command.Parameters.Add(new SqlParameter("@queryHash", SqlDbType.NVarChar, 20) { Value = queryHash });
 
                     var result = await command.ExecuteScalarAsync();
                     return result == DBNull.Value ? null : result as string;
@@ -574,625 +607,5 @@ ORDER BY bucket_hour;";
                     return items;
                 }
 
-        /// <summary>
-        /// Fetches query plan XML on demand for a single query_store_data row.
-        /// </summary>
-        public async Task<string?> GetQueryStorePlanXmlByCollectionIdAsync(long collectionId)
-        {
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-        SELECT
-            CAST(DECOMPRESS(qsd.query_plan_text) AS nvarchar(max)) AS query_plan_text
-        FROM collect.query_store_data AS qsd
-        WHERE qsd.collection_id = @collection_id;";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@collection_id", SqlDbType.BigInt) { Value = collectionId });
-
-            var result = await command.ExecuteScalarAsync();
-            return result == DBNull.Value || result == null ? null : (string)result;
-        }
-
-        /// <summary>
-        /// Fetches query plan XML on demand for a single procedure_stats row.
-        /// </summary>
-        public async Task<string?> GetProcedureStatsPlanXmlByCollectionIdAsync(long collectionId)
-        {
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-        SELECT
-            CAST(DECOMPRESS(ps.query_plan_text) AS nvarchar(max)) AS query_plan_text
-        FROM collect.procedure_stats AS ps
-        WHERE ps.collection_id = @collection_id;";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@collection_id", SqlDbType.BigInt) { Value = collectionId });
-
-            var result = await command.ExecuteScalarAsync();
-            return result == DBNull.Value || result == null ? null : (string)result;
-        }
-
-        /// <summary>
-        /// Fetches query plan XML on demand for a single query_stats row.
-        /// </summary>
-        public async Task<string?> GetQueryStatsPlanXmlByCollectionIdAsync(long collectionId)
-        {
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-        SELECT
-            CAST(DECOMPRESS(qs.query_plan_text) AS nvarchar(max)) AS query_plan_text
-        FROM collect.query_stats AS qs
-        WHERE qs.collection_id = @collection_id;";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@collection_id", SqlDbType.BigInt) { Value = collectionId });
-
-            var result = await command.ExecuteScalarAsync();
-            return result == DBNull.Value || result == null ? null : (string)result;
-        }
-
-        /// <summary>
-        /// Fetches the most recent plan XML for a query identified by query_hash.
-        /// Used by MCP plan analysis tools.
-        /// </summary>
-        public async Task<string?> GetPlanXmlByQueryHashAsync(string queryHash)
-        {
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-        SELECT TOP (1)
-            CAST(DECOMPRESS(qs.query_plan_text) AS nvarchar(max))
-        FROM collect.query_stats AS qs
-        WHERE qs.query_hash = CONVERT(binary(8), @queryHash, 1)
-        ORDER BY qs.last_execution_time DESC;";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@queryHash", SqlDbType.NVarChar, 20) { Value = queryHash });
-
-            var result = await command.ExecuteScalarAsync();
-            return result == DBNull.Value || result == null ? null : (string)result;
-        }
-
-        /// <summary>
-        /// Fetches the most recent plan XML for a procedure identified by sql_handle.
-        /// Used by MCP plan analysis tools.
-        /// </summary>
-        public async Task<string?> GetProcedurePlanXmlBySqlHandleAsync(string sqlHandle)
-        {
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-        SELECT TOP (1)
-            CAST(DECOMPRESS(ps.query_plan_text) AS nvarchar(max))
-        FROM collect.procedure_stats AS ps
-        WHERE ps.sql_handle = CONVERT(varbinary(64), @sqlHandle, 1)
-        ORDER BY ps.last_execution_time DESC;";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@sqlHandle", SqlDbType.NVarChar, 130) { Value = sqlHandle });
-
-            var result = await command.ExecuteScalarAsync();
-            return result == DBNull.Value || result == null ? null : (string)result;
-        }
-
-        private static string GetHeatmapMetricExpr(Models.HeatmapMetric metric) => metric switch
-        {
-            Models.HeatmapMetric.Duration => "(qs.total_elapsed_time_delta / 1000.0) / NULLIF(qs.execution_count_delta, 0)",
-            Models.HeatmapMetric.Cpu => "(qs.total_worker_time_delta / 1000.0) / NULLIF(qs.execution_count_delta, 0)",
-            Models.HeatmapMetric.LogicalReads => "CAST(qs.total_logical_reads_delta AS float) / NULLIF(qs.execution_count_delta, 0)",
-            Models.HeatmapMetric.LogicalWrites => "CAST(qs.total_logical_writes_delta AS float) / NULLIF(qs.execution_count_delta, 0)",
-            Models.HeatmapMetric.ExecutionCount => "CAST(qs.execution_count_delta AS float)",
-            _ => "(qs.total_elapsed_time_delta / 1000.0) / NULLIF(qs.execution_count_delta, 0)"
-        };
-
-        private static readonly string[] HeatmapDurationLabels = { "0-1ms", "1-10ms", "10-100ms", "100ms-1s", "1-10s", "10-100s", ">100s" };
-        private static readonly string[] HeatmapCountLabels = { "0-1", "1-10", "10-100", "100-1K", "1K-10K", "10K-100K", ">100K" };
-
-        public async Task<Models.HeatmapResult> GetQueryHeatmapAsync(Models.HeatmapMetric metric, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
-        {
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            var metricExpr = GetHeatmapMetricExpr(metric);
-
-            string timeFilter;
-            if (fromDate.HasValue && toDate.HasValue)
-            {
-                timeFilter = "AND qs.collection_time >= @from_date AND qs.collection_time <= @to_date";
-            }
-            else
-            {
-                timeFilter = $"AND qs.collection_time >= DATEADD(HOUR, -{hoursBack}, GETDATE())";
-            }
-
-            var query = $@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-WITH per_query AS
-(
-    SELECT
-        time_bin = DATEADD(MINUTE, DATEDIFF(MINUTE, 0, qs.collection_time) / 5 * 5, 0),
-        metric_value = {metricExpr},
-        qs.query_hash,
-        query_preview = LEFT(CAST(DECOMPRESS(qs.query_text) AS nvarchar(max)), 120),
-        qs.execution_count_delta
-    FROM collect.query_stats AS qs
-    WHERE qs.execution_count_delta > 0
-    AND   {metricExpr} IS NOT NULL
-    {timeFilter}
-)
-SELECT
-    pq.time_bin,
-    bucket_index =
-        CASE
-            WHEN pq.metric_value < 1 THEN 0
-            WHEN pq.metric_value < 10 THEN 1
-            WHEN pq.metric_value < 100 THEN 2
-            WHEN pq.metric_value < 1000 THEN 3
-            WHEN pq.metric_value < 10000 THEN 4
-            WHEN pq.metric_value < 100000 THEN 5
-            ELSE 6
-        END,
-    query_count = COUNT(*),
-    top_query_hash = CONVERT(varchar(20), MAX(CASE WHEN pq.execution_count_delta = m.max_exec THEN pq.query_hash END), 1),
-    top_query_text = MAX(CASE WHEN pq.execution_count_delta = m.max_exec THEN pq.query_preview END)
-FROM per_query AS pq
-CROSS APPLY
-(
-    SELECT max_exec = MAX(pq2.execution_count_delta)
-    FROM per_query AS pq2
-    WHERE pq2.time_bin = pq.time_bin
-    AND   CASE
-            WHEN pq2.metric_value < 1 THEN 0
-            WHEN pq2.metric_value < 10 THEN 1
-            WHEN pq2.metric_value < 100 THEN 2
-            WHEN pq2.metric_value < 1000 THEN 3
-            WHEN pq2.metric_value < 10000 THEN 4
-            WHEN pq2.metric_value < 100000 THEN 5
-            ELSE 6
-          END =
-          CASE
-            WHEN pq.metric_value < 1 THEN 0
-            WHEN pq.metric_value < 10 THEN 1
-            WHEN pq.metric_value < 100 THEN 2
-            WHEN pq.metric_value < 1000 THEN 3
-            WHEN pq.metric_value < 10000 THEN 4
-            WHEN pq.metric_value < 100000 THEN 5
-            ELSE 6
-          END
-) AS m
-GROUP BY
-    pq.time_bin,
-    CASE
-        WHEN pq.metric_value < 1 THEN 0
-        WHEN pq.metric_value < 10 THEN 1
-        WHEN pq.metric_value < 100 THEN 2
-        WHEN pq.metric_value < 1000 THEN 3
-        WHEN pq.metric_value < 10000 THEN 4
-        WHEN pq.metric_value < 100000 THEN 5
-        ELSE 6
-    END
-ORDER BY
-    pq.time_bin,
-    bucket_index;";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            if (fromDate.HasValue && toDate.HasValue)
-            {
-                command.Parameters.AddWithValue("@from_date", fromDate.Value);
-                command.Parameters.AddWithValue("@to_date", toDate.Value);
-            }
-
-            var rawCells = new System.Collections.Generic.List<Models.HeatmapCell>();
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                rawCells.Add(new Models.HeatmapCell
-                {
-                    TimeBucket = reader.GetDateTime(0),
-                    BucketIndex = reader.GetInt32(1),
-                    Count = Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
-                    TopQueryHash = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                    TopQueryText = reader.IsDBNull(4) ? "" : reader.GetString(4)
-                });
-            }
-
-            if (rawCells.Count == 0)
-                return new Models.HeatmapResult();
-
-            var times = new System.Collections.Generic.List<DateTime>();
-            var timeIndex = new System.Collections.Generic.Dictionary<DateTime, int>();
-            foreach (var cell in rawCells)
-            {
-                if (!timeIndex.ContainsKey(cell.TimeBucket))
-                {
-                    timeIndex[cell.TimeBucket] = times.Count;
-                    times.Add(cell.TimeBucket);
-                }
-            }
-
-            int numBuckets = 7;
-            var intensities = new double[numBuckets, times.Count];
-            var cellDetails = new Models.HeatmapCell[numBuckets, times.Count];
-
-            foreach (var cell in rawCells)
-            {
-                if (!timeIndex.TryGetValue(cell.TimeBucket, out int col)) continue;
-                int row = Math.Clamp(cell.BucketIndex, 0, numBuckets - 1);
-                intensities[row, col] = cell.Count;
-                cellDetails[row, col] = cell;
-            }
-
-            var labels = metric == Models.HeatmapMetric.LogicalReads || metric == Models.HeatmapMetric.LogicalWrites || metric == Models.HeatmapMetric.ExecutionCount
-                ? HeatmapCountLabels
-                : HeatmapDurationLabels;
-
-            return new Models.HeatmapResult
-            {
-                Intensities = intensities,
-                TimeBuckets = times.ToArray(),
-                BucketLabels = labels,
-                CellDetails = cellDetails
-            };
-        }
-
-        /// <summary>
-        /// Gets query stats comparison between a current time range and a baseline range.
-        /// Uses delta columns for accurate period-level aggregation.
-        /// </summary>
-        public async Task<List<Models.QueryStatsComparisonItem>> GetQueryStatsComparisonAsync(
-            DateTime currentStart, DateTime currentEnd,
-            DateTime baselineStart, DateTime baselineEnd)
-        {
-            var items = new List<Models.QueryStatsComparisonItem>();
-
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-;WITH top_hashes AS (
-    SELECT DISTINCT query_hash, database_name, object_name, schema_name, object_type
-    FROM (
-        SELECT TOP 100 query_hash, database_name, object_name, schema_name, object_type
-        FROM collect.query_stats
-        WHERE collection_time >= @currentStart AND collection_time <= @currentEnd
-        AND   execution_count_delta > 0
-        GROUP BY query_hash, database_name, object_name, schema_name, object_type
-        ORDER BY SUM(execution_count_delta) DESC
-        UNION
-        SELECT TOP 100 query_hash, database_name, object_name, schema_name, object_type
-        FROM collect.query_stats
-        WHERE collection_time >= @baselineStart AND collection_time <= @baselineEnd
-        AND   execution_count_delta > 0
-        GROUP BY query_hash, database_name, object_name, schema_name, object_type
-        ORDER BY SUM(execution_count_delta) DESC
-    ) AS combined
-),
-current_period AS (
-    SELECT th.database_name,
-           CONVERT(nvarchar(20), th.query_hash, 1) AS query_hash,
-           th.object_name, th.schema_name, th.object_type,
-           SUM(qs.execution_count_delta) AS exec_count,
-           SUM(qs.total_elapsed_time_delta) / NULLIF(SUM(qs.execution_count_delta), 0) / 1000.0 AS avg_duration_ms,
-           SUM(qs.total_worker_time_delta) / NULLIF(SUM(qs.execution_count_delta), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(qs.total_physical_reads_delta) / NULLIF(SUM(qs.execution_count_delta), 0) AS avg_reads,
-           LEFT(CAST(DECOMPRESS(MAX(qs.query_text)) AS nvarchar(max)), 500) AS query_text
-    FROM top_hashes th
-    INNER JOIN collect.query_stats qs
-      ON  qs.query_hash = th.query_hash
-      AND qs.database_name = th.database_name
-      AND ISNULL(qs.object_name, N'') = ISNULL(th.object_name, N'')
-    WHERE qs.collection_time >= @currentStart AND qs.collection_time <= @currentEnd
-    AND   qs.execution_count_delta > 0
-    GROUP BY th.database_name, th.query_hash, th.object_name, th.schema_name, th.object_type
-),
-baseline_period AS (
-    SELECT th.database_name,
-           CONVERT(nvarchar(20), th.query_hash, 1) AS query_hash,
-           th.object_name, th.schema_name, th.object_type,
-           SUM(qs.execution_count_delta) AS exec_count,
-           SUM(qs.total_elapsed_time_delta) / NULLIF(SUM(qs.execution_count_delta), 0) / 1000.0 AS avg_duration_ms,
-           SUM(qs.total_worker_time_delta) / NULLIF(SUM(qs.execution_count_delta), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(qs.total_physical_reads_delta) / NULLIF(SUM(qs.execution_count_delta), 0) AS avg_reads,
-           LEFT(CAST(DECOMPRESS(MAX(qs.query_text)) AS nvarchar(max)), 500) AS query_text
-    FROM top_hashes th
-    INNER JOIN collect.query_stats qs
-      ON  qs.query_hash = th.query_hash
-      AND qs.database_name = th.database_name
-      AND ISNULL(qs.object_name, N'') = ISNULL(th.object_name, N'')
-    WHERE qs.collection_time >= @baselineStart AND qs.collection_time <= @baselineEnd
-    AND   qs.execution_count_delta > 0
-    GROUP BY th.database_name, th.query_hash, th.object_name, th.schema_name, th.object_type
-)
-SELECT COALESCE(c.database_name, b.database_name) AS database_name,
-       COALESCE(c.query_hash, b.query_hash) AS query_hash,
-       COALESCE(c.object_name, b.object_name) AS object_name,
-       COALESCE(c.schema_name, b.schema_name) AS schema_name,
-       COALESCE(c.object_type, b.object_type) AS object_type,
-       COALESCE(c.query_text, b.query_text) AS query_text,
-       c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
-       b.exec_count AS baseline_exec_count,
-       b.avg_duration_ms AS baseline_avg_duration_ms,
-       b.avg_cpu_ms AS baseline_avg_cpu_ms,
-       b.avg_reads AS baseline_avg_reads
-FROM current_period c
-FULL OUTER JOIN baseline_period b
-  ON  ISNULL(c.database_name, N'') = ISNULL(b.database_name, N'')
-  AND ISNULL(c.query_hash, N'') = ISNULL(b.query_hash, N'')
-  AND ISNULL(c.object_name, N'') = ISNULL(b.object_name, N'')
-  AND ISNULL(c.schema_name, N'') = ISNULL(b.schema_name, N'')
-  AND ISNULL(c.object_type, N'') = ISNULL(b.object_type, N'');";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@currentStart", SqlDbType.DateTime2) { Value = currentStart });
-            command.Parameters.Add(new SqlParameter("@currentEnd", SqlDbType.DateTime2) { Value = currentEnd });
-            command.Parameters.Add(new SqlParameter("@baselineStart", SqlDbType.DateTime2) { Value = baselineStart });
-            command.Parameters.Add(new SqlParameter("@baselineEnd", SqlDbType.DateTime2) { Value = baselineEnd });
-
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                items.Add(new Models.QueryStatsComparisonItem
-                {
-                    DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                    QueryHash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    ObjectName = reader.IsDBNull(2) ? null : reader.GetString(2),
-                    SchemaName = reader.IsDBNull(3) ? null : reader.GetString(3),
-                    ObjectType = reader.IsDBNull(4) ? null : reader.GetString(4),
-                    QueryText = reader.IsDBNull(5) ? "" : reader.GetString(5),
-                    ExecutionCount = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                    AvgDurationMs = reader.IsDBNull(7) ? 0 : Convert.ToDouble(reader.GetValue(7), CultureInfo.InvariantCulture),
-                    AvgCpuMs = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8), CultureInfo.InvariantCulture),
-                    AvgReads = reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9), CultureInfo.InvariantCulture),
-                    BaselineExecutionCount = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                    BaselineAvgDurationMs = reader.IsDBNull(11) ? 0 : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture),
-                    BaselineAvgCpuMs = reader.IsDBNull(12) ? 0 : Convert.ToDouble(reader.GetValue(12), CultureInfo.InvariantCulture),
-                    BaselineAvgReads = reader.IsDBNull(13) ? 0 : Convert.ToDouble(reader.GetValue(13), CultureInfo.InvariantCulture),
-                });
-            }
-
-            return items;
-        }
-
-        /// <summary>
-        /// Gets procedure stats comparison between a current time range and a baseline range.
-        /// </summary>
-        public async Task<List<Models.ProcedureStatsComparisonItem>> GetProcedureStatsComparisonAsync(
-            DateTime currentStart, DateTime currentEnd,
-            DateTime baselineStart, DateTime baselineEnd)
-        {
-            var items = new List<Models.ProcedureStatsComparisonItem>();
-
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-;WITH top_procs AS (
-    SELECT DISTINCT database_name, schema_name, object_name
-    FROM (
-        SELECT TOP 100 database_name, schema_name, object_name
-        FROM collect.procedure_stats
-        WHERE collection_time >= @currentStart AND collection_time <= @currentEnd
-        AND   execution_count_delta > 0
-        GROUP BY database_name, schema_name, object_name
-        ORDER BY SUM(execution_count_delta) DESC
-        UNION
-        SELECT TOP 100 database_name, schema_name, object_name
-        FROM collect.procedure_stats
-        WHERE collection_time >= @baselineStart AND collection_time <= @baselineEnd
-        AND   execution_count_delta > 0
-        GROUP BY database_name, schema_name, object_name
-        ORDER BY SUM(execution_count_delta) DESC
-    ) AS combined
-),
-current_period AS (
-    SELECT tp.database_name, tp.schema_name, tp.object_name,
-           SUM(ps.execution_count_delta) AS exec_count,
-           SUM(ps.total_elapsed_time_delta) / NULLIF(SUM(ps.execution_count_delta), 0) / 1000.0 AS avg_duration_ms,
-           SUM(ps.total_worker_time_delta) / NULLIF(SUM(ps.execution_count_delta), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(ps.total_physical_reads_delta) / NULLIF(SUM(ps.execution_count_delta), 0) AS avg_reads
-    FROM top_procs tp
-    INNER JOIN collect.procedure_stats ps
-      ON  ps.database_name = tp.database_name
-      AND ISNULL(ps.schema_name, N'') = ISNULL(tp.schema_name, N'')
-      AND ps.object_name = tp.object_name
-    WHERE ps.collection_time >= @currentStart AND ps.collection_time <= @currentEnd
-    AND   ps.execution_count_delta > 0
-    GROUP BY tp.database_name, tp.schema_name, tp.object_name
-),
-baseline_period AS (
-    SELECT tp.database_name, tp.schema_name, tp.object_name,
-           SUM(ps.execution_count_delta) AS exec_count,
-           SUM(ps.total_elapsed_time_delta) / NULLIF(SUM(ps.execution_count_delta), 0) / 1000.0 AS avg_duration_ms,
-           SUM(ps.total_worker_time_delta) / NULLIF(SUM(ps.execution_count_delta), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(ps.total_physical_reads_delta) / NULLIF(SUM(ps.execution_count_delta), 0) AS avg_reads
-    FROM top_procs tp
-    INNER JOIN collect.procedure_stats ps
-      ON  ps.database_name = tp.database_name
-      AND ISNULL(ps.schema_name, N'') = ISNULL(tp.schema_name, N'')
-      AND ps.object_name = tp.object_name
-    WHERE ps.collection_time >= @baselineStart AND ps.collection_time <= @baselineEnd
-    AND   ps.execution_count_delta > 0
-    GROUP BY tp.database_name, tp.schema_name, tp.object_name
-)
-SELECT COALESCE(c.database_name, b.database_name) AS database_name,
-       COALESCE(c.schema_name, b.schema_name) AS schema_name,
-       COALESCE(c.object_name, b.object_name) AS object_name,
-       c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
-       b.exec_count AS baseline_exec_count,
-       b.avg_duration_ms AS baseline_avg_duration_ms,
-       b.avg_cpu_ms AS baseline_avg_cpu_ms,
-       b.avg_reads AS baseline_avg_reads
-FROM current_period c
-FULL OUTER JOIN baseline_period b
-  ON  ISNULL(c.database_name, N'') = ISNULL(b.database_name, N'')
-  AND ISNULL(c.schema_name, N'') = ISNULL(b.schema_name, N'')
-  AND ISNULL(c.object_name, N'') = ISNULL(b.object_name, N'');";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@currentStart", SqlDbType.DateTime2) { Value = currentStart });
-            command.Parameters.Add(new SqlParameter("@currentEnd", SqlDbType.DateTime2) { Value = currentEnd });
-            command.Parameters.Add(new SqlParameter("@baselineStart", SqlDbType.DateTime2) { Value = baselineStart });
-            command.Parameters.Add(new SqlParameter("@baselineEnd", SqlDbType.DateTime2) { Value = baselineEnd });
-
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                items.Add(new Models.ProcedureStatsComparisonItem
-                {
-                    DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                    SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    ObjectName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                    ExecutionCount = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    AvgDurationMs = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture),
-                    AvgCpuMs = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5), CultureInfo.InvariantCulture),
-                    AvgReads = reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6), CultureInfo.InvariantCulture),
-                    BaselineExecutionCount = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                    BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8), CultureInfo.InvariantCulture),
-                    BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9), CultureInfo.InvariantCulture),
-                    BaselineAvgReads = reader.IsDBNull(10) ? 0 : Convert.ToDouble(reader.GetValue(10), CultureInfo.InvariantCulture),
-                });
-            }
-
-            return items;
-        }
-
-        /// <summary>
-        /// Gets query store comparison between a current time range and a baseline range.
-        /// Reuses QueryStatsComparisonItem model (same identity: database + query_hash).
-        /// </summary>
-        public async Task<List<Models.QueryStatsComparisonItem>> GetQueryStoreComparisonAsync(
-            DateTime currentStart, DateTime currentEnd,
-            DateTime baselineStart, DateTime baselineEnd)
-        {
-            var items = new List<Models.QueryStatsComparisonItem>();
-
-            await using var tc = await OpenThrottledConnectionAsync();
-            var connection = tc.Connection;
-
-            string query = @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-;WITH top_hashes AS (
-    SELECT DISTINCT database_name, query_hash
-    FROM (
-        SELECT TOP 100 database_name, query_hash
-        FROM collect.query_store_stats
-        WHERE collection_time >= @currentStart AND collection_time <= @currentEnd
-        AND   execution_count > 0
-        GROUP BY database_name, query_hash
-        ORDER BY SUM(execution_count) DESC
-        UNION
-        SELECT TOP 100 database_name, query_hash
-        FROM collect.query_store_stats
-        WHERE collection_time >= @baselineStart AND collection_time <= @baselineEnd
-        AND   execution_count > 0
-        GROUP BY database_name, query_hash
-        ORDER BY SUM(execution_count) DESC
-    ) AS combined
-),
-current_period AS (
-    SELECT th.database_name,
-           CONVERT(nvarchar(20), th.query_hash, 1) AS query_hash,
-           SUM(qs.execution_count) AS exec_count,
-           SUM(CAST(qs.execution_count AS bigint) * qs.avg_duration_us) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
-           SUM(CAST(qs.execution_count AS bigint) * qs.avg_cpu_time_us) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(CAST(qs.execution_count AS bigint) * qs.avg_logical_io_reads) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-           MAX(qs.query_text) AS query_text
-    FROM top_hashes th
-    INNER JOIN collect.query_store_stats qs
-      ON  qs.query_hash = th.query_hash
-      AND qs.database_name = th.database_name
-    WHERE qs.collection_time >= @currentStart AND qs.collection_time <= @currentEnd
-    AND   qs.execution_count > 0
-    GROUP BY th.database_name, th.query_hash
-),
-baseline_period AS (
-    SELECT th.database_name,
-           CONVERT(nvarchar(20), th.query_hash, 1) AS query_hash,
-           SUM(qs.execution_count) AS exec_count,
-           SUM(CAST(qs.execution_count AS bigint) * qs.avg_duration_us) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
-           SUM(CAST(qs.execution_count AS bigint) * qs.avg_cpu_time_us) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(CAST(qs.execution_count AS bigint) * qs.avg_logical_io_reads) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-           MAX(qs.query_text) AS query_text
-    FROM top_hashes th
-    INNER JOIN collect.query_store_stats qs
-      ON  qs.query_hash = th.query_hash
-      AND qs.database_name = th.database_name
-    WHERE qs.collection_time >= @baselineStart AND qs.collection_time <= @baselineEnd
-    AND   qs.execution_count > 0
-    GROUP BY th.database_name, th.query_hash
-)
-SELECT COALESCE(c.database_name, b.database_name) AS database_name,
-       COALESCE(c.query_hash, b.query_hash) AS query_hash,
-       COALESCE(c.query_text, b.query_text) AS query_text,
-       c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
-       b.exec_count AS baseline_exec_count,
-       b.avg_duration_ms AS baseline_avg_duration_ms,
-       b.avg_cpu_ms AS baseline_avg_cpu_ms,
-       b.avg_reads AS baseline_avg_reads
-FROM current_period c
-FULL OUTER JOIN baseline_period b
-  ON  ISNULL(c.database_name, N'') = ISNULL(b.database_name, N'')
-  AND ISNULL(c.query_hash, N'') = ISNULL(b.query_hash, N'');";
-
-            using var command = new SqlCommand(query, connection);
-            command.CommandTimeout = 120;
-            command.Parameters.Add(new SqlParameter("@currentStart", SqlDbType.DateTime2) { Value = currentStart });
-            command.Parameters.Add(new SqlParameter("@currentEnd", SqlDbType.DateTime2) { Value = currentEnd });
-            command.Parameters.Add(new SqlParameter("@baselineStart", SqlDbType.DateTime2) { Value = baselineStart });
-            command.Parameters.Add(new SqlParameter("@baselineEnd", SqlDbType.DateTime2) { Value = baselineEnd });
-
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                items.Add(new Models.QueryStatsComparisonItem
-                {
-                    DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                    QueryHash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                    ExecutionCount = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    AvgDurationMs = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture),
-                    AvgCpuMs = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5), CultureInfo.InvariantCulture),
-                    AvgReads = reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6), CultureInfo.InvariantCulture),
-                    BaselineExecutionCount = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                    BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8), CultureInfo.InvariantCulture),
-                    BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9), CultureInfo.InvariantCulture),
-                    BaselineAvgReads = reader.IsDBNull(10) ? 0 : Convert.ToDouble(reader.GetValue(10), CultureInfo.InvariantCulture),
-                });
-            }
-
-            return items;
-        }
     }
 }

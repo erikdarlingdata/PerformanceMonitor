@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -30,7 +31,7 @@ public sealed class McpActiveQueryTools
         {
             var rows = await resolved.Value.Service.GetQuerySnapshotsAsync(hours_back);
             if (rows.Count == 0)
-                return "No active query snapshots found in the requested time range.";
+                return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
             var result = rows.Take(limit).Select(r => new
             {

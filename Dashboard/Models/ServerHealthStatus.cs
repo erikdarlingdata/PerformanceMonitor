@@ -190,14 +190,23 @@ namespace PerformanceMonitorDashboard.Models
             }
         }
 
-        public string CpuDisplayText => TotalCpuPercent.HasValue ? $"{TotalCpuPercent}%" : "--";
+        public string CpuDisplayText
+        {
+            get
+            {
+                if (!_cpuPercent.HasValue) return "--";
+                if (!_otherCpuPercent.HasValue) return $"{_cpuPercent}%";
+                return $"{TotalCpuPercent}% (SQL {_cpuPercent}%)";
+            }
+        }
 
         public string CpuDetailText
         {
             get
             {
                 if (!_cpuPercent.HasValue && !_otherCpuPercent.HasValue) return "";
-                return $"SQL: {_cpuPercent ?? 0}% Other: {_otherCpuPercent ?? 0}%";
+                string other = _otherCpuPercent.HasValue ? $"{_otherCpuPercent}%" : "n/a";
+                return $"SQL: {_cpuPercent ?? 0}% Other: {other}";
             }
         }
 
@@ -503,6 +512,12 @@ namespace PerformanceMonitorDashboard.Models
         public string CollectorDisplayText => _failedCollectorCount > 0 ? $"{_failedCollectorCount} failed" : "OK";
 
         public string CollectorDetailText => $"Healthy: {_healthyCollectorCount}, Failing: {_failedCollectorCount}";
+
+        /* Low-disk / failed-job alert presence, for the server-level tab badge (#754/#749).
+           Injected from the alert engine's per-server state in UpdateTabBadge; not bound (the
+           badge reads them directly), so no change notification is needed. */
+        public bool HasLowDiskAlert { get; set; }
+        public bool HasFailedJobAlert { get; set; }
 
         // Top waits
         public string? TopWaitType

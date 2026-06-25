@@ -19,6 +19,8 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -29,6 +31,7 @@ namespace PerformanceMonitorDashboard.Controls
     public partial class DailySummaryContent : UserControl
     {
         private DatabaseService? _databaseService;
+        private UserPreferencesService? _preferencesService;
         private DateTime? _dailySummaryDate = null; // null means today
 
         // Daily Summary filter state
@@ -52,10 +55,10 @@ namespace PerformanceMonitorDashboard.Controls
         /// <summary>
         /// Initializes the control with required dependencies.
         /// </summary>
-        /// <param name="databaseService">The database service for data retrieval.</param>
-        public void Initialize(DatabaseService databaseService)
+        public void Initialize(DatabaseService databaseService, UserPreferencesService preferencesService)
         {
             _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
+            _preferencesService = preferencesService ?? throw new ArgumentNullException(nameof(preferencesService));
         }
 
         /// <summary>
@@ -86,7 +89,8 @@ namespace PerformanceMonitorDashboard.Controls
                     DailySummaryNoDataMessage.Visibility = Visibility.Collapsed;
                 }
 
-                var data = await _databaseService.GetDailySummaryAsync(_dailySummaryDate);
+                var mode = _preferencesService?.GetPreferences().CpuAlertMode ?? CpuAlertMode.Total;
+                var data = await _databaseService.GetDailySummaryAsync(_dailySummaryDate, mode);
 
                 // Store unfiltered data and reset filters when new data is loaded
                 _dailySummaryUnfilteredData = data;
@@ -385,7 +389,7 @@ namespace PerformanceMonitorDashboard.Controls
                     {
                         if (column is DataGridBoundColumn)
                         {
-                            headers.Add(Helpers.DataGridClipboardBehavior.GetHeaderText(column));
+                            headers.Add(DataGridClipboardBehavior.GetHeaderText(column));
                         }
                     }
                     sb.AppendLine(string.Join("\t", headers));
@@ -428,7 +432,7 @@ namespace PerformanceMonitorDashboard.Controls
                             {
                                 if (column is DataGridBoundColumn)
                                 {
-                                    headers.Add(TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(column), TabHelpers.CsvSeparator));
+                                    headers.Add(TabHelpers.EscapeCsvField(DataGridClipboardBehavior.GetHeaderText(column), TabHelpers.CsvSeparator));
                                 }
                             }
                             sb.AppendLine(string.Join(TabHelpers.CsvSeparator, headers));

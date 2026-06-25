@@ -301,8 +301,31 @@ END;";
     }
 
     /// <summary>
+    /// Token in 01_install_database.sql that the installer replaces with
+    /// SET statements supplying custom data/log file paths (issue #768).
+    /// When left untouched it is an inert SQL comment and the SERVERPROPERTY
+    /// defaults are used.
+    /// </summary>
+    private const string FilePathOverrideToken = "/*__PM_FILE_PATH_OVERRIDES__*/";
+
+    /// <summary>
     /// Execute SQL installation files from the given ScriptProvider.
     /// </summary>
+    /// <param name="dataPath">
+    /// Optional server-side directory for the PerformanceMonitor data file.
+    /// When supplied, it overrides SERVERPROPERTY('InstanceDefaultDataPath')
+    /// on first creation of the database. Ignored if the database already
+    /// exists. (Placed after cancellationToken so existing callers that pass
+    /// the token positionally keep compiling.)
+    /// </param>
+    /// <param name="logPath">
+    /// Optional server-side directory for the PerformanceMonitor log file.
+    /// </param>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Design",
+        "CA1068:CancellationToken parameters must come last",
+        Justification = "dataPath/logPath are appended after cancellationToken so existing " +
+            "callers that pass the token positionally (e.g. Dashboard AddServerDialog) keep compiling.")]
     public static async Task<InstallationResult> ExecuteInstallationAsync(
         string connectionString,
         ScriptProvider provider,
@@ -310,7 +333,9 @@ END;";
         bool resetSchedule = false,
         IProgress<InstallationProgress>? progress = null,
         Func<Task>? preValidationAction = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? dataPath = null,
+        string? logPath = null)
     {
         var scriptFiles = provider.GetInstallFiles();
         ArgumentNullException.ThrowIfNull(scriptFiles);
@@ -410,6 +435,24 @@ END;";
                     });
                 }
 
+                /*Inject custom data/log file paths into the CREATE DATABASE step (#768).
+                  Only applies on first creation; if the database already exists the
+                  guarded block is skipped, so the paths are silently ignored.*/
+                if (fileName.StartsWith("01_", StringComparison.Ordinal) &&
+                    (!string.IsNullOrWhiteSpace(dataPath) || !string.IsNullOrWhiteSpace(logPath)))
+                {
+                    sqlContent = sqlContent.Replace(
+                        FilePathOverrideToken,
+                        BuildFilePathOverrideSql(dataPath, logPath),
+                        StringComparison.Ordinal);
+
+                    progress?.Report(new InstallationProgress
+                    {
+                        Message = "Applying custom database file path(s) to CREATE DATABASE...",
+                        Status = "Info"
+                    });
+                }
+
                 /*Remove SQLCMD directives*/
                 sqlContent = Patterns.SqlCmdDirectivePattern.Replace(sqlContent, "");
 
@@ -500,6 +543,58 @@ END;";
 
         return result;
     }
+
+    /// <summary>
+    /// Builds the T-SQL that sets the override path variables in
+    /// 01_install_database.sql. Each path is normalized to end with a
+    /// separator and single quotes are doubled so the value cannot break out
+    /// of the surrounding N'...' literal. The install script applies a second
+    /// REPLACE(...) escape when it concatenates the value into the dynamic
+    /// CREATE DATABASE statement (defense in depth).
+    /// </summary>
+    private static string BuildFilePathOverrideSql(string? dataPath, string? logPath)
+    {
+        var sb = new StringBuilder();
+
+        if (!string.IsNullOrWhiteSpace(dataPath))
+        {
+            AppendPathOverride(sb, "@data_path_override", dataPath);
+        }
+
+        if (!string.IsNullOrWhiteSpace(logPath))
+        {
+            AppendPathOverride(sb, "@log_path_override", logPath);
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Appends a "SET @override = N'...'" statement for a validated path.
+    /// Re-validates so the no-control-character / absolute-path guarantees hold
+    /// for any caller (not just the CLI, which already validates), then escapes
+    /// the value before embedding it in the single-quoted literal.
+    /// </summary>
+    private static void AppendPathOverride(StringBuilder sb, string variableName, string path)
+    {
+        if (!PathValidation.TryValidateDirectory(path, out string normalized, out string error))
+        {
+            throw new ArgumentException($"Invalid database file path '{path}': {error}", nameof(path));
+        }
+
+        sb.Append("SET ")
+          .Append(variableName)
+          .Append(" = N'")
+          .Append(EscapeSqlStringLiteral(normalized))
+          .Append("';\n    ");
+    }
+
+    /// <summary>
+    /// Doubles single quotes so a value can be embedded safely inside a
+    /// single-quoted T-SQL string literal.
+    /// </summary>
+    private static string EscapeSqlStringLiteral(string value) =>
+        value.Replace("'", "''", StringComparison.Ordinal);
 
     /// <summary>
     /// Run validation (master collector) after installation.
@@ -830,6 +925,7 @@ END;";
     public static async Task<string?> GetInstalledVersionAsync(
         string connectionString,
         IProgress<InstallationProgress>? progress = null,
+        bool throwOnError = false,
         CancellationToken cancellationToken = default)
     {
         LogDebug(progress, "GetInstalledVersionAsync: checking for existing installation");
@@ -890,11 +986,17 @@ END;";
         catch (SqlException ex)
         {
             LogDebug(progress, $"GetInstalledVersionAsync: SqlException — {ex.Number}: {ex.Message}");
+            /* The installer passes throwOnError=true so a transient/permission error can't be
+               mistaken for "database absent" and silently trigger a fresh install over an
+               existing database (no upgrades, then logged as SUCCESS — the #538 hazard). Soft
+               callers (Dashboard version column, adversarial tests) keep the null fallback. */
+            if (throwOnError) throw;
             return null;
         }
         catch (Exception ex)
         {
             LogDebug(progress, $"GetInstalledVersionAsync: {ex.GetType().Name} — {ex.Message}");
+            if (throwOnError) throw;
             return null;
         }
     }
@@ -1047,6 +1149,14 @@ END;";
 
             totalSuccessCount += success;
             totalFailureCount += failure;
+
+            /* Stop at the first failed hop. Later hops assume this one's schema changes applied;
+               running them against a partially-upgraded database compounds the damage. The caller
+               aborts the whole install when totalFailureCount > 0. */
+            if (failure > 0)
+            {
+                break;
+            }
         }
 
         return (totalSuccessCount, totalFailureCount, upgrades.Count);

@@ -19,8 +19,11 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Navigation;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -461,7 +464,7 @@ public partial class SettingsWindow : Window
     }
 
     private bool _isLoadingTheme;
-    private readonly string _originalTheme = Helpers.ThemeManager.CurrentTheme;
+    private readonly string _originalTheme = ThemeManager.CurrentTheme;
     private bool _saved;
     public bool McpSettingsChanged { get; private set; }
 
@@ -469,7 +472,7 @@ public partial class SettingsWindow : Window
     {
         if (_isLoadingTheme) return;
         if (ColorThemeCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string theme)
-            Helpers.ThemeManager.Apply(theme);
+            ThemeManager.Apply(theme);
     }
 
     private void LoadColorTheme()
@@ -493,7 +496,7 @@ public partial class SettingsWindow : Window
         if (ColorThemeCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string theme)
         {
             App.ColorTheme = theme;
-            Helpers.ThemeManager.Apply(theme);
+            ThemeManager.Apply(theme);
         }
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
@@ -540,7 +543,7 @@ public partial class SettingsWindow : Window
         if (TimeDisplayModeCombo.SelectedItem is ComboBoxItem selected && selected.Tag is string mode)
         {
             App.TimeDisplayMode = mode;
-            if (System.Enum.TryParse<Helpers.TimeDisplayMode>(mode, out var tdm))
+            if (System.Enum.TryParse<TimeDisplayMode>(mode, out var tdm))
                 ServerTimeHelper.CurrentDisplayMode = tdm;
         }
 
@@ -590,13 +593,21 @@ public partial class SettingsWindow : Window
         LrqExcludeWaitForCheckBox.IsChecked = App.AlertLongRunningQueryExcludeWaitFor;
         LrqExcludeBackupsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeBackups;
         LrqExcludeMiscWaitsCheckBox.IsChecked = App.AlertLongRunningQueryExcludeMiscWaits;
+        LrqExcludeCdcCheckBox.IsChecked = App.AlertLongRunningQueryExcludeCdc;
         AlertExcludedDatabasesBox.Text = string.Join(", ", App.AlertExcludedDatabases);
         AlertTempDbSpaceCheckBox.IsChecked = App.AlertTempDbSpaceEnabled;
         AlertTempDbSpaceThresholdBox.Text = App.AlertTempDbSpaceThresholdPercent.ToString();
+        AlertLowDiskCheckBox.IsChecked = App.AlertLowDiskEnabled;
+        AlertLowDiskThresholdPercentBox.Text = App.AlertLowDiskThresholdPercent.ToString();
+        AlertLowDiskThresholdGbBox.Text = App.AlertLowDiskThresholdGb.ToString();
         AlertLongRunningJobCheckBox.IsChecked = App.AlertLongRunningJobEnabled;
         AlertLongRunningJobMultiplierBox.Text = App.AlertLongRunningJobMultiplier.ToString();
+        AlertFailedJobCheckBox.IsChecked = App.AlertFailedJobEnabled;
+        AlertFailedJobLookbackBox.Text = App.AlertFailedJobLookbackMinutes.ToString();
         AlertCooldownBox.Text = App.AlertCooldownMinutes.ToString();
         EmailCooldownBox.Text = App.EmailCooldownMinutes.ToString();
+        AlertDeliveryModeBox.SelectedIndex = App.AlertDeliveryMode == AlertNotificationMode.PerEvent ? 1 : 0;
+        AlertPerEventMaxBox.Text = App.AlertPerEventMaxPerCycle.ToString();
         MuteRuleDefaultExpirationCombo.SelectedIndex = App.MuteRuleDefaultExpiration switch
         {
             "1 hour" => 0,
@@ -605,6 +616,10 @@ public partial class SettingsWindow : Window
             _ => 3
         };
         LogAlertDismissalsCheckBox.IsChecked = App.LogAlertDismissals;
+        AnalysisEnabledCheckBox.IsChecked = App.AnalysisEnabled;
+        AnalysisNotificationsCheckBox.IsChecked = App.AnalysisNotificationsEnabled;
+        AnalysisIntervalBox.Text = App.AnalysisIntervalMinutes.ToString();
+        AnalysisNotifySeverityBox.Text = App.AnalysisNotifySeverity.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
         UpdateAlertControlStates();
     }
 
@@ -635,6 +650,7 @@ public partial class SettingsWindow : Window
         App.AlertLongRunningQueryExcludeWaitFor = LrqExcludeWaitForCheckBox.IsChecked == true;
         App.AlertLongRunningQueryExcludeBackups = LrqExcludeBackupsCheckBox.IsChecked == true;
         App.AlertLongRunningQueryExcludeMiscWaits = LrqExcludeMiscWaitsCheckBox.IsChecked == true;
+        App.AlertLongRunningQueryExcludeCdc = LrqExcludeCdcCheckBox.IsChecked == true;
         App.AlertExcludedDatabases = AlertExcludedDatabasesBox.Text
             .Split(',')
             .Select(s => s.Trim())
@@ -643,9 +659,17 @@ public partial class SettingsWindow : Window
         App.AlertTempDbSpaceEnabled = AlertTempDbSpaceCheckBox.IsChecked == true;
         if (int.TryParse(AlertTempDbSpaceThresholdBox.Text, out var tempDb) && tempDb > 0 && tempDb <= 100)
             App.AlertTempDbSpaceThresholdPercent = tempDb;
+        App.AlertLowDiskEnabled = AlertLowDiskCheckBox.IsChecked == true;
+        if (int.TryParse(AlertLowDiskThresholdPercentBox.Text, out var lowDiskPct) && lowDiskPct >= 0 && lowDiskPct <= 100)
+            App.AlertLowDiskThresholdPercent = lowDiskPct;
+        if (int.TryParse(AlertLowDiskThresholdGbBox.Text, out var lowDiskGb) && lowDiskGb >= 0)
+            App.AlertLowDiskThresholdGb = lowDiskGb;
         App.AlertLongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningJobMultiplierBox.Text, out var jobMult) && jobMult >= 2 && jobMult <= 20)
             App.AlertLongRunningJobMultiplier = jobMult;
+        App.AlertFailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true;
+        if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback >= 1 && failedJobLookback <= 1440)
+            App.AlertFailedJobLookbackMinutes = failedJobLookback;
         var validationErrors = new List<string>();
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
             App.AlertCooldownMinutes = alertCooldown;
@@ -655,8 +679,24 @@ public partial class SettingsWindow : Window
             App.EmailCooldownMinutes = emailCooldown;
         else
             validationErrors.Add("Email alert cooldown must be between 1 and 120 minutes.");
+        App.AlertDeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? AlertNotificationMode.PerEvent : AlertNotificationMode.Summary;
+        if (int.TryParse(AlertPerEventMaxBox.Text, out var perEventMax) && perEventMax >= 1 && perEventMax <= 100)
+            App.AlertPerEventMaxPerCycle = perEventMax;
+        else
+            validationErrors.Add("Per-event max-per-cycle must be between 1 and 100.");
         App.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
         App.LogAlertDismissals = LogAlertDismissalsCheckBox.IsChecked == true;
+        App.AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true;
+        App.AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true;
+        if (int.TryParse(AnalysisIntervalBox.Text, out var analysisInterval) && analysisInterval >= 5 && analysisInterval <= 360)
+            App.AnalysisIntervalMinutes = analysisInterval;
+        else
+            validationErrors.Add("Analysis interval must be between 5 and 360 minutes.");
+        if (double.TryParse(AnalysisNotifySeverityBox.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var analysisSeverity)
+            && analysisSeverity >= 0.0 && analysisSeverity <= 2.0)
+            App.AnalysisNotifySeverity = analysisSeverity;
+        else
+            validationErrors.Add("Analysis notify severity must be between 0.0 and 2.0.");
 
         var settingsPath = Path.Combine(App.ConfigDirectory, "settings.json");
         try
@@ -691,17 +731,29 @@ public partial class SettingsWindow : Window
             root["alert_long_running_query_exclude_waitfor"] = App.AlertLongRunningQueryExcludeWaitFor;
             root["alert_long_running_query_exclude_backups"] = App.AlertLongRunningQueryExcludeBackups;
             root["alert_long_running_query_exclude_misc_waits"] = App.AlertLongRunningQueryExcludeMiscWaits;
+            root["alert_long_running_query_exclude_cdc"] = App.AlertLongRunningQueryExcludeCdc;
             var dbArray = new System.Text.Json.Nodes.JsonArray();
             foreach (var db in App.AlertExcludedDatabases) dbArray.Add(db);
             root["alert_excluded_databases"] = dbArray;
             root["alert_tempdb_space_enabled"] = App.AlertTempDbSpaceEnabled;
             root["alert_tempdb_space_threshold_percent"] = App.AlertTempDbSpaceThresholdPercent;
+            root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
+            root["alert_low_disk_threshold_percent"] = App.AlertLowDiskThresholdPercent;
+            root["alert_low_disk_threshold_gb"] = App.AlertLowDiskThresholdGb;
             root["alert_long_running_job_enabled"] = App.AlertLongRunningJobEnabled;
             root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
+            root["alert_failed_job_enabled"] = App.AlertFailedJobEnabled;
+            root["alert_failed_job_lookback_minutes"] = App.AlertFailedJobLookbackMinutes;
             root["alert_cooldown_minutes"] = App.AlertCooldownMinutes;
             root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
+            root["alert_delivery_mode"] = App.AlertDeliveryMode.ToString();
+            root["alert_per_event_max_per_cycle"] = App.AlertPerEventMaxPerCycle;
             root["mute_rule_default_expiration"] = App.MuteRuleDefaultExpiration;
             root["log_alert_dismissals"] = App.LogAlertDismissals;
+            root["analysis_enabled"] = App.AnalysisEnabled;
+            root["analysis_notifications_enabled"] = App.AnalysisNotificationsEnabled;
+            root["analysis_interval_minutes"] = App.AnalysisIntervalMinutes;
+            root["analysis_notify_severity"] = App.AnalysisNotifySeverity;
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             File.WriteAllText(settingsPath, root.ToJsonString(options));
@@ -737,9 +789,16 @@ public partial class SettingsWindow : Window
         AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertTempDbSpaceThresholdBox.Text = "80";
+        AlertLowDiskThresholdPercentBox.Text = "10";
+        AlertLowDiskThresholdGbBox.Text = "5";
         AlertLongRunningJobMultiplierBox.Text = "3";
+        AlertFailedJobLookbackBox.Text = "60";
         AlertCooldownBox.Text = "5";
         EmailCooldownBox.Text = "15";
+        AlertDeliveryModeBox.SelectedIndex = 0;
+        AlertPerEventMaxBox.Text = "10";
+        AnalysisIntervalBox.Text = "30";
+        AnalysisNotifySeverityBox.Text = "1.5";
         AlertExcludedDatabasesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
@@ -771,8 +830,12 @@ public partial class SettingsWindow : Window
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
             parts.Add($"TempDB > {AlertTempDbSpaceThresholdBox.Text}%");
+        if (AlertLowDiskCheckBox.IsChecked == true)
+            parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
+        if (AlertFailedJobCheckBox.IsChecked == true)
+            parts.Add($"failed jobs (last {AlertFailedJobLookbackBox.Text}m)");
 
         AlertPreviewText.Text = parts.Count > 0
             ? $"Will alert when: {string.Join(", ", parts)}"
@@ -796,8 +859,13 @@ public partial class SettingsWindow : Window
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertTempDbSpaceCheckBox.IsEnabled = enabled;
         AlertTempDbSpaceThresholdBox.IsEnabled = enabled;
+        AlertLowDiskCheckBox.IsEnabled = enabled;
+        AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
+        AlertLowDiskThresholdGbBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
+        AlertFailedJobCheckBox.IsEnabled = enabled;
+        AlertFailedJobLookbackBox.IsEnabled = enabled;
         UpdateAlertPreviewText();
     }
 
@@ -941,7 +1009,9 @@ public partial class SettingsWindow : Window
             App.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
             App.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
 
-            var error = await Services.EmailAlertService.SendTestEmailAsync();
+            /* "Test before save": App.* statics were just set from the live UI above, so
+               new AppAlertSettings() reflects what the user typed (Plan E E3c, MOD-1). */
+            var error = await EmailSendCore.SendTestEmailAsync(new AppAlertSettings(), Services.EmailAlertService.Branding);
             if (error == null)
             {
                 MessageBox.Show("Test email sent successfully!", "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1065,7 +1135,7 @@ public partial class SettingsWindow : Window
         {
             var url = TeamsWebhookUrlBox.Text?.Trim() ?? "";
             var proxy = TeamsProxyAddressBox.Text?.Trim();
-            var error = await WebhookAlertService.SendTestTeamsAsync(url, proxy);
+            var error = await WebhookAlertService.SendTestTeamsAsync(url, proxy, EmailAlertService.Branding);
 
             if (error == null)
             {
@@ -1096,7 +1166,7 @@ public partial class SettingsWindow : Window
         {
             var url = SlackWebhookUrlBox.Text?.Trim() ?? "";
             var proxy = SlackProxyAddressBox.Text?.Trim();
-            var error = await WebhookAlertService.SendTestSlackAsync(url, proxy);
+            var error = await WebhookAlertService.SendTestSlackAsync(url, proxy, EmailAlertService.Branding);
 
             if (error == null)
             {
@@ -1136,14 +1206,14 @@ public partial class SettingsWindow : Window
     private void CloseButton_Click(object sender, RoutedEventArgs e)
     {
         if (!_saved)
-            Helpers.ThemeManager.Apply(_originalTheme);
+            ThemeManager.Apply(_originalTheme);
         Close();
     }
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
         if (!_saved)
-            Helpers.ThemeManager.Apply(_originalTheme);
+            ThemeManager.Apply(_originalTheme);
         base.OnClosing(e);
     }
 }

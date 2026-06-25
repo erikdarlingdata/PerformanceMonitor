@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -243,15 +244,11 @@ public class FactCollectorTests : IDisposable
     }
 
     [Fact]
-    public async Task CollectFacts_Perfmon_ReturnsPleAndRateCounters()
+    public async Task CollectFacts_Perfmon_ReturnsRateCounters()
     {
         var facts = await SeedAndCollectAsync(s => s.SeedEverythingOnFireServerAsync());
 
-        Assert.True(facts.ContainsKey("PERFMON_PLE"), "PERFMON_PLE should be collected");
         Assert.True(facts.ContainsKey("PERFMON_BATCH_REQ_SEC"), "PERFMON_BATCH_REQ_SEC should be collected");
-
-        // PLE uses cntr_value (absolute), seeded as 45
-        Assert.Equal(45, facts["PERFMON_PLE"].Value);
     }
 
     [Fact]
@@ -376,15 +373,6 @@ public class FactCollectorTests : IDisposable
     }
 
     [Fact]
-    public async Task CollectFacts_CleanServer_PleIsHealthy()
-    {
-        var facts = await SeedAndCollectAsync(s => s.SeedCleanServerAsync());
-
-        Assert.True(facts.ContainsKey("PERFMON_PLE"));
-        Assert.Equal(5_000, facts["PERFMON_PLE"].Value);
-    }
-
-    [Fact]
     public async Task CollectFacts_CleanServer_IoLatencyIsLow()
     {
         var facts = await SeedAndCollectAsync(s => s.SeedCleanServerAsync());
@@ -412,13 +400,10 @@ public class FactCollectorTests : IDisposable
         // Memory-starved server should have corroborating evidence
         Assert.True(facts.ContainsKey("CPU_SQL_PERCENT"));
         Assert.True(facts.ContainsKey("IO_READ_LATENCY_MS"));
-        Assert.True(facts.ContainsKey("PERFMON_PLE"));
         Assert.True(facts.ContainsKey("MEMORY_CLERKS"));
 
         // CPU should be high (85%)
         Assert.True(facts["CPU_SQL_PERCENT"].Value > 80);
-        // PLE should be low (120)
-        Assert.Equal(120, facts["PERFMON_PLE"].Value);
         // Read latency should be high (35ms)
         Assert.True(facts["IO_READ_LATENCY_MS"].Value > 30);
     }
@@ -444,11 +429,9 @@ public class FactCollectorTests : IDisposable
 
         Assert.True(facts.ContainsKey("MEMORY_GRANT_PENDING"));
         Assert.True(facts.ContainsKey("QUERY_SPILLS"));
-        Assert.True(facts.ContainsKey("PERFMON_PLE"));
 
         Assert.Equal(5, facts["MEMORY_GRANT_PENDING"].Value);
         Assert.True(facts["QUERY_SPILLS"].Value >= 1_500); // ~2000 spills
-        Assert.Equal(200, facts["PERFMON_PLE"].Value);
     }
 
     [Fact]
@@ -472,7 +455,7 @@ public class FactCollectorTests : IDisposable
         {
             "CPU_SQL_PERCENT", "IO_READ_LATENCY_MS", "IO_WRITE_LATENCY_MS",
             "TEMPDB_USAGE", "MEMORY_GRANT_PENDING", "QUERY_SPILLS", "QUERY_HIGH_DOP",
-            "PERFMON_PLE", "PERFMON_BATCH_REQ_SEC", "MEMORY_CLERKS", "DB_CONFIG",
+            "PERFMON_BATCH_REQ_SEC", "MEMORY_CLERKS", "DB_CONFIG",
             "PROCEDURE_STATS", "ACTIVE_QUERIES", "RUNNING_JOBS", "SESSION_STATS",
             "TRACE_FLAGS", "SERVER_HARDWARE", "DISK_SPACE"
         };
@@ -483,5 +466,41 @@ public class FactCollectorTests : IDisposable
             var f = facts[key];
             output.WriteLine($"  {key}: value={f.Value:F2} source={f.Source} metadata_keys={string.Join(",", f.Metadata.Keys)}");
         }
+    }
+
+    /* ── WS3: percent-autogrowth-on-large-files collector smoke test ── */
+
+    // The Lite collector emits FILE_AUTOGROWTH_PERCENT ONLY for large (>= 10 GB) percent-growth
+    // files in non-system databases. Small files, fixed-MB-growth files, and system databases
+    // are excluded. This is the fact-emission smoke test that would have caught a dead fact.
+    [Fact]
+    public async Task CollectFacts_PercentAutogrowthOnLargeFiles_FiresForQualifyingFilesOnly()
+    {
+        var facts = await SeedAndCollectAsync(s => s.SeedPercentAutogrowthFilesAsync(
+            ("AppDb",   "AppDb_log",  "LOG",  200000, true,  10),  // 200 GB %-growth  -> qualifies
+            ("AppDb",   "AppDb_data", "ROWS",  60000, true,  10),  // 60 GB  %-growth  -> qualifies
+            ("ReportDb", "Rep_data",  "ROWS",   5000, true,  25),  // 5 GB   %-growth  -> too small
+            ("AppDb",   "AppDb_fix",  "ROWS",  50000, false, 0),   // 50 GB  fixed     -> excluded
+            ("master",  "master",     "ROWS", 100000, true,  10))); // system DB       -> excluded
+
+        Assert.True(facts.ContainsKey("FILE_AUTOGROWTH_PERCENT"),
+            "FILE_AUTOGROWTH_PERCENT should be collected when a large percent-growth file exists");
+        var fact = facts["FILE_AUTOGROWTH_PERCENT"];
+        Assert.Equal("config", fact.Source);
+        Assert.Equal(2, fact.Value);                              // the two qualifying AppDb files
+        Assert.Equal(2, fact.Metadata["file_count"]);
+        Assert.Equal(1, fact.Metadata["database_count"]);          // both qualifying files are in AppDb
+    }
+
+    // No qualifying file -> the fact is not emitted at all (collector returns before Add).
+    [Fact]
+    public async Task CollectFacts_PercentAutogrowthOnLargeFiles_AbsentWhenNoQualifyingFile()
+    {
+        var facts = await SeedAndCollectAsync(s => s.SeedPercentAutogrowthFilesAsync(
+            ("AppDb", "AppDb_data", "ROWS", 5000, true,  10),   // too small
+            ("AppDb", "AppDb_fix",  "ROWS", 80000, false, 0)));  // fixed growth
+
+        Assert.False(facts.ContainsKey("FILE_AUTOGROWTH_PERCENT"),
+            "FILE_AUTOGROWTH_PERCENT should not be emitted when no large percent-growth file exists");
     }
 }

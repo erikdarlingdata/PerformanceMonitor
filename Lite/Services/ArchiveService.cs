@@ -75,6 +75,7 @@ public class ArchiveService
         ("waiting_tasks", "collection_time"),
         ("running_jobs", "collection_time"),
         ("database_size_stats", "collection_time"),
+        ("index_object_stats", "collection_time"),
         ("server_properties", "collection_time"),
         ("session_stats", "collection_time"),
         ("server_config", "capture_time"),
@@ -121,45 +122,88 @@ public class ArchiveService
 
         _logger?.LogInformation("Archiving data older than {CutoffDate} to Parquet (prefix: {Timestamp})", cutoffDate, timestamp);
 
-        /* Write lock covers export + DELETE. The DELETEs modify table data, and the
-           next CHECKPOINT will reorganize the file — readers must not be mid-query
-           when that happens or they get "Reached the end of the file" errors. */
-        using (_duckDb.AcquireWriteLock())
-        {
-            using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
+        /* Archive each table independently. Export-to-Parquet (COPY ... TO)
+           only READS the database, so it runs under a read lock — concurrently
+           with the UI. Only the DELETE modifies the file, so just the DELETE
+           takes the exclusive write lock, and only briefly. This keeps the UI
+           responsive during archival instead of freezing it for the whole
+           export (issue #979).
 
-            foreach (var (table, timeColumn) in ArchivableTables)
+           Exporting and deleting in separate lock scopes is safe here: the
+           DELETE only removes rows older than cutoffDate, and collectors only
+           ever insert rows timestamped "now", so nothing archivable can be
+           written into the gap between the export and the DELETE. */
+        foreach (var (table, timeColumn) in ArchivableTables)
+        {
+            try
             {
-                try
+                /* Uniquely-named parquet file — no merging needed. Each archival
+                   cycle produces a new file with a timestamp prefix; archive
+                   views use glob (*_table.parquet) to pick up all files. */
+                var parquetPath = Path.Combine(_archivePath, $"{timestamp}_{table}.parquet")
+                    .Replace("\\", "/");
+                /* Export to a .tmp first (excluded from the *_table.parquet glob), then promote.
+                   A mid-COPY failure (OOM/disk-full/process kill) must not leave a truncated
+                   parquet that matches the glob and breaks the archive view for the whole table. */
+                var tempParquetPath = parquetPath + ".tmp";
+
+                long rowCount;
+
+                /* Export under a read lock — runs alongside UI queries. */
+                using (_duckDb.AcquireReadLock())
                 {
-                    /* Check if there are rows to archive */
-                    var rowCount = await GetRowCountBeforeCutoff(connection, table, timeColumn, cutoffDate);
+                    using var readConnection = _duckDb.CreateConnection();
+                    await readConnection.OpenAsync();
+
+                    rowCount = await GetRowCountBeforeCutoff(readConnection, table, timeColumn, cutoffDate);
                     if (rowCount == 0)
                     {
                         continue;
                     }
 
-                    /* Export to a uniquely-named parquet file — no merging needed.
-                       Each archival cycle produces a new file with a timestamp prefix.
-                       Archive views use glob (*_table.parquet) to pick up all files. */
-                    var parquetPath = Path.Combine(_archivePath, $"{timestamp}_{table}.parquet")
-                        .Replace("\\", "/");
-
-                    await ExportToParquet(connection, table, timeColumn, cutoffDate, parquetPath);
-
-                    /* Delete archived rows from hot table */
-                    using var deleteCmd = connection.CreateCommand();
-                    deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
-                    deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoffDate });
-                    await deleteCmd.ExecuteNonQueryAsync();
-
-                    _logger?.LogInformation("Archived {Count} rows from {Table} to {Path}", rowCount, table, parquetPath);
+                    await ExportToParquet(readConnection, table, timeColumn, cutoffDate, tempParquetPath);
                 }
-                catch (Exception ex)
+
+                /* Promote the temp only after the COPY has fully succeeded. */
+                if (File.Exists(parquetPath))
                 {
-                    _logger?.LogError(ex, "Failed to archive table {Table}", table);
+                    File.Delete(parquetPath);
                 }
+                File.Move(tempParquetPath, parquetPath);
+
+                /* Delete the archived rows under the write lock. The DELETE
+                   modifies table data and the next CHECKPOINT reorganizes the
+                   file — readers must not be mid-query when that happens or
+                   they get "Reached the end of the file" errors — but the
+                   DELETE itself is fast, so the UI stall is brief. */
+                try
+                {
+                    using (_duckDb.AcquireWriteLock())
+                    {
+                        using var writeConnection = _duckDb.CreateConnection();
+                        await writeConnection.OpenAsync();
+
+                        using var deleteCmd = writeConnection.CreateCommand();
+                        deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
+                        deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoffDate });
+                        await deleteCmd.ExecuteNonQueryAsync();
+                    }
+                }
+                catch
+                {
+                    /* The rows are still in the table (DELETE failed), so they aren't lost —
+                       discard the archive file we just wrote so the same rows aren't counted in
+                       both the table and the parquet (double-counted by v_* views and re-exported
+                       next cycle). */
+                    try { File.Delete(parquetPath); } catch { /* best effort */ }
+                    throw;
+                }
+
+                _logger?.LogInformation("Archived {Count} rows from {Table} to {Path}", rowCount, table, parquetPath);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to archive table {Table}", table);
             }
         }
 
@@ -244,150 +288,6 @@ COPY (
                    state and will be disposed by the caller's `using` shortly. */
             }
         }
-    }
-
-    /* Columns to exclude during compaction — dead weight from legacy archives */
-    private static readonly Dictionary<string, string[]> CompactionExcludeColumns = new()
-    {
-        ["query_store_stats"] = ["query_plan_text"]
-    };
-
-    /* Maximum total on-disk parquet bytes per compaction merge batch. Wide-VARCHAR
-       tables (query_snapshots) expand 5-10x on read; this cap keeps the in-memory
-       working set during a COPY well below the 4 GB compaction memory_limit even
-       on the worst data shapes. Groups exceeding this budget produce multiple
-       _ptNNN.parquet output files. See #933 followup — a 72-file query_snapshots
-       backlog at 4 GB OOM'd on real allocation pressure during the final merge. */
-    private const long MaxBatchInputBytes = 200L * 1024 * 1024; /* 200 MB */
-
-    /* Greedily group <paramref name="sortedPaths"/> (smallest-first) into batches
-       whose total on-disk bytes don't exceed <paramref name="maxBytes"/>. A single
-       file larger than the cap becomes its own one-element batch — that's the
-       degenerate case (the cap can't split an individual file) and the caller
-       handles it as a single-file pass-through merge. */
-    private static List<List<string>> BuildSizeBudgetedBatches(IReadOnlyList<string> sortedPaths, long maxBytes)
-    {
-        var batches = new List<List<string>>();
-        var current = new List<string>();
-        long currentBytes = 0;
-
-        foreach (var p in sortedPaths)
-        {
-            var size = new FileInfo(p.Replace("/", "\\")).Length;
-            if (currentBytes + size > maxBytes && current.Count > 0)
-            {
-                batches.Add(current);
-                current = new List<string>();
-                currentBytes = 0;
-            }
-            current.Add(p);
-            currentBytes += size;
-        }
-        if (current.Count > 0)
-        {
-            batches.Add(current);
-        }
-
-        return batches;
-    }
-
-    /* Merge one size-budgeted batch into <paramref name="outputPath"/>. The pragma
-       block matches the compaction tuning from #933:
-         - memory_limit = 4GB: parquet COPY does allocations that bypass the buffer
-           manager and can't be spilled. The cap is a hard ceiling for those, not
-           a spill trigger. 4GB leaves real headroom for wide-VARCHAR data within
-           the batch-size budget. Aligns with DuckDB's OOM guide (50-60% of RAM).
-         - threads = 2: fewer per-thread row-group buffers in flight.
-         - ROW_GROUP_SIZE 8192: smaller buffered batch per row group.
-         - preserve_insertion_order = false: lets DuckDB stream.
-       See tools/CompactionRepro for the stress reproducer. */
-    private void MergeBatchToFile(string table, List<string> sourcePaths, string outputPath, string spillDirSql)
-    {
-        if (sourcePaths.Count <= 2)
-        {
-            /* Small batch — single-pass merge (also covers the degenerate 1-file case). */
-            using var con = new DuckDBConnection("DataSource=:memory:");
-            con.Open();
-            using (var pragma = con.CreateCommand())
-            {
-                pragma.CommandText = $"SET memory_limit = '4GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
-                pragma.ExecuteNonQuery();
-            }
-
-            var selectClause = BuildSelectClause(table, sourcePaths);
-            var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
-            using var cmd = con.CreateCommand();
-            cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)) " +
-                              $"TO '{EscapeSqlPath(outputPath)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 8192)";
-            cmd.ExecuteNonQuery();
-            return;
-        }
-
-        /* Larger batch — incremental pairwise merge. Caller has already sorted
-           smallest-first across the whole group; within a batch we preserve that
-           order so the accumulator grows steadily and small files are folded in
-           early when memory is cheapest. */
-        var currentPath = sourcePaths[0];
-        var intermediateFiles = new List<string>();
-
-        for (var i = 1; i < sourcePaths.Count; i++)
-        {
-            var stepOutput = i < sourcePaths.Count - 1
-                ? outputPath + $".step{i}.tmp"
-                : outputPath;
-
-            using var con = new DuckDBConnection("DataSource=:memory:");
-            con.Open();
-            using (var pragma = con.CreateCommand())
-            {
-                pragma.CommandText = $"SET memory_limit = '4GB'; SET threads = 2; SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
-                pragma.ExecuteNonQuery();
-            }
-
-            var selectClause = BuildSelectClause(table, new[] { currentPath, sourcePaths[i] });
-            var pairList = $"'{EscapeSqlPath(currentPath)}', '{EscapeSqlPath(sourcePaths[i])}'";
-            using var cmd = con.CreateCommand();
-            cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pairList}], union_by_name=true)) " +
-                              $"TO '{EscapeSqlPath(stepOutput)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 8192)";
-            cmd.ExecuteNonQuery();
-
-            if (intermediateFiles.Count > 0)
-            {
-                var prev = intermediateFiles[^1];
-                try { File.Delete(prev); } catch { /* best effort */ }
-            }
-            intermediateFiles.Add(stepOutput);
-            currentPath = stepOutput;
-        }
-    }
-
-    /* Build the SELECT clause for a compaction COPY, excluding only the
-       CompactionExcludeColumns actually present in THIS set of files.
-       Detection must be per-merge-set, not global: archive files predating a
-       schema change lack the column, so a globally-computed "* EXCLUDE (col)"
-       fails the binder on a pair where neither file has it. query_plan_text
-       was added to query_store_stats in migration v13 (2026-02-23), so a
-       reporter's pre-v13 archives don't carry it. (#933) */
-    private static string BuildSelectClause(string table, IReadOnlyList<string> paths)
-    {
-        if (!CompactionExcludeColumns.TryGetValue(table, out var excludeCols))
-        {
-            return "*";
-        }
-
-        using var schemaCon = new DuckDBConnection("DataSource=:memory:");
-        schemaCon.Open();
-        var pathList = string.Join(", ", paths.Select(p => $"'{EscapeSqlPath(p)}'"));
-        using var schemaCmd = schemaCon.CreateCommand();
-        schemaCmd.CommandText = $"SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet([{pathList}], union_by_name=true))";
-        using var reader = schemaCmd.ExecuteReader();
-        var existingCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        while (reader.Read()) existingCols.Add(reader.GetString(0));
-
-        var colsToExclude = excludeCols.Where(c => existingCols.Contains(c)).ToArray();
-        return colsToExclude.Length > 0
-            ? $"* EXCLUDE ({string.Join(", ", colsToExclude)})"
-            : "*";
     }
 
     /// <summary>
@@ -545,15 +445,21 @@ COPY (
 
         foreach (var ((month, table), files) in groups)
         {
-            /* If there's exactly one file and it's already in monthly format, skip.
-               This regex matches both YYYYMM_table.parquet and YYYYMM_table_ptNNN.parquet. */
-            if (files.Count == 1)
+            /* Best-effort: some tables can't be merged within the memory cap and
+               are skipped — their per-cycle files are left in place and pruned by
+               retention (see ParquetCompaction.SkipCompactionTables and #933). */
+            if (ParquetCompaction.ShouldSkipCompaction(table))
             {
-                var name = Path.GetFileNameWithoutExtension(files[0]);
-                if (Regex.IsMatch(name, @"^\d{6}_"))
-                {
-                    continue;
-                }
+                continue;
+            }
+
+            /* If every file in the group is already in final monthly/part format
+               (YYYYMM_table or YYYYMM_table_ptNNN), there are no new per-cycle files to fold in,
+               so skip. Otherwise a month that legitimately split into N part files (input over
+               the per-batch budget) gets re-read and re-written on every archival cycle. */
+            if (files.All(f => Regex.IsMatch(Path.GetFileNameWithoutExtension(f), @"^\d{6}_.+?(_pt\d{3})?$")))
+            {
+                continue;
             }
 
             /* Resolve month for orphan files — use current month */
@@ -572,15 +478,13 @@ COPY (
                     .OrderBy(p => new FileInfo(p.Replace("/", "\\")).Length)
                     .ToList();
 
-                /* Bucket files into size-budgeted batches. Cap each batch's on-disk
-                   parquet bytes so a single COPY doesn't try to merge an unbounded
-                   amount of expanded VARCHAR data. Wide-row tables (query_snapshots'
-                   plan XML) expand ~5-10x in memory on read; a 72-file backlog at
-                   the 4 GB compaction memory_limit OOM'd on real allocation pressure
-                   (not pre-reservation) — see #933 followup. The cap is sized so
-                   that even with ~10x expansion the in-memory load stays well under
-                   4 GB. Narrow tables fit one batch with hundreds of files in it. */
-                var batches = BuildSizeBudgetedBatches(sorted, MaxBatchInputBytes);
+                /* Bucket files into size-budgeted batches so a single COPY never
+                   merges an unbounded amount of data. Wide query-plan-XML tables
+                   that can't merge within the cap are skipped above; the tables
+                   that reach here compress mildly, so the on-disk budget is a fine
+                   proxy and they fit one batch with many files (#933). */
+                var batches = ParquetCompaction.BuildSizeBudgetedBatches(
+                    sorted, ParquetCompaction.DefaultBatchInputBytes);
 
                 /* Plan the output names. With one batch we keep the existing
                    YYYYMM_table.parquet name (backward compatible). With multiple
@@ -601,14 +505,37 @@ COPY (
                    place for next cycle's retry. */
                 for (var i = 0; i < batches.Count; i++)
                 {
-                    MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql);
+                    ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql);
                 }
 
-                /* All batches succeeded — delete originals, promote temps. */
+                /* All batches succeeded — promote temps to their final names FIRST, then delete
+                   the originals. Deleting first risked PERMANENT data loss: the temps hold the
+                   only merged copy of the just-deleted originals, and if a promote then failed
+                   (e.g. File.Delete(finalPath) throws because a UI reader has the monthly file
+                   open mid read_parquet) the catch below deletes those temps. Promoting first
+                   keeps the originals as a fallback until the new files are safely in place. */
+                var finalPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (tempPath, finalPath) in batchOutputs)
+                {
+                    if (File.Exists(finalPath))
+                    {
+                        File.Delete(finalPath);
+                    }
+                    File.Move(tempPath, finalPath);
+                    finalPaths.Add(finalPath);
+                }
+
                 var removed = 0;
                 foreach (var f in files)
                 {
-                    var fullPath = Path.Combine(_archivePath, f);
+                    var fullPath = Path.Combine(_archivePath, f).Replace("\\", "/");
+                    /* A source file can share the name of a promoted output when the monthly file
+                       is itself re-merged; that path now holds the freshly merged data — never
+                       delete it. */
+                    if (finalPaths.Contains(fullPath))
+                    {
+                        continue;
+                    }
                     try
                     {
                         File.Delete(fullPath);
@@ -618,15 +545,6 @@ COPY (
                     {
                         _logger?.LogWarning("Could not delete {File} during compaction: {Message}", f, ex.Message);
                     }
-                }
-
-                foreach (var (tempPath, finalPath) in batchOutputs)
-                {
-                    if (File.Exists(finalPath))
-                    {
-                        File.Delete(finalPath);
-                    }
-                    File.Move(tempPath, finalPath);
                 }
 
                 totalMerged++;

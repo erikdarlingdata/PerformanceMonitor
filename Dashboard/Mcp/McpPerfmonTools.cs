@@ -7,13 +7,14 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
 [McpServerToolType]
 public sealed class McpPerfmonTools
 {
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest performance counter values including batch requests/sec, compilations/sec, recompilations/sec, page life expectancy, and other key SQL Server metrics. Provides throughput context that helps distinguish a busy server from a sick one. Use counter_name or instance_name to filter results.")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest performance counter values including batch requests/sec, compilations/sec, recompilations/sec, and other key SQL Server metrics. Provides throughput context that helps distinguish a busy server from a sick one. Use counter_name or instance_name to filter results.")]
     public static async Task<string> GetPerfmonStats(
         ServerManager serverManager,
         DatabaseServiceRegistry registry,
@@ -36,7 +37,7 @@ public sealed class McpPerfmonTools
             var rows = await resolved.Value.Service.GetPerfmonStatsAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No perfmon stats available.";
+                return McpHelpers.Status("unavailable", "No perfmon stats available.");
             }
 
             /* Return latest snapshot */
@@ -93,7 +94,7 @@ public sealed class McpPerfmonTools
             var rows = await resolved.Value.Service.GetPerfmonStatsAsync(hours_back);
             if (rows.Count == 0)
             {
-                return "No perfmon trend data available.";
+                return McpHelpers.Status("unavailable", "No perfmon trend data available.");
             }
 
             IEnumerable<PerfmonStatsItem> filtered = rows;

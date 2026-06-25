@@ -54,7 +54,10 @@ BEGIN
         @error_message nvarchar(4000),
         @engine_edition integer =
             CONVERT(integer, SERVERPROPERTY(N'EngineEdition')),
-        @major_version integer;
+        @major_version integer,
+        @lock_pages_in_memory bit = NULL,
+        @instant_file_initialization_enabled bit = NULL,
+        @memory_dump_count integer = NULL;
 
     /*
     Parse major version for feature gating
@@ -207,6 +210,101 @@ BEGIN
         END;
 
         /*
+        Server-health properties (WS5): Lock Pages in Memory, Instant File
+        Initialization, and SQL Server memory dump count. Each is captured
+        defensively and left NULL where the source is unavailable (older
+        builds, Azure SQL DB) so the collector never fails on a missing
+        DMV/column.
+        */
+
+        /*
+        LPIM: sys.dm_os_sys_info.sql_memory_model. 1 = CONVENTIONAL (off),
+        2 = LOCK_PAGES, 3 = LARGE_PAGES (both mean LPIM is in effect).
+        sql_memory_model exists on all supported on-prem versions; it is not
+        meaningful on Azure SQL DB (engine edition 5), where it is left NULL.
+        */
+        IF @engine_edition <> 5
+        BEGIN
+            BEGIN TRY
+                SELECT
+                    @lock_pages_in_memory =
+                        CASE
+                            WHEN osi.sql_memory_model IN (2, 3)
+                            THEN CONVERT(bit, 1)
+                            ELSE CONVERT(bit, 0)
+                        END
+                FROM sys.dm_os_sys_info AS osi;
+            END TRY
+            BEGIN CATCH
+                SET @lock_pages_in_memory = NULL;
+            END CATCH;
+        END;
+
+        /*
+        IFI: sys.dm_server_services.instant_file_initialization_enabled
+        ('Y'/'N'). The DMV is on-prem only and the column was added in later
+        builds (SQL 2016 SP1 / 2017+), so guard on both DMV and column
+        existence and read via dynamic SQL so older builds still compile.
+        servicename is matched with LIKE N'SQL Server (%' to cover the default
+        instance and named instances.
+        */
+        IF @engine_edition <> 5
+        AND OBJECT_ID(N'sys.dm_server_services', N'V') IS NOT NULL
+        AND EXISTS
+        (
+            SELECT
+                1/0
+            FROM sys.system_columns AS sc
+            WHERE sc.object_id = OBJECT_ID(N'sys.dm_server_services')
+            AND   sc.name = N'instant_file_initialization_enabled'
+        )
+        BEGIN
+            BEGIN TRY
+                DECLARE
+                    @ifi_sql nvarchar(max) =
+                        N'
+                SELECT TOP (1)
+                    @ifi_out =
+                        CASE
+                            WHEN ss.instant_file_initialization_enabled = N''Y''
+                            THEN CONVERT(bit, 1)
+                            WHEN ss.instant_file_initialization_enabled = N''N''
+                            THEN CONVERT(bit, 0)
+                            ELSE NULL
+                        END
+                FROM sys.dm_server_services AS ss
+                WHERE ss.servicename LIKE N''SQL Server (%'';';
+
+                EXECUTE sys.sp_executesql
+                    @ifi_sql,
+                  N'@ifi_out bit OUTPUT',
+                    @ifi_out = @instant_file_initialization_enabled OUTPUT;
+            END TRY
+            BEGIN CATCH
+                SET @instant_file_initialization_enabled = NULL;
+            END CATCH;
+        END;
+
+        /*
+        Memory dumps: COUNT(*) from sys.dm_server_memory_dumps. On-prem only
+        (not exposed on Azure SQL DB) and unavailable on some
+        editions/versions, so guard on DMV existence and TRY/CATCH; a missing
+        DMV leaves the count NULL rather than zero.
+        */
+        IF @engine_edition <> 5
+        AND OBJECT_ID(N'sys.dm_server_memory_dumps', N'V') IS NOT NULL
+        BEGIN
+            BEGIN TRY
+                SELECT
+                    @memory_dump_count = COUNT_BIG(*)
+                FROM sys.dm_server_memory_dumps AS smd;
+            END TRY
+            BEGIN CATCH
+                SET @memory_dump_count = NULL;
+            END CATCH;
+        END;
+
+        /*
         Deduplication: check if anything changed since last collection
         */
         DECLARE
@@ -221,12 +319,22 @@ BEGIN
                     CONCAT
                     (
                         CONVERT(nvarchar(128), SERVERPROPERTY(N'Edition')), N'|',
+                        /* Include the Azure tier inputs that drive the normalized edition /
+                           service_objective columns. SERVERPROPERTY('Edition') is the constant
+                           'SQL Azure' on Azure SQL DB, so without these a pure tier/SLO change with
+                           no vCore/memory delta would not change the hash and the collector would
+                           SKIP, never recording the new tier. NULL (on-prem) concats as empty. */
+                        CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), N'Edition')), N'|',
+                        CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), N'ServiceObjective')), N'|',
                         CONVERT(nvarchar(128), SERVERPROPERTY(N'ProductVersion')), N'|',
                         CONVERT(nvarchar(128), SERVERPROPERTY(N'ProductLevel')), N'|',
                         @engine_edition, N'|',
                         (SELECT osi.cpu_count FROM sys.dm_os_sys_info AS osi), N'|',
                         (SELECT osi.physical_memory_kb FROM sys.dm_os_sys_info AS osi), N'|',
-                        ISNULL(@enterprise_features, N'')
+                        ISNULL(@enterprise_features, N''), N'|',
+                        ISNULL(CONVERT(nvarchar(10), @lock_pages_in_memory), N'NULL'), N'|',
+                        ISNULL(CONVERT(nvarchar(10), @instant_file_initialization_enabled), N'NULL'), N'|',
+                        ISNULL(CONVERT(nvarchar(11), @memory_dump_count), N'NULL')
                     )
                 );
 
@@ -286,6 +394,9 @@ BEGIN
             is_clustered,
             enterprise_features,
             service_objective,
+            lock_pages_in_memory,
+            instant_file_initialization_enabled,
+            memory_dump_count,
             row_hash
         )
         SELECT
@@ -293,7 +404,19 @@ BEGIN
             server_name =
                 CONVERT(sysname, SERVERPROPERTY(N'ServerName')),
             edition =
-                CONVERT(sysname, SERVERPROPERTY(N'Edition')),
+                /* Azure SQL DB reports the legacy 'SQL Azure' for SERVERPROPERTY('Edition');
+                   store the actual product name + service tier instead. */
+                CASE
+                    WHEN @engine_edition = 5
+                    THEN N'Azure SQL Database'
+                         + ISNULL(N' (' +
+                             CASE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), N'Edition'))
+                                 WHEN N'GeneralPurpose'   THEN N'General Purpose'
+                                 WHEN N'BusinessCritical' THEN N'Business Critical'
+                                 ELSE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), N'Edition'))
+                             END + N')', N'')
+                    ELSE CONVERT(sysname, SERVERPROPERTY(N'Edition'))
+                END,
             product_version =
                 CONVERT(sysname, SERVERPROPERTY(N'ProductVersion')),
             product_level =
@@ -318,6 +441,9 @@ BEGIN
                     THEN CONVERT(sysname, DATABASEPROPERTYEX(DB_NAME(), N'ServiceObjective'))
                     ELSE NULL
                 END,
+            lock_pages_in_memory = @lock_pages_in_memory,
+            instant_file_initialization_enabled = @instant_file_initialization_enabled,
+            memory_dump_count = @memory_dump_count,
             row_hash = @current_hash
         FROM sys.dm_os_sys_info AS osi
         OPTION(RECOMPILE);
@@ -329,7 +455,7 @@ BEGIN
         */
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Collected %d server properties row(s)', 0, 1, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'Collected %I64d server properties row(s)', 0, 1, @rows_collected) WITH NOWAIT;
 
             SELECT TOP (1)
                 sp.server_name,

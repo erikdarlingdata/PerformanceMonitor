@@ -18,7 +18,9 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
-using static PerformanceMonitorDashboard.Helpers.WaitDrillDownHelper;
+using static PerformanceMonitor.Ui.WaitDrillDownHelper;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard;
 
@@ -35,6 +37,7 @@ public partial class WaitDrillDownWindow : Window
     private List<QuerySnapshotItem>? _unfilteredData;
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
+    private readonly PlanNavigationController _planActions;
 
     public WaitDrillDownWindow(
         DatabaseService databaseService,
@@ -49,6 +52,13 @@ public partial class WaitDrillDownWindow : Window
         _hoursBack = hoursBack;
         _fromDate = fromDate;
         _toDate = toDate;
+
+        _planActions = new PlanNavigationController(
+            this,
+            (xml, label, qt) => PlanViewerWindow.ShowPlanAsync(this, xml, label, qt),
+            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+                _databaseService.ConnectionString, db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct),
+            "the monitored server");
 
         Title = $"Wait Drill-Down: {waitType}";
 
@@ -513,6 +523,35 @@ public partial class WaitDrillDownWindow : Window
                 }
             }
         }
+    }
+
+    #endregion
+
+    #region Plan Actions
+
+    private async void ViewPlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetSnapshotItem(sender) is not { } item) return;
+        await _planActions.ViewPlanAsync(
+            () => _databaseService.GetQuerySnapshotPlanAsync(item.CollectionTime, item.SessionId),
+            $"Est Plan - SPID {item.SessionId}", item.QueryText);
+    }
+
+    private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetSnapshotItem(sender) is not { } item) return;
+        await _planActions.GetActualPlanAsync(item.QueryText, item.DatabaseName ?? "",
+            $"Actual Plan - SPID {item.SessionId}");
+    }
+
+    private static QuerySnapshotItem? GetSnapshotItem(object sender)
+    {
+        if (sender is MenuItem menuItem && menuItem.Parent is ContextMenu contextMenu)
+        {
+            var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu);
+            return (dataGrid?.CurrentCell.Item ?? dataGrid?.SelectedItem) as QuerySnapshotItem;
+        }
+        return null;
     }
 
     #endregion

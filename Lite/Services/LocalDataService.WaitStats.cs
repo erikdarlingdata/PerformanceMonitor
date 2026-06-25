@@ -151,6 +151,75 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// Batched sibling of <see cref="GetWaitStatsTrendAsync"/>: fetches the per-second trend for
+    /// ALL selected wait types in ONE query (replacing an N+1 query-per-type loop), grouped by type.
+    /// The LAG window is partitioned by wait_type so each type's per-second rate is computed independently.
+    /// </summary>
+    public async Task<Dictionary<string, List<WaitStatsTrendPoint>>> GetWaitStatsTrendsByTypesAsync(int serverId, List<string> waitTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var _q = TimeQuery("GetWaitStatsTrendsByTypesAsync", "v_wait_stats trends batched by type");
+        var result = new Dictionary<string, List<WaitStatsTrendPoint>>();
+        if (waitTypes.Count == 0) return result;
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var typeParams = string.Join(", ", waitTypes.Select((_, i) => "$" + (i + 4)));
+
+        command.CommandText = $@"
+WITH raw AS
+(
+    SELECT
+        wait_type,
+        collection_time,
+        delta_wait_time_ms,
+        delta_signal_wait_time_ms,
+        delta_waiting_tasks,
+        date_diff('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time), collection_time) AS interval_seconds
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   wait_type IN ({typeParams})
+)
+SELECT
+    wait_type,
+    collection_time,
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE) / interval_seconds ELSE 0 END AS wait_time_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE) / interval_seconds ELSE 0 END AS signal_wait_time_ms_per_second,
+    CASE WHEN delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE) / delta_waiting_tasks ELSE 0 END AS avg_ms_per_wait
+FROM raw
+ORDER BY wait_type, collection_time";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        foreach (var wt in waitTypes)
+            command.Parameters.Add(new DuckDBParameter { Value = wt });
+
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var wt = reader.GetString(0);
+            if (!result.TryGetValue(wt, out var list))
+            {
+                list = new List<WaitStatsTrendPoint>();
+                result[wt] = list;
+            }
+            list.Add(new WaitStatsTrendPoint
+            {
+                CollectionTime = reader.GetDateTime(1),
+                WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                AvgMsPerWait = reader.IsDBNull(4) ? 0 : reader.GetDouble(4)
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Gets total wait time trend across all wait types as a single aggregated time-series.
     /// Used by the correlated timeline lanes for a single-line wait stats overview.
     /// </summary>
@@ -436,7 +505,8 @@ LIMIT 2000";
         bool excludeSpServerDiagnostics = true,
         bool excludeWaitFor = true,
         bool excludeBackups = true,
-        bool excludeMiscWaits = true)
+        bool excludeMiscWaits = true,
+        bool excludeCdc = true)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -451,6 +521,10 @@ LIMIT 2000";
             ? "AND r.wait_type NOT IN (N'BACKUPTHREAD', N'BACKUPIO')" : "";
         string miscWaitsFilter = excludeMiscWaits
             ? "AND r.wait_type NOT IN (N'XE_LIVE_TARGET_TVF')" : "";
+        // CDC capture sessions are flagged server-side by the collector (is_cdc_capture). COALESCE
+        // guards pre-migration / archived rows where the column is NULL.
+        string cdcFilter = excludeCdc
+            ? "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE" : "";
         maxResults = Math.Clamp(maxResults, 1, 1000);
 
         command.CommandText = @$"
@@ -463,7 +537,8 @@ LIMIT 2000";
                     r.reads,
                     r.writes,
                     r.wait_type,
-                    r.blocking_session_id
+                    r.blocking_session_id,
+                    r.query_hash
                 FROM v_query_snapshots AS r
                 WHERE r.server_id = $1
                     AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
@@ -473,6 +548,7 @@ LIMIT 2000";
                     {waitForFilter}
                     {backupsFilter}
                     {miscWaitsFilter}
+                    {cdcFilter}
                     AND r.total_elapsed_time_ms >= $2
                 ORDER BY r.total_elapsed_time_ms DESC
                 LIMIT $3;";
@@ -495,7 +571,8 @@ LIMIT 2000";
                 Reads = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 Writes = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 WaitType = reader.IsDBNull(7) ? null : reader.GetString(7),
-                BlockingSessionId = reader.IsDBNull(8) ? null : (int?)reader.GetInt32(8)
+                BlockingSessionId = reader.IsDBNull(8) ? null : (int?)reader.GetInt32(8),
+                QueryHash = reader.IsDBNull(9) ? null : reader.GetString(9)
             });
         }
 
@@ -515,6 +592,7 @@ public class LongRunningQueryInfo
     public long Writes { get; set; }
     public string? WaitType { get; set; }
     public int? BlockingSessionId { get; set; }
+    public string? QueryHash { get; set; }
 }
 
 public class PoisonWaitDelta

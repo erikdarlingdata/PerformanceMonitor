@@ -15,31 +15,61 @@ using System.Windows.Markup;
 using System.Windows.Threading;
 using PerformanceMonitorDashboard.Helpers;
 using Velopack;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard
 {
     public partial class App : Application
     {
         private const string MutexName = "PerformanceMonitorDashboard_SingleInstance";
-        private Mutex? _singleInstanceMutex;
-        private bool _ownsMutex;
+        /* Version-aware single-instance + upgrade handoff (plans/single-instance-upgrade-handoff.md):
+           a newer build launched over an older tray-resident one closes it and takes over instead of
+           being handed back the stale in-memory version. The coordinator owns the mutex + the
+           exit-for-upgrade listener for the life of the owning process. */
+        private const string ExitForUpgradeEventName = "PerformanceMonitorDashboard_ExitForUpgrade";
+        private SingleInstanceCoordinator? _instanceCoordinator;
 
         protected override void OnStartup(StartupEventArgs e)
         {
             NativeMethods.SetAppUserModelId("DarlingData.PerformanceMonitor.Dashboard");
 
-            // Check for existing instance
-            _singleInstanceMutex = new Mutex(true, MutexName, out _ownsMutex);
-
-            if (!_ownsMutex)
+            /* Single-instance with upgrade handoff. Runs synchronously at the top of OnStartup before
+               base.OnStartup and any window/MCP init, so a stale older build is closed before we bind
+               the MCP port / touch shared config. A same/newer instance just surfaces (today's behavior
+               via WM_SHOWMONITOR); an older-but-elevated one raises an actionable error. */
+            _instanceCoordinator = new SingleInstanceCoordinator(new SingleInstanceOptions
             {
-                // Another instance is already running - activate it and exit
-                NativeMethods.BroadcastShowMessage();
+                MutexName = MutexName,
+                ProcessName = "PerformanceMonitorDashboard",
+                ExitEventName = ExitForUpgradeEventName,
+                SurfaceRunningInstance = NativeMethods.BroadcastShowMessage,
+                GracefulSelfExit = () => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (MainWindow is MainWindow mw) mw.ExitApplication();
+                    else Shutdown();
+                })),
+                Prompts = new MessageBoxHandoffPrompts("Performance Monitor Dashboard"),
+                AutoConfirm = Array.Exists(e.Args, a => string.Equals(a, HandoffArgs.AutoConfirm, StringComparison.OrdinalIgnoreCase)),
+                Log = msg => { try { Logger.Info($"[SingleInstance] {msg}"); } catch { /* logger not yet initialized */ } },
+            });
+
+            if (!_instanceCoordinator.TryBecomeOwner())
+            {
                 Shutdown();
                 return;
             }
 
             base.OnStartup(e);
+
+            // Right-click selects the DataGrid row under the cursor app-wide, so context-menu actions
+            // (e.g. View Plan) act on the clicked row even after an auto-refresh cleared the selection.
+            PerformanceMonitor.Ui.DataGridRowSelectionBehavior.Enable();
+
+            // #1050: WPF's GPU render thread can zombie its surface across sleep/wake or RDP, leaving a
+            // live-but-blank window. Software rendering removes the GPU dependency entirely. Charts are
+            // unaffected — ScottPlot renders via SkiaSharp (CPU) into a bitmap, not WPF's GPU path.
+            System.Windows.Media.RenderOptions.ProcessRenderMode =
+                System.Windows.Interop.RenderMode.SoftwareOnly;
 
             // Use the user's locale for date/time formatting in WPF bindings (issue #459)
             FrameworkElement.LanguageProperty.OverrideMetadata(
@@ -66,6 +96,13 @@ namespace PerformanceMonitorDashboard
             mainWindow.Show();
         }
 
+        /// <summary>
+        /// Opens the upgrade-handoff "exit" channel once startup is past its risky init. Called by
+        /// <see cref="MainWindow"/> after initialization so a newer build won't signal/kill us mid-init
+        /// (#single-instance-upgrade-handoff). Safe to call more than once.
+        /// </summary>
+        public void EnableUpgradeHandoff() => _instanceCoordinator?.EnableUpgradeHandoff();
+
         protected override void OnExit(ExitEventArgs e)
         {
             Logger.Info($"=== Application Exiting (Exit Code: {e.ApplicationExitCode}) ===");
@@ -76,11 +113,8 @@ namespace PerformanceMonitorDashboard
                 mainWin.ExitApplication();
             }
 
-            if (_ownsMutex)
-            {
-                _singleInstanceMutex?.ReleaseMutex();
-            }
-            _singleInstanceMutex?.Dispose();
+            /* Releases the mutex + disposes the exit-for-upgrade listener. */
+            _instanceCoordinator?.Dispose();
 
             base.OnExit(e);
         }

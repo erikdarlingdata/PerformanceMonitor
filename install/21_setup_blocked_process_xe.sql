@@ -8,8 +8,11 @@ Creates ring_buffer sessions that work across:
   - Azure SQL Managed Instance
   - AWS RDS for SQL Server
 
-Note: Azure SQL DB requires database-scoped sessions which are handled
-by the collection procedures in scripts 22 and 24.
+Note: Azure SQL DB requires database-scoped sessions. The collection
+procedures (scripts 22 and 24) create and start those at the top of every
+run (#1086); they also re-create/re-start the server-scoped sessions below
+if they are later dropped or stopped, so this script is the initial setup,
+not the only creation path.
 */
 
 SET ANSI_NULLS ON;

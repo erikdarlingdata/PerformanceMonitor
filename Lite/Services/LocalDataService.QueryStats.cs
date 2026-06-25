@@ -13,6 +13,8 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -37,7 +39,7 @@ WHERE d.name = @database_name;", connection);
     /// <summary>
     /// Gets top queries by CPU for a server over a time period.
     /// </summary>
-    public async Task<List<Models.TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
+    public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var connection = await OpenConnectionAsync();
@@ -64,19 +66,20 @@ ORDER BY bucket";
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
 
-        var items = new List<Models.TimeSliceBucket>();
+        var items = new List<TimeSliceBucket>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new Models.TimeSliceBucket
+            items.Add(new TimeSliceBucket
             {
-                BucketTimeUtc = reader.GetDateTime(0),
+                BucketTime = reader.GetDateTime(0),
                 SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
                 TotalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 TotalWrites = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 TotalLogicalReads = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                TotalPhysicalReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 Value = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)), // default: total CPU
             });
         }
@@ -207,7 +210,7 @@ LIMIT $4";
     /// Gets query stats comparison between a current time range and a baseline range.
     /// Returns delta percentages for duration, CPU, reads, and execution count.
     /// </summary>
-    public async Task<List<Models.QueryStatsComparisonItem>> GetQueryStatsComparisonAsync(
+    public async Task<List<QueryStatsComparisonItem>> GetQueryStatsComparisonAsync(
         int serverId,
         DateTime currentStart, DateTime currentEnd,
         DateTime baselineStart, DateTime baselineEnd)
@@ -296,11 +299,11 @@ FULL OUTER JOIN baseline_period b
         command.Parameters.Add(new DuckDBParameter { Value = baselineStart });
         command.Parameters.Add(new DuckDBParameter { Value = baselineEnd });
 
-        var items = new List<Models.QueryStatsComparisonItem>();
+        var items = new List<QueryStatsComparisonItem>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new Models.QueryStatsComparisonItem
+            items.Add(new QueryStatsComparisonItem
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 QueryHash = reader.IsDBNull(1) ? "" : reader.GetString(1),
@@ -638,7 +641,7 @@ OPTION(RECOMPILE);',
     /// <summary>
     /// Gets top procedures by CPU for a server.
     /// </summary>
-    public async Task<List<Models.TimeSliceBucket>> GetProcStatsSlicerDataAsync(
+    public async Task<List<TimeSliceBucket>> GetProcStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var connection = await OpenConnectionAsync();
@@ -665,13 +668,13 @@ ORDER BY bucket";
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
 
-        var items = new List<Models.TimeSliceBucket>();
+        var items = new List<TimeSliceBucket>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new Models.TimeSliceBucket
+            items.Add(new TimeSliceBucket
             {
-                BucketTimeUtc = reader.GetDateTime(0),
+                BucketTime = reader.GetDateTime(0),
                 SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 TotalCpu = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
                 TotalElapsed = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
@@ -781,7 +784,7 @@ LIMIT $4";
     /// <summary>
     /// Gets procedure stats comparison between a current time range and a baseline range.
     /// </summary>
-    public async Task<List<Models.ProcedureStatsComparisonItem>> GetProcedureStatsComparisonAsync(
+    public async Task<List<ProcedureStatsComparisonItem>> GetProcedureStatsComparisonAsync(
         int serverId,
         DateTime currentStart, DateTime currentEnd,
         DateTime baselineStart, DateTime baselineEnd)
@@ -871,11 +874,11 @@ FULL OUTER JOIN baseline_period b
         command.Parameters.Add(new DuckDBParameter { Value = baselineStart });
         command.Parameters.Add(new DuckDBParameter { Value = baselineEnd });
 
-        var items = new List<Models.ProcedureStatsComparisonItem>();
+        var items = new List<ProcedureStatsComparisonItem>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new Models.ProcedureStatsComparisonItem
+            items.Add(new ProcedureStatsComparisonItem
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),

@@ -178,6 +178,7 @@ public class ServerPropertyRow
     public DateTime? LastUpdated { get; set; }
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
+    public string AgReplicaRole { get; set; } = "Standalone";
 
     public decimal? AvgCpuPct { get; set; }
     public decimal? StorageTotalGb { get; set; }
@@ -195,6 +196,7 @@ public class ServerPropertyRow
     }
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
+    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
     public string ProvisioningDisplay => ProvisioningStatus?.Replace("_", " ") ?? "";
 
     // FinOps cost — from server config

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -24,7 +25,7 @@ public sealed class McpSchedulerTools
         {
             var item = await resolved.Value.Service.GetCpuPressureAsync();
             if (item == null)
-                return "No CPU scheduler data available. The scheduler collector may not have run yet.";
+                return McpHelpers.Status("unavailable", "No CPU scheduler data available. The scheduler collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {

@@ -136,6 +136,10 @@ namespace PerformanceMonitorDashboard.Services
             if (status.TotalCpuPercent.HasValue && status.TotalCpuPercent.Value >= prefs.CpuThresholdPercent)
                 return true;
 
+            // Low disk / failed Agent jobs (#754/#749) — set from the alert engine's per-server state.
+            if (status.HasLowDiskAlert || status.HasFailedJobAlert)
+                return true;
+
             return false;
         }
 
@@ -162,7 +166,9 @@ namespace PerformanceMonitorDashboard.Services
                     || status.DeadlocksSinceLastCheck > baseline.DeadlocksSinceLastCheck
                     || status.RequestsWaitingForMemory > baseline.RequestsWaitingForMemory
                     || (status.TotalCpuPercent.HasValue
-                        && status.TotalCpuPercent.Value > (baseline.TotalCpuPercent ?? 0)),
+                        && status.TotalCpuPercent.Value > (baseline.TotalCpuPercent ?? 0))
+                    || (status.HasLowDiskAlert && !baseline.HasLowDiskAlert)
+                    || (status.HasFailedJobAlert && !baseline.HasFailedJobAlert),
 
                 _ => false
             };
@@ -178,7 +184,9 @@ namespace PerformanceMonitorDashboard.Services
                 LongestBlockedSeconds = status.LongestBlockedSeconds,
                 DeadlocksSinceLastCheck = status.DeadlocksSinceLastCheck,
                 RequestsWaitingForMemory = status.RequestsWaitingForMemory,
-                TotalCpuPercent = status.TotalCpuPercent
+                TotalCpuPercent = status.TotalCpuPercent,
+                HasLowDiskAlert = status.HasLowDiskAlert,
+                HasFailedJobAlert = status.HasFailedJobAlert
             };
         }
 

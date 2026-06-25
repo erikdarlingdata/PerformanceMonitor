@@ -21,6 +21,8 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -80,9 +82,8 @@ namespace PerformanceMonitorDashboard.Controls
                         grouped.Select(d => (double)d.SingleUseSizeMb));
 
                     var singleScatter = PlanCacheChart.Plot.Add.Scatter(singleXs, singleYs);
-                    singleScatter.LineWidth = 2;
-                    singleScatter.MarkerSize = 5;
-                    singleScatter.Color = TabHelpers.ChartColors[3];
+                    singleScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SinglePagePlans"));
+                    ChartStyle.StyleScatter(singleScatter);
                     singleScatter.LegendText = "Single-Use";
                     _planCacheHover?.Add(singleScatter, "Single-Use");
 
@@ -92,9 +93,8 @@ namespace PerformanceMonitorDashboard.Controls
                         grouped.Select(d => (double)d.MultiUseSizeMb));
 
                     var multiScatter = PlanCacheChart.Plot.Add.Scatter(multiXs, multiYs);
-                    multiScatter.LineWidth = 2;
-                    multiScatter.MarkerSize = 5;
-                    multiScatter.Color = TabHelpers.ChartColors[1];
+                    multiScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MultiPagePlans"));
+                    ChartStyle.StyleScatter(multiScatter);
                     multiScatter.LegendText = "Multi-Use";
                     _planCacheHover?.Add(multiScatter, "Multi-Use");
 
@@ -117,7 +117,7 @@ namespace PerformanceMonitorDashboard.Controls
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = PlanCacheChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 

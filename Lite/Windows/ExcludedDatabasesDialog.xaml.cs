@@ -94,7 +94,7 @@ public partial class ExcludedDatabasesDialog : Window
 
     private async Task<List<string>> GetUserDatabasesAsync()
     {
-        var connectionString = _server.GetConnectionString(_serverManager.CredentialService);
+        var connectionString = _serverManager.CredentialResolver.GetConnectionString(_server);
         var builder = new SqlConnectionStringBuilder(connectionString)
         {
             InitialCatalog = "master",

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -36,7 +37,7 @@ public sealed class McpQueryTools
             var rows = await dataService.GetTopQueriesByCpuAsync(resolved.Value.ServerId, hours_back, top, databaseName: database_name);
             if (rows.Count == 0)
             {
-                return "No query stats available for the specified time range.";
+                return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
             IEnumerable<QueryStatsRow> filtered = rows;
@@ -110,7 +111,9 @@ public sealed class McpQueryTools
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.Value.ServerId, hours_back, top, databaseName: database_name);
             if (rows.Count == 0)
             {
-                return "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.";
+                return McpHelpers.Status(
+                    "unavailable",
+                    "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
             }
 
             var result = rows.Select(r => new
@@ -175,7 +178,7 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.Value.ServerId, hours_back, top, databaseName: database_name);
             if (rows.Count == 0)
             {
-                return "No Query Store data available. Query Store may not be enabled on target databases.";
+                return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
             var result = rows.Select(r => new
@@ -271,7 +274,7 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStatsHistoryAsync(resolved.Value.ServerId, database_name, query_hash, hours_back);
             if (rows.Count == 0)
             {
-                return $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.";
+                return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
             }
 
             var result = rows.Select(r => new

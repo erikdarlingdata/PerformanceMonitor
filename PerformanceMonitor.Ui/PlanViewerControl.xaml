@@ -1,0 +1,272 @@
+<UserControl x:Class="PerformanceMonitor.Ui.PlanViewerControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource BackgroundBrush}"
+             Focusable="True"
+             PreviewMouseDown="PlanViewerControl_PreviewMouseDown"
+             PreviewKeyDown="PlanViewerControl_PreviewKeyDown">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" Padding="8,6"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+            <DockPanel>
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                    <Button Content="+" Click="ZoomIn_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                            FontWeight="Bold" ToolTip="Zoom In"/>
+                    <Button Content="&#x2212;" Click="ZoomOut_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                            FontWeight="Bold" Margin="4,0,0,0" ToolTip="Zoom Out"/>
+                    <Button Content="Fit" Click="ZoomFit_Click" Height="28" Padding="8,0" Margin="4,0,0,0"
+                            ToolTip="Zoom to Fit"/>
+                    <TextBlock x:Name="ZoomLevelText" Text="100%" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="8,0,0,0" FontSize="11"/>
+                    <Separator Margin="12,4"/>
+                    <Button Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
+                            ToolTip="Save plan as .sqlplan file"/>
+                    <Separator x:Name="StatementsButtonSeparator" Margin="12,4" Visibility="Collapsed"/>
+                    <Button x:Name="StatementsButton" Content="Statements" Click="ToggleStatements_Click"
+                            Height="28" Padding="8,0" Visibility="Collapsed"
+                            ToolTip="Show/hide statement list"/>
+                </StackPanel>
+                <TextBlock x:Name="CostText" DockPanel.Dock="Right" VerticalAlignment="Center"
+                           HorizontalAlignment="Right"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"/>
+            </DockPanel>
+        </Border>
+
+        <!-- Insights Panel: Runtime Summary + Missing Indexes + Wait Stats (collapsible) -->
+        <Border x:Name="InsightsPanel" Grid.Row="1" Visibility="Collapsed"
+                Background="{DynamicResource BackgroundDarkBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+            <Expander x:Name="InsightsExpander" IsExpanded="True"
+                      Foreground="{DynamicResource ForegroundBrush}"
+                      Background="Transparent"
+                      BorderThickness="0"
+                      Padding="0">
+                <Expander.Header>
+                    <TextBlock x:Name="InsightsHeader" Text="  Plan Insights"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </Expander.Header>
+                <Grid MaxHeight="220">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" MinWidth="180"/>
+                        <ColumnDefinition Width="Auto" MinWidth="200"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Runtime Summary (left) -->
+                    <Border Grid.Column="0" Padding="10,4,10,8"
+                            Background="{DynamicResource BackgroundDarkBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+                        <StackPanel>
+                            <TextBlock Text="Runtime Summary"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Margin="0,0,0,4"/>
+                            <StackPanel x:Name="RuntimeSummaryContent"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Missing Indexes (center) -->
+                    <Border Grid.Column="1" Padding="10,4,10,8"
+                            Background="{DynamicResource PlanMissingIndexBgBrush}"
+                            BorderBrush="{DynamicResource PlanMissingIndexBorderBrush}" BorderThickness="0,0,1,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <TextBlock x:Name="MissingIndexHeader"
+                                           Text="Missing Index Suggestions"
+                                           FontSize="13"
+                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanMissingIndexHeaderBrush}"
+                                           Margin="0,0,0,6"/>
+                                <StackPanel x:Name="MissingIndexContent"/>
+                                <TextBlock x:Name="MissingIndexEmpty"
+                                           Text="No missing index suggestions"
+                                           FontSize="12" Visibility="Collapsed"
+                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Border>
+
+                    <!-- Wait Stats (right, fills remaining space) -->
+                    <Border Grid.Column="2" Padding="10,4,10,8"
+                            Background="{DynamicResource PlanWaitStatsBgBrush}">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <TextBlock x:Name="WaitStatsHeader"
+                                           Text="Wait Stats"
+                                           FontSize="13"
+                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanWaitStatsHeaderBrush}"
+                                           Margin="0,0,0,6"/>
+                                <StackPanel x:Name="WaitStatsContent"/>
+                                <TextBlock x:Name="WaitStatsEmpty"
+                                           Text="No wait stats (estimated plan)"
+                                           FontSize="12" Visibility="Collapsed"
+                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Border>
+                </Grid>
+            </Expander>
+        </Border>
+
+        <!-- Query Text (collapsible) -->
+        <Expander Grid.Row="2" x:Name="QueryTextExpander" Header="  Query Text"
+                  IsExpanded="False" Visibility="Collapsed"
+                  Foreground="{DynamicResource ForegroundBrush}"
+                  Background="{DynamicResource BackgroundDarkBrush}"
+                  BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+            <TextBox x:Name="QueryTextBox" IsReadOnly="True"
+                     FontFamily="Consolas" FontSize="11"
+                     Background="{DynamicResource BackgroundLightBrush}"
+                     Foreground="{DynamicResource ForegroundBrush}"
+                     BorderThickness="0" TextWrapping="Wrap"
+                     MaxHeight="200" VerticalScrollBarVisibility="Auto"
+                     Padding="8,4"/>
+        </Expander>
+
+        <!-- Statements Panel + Plan Canvas + Properties Panel -->
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <!-- Col 0: Statements Panel (hidden by default) -->
+                <ColumnDefinition x:Name="StatementsColumn" Width="0"/>
+                <!-- Col 1: Statements Splitter (hidden by default) -->
+                <ColumnDefinition x:Name="StatementsSplitterColumn" Width="0"/>
+                <!-- Col 2: Plan Canvas -->
+                <ColumnDefinition Width="*"/>
+                <!-- Col 3: Properties Splitter (hidden by default) -->
+                <ColumnDefinition Width="Auto"/>
+                <!-- Col 4: Properties Panel (hidden by default) -->
+                <ColumnDefinition x:Name="PropertiesColumn" Width="0"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Statements Panel -->
+            <Border x:Name="StatementsPanel" Grid.Column="0"
+                    Background="{DynamicResource BackgroundDarkBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0"
+                    Visibility="Collapsed">
+                <DockPanel>
+                    <!-- Header -->
+                    <Border DockPanel.Dock="Top" Padding="10,8"
+                            Background="{DynamicResource BackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="&#x2715;" Click="CloseStatements_Click"
+                                    Width="24" Height="24" Padding="0" FontSize="12"
+                                    VerticalAlignment="Center" ToolTip="Close Statements"
+                                    Background="Transparent" BorderThickness="0"
+                                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <TextBlock x:Name="StatementsHeader" Text="Statements"
+                                       FontWeight="SemiBold" FontSize="13"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       VerticalAlignment="Center"/>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Statement Grid -->
+                    <DataGrid x:Name="StatementsGrid"
+                              AutoGenerateColumns="False"
+                              CanUserSortColumns="True"
+                              CanUserReorderColumns="False"
+                              CanUserResizeColumns="True"
+                              IsReadOnly="True"
+                              SelectionMode="Single"
+                              GridLinesVisibility="Horizontal"
+                              HeadersVisibility="Column"
+                              SelectionChanged="StatementsGrid_SelectionChanged"
+                              FontSize="11"
+                              Background="{DynamicResource BackgroundDarkBrush}"
+                              BorderThickness="0">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Copy Query Text" Click="CopyStatementText_Click"/>
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
+                    </DataGrid>
+                </DockPanel>
+            </Border>
+
+            <!-- Statements Splitter -->
+            <GridSplitter x:Name="StatementsSplitter" Grid.Column="1" Width="5"
+                          HorizontalAlignment="Center" VerticalAlignment="Stretch"
+                          Background="{DynamicResource BorderBrush}"
+                          Visibility="Collapsed"/>
+
+            <!-- Plan Canvas -->
+            <ScrollViewer Grid.Column="2" x:Name="PlanScrollViewer"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto"
+                          Background="{DynamicResource BackgroundBrush}"
+                          PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel"
+                          PreviewMouseLeftButtonDown="PlanScrollViewer_PreviewMouseLeftButtonDown"
+                          PreviewMouseMove="PlanScrollViewer_PreviewMouseMove"
+                          PreviewMouseLeftButtonUp="PlanScrollViewer_PreviewMouseLeftButtonUp">
+                <Canvas x:Name="PlanCanvas" ClipToBounds="False"
+                        HorizontalAlignment="Left" VerticalAlignment="Top">
+                    <Canvas.LayoutTransform>
+                        <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
+                    </Canvas.LayoutTransform>
+                </Canvas>
+            </ScrollViewer>
+
+            <!-- Empty State -->
+            <StackPanel x:Name="EmptyState" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center">
+                <TextBlock Text="No Plan Loaded" FontSize="20" FontWeight="Light"
+                           Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
+                <TextBlock Text="Right-click a query row and choose 'View Plan' to display an execution plan here"
+                           FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           HorizontalAlignment="Center" Margin="0,8,0,0"/>
+            </StackPanel>
+
+            <!-- Properties Splitter -->
+            <GridSplitter x:Name="PropertiesSplitter" Grid.Column="3" Width="5"
+                          HorizontalAlignment="Center" VerticalAlignment="Stretch"
+                          Background="{DynamicResource BorderBrush}"
+                          Visibility="Collapsed"/>
+
+            <!-- Properties Panel -->
+            <Border x:Name="PropertiesPanel" Grid.Column="4"
+                    Background="{DynamicResource BackgroundDarkBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0"
+                    Visibility="Collapsed">
+                <DockPanel>
+                    <!-- Header -->
+                    <Border DockPanel.Dock="Top" Padding="10,8"
+                            Background="{DynamicResource BackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="&#x2715;" Click="CloseProperties_Click"
+                                    Width="24" Height="24" Padding="0" FontSize="12"
+                                    VerticalAlignment="Center" ToolTip="Close Properties"
+                                    Background="Transparent" BorderThickness="0"
+                                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel>
+                                <TextBlock x:Name="PropertiesHeader" Text="Operator Properties"
+                                           FontWeight="SemiBold" FontSize="13"
+                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock x:Name="PropertiesSubHeader" FontSize="11"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="0,2,0,0"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Properties Content -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                  Padding="0">
+                        <StackPanel x:Name="PropertiesContent" Margin="0"/>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

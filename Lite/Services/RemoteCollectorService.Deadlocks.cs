@@ -60,6 +60,10 @@ public partial class RemoteCollectorService
             _logger?.LogWarning("Failed to ensure deadlock XE session on '{Server}': {Message}",
                 server.DisplayName, ex.Message);
             AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure deadlock XE session: {ex.Message}");
+
+            /* Propagate so RunCollectorAsync marks the collector unhealthy instead
+               of letting a zero-row ring-buffer read record SUCCESS (#1086) */
+            throw new XeSessionEnsureException("deadlock", ex);
         }
     }
 
@@ -102,6 +106,7 @@ WHERE ses.name = @session_name;", connection))
                         _logger?.LogWarning("Failed to start deadlock XE session on '{Server}': {Message}",
                             server.DisplayName, ex.Message);
                         AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to start deadlock XE session: {ex.Message}");
+                        throw;
                     }
                 }
                 else
@@ -143,6 +148,7 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connect
             _logger?.LogWarning("Failed to create deadlock XE session on '{Server}': {Message}",
                 server.DisplayName, ex.Message);
             AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to create deadlock XE session: {ex.Message}");
+            throw;
         }
     }
 
@@ -239,7 +245,8 @@ ADD TARGET package0.ring_buffer
 WITH
 (
     MAX_DISPATCH_LATENCY = 5 SECONDS,
-    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    STARTUP_STATE = ON
 );
 
 ALTER EVENT SESSION [{DeadlockXeSessionName}] ON DATABASE STATE = START;", connection))

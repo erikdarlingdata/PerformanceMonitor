@@ -201,7 +201,7 @@ BEGIN
         BEGIN
             IF @rows_collected > 0
             BEGIN
-                RAISERROR(N'Collected %d waiting tasks', 0, 1, @rows_collected) WITH NOWAIT;
+                RAISERROR(N'Collected %I64d waiting tasks', 0, 1, @rows_collected) WITH NOWAIT;
 
                 /*
                 Show top wait types from this collection

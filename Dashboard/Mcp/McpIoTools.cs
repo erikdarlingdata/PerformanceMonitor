@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Mcp;
 
@@ -28,7 +29,7 @@ public sealed class McpIoTools
             var rows = await resolved.Value.Service.GetFileIoLatencyAsync();
             if (rows.Count == 0)
             {
-                return "No file I/O stats available.";
+                return McpHelpers.Status("unavailable", "No file I/O stats available.");
             }
 
             var result = rows.Select(r => new
@@ -78,7 +79,7 @@ public sealed class McpIoTools
             var points = await resolved.Value.Service.GetFileIoDataAsync(hours_back);
             if (points.Count == 0)
             {
-                return "No I/O trend data available.";
+                return McpHelpers.Status("unavailable", "No I/O trend data available.");
             }
 
             var result = points.Select(p => new

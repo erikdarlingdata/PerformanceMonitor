@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Models;
 
@@ -42,10 +43,38 @@ public class ServerConnection : INotifyPropertyChanged
     }
     
     /// <summary>
-    /// Authentication type: Windows, SqlServer, or EntraMFA
+    /// Authentication type: Windows, SqlServer, EntraMFA, ServicePrincipal, or ManagedIdentity
     /// </summary>
     public string AuthenticationType { get; set; } = AuthenticationTypes.Windows;
-    
+
+    /// <summary>
+    /// Service-principal application/client id (used as UserID for ServicePrincipal auth).
+    /// Non-secret; safe to persist in servers.json. The SP secret is NEVER stored here —
+    /// it lives only in Windows Credential Manager (DPAPI) via CredentialService.
+    /// </summary>
+    public string? AzureClientId { get; set; }
+
+    /// <summary>
+    /// Optional Microsoft Entra tenant id. Stored for display/future use only.
+    /// MDS resolves the tenant from the target server's AAD authority during the handshake,
+    /// so this is NOT injected into the connection string (no first-class SP tenant keyword).
+    /// </summary>
+    public string? AzureTenantId { get; set; }
+
+    /// <summary>
+    /// Optional user-assigned managed identity client id. Blank = system-assigned identity.
+    /// Non-secret; safe to persist in servers.json.
+    /// </summary>
+    public string? ManagedIdentityClientId { get; set; }
+
+    /// <summary>
+    /// Optional id of a <see cref="CredentialProfile"/> this server uses instead of inline per-server
+    /// credentials. When set, the profile supplies the auth type + credentials (the server keeps its own
+    /// connection facts: ServerName, DatabaseName, Encrypt, intent, etc.). null = today's per-server
+    /// behavior, unchanged and backward-compatible (old servers.json simply omits this field → null).
+    /// </summary>
+    public string? CredentialProfileId { get; set; }
+
     public string? Description { get; set; }
     public DateTime CreatedDate { get; set; } = DateTime.Now;
     public DateTime LastConnected { get; set; } = DateTime.Now;
@@ -125,6 +154,8 @@ public class ServerConnection : INotifyPropertyChanged
     {
         AuthenticationTypes.EntraMFA => "Microsoft Entra MFA",
         AuthenticationTypes.SqlServer => "SQL Server",
+        AuthenticationTypes.ServicePrincipal => "Azure — Service Principal",
+        AuthenticationTypes.ManagedIdentity => "Azure — Managed Identity",
         _ => "Windows"
     };
 
@@ -187,49 +218,131 @@ public class ServerConnection : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     /// <summary>
-    /// Builds and returns a connection string for this server.
-    /// Credentials are retrieved from Windows Credential Manager if SQL auth is used.
+    /// The immutable, atomic resolution tuple fed to <see cref="ApplyAuthentication"/>. It is sourced
+    /// ENTIRELY from one place — either entirely from a credential profile or entirely from this
+    /// server's own inline fields — never mixed field-by-field. This atomic shape is what structurally
+    /// prevents a wrong-identity build (e.g. a profile secret combined with the server's stale
+    /// AzureClientId). See <see cref="ResolveAuth"/>.
     /// </summary>
-    public string GetConnectionString(CredentialService credentialService)
-    {
-        string? username = null;
-        string? password = null;
+    private readonly record struct ResolvedAuth(
+        string AuthType,
+        string? Username,
+        string? Password,
+        string? AzureClientId,
+        string? ManagedIdentityClientId);
 
-        if (AuthenticationType == AuthenticationTypes.SqlServer)
+    /// <summary>
+    /// Resolves the single auth tuple for this server, fail-closed (§2, B-2/B-3).
+    /// <list type="bullet">
+    /// <item>No profile (<see cref="CredentialProfileId"/> == null) → tuple sourced entirely from this
+    /// server's own inline fields (today's behavior, regression-identical).</item>
+    /// <item>Profile in effect, profile FOUND → tuple sourced entirely from the profile (its AuthType,
+    /// its non-secret fields, secret from <c>profile_{id}</c>). NEVER reads any <c>this.*</c> auth field.</item>
+    /// <item>Profile in effect, profile MISSING → THROWS "credential profile '{id}' not found". A closed
+    /// branch with NO fall-through to the server-self path — a dangling profile must never silently
+    /// connect under the server's own stale inline auth.</item>
+    /// </list>
+    /// </summary>
+    private ResolvedAuth ResolveAuth(CredentialService credentialService, IProfileLookup? profileLookup)
+    {
+        // No profile referenced → entirely server-self (regression-identical).
+        if (string.IsNullOrEmpty(CredentialProfileId))
         {
-            var cred = credentialService.GetCredential(Id);
-            if (cred.HasValue)
+            string? username = null;
+            string? password = null;
+
+            if (AuthenticationType == AuthenticationTypes.SqlServer ||
+                AuthenticationType == AuthenticationTypes.ServicePrincipal)
             {
-                username = cred.Value.Username;
-                password = cred.Value.Password;
+                var cred = credentialService.GetCredential(Id);
+                if (cred.HasValue)
+                {
+                    username = cred.Value.Username;
+                    password = cred.Value.Password;
+                }
             }
+            // ManagedIdentity fetches no credential (no secret).
+
+            return new ResolvedAuth(AuthenticationType, username, password, AzureClientId, ManagedIdentityClientId);
         }
 
-        return BuildConnectionString(username, password);
+        // Profile referenced — CLOSED, fail-closed branch (B-2). No fall-through to server-self.
+        var profile = profileLookup?.GetProfile(CredentialProfileId);
+        if (profile == null)
+        {
+            throw new InvalidOperationException(
+                $"credential profile '{CredentialProfileId}' not found");
+        }
+
+        // Tuple sourced ENTIRELY from the profile (B-3). We never read this.AzureClientId /
+        // this.ManagedIdentityClientId here — only the profile's own fields.
+        string? profileUser = null;
+        string? profileSecret = null;
+        if (profile.AuthType == AuthenticationTypes.SqlServer ||
+            profile.AuthType == AuthenticationTypes.ServicePrincipal)
+        {
+            var cred = credentialService.GetCredential(ProfileManager.ProfileCredentialId(profile.Id));
+            if (cred.HasValue)
+            {
+                profileUser = cred.Value.Username;
+                profileSecret = cred.Value.Password;
+            }
+        }
+        // ManagedIdentity profile carries no secret.
+
+        return new ResolvedAuth(
+            profile.AuthType,
+            profileUser,
+            profileSecret,
+            profile.AzureClientId,
+            profile.ManagedIdentityClientId);
     }
 
     /// <summary>
-    /// Returns a connection string targeting UtilityDatabase if set, otherwise falls back to GetConnectionString().
-    /// Used for locating community stored procedures (sp_IndexCleanup) that may be installed in a non-default database.
+    /// Builds the connection string for this server, resolving credentials from a profile (when
+    /// <see cref="CredentialProfileId"/> is set) or from this server's own inline fields otherwise.
+    /// This is the single resolution entry point; the removed instance overloads used to expose a
+    /// <see cref="CredentialService"/>-only path that could silently bypass a profile.
     /// </summary>
-    public string GetUtilityConnectionString(CredentialService credentialService)
+    public static string ResolveConnectionString(
+        ServerConnection server,
+        CredentialService credentialService,
+        IProfileLookup? profileLookup)
     {
-        var baseConnStr = GetConnectionString(credentialService);
+        var auth = server.ResolveAuth(credentialService, profileLookup);
+        return server.BuildConnectionString(auth);
+    }
 
-        if (string.IsNullOrWhiteSpace(UtilityDatabase))
+    /// <summary>
+    /// Like <see cref="ResolveConnectionString"/> but targets <see cref="UtilityDatabase"/> when set.
+    /// Used for locating community stored procedures (sp_IndexCleanup) installed in a non-default database.
+    /// </summary>
+    public static string ResolveUtilityConnectionString(
+        ServerConnection server,
+        CredentialService credentialService,
+        IProfileLookup? profileLookup)
+    {
+        var baseConnStr = ResolveConnectionString(server, credentialService, profileLookup);
+
+        if (string.IsNullOrWhiteSpace(server.UtilityDatabase))
             return baseConnStr;
 
         var builder = new SqlConnectionStringBuilder(baseConnStr)
         {
-            InitialCatalog = UtilityDatabase
+            InitialCatalog = server.UtilityDatabase
         };
         return builder.ConnectionString;
     }
 
     /// <summary>
     /// Builds the connection string with the given credentials.
+    /// Used by tests for the server-self shape; production paths go through
+    /// <see cref="ResolveConnectionString"/>, which supplies the resolved tuple.
     /// </summary>
-    private string BuildConnectionString(string? username, string? password)
+    internal string BuildConnectionString(string? username, string? password)
+        => BuildConnectionString(new ResolvedAuth(AuthenticationType, username, password, AzureClientId, ManagedIdentityClientId));
+
+    private string BuildConnectionString(ResolvedAuth auth)
     {
         var builder = new SqlConnectionStringBuilder
         {
@@ -249,20 +362,50 @@ public class ServerConnection : INotifyPropertyChanged
         {
             "Mandatory" => SqlConnectionEncryptOption.Mandatory,
             "Strict" => SqlConnectionEncryptOption.Strict,
-            _ => SqlConnectionEncryptOption.Optional
+            "Optional" => SqlConnectionEncryptOption.Optional,
+            // Fail closed: an unknown/blank EncryptMode (legacy or hand-edited servers.json) must
+            // not silently drop to an unencrypted, cert-unvalidated connection. The UI default is
+            // Mandatory and the Dashboard builders also default to Mandatory — match that.
+            _ => SqlConnectionEncryptOption.Mandatory
         };
 
-        if (AuthenticationType == AuthenticationTypes.Windows)
+        // The tuple is atomic: every auth field comes from the SAME source (profile or server).
+        ApplyAuthentication(builder, auth.AuthType, auth.Username, auth.Password,
+            auth.AzureClientId, auth.ManagedIdentityClientId);
+
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// Applies the authentication-mode keywords (IntegratedSecurity / Authentication / UserID /
+    /// Password) to a connection-string builder. Shared by <see cref="BuildConnectionString"/> and
+    /// the Add/Edit dialog's Test-Connection builder so the two build sites never diverge.
+    /// </summary>
+    /// <param name="builder">The builder to mutate.</param>
+    /// <param name="authenticationType">One of the <see cref="AuthenticationTypes"/> constants.</param>
+    /// <param name="username">SQL username, Entra UPN, or SP client id (depending on mode).</param>
+    /// <param name="password">SQL password or SP client secret (depending on mode). Never logged.</param>
+    /// <param name="azureClientId">SP client id fallback when <paramref name="username"/> is null.</param>
+    /// <param name="managedIdentityClientId">User-assigned MI client id; blank = system-assigned.</param>
+    internal static void ApplyAuthentication(
+        SqlConnectionStringBuilder builder,
+        string authenticationType,
+        string? username,
+        string? password,
+        string? azureClientId,
+        string? managedIdentityClientId)
+    {
+        if (authenticationType == AuthenticationTypes.Windows)
         {
             builder.IntegratedSecurity = true;
         }
-        else if (AuthenticationType == AuthenticationTypes.SqlServer)
+        else if (authenticationType == AuthenticationTypes.SqlServer)
         {
             builder.IntegratedSecurity = false;
             builder.UserID = username ?? string.Empty;
             builder.Password = password ?? string.Empty;
         }
-        else if (AuthenticationType == AuthenticationTypes.EntraMFA)
+        else if (authenticationType == AuthenticationTypes.EntraMFA)
         {
             // Microsoft Entra MFA (Azure AD Interactive)
             builder.IntegratedSecurity = false;
@@ -273,20 +416,60 @@ public class ServerConnection : INotifyPropertyChanged
                 builder.UserID = username;
             }
         }
-
-        return builder.ConnectionString;
+        else if (authenticationType == AuthenticationTypes.ServicePrincipal)
+        {
+            // Microsoft Entra service principal (non-interactive): client id + secret.
+            builder.IntegratedSecurity = false;
+            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryServicePrincipal;
+            builder.UserID = username ?? azureClientId ?? string.Empty;   // client/app id
+            builder.Password = password ?? string.Empty;                  // client secret (from Credential Manager)
+        }
+        else if (authenticationType == AuthenticationTypes.ManagedIdentity)
+        {
+            // Azure managed identity (non-interactive): no secret.
+            builder.IntegratedSecurity = false;
+            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryManagedIdentity;
+            if (!string.IsNullOrWhiteSpace(managedIdentityClientId))
+            {
+                builder.UserID = managedIdentityClientId;   // user-assigned MI; omit for system-assigned
+            }
+        }
     }
 
     /// <summary>
-    /// Checks if credentials are stored in Windows Credential Manager for this server.
+    /// Checks if credentials are available for this server (profile-aware, N-1).
+    /// When a profile is referenced, reflects the profile's stored-secret state (SP/SQL → the
+    /// <c>profile_{id}</c> key; MI → true); a dangling profile reference reports false. Otherwise
+    /// reflects the per-server <c>this.Id</c> key, matching the legacy behavior.
     /// </summary>
-    public bool HasStoredCredentials(CredentialService credentialService)
+    public static bool HasStoredCredentials(
+        ServerConnection server,
+        CredentialService credentialService,
+        IProfileLookup? profileLookup)
     {
-        if (AuthenticationType == AuthenticationTypes.Windows || AuthenticationType == AuthenticationTypes.EntraMFA)
+        if (!string.IsNullOrEmpty(server.CredentialProfileId))
+        {
+            var profile = profileLookup?.GetProfile(server.CredentialProfileId);
+            if (profile == null)
+            {
+                // Dangling profile — no resolvable credential.
+                return false;
+            }
+            // MI needs no secret; SQL/SP need the profile secret present.
+            if (profile.AuthType == AuthenticationTypes.ManagedIdentity)
+                return true;
+            return credentialService.CredentialExists(ProfileManager.ProfileCredentialId(profile.Id));
+        }
+
+        // Zero-touch auth modes need no stored secret.
+        if (server.AuthenticationType == AuthenticationTypes.Windows ||
+            server.AuthenticationType == AuthenticationTypes.EntraMFA ||
+            server.AuthenticationType == AuthenticationTypes.ManagedIdentity)
         {
             return true;
         }
 
-        return credentialService.CredentialExists(Id);
+        // SqlServer (password) and ServicePrincipal (client secret) require a stored credential.
+        return credentialService.CredentialExists(server.Id);
     }
 }

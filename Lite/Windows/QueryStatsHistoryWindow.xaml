@@ -24,6 +24,13 @@
                 <MenuItem Header="Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
+                <Separator/>
+                <MenuItem Header="View Plan" Click="ViewPlan_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F50D;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Get Actual Plan" Click="GetActualPlan_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x25B6;"/></MenuItem.Icon>
+                </MenuItem>
             </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>

@@ -121,6 +121,20 @@ LIMIT 5";
     }
 }
 
+public class FailedJobInfo
+{
+    public string JobName { get; set; } = "";
+    public string JobId { get; set; } = "";
+
+    /// <summary>Server-local time the failed run started (from run_date/run_time).</summary>
+    public DateTime RunDateTime { get; set; }
+    public int StepId { get; set; }
+    public string StepName { get; set; } = "";
+    public string Message { get; set; } = "";
+
+    public string RunDateTimeFormatted => RunDateTime.ToString("yyyy-MM-dd HH:mm:ss");
+}
+
 public class AnomalousJobInfo
 {
     public string JobName { get; set; } = "";

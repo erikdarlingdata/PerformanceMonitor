@@ -1189,7 +1189,7 @@ BEGIN
         
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Updated %d rows with delta calculations for %s', 0, 1, @rows_updated, @table_name) WITH NOWAIT;
+            RAISERROR(N'Updated %I64d rows with delta calculations for %s', 0, 1, @rows_updated, @table_name) WITH NOWAIT;
         END;
 
         /*

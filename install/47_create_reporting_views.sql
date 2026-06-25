@@ -243,8 +243,14 @@ AS
 SELECT
     event_time = cus.sample_time,
     sql_server_cpu = cus.sqlserver_cpu_utilization,
+    /*
+    other_process_cpu / total_cpu are NULL on SQL Server on Linux, where host CPU
+    is not derivable (Issue #1048). Fall the total back to the (correct) SQL-only
+    figure so consumers degrade to SQL CPU rather than NULL; severity is already
+    driven by sqlserver_cpu_utilization, so it is unaffected on Linux.
+    */
     other_process_cpu = cus.other_process_cpu_utilization,
-    total_cpu = cus.total_cpu_utilization,
+    total_cpu = ISNULL(cus.total_cpu_utilization, cus.sqlserver_cpu_utilization),
     severity =
         CASE
             WHEN cus.sqlserver_cpu_utilization >= 90
@@ -350,7 +356,11 @@ SELECT
         SELECT
             COUNT_BIG(*)
         FROM collect.cpu_utilization_stats AS cus
-        WHERE cus.sqlserver_cpu_utilization >= 80
+        /*
+        On Linux total_cpu_utilization is NULL (host CPU not derivable, Issue #1048);
+        fall back to the correct SQL-only figure so high-CPU events are still detected.
+        */
+        WHERE ISNULL(cus.total_cpu_utilization, cus.sqlserver_cpu_utilization) >= 80
         AND   cus.collection_time >= DATEADD(DAY, 0, CONVERT(date, SYSDATETIME()))
     ),
     collectors_failing =
@@ -383,7 +393,9 @@ SELECT
                 SELECT
                     1/0
                 FROM collect.cpu_utilization_stats AS cus
-                WHERE cus.sqlserver_cpu_utilization >= 90
+                /* total_cpu_utilization is NULL on SQL Server on Linux; fall back to the SQL-only
+                   figure so daily_summary can still report CPU_CRITICAL there (#1048). */
+                WHERE ISNULL(cus.total_cpu_utilization, cus.sqlserver_cpu_utilization) >= 90
                 AND   cus.collection_time >= DATEADD(HOUR, -1, SYSDATETIME())
             )
             THEN N'CPU_CRITICAL'

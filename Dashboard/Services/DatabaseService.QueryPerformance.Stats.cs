@@ -32,7 +32,7 @@ namespace PerformanceMonitorDashboard.Services
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 500,
+                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 50,
                     // then hydrate text/plan for only the winners. This avoids decompressing
                     // query_text and query_plan_text for every row in the table.
                     string query = @"
@@ -98,10 +98,10 @@ namespace PerformanceMonitorDashboard.Services
             USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
         );
 
-        /*Phase 2: sum across lifetimes, rank, take TOP 500*/
+        /*Phase 2: sum across lifetimes, rank, take TOP 50*/
         DROP TABLE IF EXISTS #top_ranked;
 
-        SELECT TOP (500)
+        SELECT TOP (50)
             database_name = pl.database_name,
             query_hash = pl.query_hash,
             object_type = MAX(pl.object_type),
@@ -157,7 +157,7 @@ namespace PerformanceMonitorDashboard.Services
             HASH GROUP
         );
 
-        /*Phase 3: hydrate text and plan XML for the TOP 500 winners only*/
+        /*Phase 3: hydrate text and plan XML for the TOP 50 winners only*/
         SELECT
             tr.database_name,
             query_hash = CONVERT(nvarchar(20), tr.query_hash, 1),
@@ -194,7 +194,10 @@ namespace PerformanceMonitorDashboard.Services
             tr.min_spills,
             tr.max_spills,
             qt.query_text,
-            qp.query_plan_xml,
+            /* query_plan_xml is hydrated on demand via GetQueryStatsPlanXmlAsync (when a plan is
+               opened) — DECOMPRESSing plan XML for all TOP (50) rows cost ~7s of CPU and the grid
+               never displays it. */
+            query_plan_xml = CONVERT(nvarchar(max), NULL),
             tr.query_plan_hash,
             tr.sql_handle,
             tr.plan_handle
@@ -208,16 +211,6 @@ namespace PerformanceMonitorDashboard.Services
             AND   qs2.database_name = tr.database_name
             ORDER BY qs2.collection_time DESC
         ) AS qt
-        OUTER APPLY
-        (
-            SELECT TOP (1)
-                query_plan_xml = CAST(DECOMPRESS(qs3.query_plan_text) AS nvarchar(max))
-            FROM collect.query_stats AS qs3
-            WHERE qs3.query_hash = tr.query_hash
-            AND   qs3.database_name = tr.database_name
-            AND   qs3.query_plan_text IS NOT NULL
-            ORDER BY qs3.collection_time DESC
-        ) AS qp
         ORDER BY
             tr.avg_worker_time_ms DESC;";
 
@@ -289,7 +282,7 @@ namespace PerformanceMonitorDashboard.Services
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 500,
+                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 50,
                     // then hydrate plan XML for only the winners.
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -352,10 +345,10 @@ namespace PerformanceMonitorDashboard.Services
             USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
         );
 
-        /*Phase 2: sum across lifetimes, rank, take TOP 500*/
+        /*Phase 2: sum across lifetimes, rank, take TOP 50*/
         DROP TABLE IF EXISTS #proc_top_ranked;
 
-        SELECT TOP (500)
+        SELECT TOP (50)
             database_name = pl.database_name,
             object_id = MAX(pl.object_id),
             object_name = QUOTENAME(pl.schema_name) + N'.' + QUOTENAME(pl.object_name),
@@ -406,7 +399,7 @@ namespace PerformanceMonitorDashboard.Services
             HASH GROUP
         );
 
-        /*Phase 3: hydrate plan XML for the TOP 500 winners only*/
+        /*Phase 3: hydrate plan XML for the TOP 50 winners only*/
         SELECT
             tr.database_name,
             tr.object_id,
@@ -526,16 +519,16 @@ namespace PerformanceMonitorDashboard.Services
 
                     bool useCustomDates = fromDate.HasValue && toDate.HasValue;
 
-                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 500,
+                    // Phased approach: aggregate numerics first (no DECOMPRESS), rank TOP 50,
                     // then hydrate query text for only the winners.
                     // Note: query_plan_xml is NOT fetched here — use GetQueryStorePlanXmlAsync on demand.
                     string query = @"
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-        /*Phase 1: aggregate numerics, rank TOP 500 — no DECOMPRESS*/
+        /*Phase 1: aggregate numerics, rank TOP 50 — no DECOMPRESS*/
         DROP TABLE IF EXISTS #qs_top_ranked;
 
-        SELECT TOP (500)
+        SELECT TOP (50)
             database_name = qsd.database_name,
             query_id = qsd.query_id,
             execution_type_desc = MAX(qsd.execution_type_desc),
@@ -608,7 +601,7 @@ namespace PerformanceMonitorDashboard.Services
             USE HINT('ENABLE_PARALLEL_PLAN_PREFERENCE')
         );
 
-        /*Phase 2: hydrate query text for the TOP 500 winners only*/
+        /*Phase 2: hydrate query text for the TOP 50 winners only*/
         SELECT
             tr.*,
             qt.query_sql_text

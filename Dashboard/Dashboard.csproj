@@ -7,10 +7,10 @@
     <StartupObject>PerformanceMonitorDashboard.Program</StartupObject>
     <AssemblyName>PerformanceMonitorDashboard</AssemblyName>
     <Product>SQL Server Performance Monitor Dashboard</Product>
-    <Version>2.11.0</Version>
-    <AssemblyVersion>2.11.0.0</AssemblyVersion>
-    <FileVersion>2.11.0.0</FileVersion>
-    <InformationalVersion>2.11.0</InformationalVersion>
+    <Version>3.0.0</Version>
+    <AssemblyVersion>3.0.0.0</AssemblyVersion>
+    <FileVersion>3.0.0.0</FileVersion>
+    <InformationalVersion>3.0.0</InformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <ApplicationIcon>EDD.ico</ApplicationIcon>
@@ -22,32 +22,44 @@
          CA1849: IsDBNull sync - micro-optimization not needed for desktop app (1000+ hits)
          CA2007: ConfigureAwait - not needed for WPF UI apps (500+ hits)
          CA1508: Dead code - false positives on nullable DateTime parameters
-         CA2201: Generic exception - acceptable for global error handlers
-         CS4014: Unawaited async - intentional fire-and-forget refresh calls -->
+         CA2201: Generic exception - acceptable for global error handlers -->
     <!-- NU1701: CredentialManagement package has no .NET 10 version
          CA1001: App/MainWindow live for process lifetime - disposal handled by exit
          CA1707: MCP tool parameters use snake_case intentionally for LLM APIs
          CA1305: MCP tools use ISO 8601 format which is culture-invariant
          CA1507: False positive - 'top' is an MCP parameter name, not a C# identifier -->
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CS4014;NU1701;NU1603;CA1001;CA1707;CA1305;CA1507</NoWarn>
+    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;NU1701;NU1603;CA1001;CA1707;CA1305;CA1507;CA1848;CA2254</NoWarn>
+    <!-- CS4014 is an error: un-awaited async must be an explicit discard (_ = FooAsync())
+         or awaited. Intentional fire-and-forget = discard. Guards against silently
+         shipping fire-and-forget calls (as the E3b snooze handler did). -->
+    <WarningsAsErrors>CS4014</WarningsAsErrors>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Dashboard.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="CredentialManagement" Version="1.0.2" />
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
     <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.8" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.9" />
     <PackageReference Include="ScottPlot.WPF" Version="5.1.58" />
-    <PackageReference Include="ModelContextProtocol" Version="1.3.0" />
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
-    <PackageReference Include="Velopack" Version="0.0.1298" />
+    <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
+    <PackageReference Include="Velopack" Version="1.2.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Installer.Core\Installer.Core.csproj" />
+    <ProjectReference Include="..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
+    <ProjectReference Include="..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
+    <ProjectReference Include="..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />
+    <ProjectReference Include="..\PerformanceMonitor.PlanAnalysis\PerformanceMonitor.PlanAnalysis.csproj" />
+    <ProjectReference Include="..\PerformanceMonitor.Ui\PerformanceMonitor.Ui.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -58,6 +70,5 @@
 
   <ItemGroup>
     <Resource Include="EDD.ico" />
-    <Resource Include="Resources\PlanIcons\*.png" />
   </ItemGroup>
 </Project>

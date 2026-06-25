@@ -16,9 +16,13 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitorDashboard.Services.Remediation;
+using PerformanceMonitor.Ui;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -27,6 +31,13 @@ namespace PerformanceMonitorDashboard.Controls
         public event EventHandler? AlertsDismissed;
 
         public MuteRuleService? MuteRuleService { get; set; }
+
+        /// <summary>
+        /// Gated orchestrator for Apply Fix. Injected from MainWindow; when null the
+        /// alert detail dialog shows no Apply affordance. The UI touches only this
+        /// facade — never the remediation handler/registry/executor directly.
+        /// </summary>
+        public RemediationApplyService? RemediationApplyService { get; set; }
 
         private List<AlertHistoryDisplayItem> _allAlerts = new();
         private DateTime? _lastRefreshed;
@@ -46,6 +57,17 @@ namespace PerformanceMonitorDashboard.Controls
         }
 
         /// <summary>
+        /// Stops the stale-data timer. Call when the Alerts tab is closed — the timer is
+        /// Dispatcher-rooted, so without this the whole control (and its alert list) leaks on every
+        /// open/close cycle and keeps ticking forever.
+        /// </summary>
+        public void Cleanup()
+        {
+            _staleDataTimer.Stop();
+            _staleDataTimer.Tick -= StaleDataTimer_Tick;
+        }
+
+        /// <summary>
         /// Refreshes the alert history from the in-memory log.
         /// </summary>
         public void RefreshAlerts()
@@ -55,7 +77,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void LoadAlerts()
         {
-            var service = EmailAlertService.Current;
+            var service = JsonAlertHistoryStore.Current;
             if (service == null)
             {
                 AlertsDataGrid.ItemsSource = null;
@@ -70,6 +92,7 @@ namespace PerformanceMonitorDashboard.Controls
             _allAlerts = entries.Select(e => new AlertHistoryDisplayItem
             {
                 AlertTime = e.AlertTime,
+                ServerId = e.ServerId,
                 ServerName = e.ServerName,
                 MetricName = e.MetricName,
                 CurrentValue = e.CurrentValue,
@@ -81,7 +104,8 @@ namespace PerformanceMonitorDashboard.Controls
                 IsWarning = !e.MetricName.Contains("Cleared") && !e.MetricName.Contains("Resolved")
                             && !e.MetricName.Contains("Deadlock") && !e.MetricName.Contains("Poison"),
                 Muted = e.Muted,
-                DetailText = e.DetailText
+                DetailText = e.DetailText,
+                ContextJson = e.ContextJson
             }).ToList();
 
             _lastRefreshed = DateTime.UtcNow;
@@ -240,7 +264,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void DismissSelected_Click(object sender, RoutedEventArgs e)
         {
-            var service = EmailAlertService.Current;
+            var service = JsonAlertHistoryStore.Current;
             if (service == null) return;
 
             var selected = AlertsDataGrid.SelectedItems
@@ -262,7 +286,7 @@ namespace PerformanceMonitorDashboard.Controls
 
         private void DismissAll_Click(object sender, RoutedEventArgs e)
         {
-            var service = EmailAlertService.Current;
+            var service = JsonAlertHistoryStore.Current;
             if (service == null) return;
 
             var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryDisplayItem> coll ? coll.Count : 0;
@@ -411,7 +435,7 @@ namespace PerformanceMonitorDashboard.Controls
                     var sb = new StringBuilder();
                     var headers = dataGrid.Columns
                         .OfType<DataGridBoundColumn>()
-                        .Select(c => Helpers.DataGridClipboardBehavior.GetHeaderText(c))
+                        .Select(c => DataGridClipboardBehavior.GetHeaderText(c))
                         .ToList();
                     sb.AppendLine(string.Join("\t", headers));
 
@@ -445,7 +469,7 @@ namespace PerformanceMonitorDashboard.Controls
                             var sep = TabHelpers.CsvSeparator;
                             var headers = dataGrid.Columns
                                 .OfType<DataGridBoundColumn>()
-                                .Select(c => TabHelpers.EscapeCsvField(Helpers.DataGridClipboardBehavior.GetHeaderText(c), sep))
+                                .Select(c => TabHelpers.EscapeCsvField(DataGridClipboardBehavior.GetHeaderText(c), sep))
                                 .ToList();
                             sb.AppendLine(string.Join(sep, headers));
 
@@ -487,7 +511,7 @@ namespace PerformanceMonitorDashboard.Controls
             if (row.DataContext is not AlertHistoryDisplayItem item) return;
 
             var owner = Window.GetWindow(this);
-            var detailWindow = new AlertDetailWindow(item);
+            var detailWindow = new AlertDetailWindow(item, RemediationApplyService);
             if (owner != null) detailWindow.Owner = owner;
             detailWindow.ShowDialog();
         }
@@ -500,11 +524,11 @@ namespace PerformanceMonitorDashboard.Controls
             var dataGrid = TabHelpers.FindDataGridFromContextMenu(contextMenu);
             if (dataGrid?.SelectedItem is not AlertHistoryDisplayItem item) return;
 
-            var detailWindow = new AlertDetailWindow(item) { Owner = Window.GetWindow(this) };
+            var detailWindow = new AlertDetailWindow(item, RemediationApplyService) { Owner = Window.GetWindow(this) };
             detailWindow.ShowDialog();
         }
 
-        private void MuteThisAlert_Click(object sender, RoutedEventArgs e)
+        private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)
         {
             if (MuteRuleService == null) return;
             if (sender is not MenuItem menuItem) return;
@@ -523,12 +547,12 @@ namespace PerformanceMonitorDashboard.Controls
             var dialog = new MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
             if (dialog.ShowDialog() == true)
             {
-                MuteRuleService.AddRule(dialog.Rule);
+                await MuteRuleService.AddRuleAsync(dialog.Rule);
                 LoadAlerts();
             }
         }
 
-        private void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
+        private async void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
         {
             if (MuteRuleService == null) return;
             if (sender is not MenuItem menuItem) return;
@@ -545,7 +569,7 @@ namespace PerformanceMonitorDashboard.Controls
             var dialog = new MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
             if (dialog.ShowDialog() == true)
             {
-                MuteRuleService.AddRule(dialog.Rule);
+                await MuteRuleService.AddRuleAsync(dialog.Rule);
                 LoadAlerts();
             }
         }
@@ -557,6 +581,14 @@ namespace PerformanceMonitorDashboard.Controls
     {
         public DateTime AlertTime { get; set; }
         public string TimeLocal => AlertTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+
+        /// <summary>
+        /// Source server identity carried from <c>AlertLogEntry.ServerId</c>. Usually
+        /// a <c>ServerConnection.Id</c> GUID, but can be the finding's stable int id
+        /// (the notify-time resolver's fallback) — which is why Apply Fix resolution
+        /// is fail-closed (M3).
+        /// </summary>
+        public string ServerId { get; set; } = "";
         public string ServerName { get; set; } = "";
         public string MetricName { get; set; } = "";
         public string CurrentValue { get; set; } = "";
@@ -568,5 +600,6 @@ namespace PerformanceMonitorDashboard.Controls
         public bool IsWarning { get; set; }
         public bool Muted { get; set; }
         public string? DetailText { get; set; }
+        public string? ContextJson { get; set; }
     }
 }

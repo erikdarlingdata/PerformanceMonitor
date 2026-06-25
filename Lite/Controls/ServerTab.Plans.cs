@@ -19,6 +19,7 @@ using Microsoft.Win32;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -39,7 +40,7 @@ public partial class ServerTab : UserControl
             // Try DuckDB first
             try
             {
-                plan = await _dataService.GetCachedQueryPlanAsync(_serverId, row.QueryHash);
+                plan = await Task.Run(() => _dataService.GetCachedQueryPlanAsync(_serverId, row.QueryHash));
             }
             catch
             {
@@ -49,7 +50,7 @@ public partial class ServerTab : UserControl
             // Fall back to live server
             if (string.IsNullOrEmpty(plan))
             {
-                var connStr = _server.GetConnectionString(_credentialService);
+                var connStr = _credentialResolver.GetConnectionString(_server);
                 plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash);
                 source = "live server";
             }
@@ -93,7 +94,7 @@ public partial class ServerTab : UserControl
             {
                 try
                 {
-                    plan = await _dataService.GetCachedProcedurePlanAsync(_serverId, row.PlanHandle);
+                    plan = await Task.Run(() => _dataService.GetCachedProcedurePlanAsync(_serverId, row.PlanHandle));
                 }
                 catch
                 {
@@ -104,7 +105,7 @@ public partial class ServerTab : UserControl
             // Fall back to live server
             if (string.IsNullOrEmpty(plan))
             {
-                var connStr = _server.GetConnectionString(_credentialService);
+                var connStr = _credentialResolver.GetConnectionString(_server);
                 plan = await LocalDataService.FetchProcedurePlanOnDemandAsync(connStr, row.DatabaseName, row.SchemaName, row.ObjectName);
                 source = "live server";
             }
@@ -183,14 +184,19 @@ public partial class ServerTab : UserControl
             PlanEmptyState.Visibility = Visibility.Visible;
     }
 
-    private void OpenPlanTab(string planXml, string label, string? queryText = null)
+    private async void OpenPlanTab(string planXml, string label, string? queryText = null)
     {
+        HidePlanLoading();
+        var viewer = new PlanViewerControl();
         try
         {
-            System.Xml.Linq.XDocument.Parse(planXml);
+            /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed
+               plan XML, replacing the redundant up-front XDocument.Parse validation. */
+            await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (System.Xml.XmlException ex)
         {
+            viewer.Cleanup();
             MessageBox.Show(
                 $"The plan XML is not valid:\n\n{ex.Message}",
                 "Invalid Plan XML",
@@ -198,10 +204,16 @@ public partial class ServerTab : UserControl
                 MessageBoxImage.Warning);
             return;
         }
-
-        HidePlanLoading();
-        var viewer = new PlanViewerControl();
-        viewer.LoadPlan(planXml, label, queryText);
+        catch (Exception ex)
+        {
+            viewer.Cleanup();
+            MessageBox.Show(
+                $"Failed to load the execution plan:\n\n{ex.Message}",
+                "Plan Load Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
 
         var header = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
         header.Children.Add(new TextBlock
@@ -230,6 +242,7 @@ public partial class ServerTab : UserControl
     {
         if (sender is Button btn && btn.Tag is TabItem tab)
         {
+            (tab.Content as PlanViewerControl)?.Cleanup();
             PlanTabControl.Items.Remove(tab);
             if (PlanTabControl.Items.Count == 0)
             {
@@ -280,7 +293,7 @@ public partial class ServerTab : UserControl
                 queryText = proc.FullName;
                 try
                 {
-                    var connStr = _server.GetConnectionString(_credentialService);
+                    var connStr = _credentialResolver.GetConnectionString(_server);
                     planXml = await LocalDataService.FetchProcedurePlanOnDemandAsync(
                         connStr, proc.DatabaseName, proc.SchemaName, proc.ObjectName);
                 }
@@ -293,11 +306,27 @@ public partial class ServerTab : UserControl
                 {
                     try
                     {
-                        var connStr = _server.GetConnectionString(_credentialService);
+                        var connStr = _credentialResolver.GetConnectionString(_server);
                         planXml = await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId);
                     }
                     catch { }
                 }
+                break;
+            case QueryStatsComparisonItem comp:
+                queryText = comp.QueryText;
+                label = $"Est Plan - {comp.QueryHash}";
+                if (!string.IsNullOrEmpty(comp.QueryHash))
+                    planXml = await FetchPlanByHash(comp.QueryHash);
+                break;
+            case ProcedureStatsComparisonItem procComp:
+                label = $"Est Plan - {procComp.FullName}";
+                queryText = procComp.FullName;
+                try
+                {
+                    var procConnStr = _credentialResolver.GetConnectionString(_server);
+                    planXml = await LocalDataService.FetchProcedurePlanOnDemandAsync(procConnStr, procComp.DatabaseName, procComp.SchemaName, procComp.ObjectName);
+                }
+                catch { }
                 break;
         }
 
@@ -355,9 +384,19 @@ public partial class ServerTab : UserControl
                 {
                     try
                     {
-                        var connStr = _server.GetConnectionString(_credentialService);
+                        var connStr = _credentialResolver.GetConnectionString(_server);
                         planXml = await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId);
                     }
+                    catch { }
+                }
+                break;
+            case QueryStatsComparisonItem comp:
+                queryText = comp.QueryText;
+                databaseName = comp.DatabaseName;
+                label = $"Actual Plan - {comp.QueryHash}";
+                if (!string.IsNullOrEmpty(comp.QueryHash))
+                {
+                    try { planXml = await FetchPlanByHash(comp.QueryHash); }
                     catch { }
                 }
                 break;
@@ -388,7 +427,7 @@ public partial class ServerTab : UserControl
 
         try
         {
-            var connectionString = _server.GetConnectionString(_credentialService);
+            var connectionString = _credentialResolver.GetConnectionString(_server);
 
             var actualPlanXml = await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 connectionString,
@@ -434,7 +473,7 @@ public partial class ServerTab : UserControl
         // Try DuckDB cache first
         try
         {
-            var plan = await _dataService.GetCachedQueryPlanAsync(_serverId, queryHash);
+            var plan = await Task.Run(() => _dataService.GetCachedQueryPlanAsync(_serverId, queryHash));
             if (!string.IsNullOrEmpty(plan)) return plan;
         }
         catch { }
@@ -442,7 +481,7 @@ public partial class ServerTab : UserControl
         // Fall back to live server
         try
         {
-            var connStr = _server.GetConnectionString(_credentialService);
+            var connStr = _credentialResolver.GetConnectionString(_server);
             return await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash);
         }
         catch { return null; }
@@ -486,7 +525,7 @@ public partial class ServerTab : UserControl
         string? planXml = null;
         try
         {
-            var connStr = _server.GetConnectionString(_credentialService);
+            var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
                 planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
@@ -518,10 +557,13 @@ public partial class ServerTab : UserControl
         try
         {
             var doc = System.Xml.Linq.XElement.Parse(bprXml);
-            var processContainer = blockingSide
-                ? doc.Element("blocking-process")
-                : doc.Element("blocked-process");
-            var stack = processContainer?.Element("process")?.Element("executionStack");
+            // The collector stores the <blocked-process-report> element as the root, so the
+            // {blocking|blocked}-process nodes are direct children today — but search by descendant
+            // (matching Dashboard) so this keeps working regardless of how deep the node sits.
+            var processContainer = doc
+                .Descendants(blockingSide ? "blocking-process" : "blocked-process")
+                .FirstOrDefault();
+            var stack = processContainer?.Descendants("executionStack").FirstOrDefault();
             if (stack == null) return empty;
 
             var frames = new List<(string, int, int)>();
@@ -575,7 +617,7 @@ public partial class ServerTab : UserControl
         string? planXml = null;
         try
         {
-            var connStr = _server.GetConnectionString(_credentialService);
+            var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
                 planXml = await LocalDataService.FetchPlanBySqlHandleAsync(

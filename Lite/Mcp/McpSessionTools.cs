@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -29,7 +30,7 @@ public sealed class McpSessionTools
         {
             var rows = await dataService.GetLatestQuerySnapshotsAsync(resolved.Value.ServerId, hours_back);
             if (rows.Count == 0)
-                return "No active query snapshots found in the requested time range.";
+                return McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
 
             IEnumerable<QuerySnapshotRow> filtered = rows;
 
@@ -95,7 +96,7 @@ public sealed class McpSessionTools
         {
             var rows = await dataService.GetLatestSessionStatsAsync(resolved.Value.ServerId);
             if (rows.Count == 0)
-                return "No session statistics available. The session collector may not have run yet.";
+                return McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
             var totalConnections = rows.Sum(r => r.ConnectionCount);
             var totalRunning = rows.Sum(r => r.RunningCount);

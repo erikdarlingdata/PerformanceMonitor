@@ -91,6 +91,13 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `get_tempdb_trend` | TempDB space: user objects, internal objects, version store | `server_name`, `hours_back` |
 
+        ### Storage & Index Tools
+        | Tool | Purpose | Key Parameters |
+        |------|---------|----------------|
+        | `get_table_index_sizes` | Largest tables with size, growth (7d/30d/daily), and row counts | `server_name` |
+        | `get_index_usage` | Per-index seeks/scans/lookups/updates with Unused/Write-only/Active classification (drop candidates first) | `server_name` |
+        | `get_object_locking` | Per-index lock/latch waits and lock escalations, top contended objects | `server_name` |
+
         ### Performance Counter Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
@@ -217,7 +224,7 @@ internal static class McpInstructions
         |-----------------|------|
         | Memory grant contention, workspace memory pressure | `get_memory_grants` |
         | Buffer pool composition, memory clerk distribution | `get_memory_clerks` |
-        | Page Life Expectancy, target vs total server memory | `get_memory_stats`, `get_memory_trend` |
+        | Target vs total server memory (how close SQL is to its memory target) | `get_memory_stats`, `get_memory_trend` |
         | Queries that requested large grants during the window | `get_top_queries_by_cpu` |
         | `RESOURCE_SEMAPHORE` waits in the same window | `get_wait_stats`, `get_wait_trend` |
 

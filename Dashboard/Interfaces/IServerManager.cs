@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitorDashboard.Models;
 
 namespace PerformanceMonitorDashboard.Interfaces

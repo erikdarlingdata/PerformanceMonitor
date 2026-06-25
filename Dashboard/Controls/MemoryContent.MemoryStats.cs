@@ -21,6 +21,8 @@ using Microsoft.Win32;
 using PerformanceMonitorDashboard.Helpers;
 using PerformanceMonitorDashboard.Models;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard.Controls
 {
@@ -87,30 +89,26 @@ namespace PerformanceMonitorDashboard.Controls
                 AddPressureWarningSpans(dataList);
 
                 var totalScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(totalXs, totalYs);
-                totalScatter.LineWidth = 2;
-                totalScatter.MarkerSize = 5;
-                totalScatter.Color = TabHelpers.ChartColors[9];
+                totalScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("TotalMemory"));
+                ChartStyle.StyleScatter(totalScatter);
                 totalScatter.LegendText = "Total Memory";
                 _memoryStatsOverviewHover?.Add(totalScatter, "Total Memory");
 
                 var bufferScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(bufferXs, bufferYs);
-                bufferScatter.LineWidth = 2;
-                bufferScatter.MarkerSize = 5;
-                bufferScatter.Color = TabHelpers.ChartColors[0];
+                bufferScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BufferPool"));
+                ChartStyle.StyleScatter(bufferScatter);
                 bufferScatter.LegendText = "Buffer Pool";
                 _memoryStatsOverviewHover?.Add(bufferScatter, "Buffer Pool");
 
                 var cacheScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(cacheXs, cacheYs);
-                cacheScatter.LineWidth = 2;
-                cacheScatter.MarkerSize = 5;
-                cacheScatter.Color = TabHelpers.ChartColors[1];
+                cacheScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("CacheMemory"));
+                ChartStyle.StyleScatter(cacheScatter);
                 cacheScatter.LegendText = "Plan Cache";
                 _memoryStatsOverviewHover?.Add(cacheScatter, "Plan Cache");
 
                 var availScatter = MemoryStatsOverviewChart.Plot.Add.Scatter(availXs, availYs);
-                availScatter.LineWidth = 2;
-                availScatter.MarkerSize = 5;
-                availScatter.Color = TabHelpers.ChartColors[2];
+                availScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("AvailableMemory"));
+                ChartStyle.StyleScatter(availScatter);
                 availScatter.LegendText = "Available Physical";
                 _memoryStatsOverviewHover?.Add(availScatter, "Available Physical");
 
@@ -122,7 +120,7 @@ namespace PerformanceMonitorDashboard.Controls
                 double xCenter = xMin + (xMax - xMin) / 2;
                 var noDataText = MemoryStatsOverviewChart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
                 noDataText.LabelFontSize = 14;
-                noDataText.LabelFontColor = ScottPlot.Colors.Gray;
+                noDataText.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
                 noDataText.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
             }
 
@@ -160,7 +158,7 @@ namespace PerformanceMonitorDashboard.Controls
 
                     if (item.BufferPoolPressureWarning && item.PlanCachePressureWarning)
                     {
-                        vline.Color = TabHelpers.ChartColors[3].WithAlpha(0.5);
+                        vline.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("PressureSevere")).WithAlpha(0.5);
                         // Add legend entry for BP pressure (covers "both" case too)
                         if (!bpLegendAdded)
                         {
@@ -170,7 +168,7 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                     else if (item.BufferPoolPressureWarning)
                     {
-                        vline.Color = TabHelpers.ChartColors[3].WithAlpha(0.3);
+                        vline.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("PressureSevere")).WithAlpha(0.3);
                         if (!bpLegendAdded)
                         {
                             vline.LegendText = "BP Pressure";
@@ -179,7 +177,7 @@ namespace PerformanceMonitorDashboard.Controls
                     }
                     else
                     {
-                        vline.Color = TabHelpers.ChartColors[2].WithAlpha(0.3);
+                        vline.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("PressureMedium")).WithAlpha(0.3);
                         if (!pcLegendAdded)
                         {
                             vline.LegendText = "PC Pressure";

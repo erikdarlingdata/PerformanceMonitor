@@ -325,7 +325,7 @@ BEGIN
         */
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Collected %d database size rows', 0, 1, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'Collected %I64d database size rows', 0, 1, @rows_collected) WITH NOWAIT;
 
             SELECT TOP (20)
                 dss.database_name,

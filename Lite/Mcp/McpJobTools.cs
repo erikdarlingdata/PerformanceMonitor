@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -25,7 +26,7 @@ public sealed class McpJobTools
             var rows = await dataService.GetRunningJobsAsync(resolved.Value.ServerId);
             if (rows.Count == 0)
             {
-                return "No running SQL Agent jobs found (or collector has not run yet).";
+                return McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
             }
 
             var result = rows.Select(r => new

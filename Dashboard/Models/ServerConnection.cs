@@ -12,6 +12,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorDashboard.Interfaces;
 using PerformanceMonitorDashboard.Services;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorDashboard.Models
 {

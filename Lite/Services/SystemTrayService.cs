@@ -12,7 +12,9 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -23,16 +25,23 @@ public class SystemTrayService : IDisposable
 {
     private TaskbarIcon? _trayIcon;
     private readonly Window _mainWindow;
+    private readonly Action _restoreWindow;
     private readonly CollectionBackgroundService? _backgroundService;
     private bool _disposed;
     private MenuItem? _pauseResumeItem;
     private TextBlock? _tooltipText;
 
-    public SystemTrayService(Window mainWindow, CollectionBackgroundService? backgroundService = null)
+    /// <param name="restoreWindow">
+    /// The window's own WPF restore (e.g. <c>MainWindow.RestoreFromTray</c>). The tray must restore
+    /// through WPF's <see cref="Window.Show"/> path, never a raw Win32 ShowWindow, or a tray-hidden
+    /// window comes back blank (#1050).
+    /// </param>
+    public SystemTrayService(Window mainWindow, Action restoreWindow, CollectionBackgroundService? backgroundService = null)
     {
         _mainWindow = mainWindow;
+        _restoreWindow = restoreWindow ?? throw new ArgumentNullException(nameof(restoreWindow));
         _backgroundService = backgroundService;
-        Helpers.ThemeManager.ThemeChanged += OnThemeChanged;
+        ThemeManager.ThemeChanged += OnThemeChanged;
     }
 
     /// <summary>
@@ -44,7 +53,7 @@ public class SystemTrayService : IDisposable
 
         _trayIcon = new TaskbarIcon();
 
-        bool HasLightBackground = Helpers.ThemeManager.HasLightBackground;
+        bool HasLightBackground = ThemeManager.HasLightBackground;
 
         /* Custom tooltip styled to match current theme.
            Note: Hardcodet TrayToolTip can rarely trigger a race condition in Popup.CreateWindow
@@ -87,7 +96,7 @@ public class SystemTrayService : IDisposable
         var contextMenu = new ContextMenu();
 
         var showItem = new MenuItem { Header = "Show Window", Icon = new TextBlock { Text = "📊", Background = Brushes.Transparent } };
-        showItem.Click += (s, e) => ShowMainWindow();
+        showItem.Click += (s, e) => _restoreWindow();
         contextMenu.Items.Add(showItem);
 
         contextMenu.Items.Add(new Separator());
@@ -105,9 +114,11 @@ public class SystemTrayService : IDisposable
         _trayIcon.ContextMenu = contextMenu;
 
         /* Double-click to show window */
-        _trayIcon.TrayMouseDoubleClick += (s, e) => ShowMainWindow();
+        _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
 
-        /* Handle minimize to tray */
+        /* Handle minimize to tray. Unsubscribe first: Initialize re-runs on theme change, so a
+           plain += would stack a duplicate StateChanged handler on the app-lifetime window each time. */
+        _mainWindow.StateChanged -= MainWindow_StateChanged;
         _mainWindow.StateChanged += MainWindow_StateChanged;
     }
 
@@ -117,14 +128,6 @@ public class SystemTrayService : IDisposable
         {
             _mainWindow.Hide();
         }
-    }
-
-    private void ShowMainWindow()
-    {
-        _mainWindow.Show();
-        _mainWindow.ShowInTaskbar = true;
-        _mainWindow.WindowState = WindowState.Normal;
-        _mainWindow.Activate();
     }
 
     private void ToggleCollection()
@@ -161,6 +164,21 @@ public class SystemTrayService : IDisposable
     }
 
     /// <summary>
+    /// Shows a themed, button-less balloon (the same card chrome as the snoozable condition cards)
+    /// for resolved/cleared conditions, so an "all clear" toast no longer renders as a plain, unthemed
+    /// Windows balloon. Pass <see cref="ToastSeverity.Success"/> for a green-check "resolved" accent.
+    /// No-op if the tray icon hasn't been initialized.
+    /// </summary>
+    public void ShowStyledNotification(string title, string message, ToastSeverity severity)
+    {
+        if (_trayIcon == null)
+            return;
+
+        var balloon = new StyledBalloon(title, message, severity);
+        _trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 10000);
+    }
+
+    /// <summary>
     /// Shows a custom interactive balloon with snooze buttons that create a temporary
     /// mute rule scoped to <paramref name="serverName"/> + <paramref name="metricName"/>.
     /// Falls back to a plain balloon if the tray icon hasn't been initialized.
@@ -176,7 +194,8 @@ public class SystemTrayService : IDisposable
         if (_trayIcon == null)
             return;
 
-        var balloon = new SnoozeBalloon(title, message, icon, serverName, metricName, muteRuleService);
+        var trayIcon = _trayIcon;
+        var balloon = new SnoozeBalloon(title, message, icon, serverName, metricName, muteRuleService, () => trayIcon.CloseBalloon());
         _trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 15000);
     }
 
@@ -192,7 +211,7 @@ public class SystemTrayService : IDisposable
 
         if (disposing && _trayIcon != null)
         {
-            Helpers.ThemeManager.ThemeChanged -= OnThemeChanged;
+            ThemeManager.ThemeChanged -= OnThemeChanged;
             _mainWindow.StateChanged -= MainWindow_StateChanged;
             _trayIcon.Visibility = Visibility.Collapsed;
             _trayIcon.Dispose();

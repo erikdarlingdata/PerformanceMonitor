@@ -5,68 +5,56 @@
  */
 
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net;
-using System.Net.Mail;
-using System.Net.Mime;
-using System.Text;
-using System.Text.Json;
 using System.Threading.Tasks;
-using PerformanceMonitorDashboard.Helpers;
-using PerformanceMonitorDashboard.Models;
+using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorDashboard.Services
 {
     /// <summary>
-    /// SMTP email sending service with per-metric cooldown and persistent alert log.
-    /// Uses System.Net.Mail.SmtpClient (no new NuGet packages needed).
+    /// Dashboard's per-app alert orchestrator shell (Plan E E3c, Approach B). The shared SMTP
+    /// send, cooldown, webhook fan-out, and failure counters live in <see cref="EmailSendCore"/>;
+    /// this shell owns Dashboard's record cadence: a per-channel <c>email</c> row and/or
+    /// <c>webhook</c> row written via <see cref="JsonAlertHistoryStore"/>, plus the analysis-path
+    /// no-channel "tray" fallback (in <see cref="SendFindingAlertAsync"/>).
+    /// <para>
+    /// The Dashboard-only history-management API (GetAlertHistory / Hide* / SaveAlertLog) lives
+    /// on <see cref="JsonAlertHistoryStore"/>; its consumers (AlertsHistoryContent, McpAlertTools,
+    /// MainWindow) reach it directly via the store's <c>Current</c> (E3c Phase 6).
+    /// </para>
     /// </summary>
-    public class EmailAlertService
+    public class EmailAlertService : IFindingAlertSender
     {
-        private const string SmtpCredentialKey = "PerformanceMonitorDashboard_SMTP";
-        private const int MaxAlertLogEntries = 1000;
-        private static readonly CredentialService s_credentialService = new();
-        private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
+        private static readonly AlertBranding s_branding = new("Performance Monitor Dashboard", null);
 
-        private readonly UserPreferencesService _preferencesService;
-        private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
+        /// <summary>Test seam: the branding this app feeds the shared email/template renderer.</summary>
+        internal static AlertBranding Branding => s_branding;
 
-        /* Alert log — loaded from JSON on startup, saved on exit, new alerts added in-memory */
-        private readonly List<AlertLogEntry> _alertLog = new();
-        private readonly object _alertLogLock = new();
-        private readonly string _alertLogFilePath;
-
-        /* Failure tracking for louder logging */
-        private int _consecutiveFailures;
-        private string? _lastFailureError;
+        private readonly IAlertSettings _settings;
+        private readonly JsonAlertHistoryStore _historyStore;
+        private readonly EmailSendCore _core;
+        private readonly ILogger<EmailAlertService> _logger;
 
         /// <summary>
         /// The current instance, set when MainWindow creates the service.
-        /// Used by MCP tools to access alert history.
+        /// Used by MCP tools and the Alerts history UI to reach the service.
         /// </summary>
         public static EmailAlertService? Current { get; private set; }
 
-        public EmailAlertService(UserPreferencesService preferencesService)
+        public EmailAlertService(IAlertSettings settings, JsonAlertHistoryStore historyStore, WebhookAlertService webhookAlertService, ILogger<EmailAlertService> logger)
         {
-            _preferencesService = preferencesService;
+            _settings = settings;
+            _historyStore = historyStore;
+            _logger = logger;
+            _core = new EmailSendCore(settings, historyStore, webhookAlertService, s_branding, logger);
             Current = this;
-
-            var appDataPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "PerformanceMonitorDashboard");
-            Directory.CreateDirectory(appDataPath);
-            _alertLogFilePath = Path.Combine(appDataPath, "alert_history.json");
-
-            LoadAlertLog();
         }
 
         /// <summary>
-        /// Attempts to send alert notifications (email, Teams, Slack) based on enabled channels.
-        /// Each channel operates independently — disabling email does not affect webhooks.
-        /// Never throws.
+        /// Attempts to send alert notifications (email, Teams, Slack) via the shared core and
+        /// records Dashboard's per-channel rows: an <c>email</c> row when email is attempted
+        /// (configured + outside cooldown) and a <c>webhook</c> row when a webhook is delivered.
+        /// Each channel operates independently. Never throws.
         /// </summary>
         public async Task TrySendAlertEmailAsync(
             string metricName,
@@ -78,361 +66,103 @@ namespace PerformanceMonitorDashboard.Services
         {
             try
             {
-                var prefs = _preferencesService.GetPreferences();
+                var result = await _core.TrySendAsync(
+                    metricName, serverName, currentValue, thresholdValue, serverId, context, attemptChannels: true);
 
-                /* Attempt email delivery if SMTP is fully configured */
-                if (prefs.SmtpEnabled &&
-                    !string.IsNullOrWhiteSpace(prefs.SmtpServer) &&
-                    !string.IsNullOrWhiteSpace(prefs.SmtpFromAddress) &&
-                    !string.IsNullOrWhiteSpace(prefs.SmtpRecipients))
+                if (result.EmailAttempted)
                 {
-                    var cooldownKey = $"{serverId}:{metricName}";
-                    var withinCooldown = _cooldowns.TryGetValue(cooldownKey, out var lastSent) &&
-                        DateTime.UtcNow - lastSent < TimeSpan.FromMinutes(prefs.EmailCooldownMinutes);
-
-                    if (!withinCooldown)
-                    {
-                        bool sent = false;
-                        string? sendError = null;
-                        var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
-                        var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                            metricName, serverName, currentValue, thresholdValue, prefs.EmailCooldownMinutes, context);
-
-                        try
-                        {
-                            await SendEmailAsync(prefs, subject, htmlBody, plainTextBody, context);
-                            sent = true;
-                            _cooldowns[cooldownKey] = DateTime.UtcNow;
-
-                            if (_consecutiveFailures > 0)
-                            {
-                                Logger.Info($"Alert email delivery recovered after {_consecutiveFailures} failure(s)");
-                            }
-                            _consecutiveFailures = 0;
-                            _lastFailureError = null;
-
-                            Logger.Info($"Alert email sent for {metricName} on {serverName}");
-                        }
-                        catch (Exception ex)
-                        {
-                            sendError = ex.Message;
-                            _consecutiveFailures++;
-                            _lastFailureError = ex.Message;
-
-                            if (_consecutiveFailures <= 3)
-                            {
-                                Logger.Error($"ALERT EMAIL FAILED ({_consecutiveFailures}x): {ex.GetType().Name}: {ex.Message}");
-                            }
-                            else if (_consecutiveFailures % 50 == 0)
-                            {
-                                Logger.Error($"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
-                            }
-                        }
-
-                        RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, sent, "email", sendError);
-                    }
+                    var emailContextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
+                    RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, result.EmailSent, "email", result.SendError, contextJson: emailContextJson);
                 }
 
-                /* Send webhook notifications (Teams / Slack) — independent of email */
-                var webhookService = WebhookAlertService.Current;
-                if (webhookService != null)
+                if (result.WebhookSent)
                 {
-                    var webhookSent = await webhookService.TrySendWebhookAlertsAsync(
-                        metricName, serverName, currentValue, thresholdValue, serverId, context);
-                    if (webhookSent)
-                    {
-                        RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, true, "webhook");
-                    }
+                    var webhookContextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
+                    RecordAlert(serverId, serverName, metricName, currentValue, thresholdValue, true, "webhook", contextJson: webhookContextJson);
                 }
             }
             catch (Exception ex)
             {
-                Logger.Error($"TrySendAlertEmailAsync outer error: {ex.Message}");
+                _logger.LogError($"TrySendAlertEmailAsync outer error: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Records an alert (tray notification or email) to the in-memory log.
+        /// Records an alert (tray notification or email) to the alert-history store.
+        /// Thin forwarder over <see cref="JsonAlertHistoryStore.RecordAlertAsync"/>. The store
+        /// completes synchronously (in-memory + trim), so this stays a sync method to preserve
+        /// the existing call sites' shape (MainWindow threshold alerts call it directly).
         /// </summary>
         public void RecordAlert(string serverId, string serverName, string metricName,
             string currentValue, string thresholdValue, bool alertSent,
-            string notificationType, string? sendError = null, bool muted = false, string? detailText = null)
+            string notificationType, string? sendError = null, bool muted = false, string? detailText = null,
+            string? contextJson = null)
         {
-            var entry = new AlertLogEntry
-            {
-                AlertTime = DateTime.UtcNow,
-                ServerId = serverId,
-                ServerName = serverName,
-                MetricName = metricName,
-                CurrentValue = currentValue,
-                ThresholdValue = thresholdValue,
-                AlertSent = alertSent,
-                NotificationType = notificationType,
-                SendError = sendError,
-                Muted = muted,
-                DetailText = detailText
-            };
-
-            lock (_alertLogLock)
-            {
-                _alertLog.Add(entry);
-
-                /* Trim if over max */
-                if (_alertLog.Count > MaxAlertLogEntries)
-                {
-                    _alertLog.RemoveRange(0, _alertLog.Count - MaxAlertLogEntries);
-                }
-            }
+            _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                serverId, serverName, metricName,
+                currentValue, thresholdValue,
+                null, null,
+                alertSent, notificationType, sendError,
+                muted, detailText, contextJson)).GetAwaiter().GetResult();
         }
 
         /// <summary>
-        /// Gets alert history from the log (excludes hidden alerts).
+        /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
+        /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
+        /// restarts. Thin forwarder over the store.
         /// </summary>
-        public List<AlertLogEntry> GetAlertHistory(int hoursBack = 24, int limit = 50)
-        {
-            var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-
-            lock (_alertLogLock)
-            {
-                return _alertLog
-                    .Where(a => a.AlertTime >= cutoff && !a.Hidden)
-                    .OrderByDescending(a => a.AlertTime)
-                    .Take(limit)
-                    .ToList();
-            }
-        }
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
+            => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
 
         /// <summary>
-        /// Hides specific alerts matching the given keys.
-        /// Each key is (AlertTime, ServerName, MetricName).
+        /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
+        /// Dashboard's cadence — per-channel email/webhook rows from
+        /// <see cref="TrySendAlertEmailAsync"/>, plus a "tray" fallback row when no channel is
+        /// configured to log (so the Alerts history tab still shows the finding). The fallback
+        /// lives here, not in <see cref="TrySendAlertEmailAsync"/>, because the threshold-alert
+        /// path records its own "tray" row separately — this fallback is analysis-path only.
         /// </summary>
-        public void HideAlerts(List<(DateTime AlertTime, string ServerName, string MetricName)> keys)
+        public async Task SendFindingAlertAsync(FindingAlert alert)
         {
-            if (keys.Count == 0) return;
+            await TrySendAlertEmailAsync(
+                alert.MetricName,
+                alert.ServerName,
+                alert.CurrentValue,
+                alert.ThresholdValue,
+                alert.ServerId,
+                alert.Context);
 
-            var keySet = new HashSet<(DateTime, string, string)>(keys);
-            int hidden = 0;
+            // Round-2/3 review carry-over: require both the enable flag AND the URL for a
+            // channel to count as "attempted", so the fallback fires when no channel can send.
+            var emailWouldLog =
+                _settings.SmtpEnabled
+                && !string.IsNullOrWhiteSpace(_settings.SmtpServer)
+                && !string.IsNullOrWhiteSpace(_settings.SmtpFromAddress)
+                && !string.IsNullOrWhiteSpace(_settings.SmtpRecipients);
+            var webhooksAttempted =
+                (_settings.TeamsWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.TeamsWebhookUrl))
+             || (_settings.SlackWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.SlackWebhookUrl));
 
-            lock (_alertLogLock)
+            if (!emailWouldLog && !webhooksAttempted)
             {
-                foreach (var alert in _alertLog)
-                {
-                    if (keySet.Contains((alert.AlertTime, alert.ServerName, alert.MetricName)))
-                    {
-                        alert.Hidden = true;
-                        hidden++;
-                    }
-                }
+                RecordAlert(
+                    alert.ServerId,
+                    alert.ServerName,
+                    alert.MetricName,
+                    alert.CurrentValue,
+                    alert.ThresholdValue,
+                    alertSent: false,
+                    notificationType: "tray",
+                    muted: false,
+                    detailText: alert.DetailText,
+                    contextJson: AlertContextSerializer.Serialize(alert.Context));
             }
-
-            if (_preferencesService.GetPreferences().LogAlertDismissals)
-                Logger.Info($"[AlertDismiss] Dismissed {hidden} of {keys.Count} selected alert(s)");
         }
 
         /// <summary>
-        /// Hides all non-hidden alerts matching the time/server filter.
-        /// </summary>
-        public void HideAllAlerts(int hoursBack, string? serverName = null)
-        {
-            var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-            int hidden = 0;
-
-            lock (_alertLogLock)
-            {
-                foreach (var alert in _alertLog)
-                {
-                    if (!alert.Hidden &&
-                        alert.AlertTime >= cutoff &&
-                        (serverName == null || alert.ServerName == serverName))
-                    {
-                        alert.Hidden = true;
-                        hidden++;
-                    }
-                }
-            }
-
-            if (_preferencesService.GetPreferences().LogAlertDismissals)
-                Logger.Info($"[AlertDismiss] Dismissed all: {hidden} alert(s) hidden (hoursBack={hoursBack}, server={serverName ?? "all"})");
-        }
-
-        /// <summary>
-        /// Gets email delivery health summary.
+        /// Gets email delivery health summary (from the shared send core).
         /// </summary>
         public (int ConsecutiveFailures, string? LastError) GetEmailHealth()
-        {
-            return (_consecutiveFailures, _lastFailureError);
-        }
-
-        #region Alert Log Persistence
-
-        /// <summary>
-        /// Saves the alert log to a JSON file. Call on application exit.
-        /// </summary>
-        public void SaveAlertLog()
-        {
-            try
-            {
-                List<AlertLogEntry> snapshot;
-                lock (_alertLogLock)
-                {
-                    snapshot = new List<AlertLogEntry>(_alertLog);
-                }
-
-                var json = JsonSerializer.Serialize(snapshot, s_jsonOptions);
-                File.WriteAllText(_alertLogFilePath, json);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Failed to save alert log: {ex.Message}");
-            }
-        }
-
-        private void LoadAlertLog()
-        {
-            try
-            {
-                if (!File.Exists(_alertLogFilePath)) return;
-
-                var json = File.ReadAllText(_alertLogFilePath);
-                var entries = JsonSerializer.Deserialize<List<AlertLogEntry>>(json);
-
-                if (entries != null)
-                {
-                    lock (_alertLogLock)
-                    {
-                        _alertLog.AddRange(entries);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warning($"Failed to load alert log, starting fresh: {ex.Message}");
-            }
-        }
-
-        #endregion
-
-        /// <summary>
-        /// Sends a test email to verify SMTP configuration.
-        /// Returns null on success, or the error message on failure.
-        /// </summary>
-        public async Task<string?> SendTestEmailAsync(UserPreferences prefs)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(prefs.SmtpServer))
-                    return "SMTP server is not configured.";
-
-                if (string.IsNullOrWhiteSpace(prefs.SmtpFromAddress))
-                    return "From address is not configured.";
-
-                if (string.IsNullOrWhiteSpace(prefs.SmtpRecipients))
-                    return "No recipients configured.";
-
-                var subject = "[SQL Monitor] Test Email";
-                var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildTestEmail();
-
-                await SendEmailAsync(prefs, subject, htmlBody, plainTextBody);
-                return null;
-            }
-            catch (Exception ex)
-            {
-                return ex.Message;
-            }
-        }
-
-        /// <summary>
-        /// Gets the stored SMTP password from the credential manager.
-        /// </summary>
-        public static string? GetSmtpPassword()
-        {
-            try
-            {
-                var credential = s_credentialService.GetCredential(SmtpCredentialKey);
-                return credential?.Password;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Failed to retrieve SMTP password: {ex.Message}");
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Saves the SMTP password to the credential manager.
-        /// </summary>
-        public static void SaveSmtpPassword(string password, string username)
-        {
-            try
-            {
-                s_credentialService.SaveCredential(SmtpCredentialKey, string.IsNullOrEmpty(username) ? "smtp" : username, password);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"Failed to save SMTP password: {ex.Message}");
-            }
-        }
-
-        private static async Task SendEmailAsync(UserPreferences prefs, string subject, string htmlBody, string plainTextBody, AlertContext? context = null)
-        {
-            using var smtpClient = new SmtpClient(prefs.SmtpServer, prefs.SmtpPort)
-            {
-                EnableSsl = prefs.SmtpUseSsl,
-                DeliveryMethod = SmtpDeliveryMethod.Network,
-                Timeout = 30000
-            };
-
-            if (!string.IsNullOrWhiteSpace(prefs.SmtpUsername))
-            {
-                var password = GetSmtpPassword();
-                smtpClient.Credentials = new NetworkCredential(prefs.SmtpUsername, password ?? "");
-            }
-
-            using var message = new MailMessage
-            {
-                From = new MailAddress(prefs.SmtpFromAddress),
-                Subject = subject
-            };
-
-            /* Multipart/alternative: plain text + HTML */
-            var plainView = AlternateView.CreateAlternateViewFromString(plainTextBody, null, MediaTypeNames.Text.Plain);
-            var htmlView = AlternateView.CreateAlternateViewFromString(htmlBody, null, MediaTypeNames.Text.Html);
-            message.AlternateViews.Add(plainView);
-            message.AlternateViews.Add(htmlView);
-
-            /* XML attachment (deadlock graph, blocked process report) */
-            if (!string.IsNullOrEmpty(context?.AttachmentXml) && !string.IsNullOrEmpty(context?.AttachmentFileName))
-            {
-                var xmlBytes = Encoding.UTF8.GetBytes(context.AttachmentXml);
-                var stream = new MemoryStream(xmlBytes); /* Disposed by MailMessage.Dispose() via Attachment chain */
-                message.Attachments.Add(new Attachment(stream, context.AttachmentFileName, "application/xml"));
-            }
-
-            foreach (var recipient in prefs.SmtpRecipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                message.To.Add(recipient);
-            }
-
-            await smtpClient.SendMailAsync(message);
-        }
-    }
-
-    /// <summary>
-    /// Represents a single alert event in the log.
-    /// </summary>
-    public class AlertLogEntry
-    {
-        public DateTime AlertTime { get; set; }
-        public string ServerId { get; set; } = "";
-        public string ServerName { get; set; } = "";
-        public string MetricName { get; set; } = "";
-        public string CurrentValue { get; set; } = "";
-        public string ThresholdValue { get; set; } = "";
-        public bool AlertSent { get; set; }
-        public string NotificationType { get; set; } = "";
-        public string? SendError { get; set; }
-        public bool Hidden { get; set; }
-        public bool Muted { get; set; }
-        public string? DetailText { get; set; }
+            => _core.GetEmailHealth();
     }
 }

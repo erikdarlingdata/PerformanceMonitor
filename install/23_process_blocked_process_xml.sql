@@ -51,6 +51,7 @@ BEGIN
         @rows_deleted bigint = 0,
         @rows_marked bigint = 0,
         @rows_parsed bigint = 0,
+        @rows_typed bigint = 0,
         @start_time datetime2(7) = SYSDATETIME(),
         @utc_offset_minutes integer = DATEDIFF(MINUTE, GETUTCDATE(), SYSDATETIME()),
         @start_date_local datetime2(7) = NULL,
@@ -74,7 +75,7 @@ BEGIN
             SET @sql = N'
             IF OBJECT_ID(N''' + QUOTENAME(@procedure_database) + N'.dbo.sp_HumanEventsBlockViewer'', N''P'') IS NOT NULL
             BEGIN
-                SELECT @blockviewer_database = N''' + QUOTENAME(@procedure_database) + N''';
+                SELECT @blockviewer_database = N''' + REPLACE(@procedure_database, '''', '''''') + N''';
             END;';
 
             EXECUTE sys.sp_executesql
@@ -144,9 +145,20 @@ BEGIN
                 The proc expects local time inputs and converts to UTC internally
                 Raw table event_time is UTC (from XE @timestamp attribute)
                 */
+                /*
+                Pad the upper bound by one second. sp_HumanEventsBlockViewer
+                filters the source table with a half-open window
+                (event_time < @end_date), so without the pad the newest
+                event(s) - and an entire batch sharing a single timestamp
+                (MIN = MAX, the common case because a blocked-process monitor
+                loop emits every report at one instant) - fall outside
+                [MIN, MAX) and are never parsed. The local/UTC basis itself
+                round-trips correctly: this proc shifts UTC event_time to local
+                and sp_HumanEventsBlockViewer shifts it back to UTC internally.
+                */
                 SELECT
                     @start_date_local = DATEADD(MINUTE, @utc_offset_minutes, @start_date),
-                    @end_date_local = DATEADD(MINUTE, @utc_offset_minutes, @end_date);
+                    @end_date_local = DATEADD(SECOND, 1, DATEADD(MINUTE, @utc_offset_minutes, @end_date));
 
                 IF @debug = 1
                 BEGIN
@@ -246,30 +258,172 @@ BEGIN
             IF @rows_parsed > 0
             BEGIN
                 /*
-                Mark raw XML rows as processed
-                Only mark the rows in the date range we just processed
+                Populate blocker-side typed columns on the rows just parsed by
+                sp_HumanEventsBlockViewer so the Dashboard analysis path can
+                read structured columns instead of re-parsing the XML on every
+                BLOCKING_CHAIN fact. Only activity='blocked' rows carry the
+                full XML; activity='blocking' rows stay NULL on the new
+                columns (they describe the blocker side via their own
+                spid/status columns).
+
+                XQuery uses the descendant axis (//blocked-process-report/...)
+                because the stored XML is <event>-rooted with the report
+                nested two levels deep at
+                /event/data[@name="blocked_process"]/value/blocked-process-report.
+                The descendant axis sidesteps the wrap and was empirically
+                validated; a leading-slash (/blocked-process-report/...)
+                returns NULL on every row.
+
+                LTRIM/RTRIM matches the C# parser's .Trim() for spaces only
+                (not CR/LF/TAB); the reconstructor keys on session pair, not
+                SQL text, so the divergence is cosmetic.
+
+                Runs BEFORE the is_processed=1 mark below so a crash here
+                rolls back inside the surrounding transaction and the raw XML
+                rows stay unmarked - the next run retries them.
                 */
-                UPDATE bx
-                SET    bx.is_processed = 1
-                FROM collect.blocked_process_xml AS bx
-                WHERE bx.is_processed = 0
-                AND   (@start_date IS NULL OR bx.event_time >= @start_date)
-                AND   (@end_date IS NULL OR bx.event_time <= @end_date);
+                UPDATE
+                    b
+                SET
+                    b.blocking_spid =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/@spid)[1]',
+                            N'integer'
+                        ),
+                    b.blocking_last_tran_started =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/@lasttranstarted)[1]',
+                            N'datetime2(7)'
+                        ),
+                    b.blocking_status =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/@status)[1]',
+                            N'nvarchar(10)'
+                        ),
+                    b.blocked_sql_text =
+                        LTRIM(RTRIM(b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocked-process/process/inputbuf/text())[1]',
+                            N'nvarchar(max)'
+                        ))),
+                    b.blocking_sql_text =
+                        LTRIM(RTRIM(b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/inputbuf/text())[1]',
+                            N'nvarchar(max)'
+                        ))),
+                    /* Session identity for the (monitor_loop, spid, ecid) chain reconstruction. monitor_loop
+                       is the report's episode; blocking_ecid is the blocker's exec-context (the blocked side's
+                       ecid is already populated by sp_HumanEventsBlockViewer). Descendant axis: the stored XML
+                       is <event>-rooted. */
+                    b.monitor_loop =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/@monitorLoop)[1]',
+                            N'integer'
+                        ),
+                    b.blocking_ecid =
+                        b.blocked_process_report_xml.value
+                        (
+                            N'(//blocked-process-report/blocking-process/process/@ecid)[1]',
+                            N'integer'
+                        )
+                FROM collect.blocking_BlockedProcessReport AS b
+                WHERE b.event_time >= @start_date_local
+                AND   b.event_time <= @end_date_local
+                AND   b.activity = 'blocked'
+                AND   b.blocking_spid IS NULL
+                AND   b.blocked_process_report_xml IS NOT NULL;
 
                 SELECT
-                    @rows_marked = ROWCOUNT_BIG();
+                    @rows_typed = ROWCOUNT_BIG();
 
                 IF @debug = 1
                 BEGIN
-                    RAISERROR(N'Marked %I64d raw XML rows as processed (%I64d parsed blocking events)', 0, 1, @rows_marked, @rows_parsed) WITH NOWAIT;
+                    RAISERROR(N'Populated blocker-side typed columns for %I64d rows', 0, 1, @rows_typed) WITH NOWAIT;
                 END;
-            END;
-            ELSE
-            BEGIN
-                IF @debug = 1
+
+                /*
+                Defense-in-depth: if sp_HumanEventsBlockViewer wrote rows
+                (@rows_parsed > 0) but the typed-column UPDATE populated zero
+                (@rows_typed = 0), the XQuery is silently failing - most
+                likely a future wire-format change in
+                sp_HumanEventsBlockViewer or the upstream XE shape. Log this
+                clearly so it surfaces in config.collection_log instead of
+                only revealing itself when the analysis path returns garbage
+                chains. The condition can't be a hard error because new-row
+                UPDATEs can also legitimately populate 0 if every row had
+                non-NULL blocking_spid already (re-processing same window),
+                so we just record it.
+                */
+                IF @rows_parsed > 0 AND @rows_typed = 0
                 BEGIN
-                    RAISERROR(N'sp_HumanEventsBlockViewer produced 0 parsed results for %d XML events - rows left unprocessed for retry', 0, 1, @rows_available) WITH NOWAIT;
+                    INSERT INTO
+                        config.collection_log
+                    (
+                        collector_name,
+                        collection_status,
+                        rows_collected,
+                        duration_ms,
+                        error_message
+                    )
+                    VALUES
+                    (
+                        N'process_blocked_process_xml',
+                        N'TYPED_COLUMNS_EMPTY',
+                        @rows_parsed,
+                        DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
+                        N'sp_HumanEventsBlockViewer wrote '
+                        + CAST(@rows_parsed AS nvarchar(20))
+                        + N' rows but XQuery extraction populated 0 blocker-side typed columns - '
+                        + N'likely a wire-format change in blocked_process_report_xml; '
+                        + N'check //blocked-process-report path against a sample row.'
+                    );
                 END;
+
+            END;
+
+            /*
+            Mark the raw XML rows we handed to sp_HumanEventsBlockViewer as
+            processed - UNCONDITIONALLY after a clean parse run, not only when
+            @rows_parsed > 0. The viewer legitimately returns zero rows for
+            events that carry no lock-blocking chain between distinct sessions:
+            self-blocks, and non-lock GENERIC/NL waits such as a memory-grant
+            RESOURCE_SEMAPHORE wait that tripped blocked_process_threshold.
+            Those never parse, so gating the mark on @rows_parsed > 0 left them
+            unprocessed forever - the processor re-ran the viewer over the same
+            dead events every cycle and re-logged NO_RESULTS indefinitely.
+
+            Safe because the upper bound was padded (+1s) above, so the viewer's
+            half-open window actually covers every unprocessed event - we never
+            mark a row the viewer did not get to see. Genuine failures never
+            reach here either: the XACT_STATE() = -1 check and the CATCH block
+            both roll back without marking, so a real parse failure still
+            retries next run. Raw XML is retained (is_processed = 1, not
+            deleted); data-retention handles cleanup. event_time is UTC,
+            matching @start_date / @end_date.
+            */
+            IF @rows_parsed = 0 AND @debug = 1
+            BEGIN
+                RAISERROR(N'sp_HumanEventsBlockViewer produced 0 parsed results for %d XML event(s) - no lock-blocking chains (self-block / non-lock waits); events still marked processed', 0, 1, @rows_available) WITH NOWAIT;
+            END;
+
+            UPDATE bx
+            SET    bx.is_processed = 1
+            FROM collect.blocked_process_xml AS bx
+            WHERE bx.is_processed = 0
+            AND   (@start_date IS NULL OR bx.event_time >= @start_date)
+            AND   (@end_date IS NULL OR bx.event_time <= @end_date);
+
+            SELECT
+                @rows_marked = ROWCOUNT_BIG();
+
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Marked %I64d raw XML rows as processed (%I64d parsed blocking events)', 0, 1, @rows_marked, @rows_parsed) WITH NOWAIT;
             END;
         END;
 
@@ -288,18 +442,18 @@ BEGIN
         VALUES
         (
             N'process_blocked_process_xml',
-            CASE WHEN @rows_available = 0 THEN N'SUCCESS'
-                 WHEN @rows_parsed > 0 THEN N'SUCCESS'
-                 ELSE N'NO_RESULTS'
-            END,
+            /*
+            A clean parse run is SUCCESS even when it produced 0 blocking
+            chains: the events were processed and marked, they simply carried
+            no lock-blocking between distinct sessions (self-block / non-lock
+            waits). Genuine failures take the CATCH path and log ERROR. This
+            ends the perpetual NO_RESULTS this collector used to emit for
+            un-parseable-by-design events.
+            */
+            N'SUCCESS',
             @rows_available,
             DATEDIFF(MILLISECOND, @start_time, SYSDATETIME()),
-            CASE WHEN @rows_available > 0 AND @rows_parsed = 0
-                 THEN N'sp_HumanEventsBlockViewer returned 0 parsed results for '
-                      + CAST(@rows_available AS nvarchar(20))
-                      + N' XML events - rows left unprocessed for retry'
-                 ELSE NULL
-            END
+            NULL
         );
 
         IF @debug = 1

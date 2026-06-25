@@ -5,6 +5,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:ScottPlot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
              xmlns:local="clr-namespace:PerformanceMonitorDashboard.Controls"
+             xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
              xmlns:converters="clr-namespace:PerformanceMonitorDashboard.Converters"
              mc:Ignorable="d">
     <UserControl.Resources>
@@ -576,10 +577,17 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <local:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0"/>
-                <TextBlock x:Name="QueryStatsComparisonBanner" Grid.Row="1" Visibility="Collapsed"
-                           Padding="8,4" FontWeight="Bold"
-                           Foreground="{DynamicResource ForegroundBrush}"
-                           Background="#2244AAFF"/>
+                <StackPanel Grid.Row="1">
+                    <TextBlock x:Name="QueryStatsComparisonBanner" Visibility="Collapsed"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#2244AAFF"/>
+                    <Expander x:Name="QueryStatsByDbExpander" Header="CPU by database" IsExpanded="False" Margin="4,2,4,0">
+                        <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
+                            <ui:MetricBarCards x:Name="QueryStatsByDbCards" Margin="4,4,4,8"/>
+                        </ScrollViewer>
+                    </Expander>
+                </StackPanel>
             <DataGrid Grid.Row="2" x:Name="QueryStatsDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
                       GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                       ScrollViewer.CanContentScroll="True" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -644,22 +652,36 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                        <DataGridTextColumn.Header>
+                    <DataGridTemplateColumn SortMemberPath="ExecutionCount" Width="100">
+                        <DataGridTemplateColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ExecutionCount" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
-                        </DataGridTextColumn.Header>
-                    </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding TotalCpuTimeMs, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="110">
-                        <DataGridTextColumn.Header>
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <ui:BarChartCell Value="{Binding ExecutionCount}"
+                                                 Maximum="{Binding BarMaxExecutions, RelativeSource={RelativeSource AncestorType={x:Type local:QueryPerformanceContent}}}"
+                                                 Text="{Binding ExecutionCount, StringFormat='{}{0:N0}'}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn SortMemberPath="TotalCpuTimeMs" Width="110">
+                        <DataGridTemplateColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalCpuTimeMs" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Total CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
-                        </DataGridTextColumn.Header>
-                    </DataGridTextColumn>
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <ui:BarChartCell Value="{Binding TotalCpuTimeMs}"
+                                                 Maximum="{Binding BarMaxTotalCpu, RelativeSource={RelativeSource AncestorType={x:Type local:QueryPerformanceContent}}}"
+                                                 Text="{Binding TotalCpuTimeMs, StringFormat='{}{0:N2}'}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                     <DataGridTextColumn Binding="{Binding AvgCpuTimeMs, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
@@ -684,14 +706,21 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding TotalElapsedTimeMs, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                        <DataGridTextColumn.Header>
+                    <DataGridTemplateColumn SortMemberPath="TotalElapsedTimeMs" Width="120">
+                        <DataGridTemplateColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalElapsedTimeMs" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Total Elapsed (ms)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
-                        </DataGridTextColumn.Header>
-                    </DataGridTextColumn>
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <ui:BarChartCell Value="{Binding TotalElapsedTimeMs}"
+                                                 Maximum="{Binding BarMaxTotalElapsed, RelativeSource={RelativeSource AncestorType={x:Type local:QueryPerformanceContent}}}"
+                                                 Text="{Binding TotalElapsedTimeMs, StringFormat='{}{0:N2}'}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                     <DataGridTextColumn Binding="{Binding AvgElapsedTimeMs, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="120">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
@@ -716,14 +745,21 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding TotalLogicalReads, StringFormat='{}{0:N0}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                        <DataGridTextColumn.Header>
+                    <DataGridTemplateColumn SortMemberPath="TotalLogicalReads" Width="100">
+                        <DataGridTemplateColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalLogicalReads" Click="QueryStatsFilter_Click" Margin="0,0,4,0"/>
                                 <TextBlock Text="Total Reads (pages)" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
-                        </DataGridTextColumn.Header>
-                    </DataGridTextColumn>
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <ui:BarChartCell Value="{Binding TotalLogicalReads}"
+                                                 Maximum="{Binding BarMaxTotalReads, RelativeSource={RelativeSource AncestorType={x:Type local:QueryPerformanceContent}}}"
+                                                 Text="{Binding TotalLogicalReads, StringFormat='{}{0:N0}'}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                     <DataGridTextColumn Binding="{Binding AvgLogicalReads, StringFormat='{}{0:N2}'}" ElementStyle="{StaticResource NumericCell}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">

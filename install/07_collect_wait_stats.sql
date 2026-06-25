@@ -175,7 +175,7 @@ BEGIN
         
         IF @debug = 1
         BEGIN
-            RAISERROR(N'Collected %d wait stats rows', 0, 1, @rows_collected) WITH NOWAIT;
+            RAISERROR(N'Collected %I64d wait stats rows', 0, 1, @rows_collected) WITH NOWAIT;
         END;
         
         COMMIT TRANSACTION;

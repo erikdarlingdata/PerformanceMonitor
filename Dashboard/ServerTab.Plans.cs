@@ -18,6 +18,7 @@ using System.Windows.Controls;
 using Microsoft.Data.SqlClient;
 using Microsoft.Win32;
 using PerformanceMonitorDashboard.Models;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorDashboard
 {
@@ -46,14 +47,19 @@ namespace PerformanceMonitorDashboard
             PerformanceTab.CancelActualPlan();
         }
 
-        private void OpenPlanTab(string planXml, string label, string? queryText = null)
+        private async void OpenPlanTab(string planXml, string label, string? queryText = null)
         {
+            HidePlanLoading();
+            var viewer = new PlanViewerControl();
             try
             {
-                System.Xml.Linq.XDocument.Parse(planXml);
+                /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed
+                   plan XML, replacing the redundant up-front XDocument.Parse validation. */
+                await viewer.LoadPlan(planXml, label, queryText);
             }
             catch (System.Xml.XmlException ex)
             {
+                viewer.Cleanup();
                 MessageBox.Show(
                     $"The plan XML is not valid:\n\n{ex.Message}",
                     "Invalid Plan XML",
@@ -61,10 +67,16 @@ namespace PerformanceMonitorDashboard
                     MessageBoxImage.Warning);
                 return;
             }
-
-            HidePlanLoading();
-            var viewer = new Controls.PlanViewerControl();
-            viewer.LoadPlan(planXml, label, queryText);
+            catch (Exception ex)
+            {
+                viewer.Cleanup();
+                MessageBox.Show(
+                    $"Failed to load the execution plan:\n\n{ex.Message}",
+                    "Plan Load Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
 
             var header = new StackPanel { Orientation = Orientation.Horizontal };
             header.Children.Add(new TextBlock
@@ -93,6 +105,7 @@ namespace PerformanceMonitorDashboard
         {
             if (sender is Button btn && btn.Tag is TabItem tab)
             {
+                (tab.Content as PlanViewerControl)?.Cleanup();
                 PlanTabControl.Items.Remove(tab);
                 if (PlanTabControl.Items.Count == 0)
                 {
@@ -153,11 +166,16 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void DownloadBlockingXml_Click(object sender, RoutedEventArgs e)
+        private async void DownloadBlockingXml_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.DataContext is BlockingEventItem item)
             {
-                if (string.IsNullOrWhiteSpace(item.BlockedProcessReportXml))
+                // The grid defers the (large) report XML for speed; fetch this one on demand.
+                var reportXml = item.BlockedProcessReportXml;
+                if (string.IsNullOrWhiteSpace(reportXml) && item.HasBlockedProcessReport && _databaseService != null)
+                    reportXml = await _databaseService.GetBlockedProcessReportAsync(item.BlockingId, item.CollectionTime) ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(reportXml))
                 {
                     MessageBox.Show(
                         "No blocked process report XML available for this event.",
@@ -184,7 +202,7 @@ namespace PerformanceMonitorDashboard
                 {
                     try
                     {
-                        File.WriteAllText(saveFileDialog.FileName, item.BlockedProcessReportXml);
+                        File.WriteAllText(saveFileDialog.FileName, reportXml);
                         MessageBox.Show(
                             $"Blocked process report saved successfully to:\n{saveFileDialog.FileName}",
                             "Success",
@@ -205,11 +223,15 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void DownloadDeadlockGraph_Click(object sender, RoutedEventArgs e)
+        private async void DownloadDeadlockGraph_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.DataContext is DeadlockItem item)
             {
-                if (string.IsNullOrWhiteSpace(item.DeadlockGraph))
+                // Graph is deferred out of the grid query; fetch it on demand.
+                var graphXml = item.DeadlockGraph;
+                if (string.IsNullOrWhiteSpace(graphXml) && _databaseService != null)
+                    graphXml = await _databaseService.GetDeadlockGraphAsync(item.CollectionTime, item.DeadlockId) ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(graphXml))
                 {
                     MessageBox.Show(
                         "No deadlock graph available for this event.",
@@ -236,7 +258,7 @@ namespace PerformanceMonitorDashboard
                 {
                     try
                     {
-                        File.WriteAllText(saveFileDialog.FileName, item.DeadlockGraph);
+                        File.WriteAllText(saveFileDialog.FileName, graphXml);
                         MessageBox.Show(
                             $"Deadlock graph saved successfully to:\n{saveFileDialog.FileName}",
                             "Success",
@@ -278,9 +300,15 @@ namespace PerformanceMonitorDashboard
             if (grid?.SelectedItem is not BlockingEventItem row) return;
 
             var sideLabel = blockingSide ? "Blocking" : "Blocked";
-            var label = $"Est Plan - {sideLabel} SPID {row.Spid}";
 
-            var frames = ExtractBlockedProcessFrames(row.BlockedProcessReportXml, blockingSide);
+            // The grid defers the (large) blocked process report XML; fetch this one on demand.
+            var reportXml = row.BlockedProcessReportXml;
+            if (string.IsNullOrWhiteSpace(reportXml) && row.HasBlockedProcessReport && _databaseService != null)
+                reportXml = await _databaseService.GetBlockedProcessReportAsync(row.BlockingId, row.CollectionTime) ?? string.Empty;
+
+            // A blocked process report can list several frames, each with its own sql_handle —
+            // retrieve and open every plan we can still recover, not just the first.
+            var frames = ExtractBlockedProcessFrames(reportXml, blockingSide);
             if (frames.Count == 0)
             {
                 MessageBox.Show(
@@ -291,22 +319,28 @@ namespace PerformanceMonitorDashboard
                 return;
             }
 
-            string? planXml = null;
+            int opened = 0;
             try
             {
                 var connStr = _serverConnection.GetConnectionString(_credentialService);
-                foreach (var f in frames)
+                for (int i = 0; i < frames.Count; i++)
                 {
-                    planXml = await FetchPlanBySqlHandleAsync(
+                    var f = frames[i];
+                    var planXml = await FetchPlanBySqlHandleAsync(
                         connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
-                    if (!string.IsNullOrEmpty(planXml)) break;
+                    if (string.IsNullOrEmpty(planXml)) continue;
+
+                    var label = frames.Count > 1
+                        ? $"Est Plan - {sideLabel} SPID {row.Spid} ({i + 1}/{frames.Count})"
+                        : $"Est Plan - {sideLabel} SPID {row.Spid}";
+                    OpenPlanTab(planXml, label, row.QueryText);
+                    opened++;
                 }
             }
             catch { }
 
-            if (!string.IsNullOrEmpty(planXml))
+            if (opened > 0)
             {
-                OpenPlanTab(planXml, label, row.QueryText);
                 PlanViewerTabItem.IsSelected = true;
             }
             else
@@ -326,10 +360,13 @@ namespace PerformanceMonitorDashboard
             try
             {
                 var doc = System.Xml.Linq.XElement.Parse(bprXml);
-                var processContainer = blockingSide
-                    ? doc.Element("blocking-process")
-                    : doc.Element("blocked-process");
-                var stack = processContainer?.Element("process")?.Element("executionStack");
+                // The stored report's root is the full XE <event>; the process nodes live deeper, at
+                // /event/data/value/blocked-process-report/{blocking|blocked}-process/process/executionStack.
+                // Search by descendant rather than direct child so the frames are actually found.
+                var processContainer = doc
+                    .Descendants(blockingSide ? "blocking-process" : "blocked-process")
+                    .FirstOrDefault();
+                var stack = processContainer?.Descendants("executionStack").FirstOrDefault();
                 if (stack == null) return empty;
 
                 var frames = new List<(string, int, int)>();
@@ -368,7 +405,11 @@ namespace PerformanceMonitorDashboard
             var sideLabel = string.IsNullOrWhiteSpace(row.DeadlockType) ? "Process" : row.DeadlockType;
             var label = $"Est Plan - {sideLabel} SPID {row.Spid}";
 
-            var frames = ExtractDeadlockProcessFrames(row.DeadlockGraph, row.Spid);
+            // Graph is deferred out of the grid query; fetch it on demand.
+            var graphXml = row.DeadlockGraph;
+            if (string.IsNullOrWhiteSpace(graphXml) && _databaseService != null)
+                graphXml = await _databaseService.GetDeadlockGraphAsync(row.CollectionTime, row.DeadlockId) ?? string.Empty;
+            var frames = ExtractDeadlockProcessFrames(graphXml, row.Spid);
             if (frames.Count == 0)
             {
                 MessageBox.Show(
