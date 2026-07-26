@@ -71,3 +71,4 @@ community/*.sql
 
 # Test-run artifacts (dotnet test --logger trx)
 TestResults/
+# (throwaway) validating the docs fast path end-to-end - this branch never merges
