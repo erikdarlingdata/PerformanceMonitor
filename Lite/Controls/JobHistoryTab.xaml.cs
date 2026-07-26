@@ -107,7 +107,12 @@ public partial class JobHistoryTab : UserControl
     /// <summary>
     /// Populates the header Agent indicator (issue #1433 Phase 2). With a server selected it shows that
     /// server's Agent status + next scheduled run; across all servers it shows a running/stopped roll-up.
-    /// A stopped Agent is drawn in red. Best-effort — an agent_status read failure just clears the indicator.
+    /// Best-effort — an agent_status read failure just clears the indicator.
+    ///
+    /// <para>What is drawn in red is decided by <see cref="AgentHeaderStatus"/> (#1720), not by
+    /// <c>agent_running</c> alone: a server where Agent has never been observed running does not use Agent
+    /// and is not "stopped", and a reading older than the stale window describes nothing about the service
+    /// now. Both used to render as the same red alarm as a genuine outage.</para>
     /// </summary>
     private async System.Threading.Tasks.Task UpdateAgentStatusAsync(int? serverId)
     {
@@ -128,21 +133,14 @@ public partial class JobHistoryTab : UserControl
                 return;
             }
 
-            if (serverId.HasValue)
-            {
-                var s = statuses[0];
-                AgentStatusIndicator.Text = $"Agent: {s.StatusDisplay} · Next run: {s.NextScheduledRunLocal}";
-                AgentStatusIndicator.Foreground = s.AgentRunning ? okBrush : alertBrush;
-            }
-            else
-            {
-                var running = statuses.Count(x => x.AgentRunning);
-                var stopped = statuses.Count - running;
-                AgentStatusIndicator.Text = stopped > 0
-                    ? $"Agents: {running}/{statuses.Count} running, {stopped} stopped"
-                    : $"Agents: {running}/{statuses.Count} running";
-                AgentStatusIndicator.Foreground = stopped > 0 ? alertBrush : okBrush;
-            }
+            var utcNow = DateTime.UtcNow;
+
+            var (text, isAlert) = serverId.HasValue
+                ? AgentHeaderStatus.DescribeSingle(statuses[0], utcNow)
+                : AgentHeaderStatus.DescribeFleet(statuses, utcNow);
+
+            AgentStatusIndicator.Text = text;
+            AgentStatusIndicator.Foreground = isAlert ? alertBrush : okBrush;
         }
         catch (Exception ex)
         {

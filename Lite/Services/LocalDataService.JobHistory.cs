@@ -149,6 +149,12 @@ LIMIT {limitParam}";
 
         var serverFilter = serverId.HasValue ? "WHERE server_id = $1" : string.Empty;
 
+        /* collection_time and ever_running ride along with the newest row (#1720) so the header can apply the
+           same two gates Darling's alert does: refuse to judge a stale reading, and never call a server
+           "stopped" where Agent has never been seen running. ever_running is a window aggregate over the same
+           partition rather than a second round trip — the retained history for the server is already the scan
+           this query performs. MAX over a 0/1 CASE rather than BOOL_OR so the projection does not depend on
+           which aggregates DuckDB exposes as window functions. */
         command.CommandText = $@"
 SELECT
     server_id,
@@ -156,7 +162,9 @@ SELECT
     agent_running,
     agent_status_desc,
     agent_startup_desc,
-    next_scheduled_run
+    next_scheduled_run,
+    collection_time,
+    ever_running
 FROM (
     SELECT
         server_id,
@@ -165,6 +173,9 @@ FROM (
         agent_status_desc,
         agent_startup_desc,
         next_scheduled_run,
+        collection_time,
+        MAX(CASE WHEN agent_running THEN 1 ELSE 0 END)
+            OVER (PARTITION BY server_id) AS ever_running,
         ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY collection_time DESC) AS rn
     FROM agent_status
     {serverFilter}
@@ -187,6 +198,8 @@ ORDER BY server_name";
                 AgentStatusDesc = reader.IsDBNull(3) ? null : reader.GetString(3),
                 AgentStartupDesc = reader.IsDBNull(4) ? null : reader.GetString(4),
                 NextScheduledRun = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                CollectionTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                EverSeenRunning = !reader.IsDBNull(7) && ToInt64(reader.GetValue(7)) == 1,
             });
         }
 
@@ -262,6 +275,21 @@ public class AgentStatusRow
     public string? AgentStatusDesc { get; set; }
     public string? AgentStartupDesc { get; set; }
     public DateTime? NextScheduledRun { get; set; }
+
+    /// <summary>
+    /// When this snapshot was collected (UTC). Null only for a row read before #1720 added the column to the
+    /// projection. <see cref="AgentHeaderStatus"/> refuses to judge a reading older than its stale window —
+    /// without this the header rendered a days-old row as though it described the service now.
+    /// </summary>
+    public DateTime? CollectionTime { get; set; }
+
+    /// <summary>
+    /// Has Agent been observed RUNNING at least once for this server, anywhere in the retained
+    /// <c>agent_status</c> history? The capability gate #1719 established for Darling's alert, applied here to
+    /// the header: a server that has never run Agent is not "stopped". Derived from collected evidence rather
+    /// than remembered in process, and bounded by that table's retention, for the reasons #1719 documents.
+    /// </summary>
+    public bool EverSeenRunning { get; set; }
 
     public string StatusDisplay => AgentRunning ? "Running" : (AgentStatusDesc ?? "Stopped");
 
