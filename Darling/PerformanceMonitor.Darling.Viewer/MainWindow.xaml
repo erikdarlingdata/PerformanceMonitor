@@ -937,6 +937,14 @@
                     <local:JobHistoryTab x:Name="JobHistoryContent" Margin="0,8,0,0"/>
                 </TabItem>
 
+                <!-- Availability Groups (#991): fleet-wide AG topology, one card per (reporting server, AG).
+                     Collapsed until a load actually finds AG rows — Always On is opt-in and most fleets run
+                     none, so a permanently visible tab that only ever says "nothing here" is noise. The reveal
+                     is driven from MainWindow.xaml.cs off the control's HasAvailabilityGroups. -->
+                <TabItem x:Name="AvailabilityGroupsTabItem" Header="Availability Groups" Visibility="Collapsed">
+                    <local:AvailabilityGroupsTab x:Name="AvailabilityGroupsContent" Margin="0,8,0,0"/>
+                </TabItem>
+
                 <!-- FinOps: the top-level cross-server aggregate tab (restored to Lite's shape from the earlier
                      per-server inner tab, which had duplicated the fleet-wide Server Inventory inside every
                      server's tab). Its OWN server selector (synced to the sidebar selection on a single-click,

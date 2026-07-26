@@ -848,6 +848,102 @@ public sealed class DarlingComposeTests
         Assert.Contains("delta_execution_count", sql, StringComparison.Ordinal);
     }
 
+    /* ─────────────────────── #1687: the row cap keeps the NEWEST slice, and says so ─────────────────────── */
+
+    [Fact]
+    public void TimeSeries_RowCap_KeepsTheNewestBuckets_ViaADescLimitedSubquery()
+    {
+        /* The bug: "ORDER BY bucket LIMIT 10000" returns the EARLIEST 10,000 rows, so a grouped
+           minute-grain 24h panel rendered its first ~87 minutes as if that were the window. The cap now
+           applies DESC inside a subquery, and the survivors are re-sorted ascending for the renderer. */
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"groupBy\":[\"wait_type\"],\"viz\":\"stacked\"}"));
+
+        Assert.Contains("SELECT * FROM (", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY bucket DESC\nLIMIT " + ComposeLimits.HardRowCap + "\n) AS capped\nORDER BY bucket", sql, StringComparison.Ordinal);
+
+        /* The inner ORDER BY must be the DESC one — an ascending inner sort would re-introduce the bug
+           while still looking wrapped. */
+        Assert.DoesNotContain("ORDER BY bucket\nLIMIT", sql, StringComparison.Ordinal);
+
+        /* The cap survives as the LAST thing applied inside the subquery, and the outer sort is what the
+           renderer consumes. */
+        Assert.EndsWith("ORDER BY bucket", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TimeSeries_RowCap_WrapperOpensAfterTheCte_SoTheWithStaysTopLevel()
+    {
+        /* A module-join panel emits "WITH m AS (...)" first. The wrapper must open AFTER it: swallowing
+           the CTE into the subquery would be a different (and in some engines invalid) statement, and
+           the join would lose its source. */
+        var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"object_name\"],\"viz\":\"line\"}"));
+
+        Assert.StartsWith("WITH ", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("WITH ", StringComparison.Ordinal) < sql.IndexOf("SELECT * FROM (", StringComparison.Ordinal),
+            "the row-cap wrapper must open after the CTE, not before it");
+    }
+
+    [Fact]
+    public void RankedAndScalar_AreUntouchedByTheRowCapWrapper()
+    {
+        /* Ranked's LIMIT is the caller's own topN — reaching it is the request being honored, not
+           truncation — and Scalar is one row. Neither gets the wrapper. */
+        var ranked = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}"));
+        Assert.DoesNotContain("SELECT * FROM (", ranked, StringComparison.Ordinal);
+        Assert.DoesNotContain(") AS capped", ranked, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY value DESC", ranked, StringComparison.Ordinal);
+
+        var scalar = Compile(ValidPlan("{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"avg\",\"viz\":\"stat\"}"));
+        Assert.DoesNotContain("SELECT * FROM (", scalar, StringComparison.Ordinal);
+        Assert.EndsWith("LIMIT 1", scalar, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RowCapNotice_FiresAtExactlyTheCap_AndNotBelowIt()
+    {
+        /* Exactly-at-cap is the only detectable signal: the compiler cannot know buckets x groups ahead
+           of time, because group cardinality is a property of the DATA, not the spec. */
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap - 1));
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, 0));
+
+        var notice = ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap);
+        Assert.NotNull(notice);
+        Assert.Contains("row cap reached", notice, StringComparison.Ordinal);
+        Assert.Contains("most recent", notice, StringComparison.Ordinal);
+
+        /* Names both escape hatches, because "it was truncated" without "here is what to do" is only
+           half the fix. */
+        Assert.Contains("Coarsen the time bucket", notice, StringComparison.Ordinal);
+        Assert.Contains("narrow the group-by", notice, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CombineNotices_ShowsEveryNoticeThatApplies_NotJustTheFirst()
+    {
+        /* Retention truncates the OLD end of a window and the row cap now truncates the old end too (by
+           keeping the newest buckets) — a long grouped panel on a retention-active store hits both. The
+           panel in the most trouble is exactly the one that must not have half its explanation dropped. */
+        Assert.Null(ComposeStoreAvailability.CombineNotices(null, null));
+        Assert.Equal("only one", ComposeStoreAvailability.CombineNotices(null, "only one"));
+        Assert.Equal("only one", ComposeStoreAvailability.CombineNotices("only one", null));
+        Assert.Equal("first second", ComposeStoreAvailability.CombineNotices("first", "second"));
+
+        /* An empty or whitespace notice is not a notice — it must not produce a stray separator or an
+           empty strip on the page. */
+        Assert.Null(ComposeStoreAvailability.CombineNotices("", "   "));
+        Assert.Equal("real", ComposeStoreAvailability.CombineNotices("", "real"));
+    }
+
+    [Fact]
+    public void RowCapNotice_IsTimeSeriesOnly()
+    {
+        /* A Ranked panel returning exactly topN rows is the request being satisfied. Warning there would
+           be a false alarm on the most ordinary result there is. */
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Ranked, ComposeLimits.HardRowCap));
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Scalar, ComposeLimits.HardRowCap));
+    }
+
     /* ─────────────────────────── #991 Availability Group measures ─────────────────────────── */
 
     [Fact]

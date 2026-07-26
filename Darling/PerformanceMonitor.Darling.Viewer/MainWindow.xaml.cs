@@ -240,6 +240,11 @@ public partial class MainWindow : Window
         JobHistoryContent.Initialize(_dataService);
         JobHistoryContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Availability Groups (#991): a self-loading fleet-wide control. Its TabItem ships Collapsed and is
+           revealed only once a load finds AG rows, so an Always-On-less fleet never carries a dead tab. */
+        AvailabilityGroupsContent.Initialize(_dataService);
+        AvailabilityGroupsContent.StatusChanged += OnServerTabStatusChanged;
+
         /* The FinOps tab is a self-loading cross-server aggregate control with its own server selector; give
            it the store, surface its load/refresh outcomes on the shared status bar, and route its query grids'
            "View Plan" requests into the standalone Plan Viewer surface (it has no per-server plan host). */
@@ -365,6 +370,14 @@ public partial class MainWindow : Window
         /* Poll alert history once, regardless of the visible tab: refresh the per-server "needs attention"
            badges (sidebar + open tabs) and surface genuinely-new rows as tray toasts. */
         _ = PollAlertsAsync();
+
+        /* Probe for Availability Groups while the tab is still hidden, so standing an AG up reveals it without
+           a restart. Converge-then-stop: once revealed this does nothing and the tab refreshes through the
+           normal visible-tab path, so an AG fleet does not pay for the probe twice. */
+        if (AvailabilityGroupsTabItem.Visibility != Visibility.Visible)
+        {
+            _ = RefreshAvailabilityGroupsAsync();
+        }
 
         /* Two tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
            analysis findings change on the service's 30-minute cadence, so an interval auto-refresh is pointless
@@ -753,6 +766,23 @@ public partial class MainWindow : Window
     /// and sets <see cref="_refreshRequested"/>, so the running loop reloads once more when it finishes —
     /// no user action is silently swallowed.
     /// </summary>
+    /// <summary>
+    /// Loads the Availability Groups tab and reveals it once the store actually has AG rows (#991). Always On is
+    /// opt-in and most fleets run none, so the tab ships Collapsed rather than standing there permanently empty.
+    /// The reveal is one-way within a session: a fleet that HAS AGs keeps the tab even if a later sweep reads
+    /// zero (a collector hiccup should not make a tab vanish under the operator mid-look).
+    /// </summary>
+    private async Task RefreshAvailabilityGroupsAsync()
+    {
+        await AvailabilityGroupsContent.RefreshAgAsync();
+
+        if (AvailabilityGroupsContent.HasAvailabilityGroups
+            && AvailabilityGroupsTabItem.Visibility != Visibility.Visible)
+        {
+            AvailabilityGroupsTabItem.Visibility = Visibility.Visible;
+        }
+    }
+
     private async Task RefreshVisibleAsync()
     {
         if (_dataService is null)
@@ -802,6 +832,9 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
+                    break;
+                case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
+                    await RefreshAvailabilityGroupsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     await FinOpsContent.RefreshActiveSubTabAsync();

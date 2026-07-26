@@ -176,6 +176,11 @@ public static class ComposeCompiler
             sql.Append(")\n");
         }
 
+        /* Where the CTE (if any) ends and the real statement begins. A capped time-series query is wrapped
+           in a subquery below, and the wrapper has to open HERE so the WITH stays at the top level rather
+           than being swallowed into the subquery. */
+        var bodyStart = sql.Length;
+
         /* SELECT list + the matching GROUP BY expressions. */
         var selectExprs = new List<string>();
         var groupExprs = new List<string>();
@@ -246,8 +251,22 @@ public static class ComposeCompiler
         switch (plan.Mode)
         {
             case PanelMode.TimeSeries:
-                sql.Append("ORDER BY bucket\n");
-                sql.Append("LIMIT ").Append(ComposeLimits.HardRowCap);
+                /* The cap keeps the NEWEST buckets, not the oldest (#1687). A plain
+                   "ORDER BY bucket LIMIT n" silently returns the EARLIEST n rows, so a grouped
+                   minute-grain panel over 24h rendered its first ~87 minutes as though that were the
+                   whole window — numbers right, window wrong, and nothing on screen said so. Recent
+                   data is the point of a monitoring chart, so the cap is applied DESC inside a
+                   subquery and the survivors re-sorted ascending for the renderer, which consumes
+                   buckets in order.
+
+                   No parameter-ordering hazard: this LIMIT is a literal (only the Ranked arm binds a
+                   LIMIT parameter), and the wrapper only brackets text whose parameters were already
+                   appended in the same order, so $n positions are untouched. */
+                sql.Insert(bodyStart, "SELECT * FROM (\n");
+                sql.Append("ORDER BY bucket DESC\n");
+                sql.Append("LIMIT ").Append(ComposeLimits.HardRowCap).Append('\n');
+                sql.Append(") AS capped\n");
+                sql.Append("ORDER BY bucket");
                 break;
             case PanelMode.Ranked:
                 sql.Append("ORDER BY value DESC\n");

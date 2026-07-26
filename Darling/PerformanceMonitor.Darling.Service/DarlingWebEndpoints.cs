@@ -457,8 +457,14 @@ public static class DarlingWebEndpoints
             var payload = new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations };
             /* Partial window, and says so (#1665): when the route landed on a tier whose retention cannot
                reach the window's start on a retention-active store, tell the caller instead of quietly
-               returning a short slice of what they asked for. Additive — absent when the window fits. */
-            if (ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups) is string notice)
+               returning a short slice of what they asked for. Additive — absent when the window fits.
+               Joined with the row-cap notice (#1687), because the two truncate a panel from OPPOSITE
+               ends — retention loses the oldest points, the row cap now drops them too by keeping the
+               newest buckets — and a panel can genuinely hit both at once. Showing one and swallowing
+               the other would under-report exactly the panel that is worst off. */
+            if (ComposeStoreAvailability.CombineNotices(
+                    ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups),
+                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;
             }

@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -128,5 +129,46 @@ internal static class ComposeStoreAvailability
         return string.Create(
             CultureInfo.InvariantCulture,
             $"partial window: this panel read the {tierName} tier, which this store keeps for about {retained.TotalDays:0} days, but the requested window starts {windowDays:0.#} days back — older points are not included.");
+    }
+
+    /// <summary>
+    /// The row-cap sibling of <see cref="BuildRetentionNotice"/> (#1687): a time-series panel whose
+    /// (buckets × groups) product exceeds <see cref="ComposeLimits.HardRowCap"/> is truncated by the
+    /// compiler's LIMIT, and the caller must be told — the same silent-truncation class as the retention
+    /// gaps, where the numbers are right and the WINDOW is wrong.
+    ///
+    /// <para>Detected by <paramref name="rowCount"/> landing EXACTLY on the cap, which is the only signal
+    /// available: the compiler cannot know the product ahead of time (it depends on the data's group
+    /// cardinality, not the spec). That means a panel producing exactly 10,000 rows on its own is
+    /// reported as capped — a false positive, deliberately accepted. Erring toward an unnecessary notice
+    /// beats erring toward a truncated chart that looks complete, and the reverse mistake is the bug this
+    /// exists to fix.</para>
+    ///
+    /// <para>TIME SERIES ONLY. A Ranked panel's LIMIT is the user's own topN — hitting it is the request
+    /// being honored, not truncation — and Scalar is a single row.</para>
+    /// </summary>
+    internal static string? BuildRowCapNotice(PanelMode mode, int rowCount)
+    {
+        if (mode != PanelMode.TimeSeries || rowCount < ComposeLimits.HardRowCap)
+        {
+            return null;
+        }
+
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"row cap reached — showing the most recent {ComposeLimits.HardRowCap:N0} buckets of the window, not the whole of it. Coarsen the time bucket or narrow the group-by to fit the window into fewer rows.");
+    }
+
+    /// <summary>
+    /// Joins the notices that apply into the single <c>notice</c> string the payload carries, or null when
+    /// none do. Kept as its own function so the ALL-of-them behavior is testable: retention and the row cap
+    /// truncate a panel from opposite ends and a panel can hit both at once, so showing one and dropping
+    /// the other would under-report precisely the worst-off panel — the same silent-truncation failure
+    /// these notices exist to end.
+    /// </summary>
+    internal static string? CombineNotices(params string?[] notices)
+    {
+        var present = notices.Where(n => !string.IsNullOrWhiteSpace(n)).ToArray();
+        return present.Length == 0 ? null : string.Join(" ", present);
     }
 }

@@ -45,12 +45,10 @@ public sealed class ViewerCollectorCoverageTests
     /// </summary>
     private static readonly HashSet<string> KnownStoreOnlyOrUnbuiltTables = new(StringComparer.OrdinalIgnoreCase)
     {
-        // UNBUILT UI (parity board Tier 1) -- remove when the tab ships.
-        // #991 scoped the AG collectors' first cut to collection only: the two tables plus compose measures,
-        // so the data is reachable from Custom Views and MCP straight away, with the viewer tab and the
-        // failover / sync-fell-behind alerts as a follow-up.
-        "ag_replica_states",
-        "ag_database_replica_states",
+        // Empty: every collector table now has a Darling viewer reader. The two AG tables were the last
+        // entries -- carried as tracked debt while #991 shipped collection-only, and removed when the
+        // Availability Groups tab landed. This ratchet only ever shrinks; adding an entry back means a
+        // collector shipped without a viewer surface.
     };
 
     [Fact]

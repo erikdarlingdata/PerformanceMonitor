@@ -1,0 +1,155 @@
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.AvailabilityGroupsTab"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="450" d:DesignWidth="900">
+    <!-- Fleet-wide Availability Group topology (#991) — the desktop twin of the web dashboard's
+         Availability Groups page, rewired to Postgres via ViewerDataService.GetAvailabilityGroupsAsync.
+         One CARD PER (reporting server, AG), deliberately not merged: a secondary's DMV returns only local
+         information, so the same AG legitimately renders one card naming both replicas (from the primary)
+         and another naming just itself with no primary (from the secondary). Merging them would let the
+         blind view overwrite the complete one. Every severity is computed in the reader; this file only
+         binds the brush it produced. -->
+    <Grid Margin="12,0,12,12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header: counts + refresh -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10" VerticalAlignment="Center">
+            <TextBlock Text="Availability Groups" FontSize="16" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+            <TextBlock x:Name="SummaryText" Margin="14,0,0,0" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <Button x:Name="RefreshButton" Content="Refresh" Margin="14,0,0,0" Padding="10,3"
+                    Click="RefreshButton_Click"/>
+        </StackPanel>
+
+        <!-- Empty state: shown when the fleet reports no AGs at all. -->
+        <TextBlock x:Name="EmptyState" Grid.Row="1" Visibility="Collapsed"
+                   TextWrapping="Wrap" MaxWidth="620" HorizontalAlignment="Left" VerticalAlignment="Top"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                   Text="No Availability Groups observed on any monitored server. The AG collectors write no rows for an instance that hosts none, and they do not run against Azure SQL Database."/>
+
+        <ScrollViewer Grid.Row="1" x:Name="CardScroller" VerticalScrollBarVisibility="Auto">
+            <ItemsControl x:Name="AgCards">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Margin="0,0,0,12" Padding="12" CornerRadius="4"
+                                Background="{DynamicResource BackgroundLightBrush}"
+                                BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1,1,1,1">
+                            <StackPanel>
+                                <!-- Card header: AG name, worst-health badge, primary -->
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Ellipse Width="10" Height="10" VerticalAlignment="Center"
+                                             Fill="{Binding SeverityBrush}"/>
+                                    <TextBlock Text="{Binding AgNameDisplay}" Margin="8,0,0,0"
+                                               FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <Border Margin="10,0,0,0" Padding="6,1" CornerRadius="8"
+                                            Background="{DynamicResource BackgroundDarkBrush}">
+                                        <TextBlock Text="{Binding SeverityLabel}" FontSize="11" FontWeight="SemiBold"
+                                                   Foreground="{Binding SeverityBrush}"/>
+                                    </Border>
+                                    <TextBlock Text="{Binding PrimaryDisplay}" Margin="14,0,0,0" FontSize="12"
+                                               VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundDimBrush}"/>
+                                </StackPanel>
+
+                                <TextBlock Text="{Binding SubtitleDisplay}" Margin="18,2,0,8" FontSize="11"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+                                <!-- Replica chips -->
+                                <ItemsControl ItemsSource="{Binding Replicas}" Margin="18,0,0,8">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Margin="0,0,8,8" Padding="8,5" MinWidth="190" CornerRadius="3"
+                                                    Background="{DynamicResource BackgroundDarkBrush}"
+                                                    BorderBrush="{Binding SeverityBrush}" BorderThickness="3,0,0,0">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding RoleDisplay}" FontSize="10"
+                                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                                    <TextBlock Text="{Binding NameDisplay}" FontSize="13" FontWeight="SemiBold"
+                                                               Foreground="{DynamicResource ForegroundBrush}"
+                                                               ToolTip="{Binding EndpointUrl}"/>
+                                                    <TextBlock Text="{Binding StateDisplay}" FontSize="10" Margin="0,1,0,0"
+                                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                                    <TextBlock Text="{Binding ModeDisplay}" FontSize="10"
+                                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <!-- Per-database secondary state -->
+                                <DataGrid ItemsSource="{Binding Databases}" Margin="18,0,0,0"
+                                          AutoGenerateColumns="False" IsReadOnly="True"
+                                          HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                          CanUserAddRows="False" MaxHeight="260">
+                                    <DataGrid.Style>
+                                        <Style TargetType="DataGrid" BasedOn="{StaticResource {x:Type DataGrid}}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasDatabases}" Value="False">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </DataGrid.Style>
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Replica" Binding="{Binding ReplicaDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Sync state" Binding="{Binding SyncStateDisplay}" Width="Auto">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{Binding SyncStateBrush}"/>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Send queue (KB)" Binding="{Binding SendQueueDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Redo queue (KB)" Binding="{Binding RedoQueueDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Send rate (KB/s)" Binding="{Binding SendRateDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Redo rate (KB/s)" Binding="{Binding RedoRateDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Lag" Binding="{Binding LagDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Est drain (min)" Binding="{Binding SendDrainDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Est redo (min)" Binding="{Binding RedoDrainDisplay}" Width="Auto"/>
+                                        <DataGridTextColumn Header="Data movement" Binding="{Binding DataMovementDisplay}" Width="*">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{Binding DataMovementBrush}"/>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+
+                                <TextBlock Margin="18,4,0,0" FontSize="11"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="No database-level state collected for this group yet.">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasDatabases}" Value="False">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+    </Grid>
+</UserControl>
