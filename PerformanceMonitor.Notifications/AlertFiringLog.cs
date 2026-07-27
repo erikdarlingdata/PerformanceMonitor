@@ -35,9 +35,16 @@ public static class AlertFiringLog
     /// operator's ability to find the event afterwards — suppressing both would make a muted condition
     /// invisible everywhere at once, which is how a muted-and-forgotten alert becomes an outage.
     /// </summary>
+    /// <param name="shortMessage">The one-line summary. NULLABLE because
+    /// <see cref="AlertOutcome.ShortMessage"/> is - it defaults to null and several engine families pass
+    /// nothing - and an alert with no summary must still log its trigger rather than be dropped or throw.
+    /// When it is absent the trailing separator is omitted too, so the line does not end in a dangling
+    /// colon.</param>
     public static string Fired(
-        string serverName, string metricName, string severity, string shortMessage, bool muted) =>
-        $"ALERT TRIGGERED [{severity}] {metricName} on {serverName}: {shortMessage}" + (muted ? " [muted]" : "");
+        string serverName, string metricName, string severity, string? shortMessage, bool muted) =>
+        $"ALERT TRIGGERED [{severity}] {metricName} on {serverName}"
+        + (string.IsNullOrEmpty(shortMessage) ? "" : $": {shortMessage}")
+        + (muted ? " [muted]" : "");
 
     /// <summary>
     /// The line for an alert that CLEARED — the other half of the pair, in the same shape so the two grep

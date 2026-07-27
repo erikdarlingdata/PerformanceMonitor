@@ -268,16 +268,25 @@ public partial class MainWindow : Window
     {
         try
         {
+            /* Captured once and null-checked: this runs unawaited off a UI-timer tick, so it can land before
+               the data service is wired during startup - and an NRE on a fire-and-forget task is an unobserved
+               exception nobody sees. Same shape as the tray capture in ShowAlertResolutionToastAsync. */
+            var data = _dataService;
+            if (data is null)
+            {
+                return;
+            }
+
             var alerts = new List<AgAlert>();
             var now = DateTime.UtcNow;
 
-            var (replicaTimeUtc, replicas) = await _dataService.GetLatestAgReplicaStatesAsync(serverId);
+            var (replicaTimeUtc, replicas) = await data.GetLatestAgReplicaStatesAsync(serverId);
             if (IsFresh(replicaTimeUtc))
             {
                 alerts.AddRange(_agAlertEvaluator.EvaluateReplicas(serverId, replicas));
             }
 
-            var (databaseTimeUtc, databases) = await _dataService.GetLatestAgDatabaseReplicaStatesAsync(serverId);
+            var (databaseTimeUtc, databases) = await data.GetLatestAgDatabaseReplicaStatesAsync(serverId);
             if (IsFresh(databaseTimeUtc))
             {
                 alerts.AddRange(_agAlertEvaluator.EvaluateDatabases(

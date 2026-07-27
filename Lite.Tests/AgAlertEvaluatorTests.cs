@@ -222,7 +222,7 @@ public class AgAlertEvaluatorTests
 
         /* This server catches up. Its snapshot says nothing about the other server, whose alert must stand. */
         var recovered = e.EvaluateDatabases(ServerId, new[] { Database(lagSeconds: 0) }, 300, 0, Cooldown);
-        Assert.Single(recovered.Where(a => a.MetricName == "AG Sync Recovered"));
+        Assert.Single(recovered, a => a.MetricName == "AG Sync Recovered");
 
         /* The other server is still inside its cooldown, so it stays quiet rather than re-firing fresh. */
         Assert.Empty(e.EvaluateDatabases(otherServerId, new[] { Database(lagSeconds: 600) }, 300, 0, Cooldown));
