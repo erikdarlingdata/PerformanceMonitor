@@ -1637,7 +1637,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ServerContextMenu_Remove_Click(object sender, RoutedEventArgs e)
+    private async void ServerContextMenu_Remove_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
         if (server == null) return;
@@ -1658,6 +1658,19 @@ public partial class MainWindow : Window
                sighting against the OLD role and page a phantom failover. The storage name hashes
                deterministically, so a re-added server really does get the same id back. */
             _agAlertEvaluator.Forget(removedServerId);
+            /* #2020: same deterministic-id hazard for tag assignments — drop them here, or a
+               removed-then-re-added server silently resurrects its old tags. */
+            if (_dataService != null)
+            {
+                try
+                {
+                    await _dataService.ClearServerTagsForServerAsync(removedServerId);
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
+                }
+            }
             _serverManager.DeleteServer(server.Id);
             RefreshServerList();
             StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
