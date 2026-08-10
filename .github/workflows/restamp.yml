@@ -1,0 +1,139 @@
+# ONE-OFF (#2113/#2147/#2151): rebuild the v3.4.0 plain archives from the restamp-3.4.0 branch
+# (= the v3.4.0 tag + ONLY the single-source version-stamp fix cherry-picked) and clobber them onto
+# the existing v3.4.0 release, so downloads stop identifying as 3.3.0 and the update-nag loop ends.
+#
+# Scope is deliberately the PLAIN archives only: PerformanceMonitorLite-3.4.0.zip,
+# PerformanceMonitorDarling-3.4.0.zip, PerformanceMonitorDarling-linux-x64-3.4.0.tar.gz, and the two
+# checksum files (MERGED: replaced assets get new hashes, untouched assets keep their lines). The
+# Velopack chain (delta/full nupkgs, Setup.exe, releases.*.json) is NOT regenerated here — it feeds
+# the in-app updater and its delta chain, and rebuilding that blind risks breaking updates for
+# everyone; it stays the release-cutter's call.
+#
+# Build steps mirror nightly.yml's exactly (same publish shapes, same archive layouts, same
+# pg-runtime staging) with the version taken as plain 3.4.0. DELETE THIS FILE after the run.
+
+name: Restamp v3.4.0 archives
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: restamp-3.4.0
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore dependencies
+        run: |
+          dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
+          dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
+
+      - name: Publish Lite
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
+
+      - name: Publish Darling Service
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
+
+      - name: Publish Darling Viewer
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -o publish/DarlingViewer
+
+      - name: Verify the stamp actually derives (the whole point)
+        shell: pwsh
+        run: |
+          $v = (Get-Item publish/Lite/PerformanceMonitorLite.dll).VersionInfo
+          Write-Host "Lite FileVersion=$($v.FileVersion) ProductVersion=$($v.ProductVersion)"
+          if ($v.FileVersion -notlike '3.4.0*') { throw "Lite still stamped $($v.FileVersion) — abort before touching the release" }
+          $d = (Get-Item publish/DarlingService/PerformanceMonitor.Darling.Service.dll).VersionInfo
+          Write-Host "Darling FileVersion=$($d.FileVersion)"
+          if ($d.FileVersion -notlike '3.4.0*') { throw "Darling still stamped $($d.FileVersion) — abort" }
+
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Package archives (plain 3.4.0 names)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path releases
+          Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-3.4.0.zip" -Force
+
+          $darlingDir = 'publish/Darling'
+          New-Item -ItemType Directory -Force -Path "$darlingDir/viewer" | Out-Null
+          Copy-Item 'publish/DarlingService/*' $darlingDir -Recurse
+          Copy-Item 'publish/DarlingViewer/*' "$darlingDir/viewer" -Recurse
+          Copy-Item 'Darling/artifacts/pg-runtime.zip' $darlingDir
+          Compress-Archive -Path 'publish/Darling/*' -DestinationPath "releases/PerformanceMonitorDarling-3.4.0.zip" -Force
+
+      - name: Merge checksums (replaced assets rehashed, untouched lines preserved)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download v3.4.0 --pattern SHA256SUMS.txt --output releases/SHA256SUMS.old.txt
+          $old = Get-Content releases/SHA256SUMS.old.txt
+          $replacedNames = @('PerformanceMonitorLite-3.4.0.zip', 'PerformanceMonitorDarling-3.4.0.zip')
+          $kept = $old | Where-Object { $line = $_; -not ($replacedNames | Where-Object { $line -like "*$_*" }) }
+          $new = $replacedNames | ForEach-Object {
+            $hash = (Get-FileHash "releases/$_" -Algorithm SHA256).Hash.ToLower()
+            "$hash  $_"
+          }
+          ($new + $kept) | Out-File -FilePath releases/SHA256SUMS.txt -Encoding utf8
+          Write-Host "Merged SHA256SUMS.txt:"
+          Get-Content releases/SHA256SUMS.txt
+
+      - name: Clobber archives onto the v3.4.0 release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload v3.4.0 releases/PerformanceMonitorLite-3.4.0.zip releases/PerformanceMonitorDarling-3.4.0.zip releases/SHA256SUMS.txt --clobber
+
+  linux:
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: restamp-3.4.0
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Publish service (linux-x64)
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
+
+      - name: Package + checksum + clobber
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p releases
+          tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-3.4.0.tar.gz" .
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-3.4.0.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          gh release upload v3.4.0 releases/PerformanceMonitorDarling-linux-x64-3.4.0.tar.gz releases/SHA256SUMS-linux.txt --clobber
