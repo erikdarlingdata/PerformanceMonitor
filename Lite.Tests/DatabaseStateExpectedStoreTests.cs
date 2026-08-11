@@ -77,6 +77,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         }
     }
 
+    /// <summary>
+    /// Writes a baseline row DIRECTLY, which is the only way to reproduce a row the OLD seeder guessed
+    /// (#2189). <c>SetDatabaseStateExpectedAsync</c> always stamps <c>is_user_override = true</c>, so it
+    /// cannot express "the product guessed this" — and that distinction is the whole thing the repair keys on.
+    /// </summary>
+    private async Task SetExpectedAsync(string database, string expectedState, bool userOverride)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
+VALUES ($1, $2, $3, $4, now()::TIMESTAMP)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = database });
+        cmd.Parameters.Add(new DuckDBParameter { Value = expectedState });
+        cmd.Parameters.Add(new DuckDBParameter { Value = userOverride });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     private static readonly DateTime T0 = new(2026, 8, 1, 9, 0, 0, DateTimeKind.Unspecified);
 
     [Fact]
@@ -217,6 +237,67 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("ONLINE", row.ExpectedState);
         Assert.False(row.IsUserOverride);
+    }
+
+    [Fact]
+    public async Task MidRestoreFirstObservation_IsNotBaselined_ThenBaselinesWhatItSettlesInto()
+    {
+        // #2189: RESTORING is as transient as RECOVERY_PENDING, and baselining it inverts the alert forever —
+        // the database then "deviates" by being healthy. Observed on the production fleet as 636 alerts in 24
+        // hours from 5 databases reading "Expected: RESTORING, Current: ONLINE".
+        await SeedSnapshotAsync(T0, ("Restoring", "RESTORING", false));
+        var service = new LocalDataService(_duckDb);
+
+        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Equal("", (await service.GetDatabaseStateExpectationsAsync(ServerId))
+            .Single(r => r.DatabaseName == "Restoring").ExpectedState); // pending, NOT baselined RESTORING
+
+        // Restore finishes. Now there is a real steady state to learn.
+        await SeedSnapshotAsync(T0.AddMinutes(1), ("Restoring", "ONLINE", false));
+        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+
+        var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
+        Assert.Equal("ONLINE", row.ExpectedState);
+        Assert.False(row.IsUserOverride);
+    }
+
+    [Fact]
+    public async Task AlreadyPoisonedRestoringBaseline_IsRepairedAndReseeded_InOneCall()
+    {
+        // The seed is insert-if-absent, so it can never correct a row written before the #2189 fix. The repair
+        // statement runs BEFORE the seed precisely so a poisoned baseline is dropped and the real steady state
+        // re-learned in the SAME call, rather than leaving the database with no baseline for a cycle.
+        await SeedSnapshotAsync(T0, ("Restored", "ONLINE", false));
+        var service = new LocalDataService(_duckDb);
+
+        // Write the poisoned baseline the way the old seeder would have: guessed, not an operator override.
+        await SetExpectedAsync("Restored", "RESTORING", userOverride: false);
+        Assert.Equal("RESTORING", (await service.GetDatabaseStateExpectationsAsync(ServerId))
+            .Single().ExpectedState);
+
+        // Reading deviations runs repair-then-seed. Healthy database, so it must end up ONLINE and silent.
+        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+
+        var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
+        Assert.Equal("ONLINE", row.ExpectedState);
+        Assert.False(row.IsUserOverride);
+    }
+
+    [Fact]
+    public async Task OperatorOverrideOnATransientState_SurvivesTheRepair()
+    {
+        // Somebody who deliberately sets a database's expectation to RESTORING — a permanently log-shipped
+        // target, say — means it. The repair is scoped to guessed baselines only, and this is the assertion
+        // that keeps it that way.
+        await SeedSnapshotAsync(T0, ("Deliberate", "RESTORING", false));
+        var service = new LocalDataService(_duckDb);
+        await SetExpectedAsync("Deliberate", "RESTORING", userOverride: true);
+
+        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+
+        var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
+        Assert.Equal("RESTORING", row.ExpectedState);
+        Assert.True(row.IsUserOverride);
     }
 
     [Fact]

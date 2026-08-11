@@ -27,8 +27,13 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /* Matches the service alert read's seed: effective state (STANDBY for a log-shipping secondary, else
-       state_desc), and a critical effective state is NOT baselined so it stays pending — otherwise opening
-       the editor mid-outage would baseline SUSPECT and silence the alert. */
+       state_desc), and neither a critical NOR a transient effective state is baselined so it stays pending —
+       otherwise opening the editor mid-outage would baseline SUSPECT and silence the alert, and opening it
+       mid-restore would baseline RESTORING and make the database alert forever once it recovered (#2189).
+
+       This list must stay identical to DarlingAlertReadAdapter's. It is a third copy of the same rule (the
+       service, Lite, and here), and the editor is a WRITE path — a seed that disagrees with the alert's does
+       not merely display something different, it poisons the baseline the alert then reads. */
     private const string DatabaseStateSeedSql = @"
 INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
 SELECT $1, ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END, false, (now() AT TIME ZONE 'UTC')
@@ -36,8 +41,18 @@ FROM database_states ds
 WHERE ds.server_id = $1
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
 AND   ds.state_desc IS NOT NULL
-AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY', 'RESTORING', 'RECOVERING')
 ON CONFLICT (server_id, database_name) DO NOTHING";
+
+    /* #2189, run BEFORE the seed for the same reason the service does it: drop an auto-baseline that recorded
+       a transient state so the seed re-learns the real one in the same call. Without this the editor would
+       keep DISPLAYING a poisoned "Expected: RESTORING" it is capable of fixing, and an operator looking at
+       the override screen is exactly the person who would reasonably assume it had been fixed. */
+    private const string DatabaseStateRepairTransientSql = @"
+DELETE FROM config.database_state_expected
+WHERE server_id = $1
+AND   is_user_override = false
+AND   expected_state IN ('RESTORING', 'RECOVERING', 'SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')";
 
     private const string DatabaseStateExpectationsSql = @"
 WITH latest AS (
@@ -77,6 +92,12 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false
     {
         if (!IsReadOnly)
         {
+            await using (var repair = _dataSource.CreateCommand(DatabaseStateRepairTransientSql))
+            {
+                repair.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                await repair.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             await using var seed = _dataSource.CreateCommand(DatabaseStateSeedSql);
             seed.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await seed.ExecuteNonQueryAsync(cancellationToken);
