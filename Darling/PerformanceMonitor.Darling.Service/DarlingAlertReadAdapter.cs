@@ -680,8 +680,36 @@ FROM database_states ds
 WHERE ds.server_id = $1
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
 AND   ds.state_desc IS NOT NULL
-AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY', 'RESTORING', 'RECOVERING')
 ON CONFLICT (server_id, database_name) DO NOTHING";
+
+    /// <summary>
+    /// #2189: removes an auto-baseline that recorded a TRANSIENT state as expected, so the seed above can
+    /// re-learn the database's real steady state on its next pass.
+    ///
+    /// <para>The seed used to exclude only SUSPECT / RECOVERY_PENDING / EMERGENCY, so a database observed
+    /// mid-restore had RESTORING written as its accepted baseline — and then deviated permanently by being
+    /// healthy. Measured on the production fleet: 636 alerts in 24 hours from 5 databases, every one reading
+    /// "Expected: RESTORING, Current: ONLINE", all of them consolidation restores that had been observed at
+    /// the wrong moment. The seed fix stops new ones; this repairs the rows already written, which the seed
+    /// cannot do because it is insert-if-absent by design.</para>
+    ///
+    /// <para>Runs beside the seed and prune every evaluation rather than as a migration rung: it is
+    /// self-healing (a baseline poisoned by any future path gets corrected on the next cycle), it needs no
+    /// schema change, and it is idempotent — once no auto-baseline names a transient state it deletes
+    /// nothing. Deleting rather than updating is deliberate: the correct steady state is not knowable here
+    /// (the database may still be restoring), and an absent baseline is exactly the "pending" condition the
+    /// seed already handles correctly on the next observation.</para>
+    ///
+    /// <para><c>is_user_override = false</c> is load-bearing. An operator who deliberately sets a database's
+    /// expected state to RESTORING — a permanently log-shipped target, say — means it, and their intent must
+    /// survive. Only baselines this code guessed are eligible. $1 server_id.</para>
+    /// </summary>
+    public const string RepairTransientDatabaseStateBaselineSql = @"
+DELETE FROM config.database_state_expected
+WHERE server_id = $1
+AND   is_user_override = false
+AND   expected_state IN ('RESTORING', 'RECOVERING', 'SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')";
 
     /// <summary>
     /// Tidies auto-baselines for databases no longer in the newest snapshot (dropped/renamed); user
@@ -783,6 +811,16 @@ ORDER BY l.database_name";
 
         var items = new List<DatabaseStateInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        /* BEFORE the seed, deliberately (#2189): dropping a transient-state baseline first lets the seed
+           re-learn the real steady state in the SAME cycle. Repairing afterwards would leave the database
+           with no baseline until the next pass, and the seed is insert-if-absent so it can never correct a
+           row itself. */
+        using (var repair = new NpgsqlCommand(RepairTransientDatabaseStateBaselineSql, connection))
+        {
+            repair.Parameters.AddWithValue(serverId);
+            await repair.ExecuteNonQueryAsync(cancellationToken);
+        }
 
         using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection))
         {

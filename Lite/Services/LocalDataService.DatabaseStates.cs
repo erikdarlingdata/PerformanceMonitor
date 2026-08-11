@@ -36,8 +36,27 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
 
+        /* #2189, BEFORE the seed: drop any auto-baseline that recorded a TRANSIENT state, so the seed below
+           re-learns the real steady state in the SAME cycle. A database observed mid-restore used to get
+           RESTORING written as its expected state and then deviated forever by being healthy — 636 alerts in
+           24 hours from 5 databases on the production fleet. The seed is insert-if-absent, so it can never
+           correct a row itself; this is what makes the fix self-healing for baselines already written.
+           is_user_override = false is load-bearing: an operator who deliberately expects RESTORING (a
+           permanently log-shipped target) means it. */
+        using (var repair = connection.CreateCommand())
+        {
+            repair.CommandText = @"
+DELETE FROM config_database_state_expected
+WHERE server_id = $1
+AND   is_user_override = false
+AND   expected_state IN ('RESTORING', 'RECOVERING', 'SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')";
+            repair.Parameters.Add(new DuckDBParameter { Value = serverId });
+            await repair.ExecuteNonQueryAsync();
+        }
+
         /* Seed missing baselines from the latest snapshot (insert-if-absent; effective state; non-critical
-           only — a critical first observation stays pending and alerts via the no-baseline arm below). */
+           and non-transient only — a critical or mid-operation first observation stays pending, and the
+           critical ones alert via the no-baseline arm below). */
         using (var seed = connection.CreateCommand())
         {
             seed.CommandText = $@"
@@ -47,7 +66,7 @@ FROM database_states ds
 WHERE ds.server_id = $1
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
 AND   ds.state_desc IS NOT NULL
-AND   {EffectiveStateSql} NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+AND   {EffectiveStateSql} NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY', 'RESTORING', 'RECOVERING')
 AND   NOT EXISTS (
     SELECT 1 FROM config_database_state_expected e
     WHERE e.server_id = $1 AND e.database_name = ds.database_name
