@@ -430,7 +430,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering.")]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -438,10 +438,21 @@ public sealed class DarlingMcpDataTools
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1. Note: max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled. Confirm current parallelism with analyze_query_plan, which reads the actual plan.")] bool parallel_only = false,
-        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0)
+        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
+        [Description("Grouping. 'query_hash' (default) is one row per (database, query_hash, host_object). 'host_object' rolls every statement of a hosting procedure/function into ONE row — use it when dynamic SQL built with per-value literals fragments one logical statement across many query_hash values, which makes top-N-by-hash structurally unable to surface it (measured at 21 fragments for one statement, whose combined CPU was the largest on the instance while no single fragment ranked). Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up.")] string group_by = "query_hash")
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
+
+        /* #2235: an unrecognised value must not silently fall back to the default grouping — a caller who
+           asked for a rollup and got a per-hash ranking would read it as "this proc is not hot", which is
+           the exact wrong conclusion this option exists to prevent. */
+        var rollUp = string.Equals(group_by, "host_object", StringComparison.OrdinalIgnoreCase);
+        if (!rollUp && !string.Equals(group_by, "query_hash", StringComparison.OrdinalIgnoreCase))
+        {
+            return McpHelpers.Status("invalid",
+                $"group_by must be 'query_hash' or 'host_object' (got '{group_by}').");
+        }
 
         var validation = McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
@@ -451,7 +462,8 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
 
@@ -496,6 +508,13 @@ public sealed class DarlingMcpDataTools
                 distinct_texts = r.DistinctTexts,
                 text_note = r.DistinctTexts > 1
                     ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
+                    : null,
+                // #2235: under host_object rollup this is the finding, not a decoration — it is the number
+                // that explains why a per-hash ranking could not surface this statement. query_hash is one
+                // member of the group when it is > 1, exactly as query_text already is for distinct_texts.
+                distinct_query_hashes = r.DistinctQueryHashes,
+                rollup_note = r.DistinctQueryHashes > 1
+                    ? $"rolled up {r.DistinctQueryHashes} query_hash values belonging to {r.HostObjectName} — dynamic SQL with per-value literals fragments one statement across hashes, so none of these would rank individually; query_hash and query_text are one representative fragment"
                     : null
             });
 
@@ -503,6 +522,9 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #2235: echoed so a stored or pasted payload cannot be misread as the other grouping —
+                   the two answer different questions and the rows look alike. */
+                group_by = rollUp ? "host_object" : "query_hash",
                 queries = result
             }, McpHelpers.JsonOptions);
         }

@@ -99,6 +99,16 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
             .ToArray();
     }
 
+    /// <summary>
+    /// Lite's parameter contract, pinned as a PREFIX rather than as the whole list (#2235).
+    ///
+    /// <para>This asserted the full list, which was the same thing until <c>get_top_queries_by_cpu</c> gained a
+    /// trailing optional <c>group_by</c> that Lite does not have. The guarantee that matters was never "the
+    /// lists are identical" — it is that a client written against LITE's contract still calls Darling
+    /// correctly, which a trailing optional parameter preserves both positionally and by name. Anything
+    /// appended must therefore stay optional AND stay last; a REORDERING that keeps the same names still
+    /// fails, because the prefix is compared element-wise rather than as a joined substring.</para>
+    /// </summary>
     [Theory]
     [InlineData("get_cpu_utilization", "server_name,hours_back")]
     [InlineData("get_wait_stats", "server_name,hours_back,limit")]
@@ -118,7 +128,31 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     {
         var expected = expectedCsv.Split(',');
         var actual = McpParams(toolName).Select(p => p.Name).ToArray();
-        Assert.Equal(expected, actual);
+
+        Assert.True(actual.Length >= expected.Length,
+            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actual)}]");
+        Assert.Equal(expected, actual.Take(expected.Length).ToArray());
+    }
+
+    /// <summary>
+    /// #2235's <c>group_by</c>, pinned as a TRAILING OPTIONAL on <c>get_top_queries_by_cpu</c> and absent from
+    /// its siblings.
+    ///
+    /// <para>Trailing and optional is what keeps <see cref="ParamContract_MatchesLite"/> true, so it is asserted
+    /// rather than left to review. Absent on <c>get_top_procedures_by_cpu</c> because procedure stats are
+    /// ALREADY keyed on the object — the rollup would be a no-op there — and absent on
+    /// <c>get_query_store_top</c> because Query Store keys on <c>query_id</c>, which does not fragment the way a
+    /// shape hash does, so the same option would imply a grouping that surface cannot perform.</para>
+    /// </summary>
+    [Fact]
+    public void ParamContract_GroupByIsATrailingOptionalOnTopQueriesOnly()
+    {
+        var ps = McpParams("get_top_queries_by_cpu");
+        Assert.Equal("group_by", ps[^1].Name);
+        Assert.True(ps[^1].Optional, "group_by must be optional so Lite-shaped calls still work");
+
+        foreach (var tool in new[] { "get_top_procedures_by_cpu", "get_query_store_top" })
+            Assert.DoesNotContain("group_by", McpParams(tool).Select(p => p.Name));
     }
 
     [Fact]
