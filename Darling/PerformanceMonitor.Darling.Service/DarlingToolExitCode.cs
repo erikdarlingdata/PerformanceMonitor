@@ -90,6 +90,69 @@ internal static class DarlingToolExitCode
     }
 
     /// <summary>
+    /// True when Windows killed the process in the LOADER — a dependency problem, not a tool error. The
+    /// caller uses this to decide whether gathering more evidence is worth a process launch (#2185).
+    /// </summary>
+    internal static bool IsLoaderStatus(int exitCode)
+    {
+        var status = unchecked((uint)exitCode);
+        return status >= NtStatusErrorFloor
+               && s_knownStatuses.TryGetValue(status, out var known)
+               && known.Kind == StatusKind.Loader;
+    }
+
+    /// <summary>
+    /// Names WHICH binary could not load, from a <c>--version</c> probe of each (#2185).
+    ///
+    /// <para><b>Why this exists.</b> The field report that produced it took four exchanges and still is not
+    /// diagnosed, and the decisive clue was buried in the operator's shell rather than in any log: they ran
+    /// <c>initdb --version</c> by hand and it printed <c>initdb (PostgreSQL) 18.4</c>, while the service's
+    /// real <c>initdb</c> run died in the loader. A process that dies loading cannot print its own version,
+    /// so those two facts together rule out the two causes the loader diagnosis suggests — and neither the
+    /// operator nor the log could see that.</para>
+    ///
+    /// <para><b>The asymmetry that makes it diagnostic.</b> <c>initdb --version</c> prints and exits, but a
+    /// real <c>initdb</c> run spawns <c>postgres.exe</c> in bootstrap mode to build the template database
+    /// and propagates its status. So a dependency missing only for <c>postgres.exe</c> produces exactly the
+    /// reported shape: the version probe succeeds and the bootstrap dies. Probing both separates that from
+    /// "the whole runtime cannot load", which is a different fix.</para>
+    /// </summary>
+    internal static string DescribeRuntimeProbe(int initDbExitCode, int postgresExitCode)
+    {
+        var initDbLoaded = !IsLoaderStatus(initDbExitCode);
+        var postgresLoaded = !IsLoaderStatus(postgresExitCode);
+
+        if (initDbLoaded && !postgresLoaded)
+        {
+            return "\nRuntime probe: initdb.exe loaded and reported its version, but postgres.exe did NOT — " +
+                   $"it exited {Describe(postgresExitCode)}. That is the specific cause: a real initdb run spawns " +
+                   "postgres.exe in bootstrap mode to build the template database and passes its status back, so a " +
+                   "dependency missing only for postgres.exe fails the bootstrap while leaving `initdb --version` " +
+                   "working. Compare postgres.exe's imports against the DLLs beside it; the bundle is the suspect, " +
+                   "not the install location or the service account.";
+        }
+
+        if (!initDbLoaded && !postgresLoaded)
+        {
+            return "\nRuntime probe: NEITHER initdb.exe nor postgres.exe could load, so this is not specific to " +
+                   "one binary — the whole bundled runtime is failing to start. That points at the shared MSVC " +
+                   "runtime beside the binaries or the machine's Universal CRT, rather than at any one tool.";
+        }
+
+        if (initDbLoaded && postgresLoaded)
+        {
+            return "\nRuntime probe: BOTH initdb.exe and postgres.exe loaded and reported their versions when " +
+                   "probed just now. The loader failure is therefore not a permanently missing dependency — it is " +
+                   "specific to the failing invocation, so capture the Event Viewer > Windows Logs > Application " +
+                   "entry at the failure time, which names the module.";
+        }
+
+        return "\nRuntime probe: postgres.exe loaded but initdb.exe did not — unusual, since they share a " +
+               $"dependency set; initdb.exe exited {Describe(initDbExitCode)}. Treat initdb.exe itself as the " +
+               "damaged file and re-extract the package.";
+    }
+
+    /// <summary>
     /// The paragraph that follows the failure line: what Windows did, why the captured output is empty,
     /// and the checks that separate the two causes. Empty string for a tool's own exit code — initdb
     /// exiting 1 with a real error on stderr needs no help from here, and burying that message under

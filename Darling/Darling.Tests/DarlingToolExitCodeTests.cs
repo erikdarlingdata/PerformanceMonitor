@@ -222,4 +222,126 @@ public sealed class DarlingToolExitCodeTests
         Assert.Equal(string.Empty, output);
         Assert.Contains("STATUS_DLL_NOT_FOUND", DarlingToolExitCode.Describe(exitCode), StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #2185: the loader predicate, which decides whether gathering more evidence is worth two process
+    /// launches. Every status the table calls Loader qualifies; a crash and a plain code do not.
+    /// </summary>
+    [Theory]
+    [InlineData(StatusDllNotFound, true)]
+    [InlineData(StatusEntryPointNotFound, true)]
+    [InlineData(StatusInvalidImageFormat, true)]
+    [InlineData(StatusDllInitFailed, true)]
+    [InlineData(StatusAccessDenied, true)]
+    [InlineData(StatusAccessViolation, false)]
+    [InlineData(StatusNoMemory, false)]
+    [InlineData(1, false)]
+    [InlineData(0, false)]
+    public void OnlyLoaderStatusesAreWorthProbingFor(int exitCode, bool expected)
+    {
+        Assert.Equal(expected, DarlingToolExitCode.IsLoaderStatus(exitCode));
+    }
+
+    /// <summary>
+    /// THE #2185 CASE, and the reason this decoder grew a probe at all.
+    ///
+    /// <para>The field report survived four exchanges undiagnosed. The reporter had moved the install out of
+    /// their user profile, confirmed all three bundled MSVC DLLs present — the two causes the loader
+    /// diagnosis suggests — and then ran <c>initdb --version</c> by hand, which printed
+    /// <c>initdb (PostgreSQL) 18.4</c>. A binary that dies in the loader cannot print its own version, so
+    /// that one observation killed both hypotheses, and it existed only in their shell.</para>
+    ///
+    /// <para>The asymmetry it points at: a real <c>initdb</c> run spawns <c>postgres.exe</c> in bootstrap
+    /// mode and propagates its status, so a dependency missing only for <c>postgres.exe</c> produces exactly
+    /// the reported shape. The probe must name that binary, and must contradict the generic diagnosis rather
+    /// than quietly sitting next to it.</para>
+    /// </summary>
+    [Fact]
+    public void WhenOnlyPostgresCannotLoad_TheProbeNamesPostgresAndTheBootstrapSpawn()
+    {
+        var probe = DarlingToolExitCode.DescribeRuntimeProbe(initDbExitCode: 0, postgresExitCode: StatusDllNotFound);
+
+        Assert.Contains("postgres.exe did NOT", probe, StringComparison.Ordinal);
+        Assert.Contains("STATUS_DLL_NOT_FOUND", probe, StringComparison.Ordinal);
+        Assert.Contains("bootstrap mode", probe, StringComparison.Ordinal);
+        /* And that it explicitly clears the two things the operator already ruled out, so the message does
+           not read as agreeing with the diagnosis printed directly above it. */
+        Assert.Contains("not the install location or the service account", probe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both dead is a DIFFERENT fix — the shared runtime rather than one binary — so it must not read as the
+    /// postgres-specific case. Ambiguity here costs the operator the same days the original report did.
+    /// </summary>
+    [Fact]
+    public void WhenNeitherLoads_TheProbeBlamesTheSharedRuntimeInstead()
+    {
+        var probe = DarlingToolExitCode.DescribeRuntimeProbe(StatusDllNotFound, StatusDllNotFound);
+
+        Assert.Contains("NEITHER", probe, StringComparison.Ordinal);
+        Assert.Contains("MSVC runtime", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("postgres.exe did NOT", probe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both alive is a finding, not a shrug: it rules out a permanently missing dependency and hands the
+    /// operator the one source that names the offending module. Returning nothing here would leave the
+    /// generic diagnosis standing after the probe had already disproved it — the original bug.
+    /// </summary>
+    [Fact]
+    public void WhenBothLoad_TheProbeSaysSoAndRedirectsToTheEventLog()
+    {
+        var probe = DarlingToolExitCode.DescribeRuntimeProbe(0, 0);
+
+        Assert.Contains("BOTH", probe, StringComparison.Ordinal);
+        Assert.Contains("Event Viewer", probe, StringComparison.Ordinal);
+        Assert.NotEqual(string.Empty, probe);
+    }
+
+    /// <summary>
+    /// The inverted case is real (a single damaged file) and gets its own fix, so it may not silently fall
+    /// through to one of the other three arms.
+    /// </summary>
+    [Fact]
+    public void WhenOnlyInitDbCannotLoad_TheProbeBlamesInitDbItself()
+    {
+        var probe = DarlingToolExitCode.DescribeRuntimeProbe(StatusDllNotFound, 0);
+
+        Assert.Contains("initdb.exe did not", probe, StringComparison.Ordinal);
+        Assert.Contains("re-extract", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("NEITHER", probe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A NON-loader exit code from a probed binary means it loaded — it ran and then failed for its own
+    /// reasons — so it must not be reported as a load failure. Guards the obvious over-read of "exit code
+    /// != 0 means broken", which would blame postgres.exe on every probe that merely returned non-zero.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(StatusAccessViolation)]
+    public void ANonLoaderExitCodeStillCountsAsLoaded(int postgresExitCode)
+    {
+        var probe = DarlingToolExitCode.DescribeRuntimeProbe(0, postgresExitCode);
+
+        Assert.Contains("BOTH", probe, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every arm leads with the same <c>Runtime probe:</c> label on its own line. It is appended to a message
+    /// the field greps and the tracker searches, so it has to be findable and must not run onto the end of
+    /// the loader diagnosis's last sentence.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(0, StatusDllNotFound)]
+    [InlineData(StatusDllNotFound, 0)]
+    [InlineData(StatusDllNotFound, StatusDllNotFound)]
+    public void EveryProbeVerdictIsLabelledAndStartsItsOwnLine(int initDbExitCode, int postgresExitCode)
+    {
+        var probe = DarlingToolExitCode.DescribeRuntimeProbe(initDbExitCode, postgresExitCode);
+
+        Assert.StartsWith("\nRuntime probe: ", probe, StringComparison.Ordinal);
+    }
 }

@@ -1009,12 +1009,33 @@ public sealed class DarlingManagedPostgresTests
     {
         var source = ReadManagedPostgresSource();
 
-        Assert.Contains("throw new InvalidOperationException(BuildInitDbFailureMessage(exitCode, initDb, _dataDirectory, output));", source, StringComparison.Ordinal);
+        Assert.Contains("BuildInitDbFailureMessage(exitCode, initDb, _dataDirectory, output, runtimeProbe));", source, StringComparison.Ordinal);
         Assert.Contains("throw new InvalidOperationException(BuildStatusFailureMessage(exitCode, pgCtl, _dataDirectory, output)),", source, StringComparison.Ordinal);
         Assert.Contains("BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail())", source, StringComparison.Ordinal);
 
         /* And that no bootstrap failure went back to interpolating the bare code. */
         Assert.DoesNotContain("exit code {exitCode}", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2185: the runtime probe is GATED on a loader status, pinned at the source because the gate is the
+    /// whole design and behavioral coverage cannot reach it.
+    ///
+    /// <para>Two things would go wrong ungated. Every ordinary initdb failure — a non-empty data directory,
+    /// a bad locale, a permissions refusal — would launch two extra processes and then append a paragraph
+    /// about DLL loading to an error that has nothing to do with loading, which is worse than silence
+    /// because it sends the operator down the wrong path. And the probe only MEANS anything against a
+    /// loader status: "both binaries load fine" is a useful finding when Windows just refused to load one,
+    /// and noise otherwise.</para>
+    /// </summary>
+    [Fact]
+    public void TheRuntimeProbeOnlyRunsForALoaderStatus()
+    {
+        var source = ReadManagedPostgresSource();
+
+        Assert.Contains("DarlingToolExitCode.IsLoaderStatus(exitCode)", source, StringComparison.Ordinal);
+        Assert.Contains("? await ProbeRuntimeBinariesAsync(binDirectory, cancellationToken)", source, StringComparison.Ordinal);
+        Assert.Contains(": string.Empty;", source, StringComparison.Ordinal);
     }
 
     private static string ReadManagedPostgresSource([CallerFilePath] string thisFile = "")

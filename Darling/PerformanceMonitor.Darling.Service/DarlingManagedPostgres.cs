@@ -204,6 +204,10 @@ public sealed class DarlingManagedPostgres
     /* Process budgets. pg_ctl start/stop get -w -t 60 of their own, so the outer budget only
        has to outlive them; initdb on a cold disk can take tens of seconds. */
     private static readonly TimeSpan s_initDbTimeout = TimeSpan.FromSeconds(180);
+
+    /* #2185: `--version` prints one line and exits, so this bounds a diagnostic probe, not real work. Short
+       on purpose — it runs while a startup failure is already being reported. */
+    private static readonly TimeSpan s_versionProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan s_pgCtlTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan s_statusTimeout = TimeSpan.FromSeconds(30);
     private const int PgCtlWaitSeconds = 60;
@@ -895,7 +899,16 @@ public sealed class DarlingManagedPostgres
 
             if (exitCode != 0)
             {
-                throw new InvalidOperationException(BuildInitDbFailureMessage(exitCode, initDb, _dataDirectory, output));
+                /* #2185: on a LOADER status, gather the evidence ourselves rather than asking the operator
+                   to run two commands and report back. That thread took four exchanges and the decisive fact
+                   — `initdb --version` working while the bootstrap died — only ever existed in the reporter's
+                   shell. Two extra process launches on a path that has already failed fatally is free. */
+                var runtimeProbe = DarlingToolExitCode.IsLoaderStatus(exitCode)
+                    ? await ProbeRuntimeBinariesAsync(binDirectory, cancellationToken)
+                    : string.Empty;
+
+                throw new InvalidOperationException(
+                    BuildInitDbFailureMessage(exitCode, initDb, _dataDirectory, output, runtimeProbe));
             }
         }
         finally
@@ -920,10 +933,48 @@ public sealed class DarlingManagedPostgres
     /// Windows set that code, and an <c>Output:</c> field that says it is empty BECAUSE the process was
     /// killed before it could write, rather than looking like data that failed to arrive.
     /// </summary>
-    internal static string BuildInitDbFailureMessage(int exitCode, string exePath, string dataDirectory, string output)
+    internal static string BuildInitDbFailureMessage(
+        int exitCode, string exePath, string dataDirectory, string output, string runtimeProbe = "")
         => $"initdb failed (exit code {DarlingToolExitCode.Describe(exitCode)}) for {dataDirectory}." +
            DarlingToolExitCode.Diagnose(exitCode, exePath) +
+           runtimeProbe +
            $"\nOutput:\n{DarlingToolExitCode.FormatOutput(output, exitCode)}";
+
+    /// <summary>
+    /// Asks each of the two binaries for its version and reports which one could not load (#2185).
+    ///
+    /// <para><b>Never throws and never blocks meaningfully.</b> This runs on a path that has ALREADY failed
+    /// fatally, and its only job is to add a sentence to an exception that is about to be raised. A probe that
+    /// threw would replace a precise "initdb failed, here is why" with whatever the probe hit; a probe that
+    /// hung would turn a fast failure into a service that appears wedged at startup. So every fault mode —
+    /// missing file, unreadable directory, cancellation, timeout — resolves to the empty string, which
+    /// composes to the exact message the product produced before this existed.</para>
+    ///
+    /// <para><c>--version</c> is the right probe because it is the ONE invocation that loads the binary and
+    /// its full dependency chain without touching the data directory, the port, or the cluster: it is the
+    /// loader test with no side effect. A five-second budget is generous for a process that prints one line.</para>
+    /// </summary>
+    private static async Task<string> ProbeRuntimeBinariesAsync(string binDirectory, CancellationToken cancellationToken)
+    {
+        try
+        {
+            /* The order matters for the reader, not the logic: initdb is what failed, postgres is the
+               hypothesis. Both are probed even when the first one loads, because "both loaded" is itself a
+               finding — it rules out a permanently missing dependency and redirects to the event log. */
+            var (initDbCode, _) = await RunToolAsync(
+                Path.Combine(binDirectory, "initdb.exe"), "--version", s_versionProbeTimeout, cancellationToken);
+            var (postgresCode, _) = await RunToolAsync(
+                Path.Combine(binDirectory, "postgres.exe"), "--version", s_versionProbeTimeout, cancellationToken);
+
+            return DarlingToolExitCode.DescribeRuntimeProbe(initDbCode, postgresCode);
+        }
+        catch (Exception)
+        {
+            /* Deliberately unfiltered. See the summary: the caller is composing a fatal message and there is
+               no fault here worth surfacing over the failure that is already being reported. */
+            return string.Empty;
+        }
+    }
 
     /// <summary>
     /// Marker-guarded conf append, re-checked on EVERY start — heals the crash window between
