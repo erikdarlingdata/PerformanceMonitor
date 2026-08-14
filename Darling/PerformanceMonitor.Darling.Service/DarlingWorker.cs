@@ -426,6 +426,14 @@ public sealed class DarlingWorker : BackgroundService
         public ConcurrentDictionary<string, DateTime> NextDue { get; } = new(StringComparer.OrdinalIgnoreCase);
         public DateTime NextConnectAttempt { get; set; } = DateTime.MinValue;
 
+        /* #2255: the last connect-failure message logged in FULL, so an unchanged cause repeats as one terse
+           line instead of its whole explanation every 60 seconds forever. The field report is a DPAPI decrypt
+           failure — permanent by construction, since the blob can never become decryptable on this host — and
+           at Warning-with-full-text it buried the log while never once telling the operator anything new.
+           Compared on the message rather than the exception type so a changed cause (credential fixed, server
+           now genuinely unreachable) prints in full again. */
+        public string? LastConnectFailureLogged { get; set; }
+
         /* MinValue = the first loop pass after connect evaluates alerts immediately. */
         public DateTime NextAlertSweep { get; set; } = DateTime.MinValue;
 
@@ -3111,6 +3119,11 @@ LIMIT 1", connection);
         {
             var runtime = await DarlingServerConnector.ConnectAsync(server.Config, _logger, cancellationToken);
             server.Runtime = runtime;
+
+            /* #2255: cleared on success so a LATER failure prints in full even when it carries the same
+               message as one from before this connect. Without this, a fixed-then-broken-again cause would be
+               suppressed as a repeat of something the operator had already scrolled past. */
+            server.LastConnectFailureLogged = null;
             /* Force the long-query trace (#1496) to re-reconcile on the next sweep after every (re)connect:
                an Azure database-scoped session can stop on reconnect, so a still-"applied" flag would
                otherwise skip restarting it. Cheap — the reconcile no-ops unless the desired state differs
@@ -3241,7 +3254,30 @@ LIMIT 1", connection);
         {
             server.Runtime = null;
             server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
-            _logger.LogWarning("[{Server}] Connect failed, retrying in 60s: {Message}", server.Config.DisplayName, ex.Message);
+            /* #2255: full text on a NEW cause, one line while it persists. A credential that cannot be
+               decrypted on this host is not a transient connect failure, so its explanation is worth Error
+               once and worth almost nothing on the 1,440th repeat. */
+            var failure = ex.Message;
+            if (!string.Equals(server.LastConnectFailureLogged, failure, StringComparison.Ordinal))
+            {
+                server.LastConnectFailureLogged = failure;
+                if (ex is InvalidOperationException && failure.Contains("DPAPI-decrypt", StringComparison.Ordinal))
+                {
+                    /* Error, not Warning: nothing about this clears on its own, so it needs an operator. */
+                    _logger.LogError("[{Server}] Connect failed and will keep failing until fixed: {Message}",
+                        server.Config.DisplayName, failure);
+                }
+                else
+                {
+                    _logger.LogWarning("[{Server}] Connect failed, retrying in 60s: {Message}",
+                        server.Config.DisplayName, failure);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("[{Server}] Connect still failing, retrying in 60s (same cause as logged above)",
+                    server.Config.DisplayName);
+            }
 
             /* Stage 4: the online->offline connection edge (Server Unreachable) — fires once when a
                previously-connected server can no longer be reached; a repeated failed reconnect does NOT

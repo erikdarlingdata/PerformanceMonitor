@@ -38,6 +38,35 @@ public static class DarlingSecrets
         return Convert.ToBase64String(protectedBytes);
     }
 
+    /// <summary>
+    /// What a DPAPI decrypt failure actually means, in the operator's terms (#2255).
+    ///
+    /// <para><b>Why this exists.</b> <c>ProtectedData.Unprotect</c> throws
+    /// <c>CryptographicException: Key not valid for use in specified state</c>, and that message went into the
+    /// log verbatim, once every 60 seconds, forever. The field report shows exactly how it lands: the operator
+    /// read it as SQL Server rejecting the login and went looking at the server's credentials, because nothing
+    /// in it says DPAPI, names what failed to decrypt, or mentions that a MACHINE boundary is involved.</para>
+    ///
+    /// <para><b>The cause it points at.</b> These blobs are <see cref="DataProtectionScope.LocalMachine"/>, so
+    /// any user on the machine that wrote one can decrypt it and NO other machine ever can. That makes the
+    /// overwhelmingly likely cause a credential saved by a Viewer running on a DIFFERENT PC — which is the
+    /// documented single-box limitation of the Viewer's write path, not a permissions problem on the service
+    /// account. The remedies are therefore all "encrypt it on this host", which is what the message says.</para>
+    ///
+    /// <para>Kept as a function rather than a literal at each throw site so the three surfaces that can hit
+    /// this — a monitored server's password, the store credential, a network token — cannot drift into
+    /// explaining the same failure three different ways.</para>
+    /// </summary>
+    internal static string DescribeDecryptFailure(string what) =>
+        $"Could not DPAPI-decrypt {what}. This is a Windows Data Protection failure on THIS host, not SQL Server " +
+        "rejecting a login — no credential was ever sent to the server. These blobs are encrypted with " +
+        "LocalMachine scope, so they can only be decrypted on the machine that wrote them (any user on it, but " +
+        "no other machine). The usual cause is a credential saved by a Viewer running on a DIFFERENT PC: the " +
+        "Viewer encrypts on the machine it runs on, so a remotely-added server's password is unreadable here. " +
+        "Fix it on this host, any one of: re-add the server from a Viewer running on this machine; run " +
+        "'--add-server' here; run '--encrypt-password' here and paste the blob; or store the password as an " +
+        "'env:' / 'file:' reference, which is not machine-bound.";
+
     public static string Unprotect(string base64Blob)
     {
         if (string.IsNullOrWhiteSpace(base64Blob))
@@ -75,7 +104,20 @@ public static class DarlingSecrets
                 return DarlingSecretSource.Resolve(server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword");
             }
 
-            return Unprotect(server.EncryptedPassword);
+            /* #2255: the raw CryptographicException ("Key not valid for use in specified state") reached the
+               worker's connect-retry warning verbatim and repeated every 60s with no way to act on it. Server
+               identity is only known HERE, so this is where it gets attached. */
+            try
+            {
+                return Unprotect(server.EncryptedPassword);
+            }
+            catch (CryptographicException ex)
+            {
+                throw new InvalidOperationException(
+                    DescribeDecryptFailure($"the stored password for server '{server.DisplayName}' " +
+                                           "(servers[].encryptedPassword)"),
+                    ex);
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(server.Password))
