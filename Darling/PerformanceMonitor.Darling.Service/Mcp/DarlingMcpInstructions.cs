@@ -94,9 +94,9 @@ internal static class DarlingMcpInstructions
 
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_blocking` | Recent blocked/blocking pairs from the blocked-process-report XE + the always-on DMV fallback | `server_name`, `hours_back` (default 24), `limit` (default 30) |
-        | `get_deadlocks` | Recent deadlocks: victim process/SQL + a process summary | `server_name`, `hours_back` (default 24), `limit` (default 20) |
-        | `get_deadlock_detail` | The raw deadlock graph XML for the recent deadlocks | `server_name`, `hours_back` (default 24), `limit` (default 5) |
+        | `get_blocking` | Recent blocked/blocking pairs from the blocked-process-report XE + the always-on DMV fallback | `server_name`, `hours_back` (default 24), `limit` (default 30), `dedup_key` (optional) |
+        | `get_deadlocks` | Recent deadlocks: victim process/SQL + a process summary | `server_name`, `hours_back` (default 24), `limit` (default 20), `dedup_key` (optional) |
+        | `get_deadlock_detail` | The raw deadlock graph XML for the recent deadlocks | `server_name`, `hours_back` (default 24), `limit` (default 5), `dedup_key` (optional) |
         | `get_blocked_process_xml` | The raw blocked-process-report XML | `server_name`, `hours_back` (default 24), `limit` (default 5) |
         | `get_long_query_completions` | Longest completed queries (rpc/batch over the trace threshold) + attentions/cancels from the opt-in long-query trace, duration DESC (empty until the collector is enabled) | `server_name`, `hours_back` (default 24), `limit` (default 30) |
         | `get_blocking_trend` | Per-minute blocking-incident counts over time (XE, DMV-snapshot fallback) | `server_name`, `hours_back` (default 24) |
@@ -236,6 +236,16 @@ internal static class DarlingMcpInstructions
         A SQL password is encrypted at rest (DPAPI, the service identity) and is NEVER returned by a read tool. It DOES travel to this endpoint inside `add_servers`' request JSON, so on a LAN deployment reach the endpoint only through the documented TLS reverse proxy.
 
         The three config-change tools diff the store's config snapshots. This edition captures configuration WHEN THE SERVICE CONNECTS to a server (not on a fixed schedule), so a change is detected between two connect snapshots and at least two are needed — a stable, always-connected deployment may show no changes until the next connect. They emit only the values the collectors capture; the Dashboard's `requires_restart` / setting `description` / `setting_type` / generated change-narrative enrichment is not collected here and is omitted. `get_blocking_deadlock_stats` (the Dashboard's blocking/deadlock aggregate) is NOT hosted: this edition has no blocking/deadlock rollup table — use `get_blocking` / `get_deadlocks` for the raw events.
+
+        Jumping from an alert to its incident: `get_blocking`, `get_deadlocks` and `get_deadlock_detail` accept an
+        optional `dedup_key` — the #1140 alert fingerprint, shown to operators as the alert's **Dedup Key** fact and
+        carried onto downstream tickets. Pass it to get exactly that incident instead of pulling a server+time window
+        and guessing which row the alert meant. Those three tools also RETURN a `dedup_key` on every row, so an
+        incident found by browsing can be correlated back to its alerts, or handed to another agent as a stable
+        identifier. Two things to know when it matches nothing: the fingerprint is scoped to the server's DISPLAY name
+        and to the incident's involved objects, so a server renamed since the alert fired has different keys now; and
+        `hours_back` still bounds the search, so widen it before concluding the incident is gone. The no-match response
+        says how many rows it examined, which distinguishes those cases.
 
         Note on `next_tools`: analyze_server findings include `next_tools` recommendations. Most are hosted on this server — the plan-analysis tools (`analyze_query_plan`, `analyze_query_store_plan`) and the data-read tools listed above (`get_wait_stats`, `get_top_queries_by_cpu`, `get_cpu_utilization`, `get_memory_stats`, `get_file_io_stats`, `get_tempdb_trend`, `get_blocking`, `get_deadlocks`, `get_waiting_tasks`, `get_active_queries`, ...) — so follow those here. `get_top_queries_by_cpu` / `get_top_procedures_by_cpu` / `get_query_store_top` are where the `query_hash` / `sql_handle` / `query_id` + `plan_id` keys for the plan-analysis tools come from. The resource-contention + jobs tools (`get_latch_stats`, `get_spinlock_stats`, `get_resource_semaphore`, `get_memory_grants`, `get_plan_cache_bloat`, `get_cpu_scheduler_pressure`, `get_running_jobs`), the trend siblings (`get_memory_trend`, `get_perfmon_trend`, `get_file_io_trend`, `get_query_trend`, `get_query_duration_trend`), the `get_health_parser_*` system-health family, and the blocking/deadlock trend + memory-pressure reads (`get_blocking_trend`, `get_deadlock_trend`, `get_memory_pressure_events`) are all hosted here too — follow those `next_tools` on this server. Two `next_tools` names differ from what this edition hosts: `get_blocked_process_reports` (a Lite name) is served here as `get_blocked_process_xml` (with `get_blocking` for a quick overview), and `get_blocking_deadlock_stats` (the Dashboard's blocking/deadlock rollup) is not hosted at all — use `get_blocking` / `get_deadlocks` instead.
 

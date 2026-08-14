@@ -84,6 +84,60 @@ ORDER BY server_name";
             : (resolved.Value, null);
     }
 
+    /// <summary>
+    /// The server name the ALERT path hashes into a #1140 fingerprint, for a resolved server (#2159).
+    ///
+    /// <para><b>This is not the resolved name, and the difference is the whole reason this exists.</b>
+    /// <see cref="ResolveOrError"/> returns <c>servers.server_name</c> — the STORAGE name,
+    /// <c>host[:database][:RO]</c>, which is right for every read because it is what the collectors stamp on
+    /// each row. But <c>AlertFingerprint</c> hashes the server name into the dedup key, and the alerting path
+    /// passes <c>DarlingConfig.DisplayName</c>: <c>Name</c> if one is set, else <c>Host</c>. Those two strings
+    /// differ whenever a server has a custom display name, and also whenever the registration names a database
+    /// or read-only intent — <c>server_name</c> carries those suffixes and <c>DisplayName</c> does not.</para>
+    ///
+    /// <para>So a reader that recomputed a fingerprint from the resolved name would agree with the alert only on
+    /// plain, un-renamed hosts, and return NOTHING on the rest — silently, because no match is
+    /// indistinguishable from no incident. Hence one helper, next to the resolution it corrects.</para>
+    ///
+    /// <para>Falls back to the storage name when the registry's <c>display_name</c> is null or blank, matching
+    /// the convention the fleet reader already applies to the same column. <c>DisplayName</c> itself is never
+    /// blank at alert time (it falls back to <c>Host</c>), so this only covers a registry row written without
+    /// one.</para>
+    /// </summary>
+    public static string FingerprintNameOf(RegisteredServer server) =>
+        string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName!;
+
+    /// <summary>
+    /// Resolves a server AND the fingerprint name for it, in one registry read — the incident readers that
+    /// accept a <c>dedup_key</c> need both, and reading the registry twice could disagree with itself.
+    /// </summary>
+    public static async Task<((int ServerId, string ServerName, string FingerprintName) resolved, string? error)>
+        ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName)
+    {
+        List<RegisteredServer> servers;
+        try
+        {
+            servers = await LoadEnabledAsync(postgres);
+        }
+        catch (Exception ex)
+        {
+            return (default, $"Could not read the servers registry from the Postgres store: {ex.Message}");
+        }
+
+        var (resolved, error) = ResolveOrError(servers, serverName);
+        if (error != null)
+        {
+            return (default, error);
+        }
+
+        /* Re-find the row by the id just resolved rather than re-running the name match: the match is
+           first-wins over a partial, so a second pass is a second chance to pick a different row. */
+        var row = servers.FirstOrDefault(s => s.ServerId == resolved.ServerId);
+        var fingerprintName = row is null ? resolved.ServerName : FingerprintNameOf(row);
+
+        return ((resolved.ServerId, resolved.ServerName, fingerprintName), null);
+    }
+
     private static (int ServerId, string ServerName)? Resolve(
         IReadOnlyList<RegisteredServer> servers,
         string? serverName)
