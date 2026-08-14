@@ -1913,6 +1913,22 @@ public sealed class DarlingWorker : BackgroundService
                    abandoned (loudly) and quarantined until its task actually dies, while every other
                    server's backfill continues. The deadline is a generous multiple of a healthy slice
                    (statement timeout 60s + store writes), so an abandonment is a defect signal. */
+                /* #2165: the other half of the gate. Held for the WHOLE slice, and taken outside the
+                   AbandonableStep so an abandoned-but-still-wedged slice keeps the gate closed — the tick must
+                   keep yielding while that statement is genuinely still running on the server, which is exactly
+                   the case the abandonment leaves behind. Zero-wait, so a tick already collecting simply defers
+                   this server's slice to the next five-minute cycle. */
+                var gate = _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire();
+                if (gate is null)
+                {
+                    _logger.LogInformation(
+                        "query_store backfill slice on '{Server}' deferred — the tick's Query Store collection is running (#2165)",
+                        runtime.Config.DisplayName);
+                    continue;
+                }
+
+                using var backfillGate = gate;
+
                 var step = _backfillSliceSteps.GetOrAdd(runtime.ServerId, static _ => new AbandonableStep());
                 var result = await step.RunAsync(
                     () => backfill.RunServerSliceAsync(runtime, stoppingToken),
@@ -1950,6 +1966,24 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
     }
+
+    /// <summary>
+    /// #2165: per-server gates shared by the tick's Query Store pass and the backfill slice, so the two never
+    /// run heavy QS text extraction against one server at the same time. Keyed by ServerId and never pruned,
+    /// like its <see cref="_backfillSliceSteps"/> sibling — one small object per server ever monitored.
+    ///
+    /// <para>Both loops must resolve the SAME gate instance for a server, which is what makes this one
+    /// dictionary rather than one per loop. Pinned by a test for that reason.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<int, QueryStoreServerGate> _queryStoreGates = new();
+
+    /// <summary>
+    /// #2165: whether a dispatched collector name is the Query Store collector the gate covers. Compared
+    /// against the collector's OWN declared name rather than a literal, so renaming the collector cannot
+    /// silently unhook the gate and let the two loops overlap again.
+    /// </summary>
+    internal static bool IsQueryStoreCollector(string collectorName) =>
+        string.Equals(collectorName, QueryStoreCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>#2148: per-server abandonment guards for the backfill loop — keyed by ServerId so a
     /// removed-and-re-added server reuses its guard (harmless), and a wedged server never blocks its
@@ -3918,6 +3952,26 @@ LIMIT 1";
         var runtime = server.Runtime;
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
         {
+            return 0;
+        }
+
+        /* #2165: the tick's Query Store pass and the backfill slice both do heavy QS text extraction, and
+           they used to be free to run against the SAME server at once — measured as ~128 MB in flight on a
+           4-core box, because a big catalog arriving triggers BOTH loops. Gated HERE because this is the one
+           funnel that has the runtime and the collector name together. Never waits: see QueryStoreServerGate
+           for why blocking a shared fleet loop would recreate the #2148 wedge through a lock. Skipping is safe
+           for this collector because its window is watermark-driven (#1960) — the next pass resumes from the
+           same boundary, so a skipped pass defers rows rather than dropping them. */
+        using var queryStoreGate = IsQueryStoreCollector(collectorName)
+            ? _queryStoreGates.GetOrAdd(runtime.ServerId, static _ => new QueryStoreServerGate()).TryAcquire()
+            : QueryStoreServerGate.NotGated;
+
+        if (queryStoreGate is null)
+        {
+            _logger.LogInformation(
+                "  [{Server}] query_store skipped this tick — its Query Store backfill slice is mid-flight (#2165). " +
+                "Resumes next tick from the same watermark; no rows are lost.",
+                server.Config.DisplayName);
             return 0;
         }
 

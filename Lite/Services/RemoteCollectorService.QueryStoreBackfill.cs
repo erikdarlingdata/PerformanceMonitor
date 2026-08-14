@@ -49,6 +49,16 @@ public partial class RemoteCollectorService
     /// ever monitored).</summary>
     private readonly ConcurrentDictionary<string, AbandonableStep> _backfillSliceSteps = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// #2165: per-server gates shared by the tick's Query Store collection and this backfill slice, so the two
+    /// never run heavy QS text extraction against one server at the same time. Keyed like
+    /// <see cref="_backfillSliceSteps"/> and likewise never pruned — one tiny object per server.
+    ///
+    /// <para>Both loops must resolve the SAME gate instance per server, which is why there is one dictionary
+    /// rather than one per loop. Pinned by a test for exactly that reason.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<string, QueryStoreServerGate> _queryStoreGates = new(StringComparer.Ordinal);
+
     /// <summary>#2148: the hard ceiling ONE server's slice may hold the tick — a healthy slice is one
     /// 30s-capped statement plus DuckDB writes, so this is a defect signal, never jitter. Per SERVER
     /// deliberately (review catch, round 2): a shared tick-level deadline would both stall every
@@ -70,6 +80,23 @@ public partial class RemoteCollectorService
             {
                 return;
             }
+
+            /* #2165: the other half of the gate. Taken OUTSIDE the AbandonableStep on purpose — an
+               abandoned-but-still-wedged slice keeps the gate closed, which is right, because the statement
+               is genuinely still running on the monitored server and the tick must keep yielding to it. */
+            var gate = _queryStoreGates
+                .GetOrAdd(server.Id, static _ => new QueryStoreServerGate())
+                .TryAcquire();
+
+            if (gate is null)
+            {
+                _logger?.LogInformation(
+                    "query_store backfill slice on '{Server}' deferred — the tick's Query Store collection is running (#2165)",
+                    server.DisplayName);
+                continue;
+            }
+
+            using var backfillGate = gate;
 
             var step = _backfillSliceSteps.GetOrAdd(server.Id, static _ => new AbandonableStep());
             var result = await step.RunAsync(
