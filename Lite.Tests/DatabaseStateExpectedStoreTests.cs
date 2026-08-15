@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Alerting;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -78,6 +80,45 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
     }
 
     private static readonly DateTime T0 = new(2026, 8, 1, 9, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// Runs the deviation sweep until <paramref name="settled"/> holds, up to <paramref name="cycles"/> times
+    /// (#2266). Returns the LAST result either way, so a real regression still fails on its own assertion with
+    /// its own message.
+    ///
+    /// <para><b>Why any retry is correct here rather than a tolerance hack.</b>
+    /// <c>GetDatabaseStateDeviationsAsync</c> does its seeding, the #2189 heal, the #2203 forget and the prune
+    /// inside a BEST-EFFORT block: it opens the write connection with a 5-second lock acquisition and, on
+    /// <c>TimeoutException</c>, skips the whole maintenance block and runs the deviation read anyway. That is
+    /// deliberate and documented — skipping is the only lossless option when archival holds the lock. The write
+    /// lock is <b>static, shared by the whole process</b> (the method's own comment says so), and xunit runs
+    /// test classes in parallel, so another class can hold it long enough for a cycle here to skip its
+    /// maintenance.</para>
+    ///
+    /// <para>The observed flake is exactly that: <c>ExpectedState = SUSPECT</c> with <c>StateDesc = ONLINE</c> —
+    /// a combination only reachable by skipping the heal while completing the read. So asserting the heal lands
+    /// in ONE cycle asserts something the design does not promise; asserting it lands within a FEW cycles is the
+    /// contract. No tuned number is involved: the semantics are "eventually", and the count only needs to
+    /// exceed one.</para>
+    ///
+    /// <para>It cannot mask a regression, which is the property that makes it acceptable in 23 tests' worth of
+    /// company: a heal that is genuinely broken never settles, all cycles run, and the caller's own assertion
+    /// fails on the final result exactly as it does today.</para>
+    /// </summary>
+    private static async Task<List<DatabaseStateInfo>> SweepUntilAsync(
+        LocalDataService service,
+        Func<List<DatabaseStateInfo>, bool> settled,
+        int cycles = 5)
+    {
+        List<DatabaseStateInfo> result;
+        do
+        {
+            result = await service.GetDatabaseStateDeviationsAsync(ServerId);
+        }
+        while (!settled(result) && --cycles > 0);
+
+        return result;
+    }
 
     /// <summary>
     /// Writes an expectation row directly, bypassing the service's writers — the only way to reproduce a
@@ -317,7 +358,9 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("App", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("App", "ONLINE", false));
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        /* #2266: same best-effort maintenance exposure as the outage sibling below — structurally identical
+           test, so it can flake the same way even though only the SUSPECT one has been seen to. */
+        Assert.Empty(await SweepUntilAsync(service, deviations => deviations.Count == 0));
         Assert.Equal("ONLINE", (await service.GetDatabaseStateExpectationsAsync(ServerId)).Single().ExpectedState);
     }
 
@@ -339,7 +382,9 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("Payments", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("Payments", "ONLINE", false));
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        /* #2266: the heal rides a best-effort maintenance block, so a cycle whose write-lock acquisition times
+           out against another parallel test class skips it silently. Sweep until it lands. */
+        Assert.Empty(await SweepUntilAsync(service, deviations => deviations.Count == 0));
         Assert.Equal("ONLINE", (await service.GetDatabaseStateExpectationsAsync(ServerId)).Single().ExpectedState);
     }
 
