@@ -433,12 +433,6 @@ public sealed class DarlingMcpServerAdminTools
     }
 
     /// <summary>
-    /// PURE dedupe partition — the case-folded <see cref="ServerIdHelper.BuildStorageName"/> gate seeded with the
-    /// existing store keys, first-occurrence-wins within the batch (the #1549 idiom). Returns the <c>Ready</c>
-    /// entries to probe + insert and the <c>Duplicates</c> as ready-to-report results. Unit-testable without a
-    /// store or probe.
-    /// </summary>
-    /// <summary>
     /// The #2280 check: why this entry must not be added, or null when it may be.
     ///
     /// <para>Compares the identity this entry would have if keyed on the database the server ACTUALLY reached
@@ -492,6 +486,12 @@ public sealed class DarlingMcpServerAdminTools
                "registration instead.";
     }
 
+    /// <summary>
+    /// PURE dedupe partition — the case-folded <see cref="ServerIdHelper.BuildStorageName"/> gate seeded with the
+    /// existing store keys, first-occurrence-wins within the batch (the #1549 idiom). Returns the <c>Ready</c>
+    /// entries to probe + insert and the <c>Duplicates</c> as ready-to-report results. Unit-testable without a
+    /// store or probe.
+    /// </summary>
     internal static (List<ParsedServerEntry> Ready, List<ServerResult> Duplicates) PartitionDuplicates(
         IReadOnlyList<ParsedServerEntry> entries, IEnumerable<string> existingKeys)
     {
