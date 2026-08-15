@@ -1172,11 +1172,20 @@ public sealed class MonitoredServer
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? Host : Name;
 
     /// <summary>
-    /// The canonical storage identity (host[:database][:RO]) — hashed to server_id via the shared
-    /// ServerIdHelper, so this Darling entry derives the same id Lite would for the same server.
+    /// The canonical storage identity (<c>host[:database][:pg][:port][:RO]</c>) — hashed to server_id via the
+    /// shared ServerIdHelper, so this Darling entry derives the same id Lite would for the same server.
+    ///
+    /// <para>#2218: engine and port are passed so a PostgreSQL instance cannot collide with a SQL Server on the
+    /// same host, and two PostgreSQL instances on one host cannot collide with each other. Both are inert for a
+    /// SQL Server entry and the resulting name is byte-identical to what it was before — <c>Engine</c> folds to
+    /// no token for SQL Server, and <c>Port</c> is a PostgreSQL-only field that stays 0 there, because SQL
+    /// Server carries a non-default port inside <c>Host</c> as <c>host,1433</c> and is therefore already
+    /// discriminated by the host string. That is why no conditional is needed here: the defaults ARE the
+    /// backwards-compatible case.</para>
     /// </summary>
     [JsonIgnore]
-    public string StorageName => PerformanceMonitor.Common.ServerIdHelper.BuildStorageName(Host, Database, ReadOnlyIntent);
+    public string StorageName => PerformanceMonitor.Common.ServerIdHelper.BuildStorageName(
+        Host, Database, ReadOnlyIntent, Engine, Port);
 
     /// <summary>
     /// <c>config_monitored_servers.server_id</c> as READ FROM THE STORE, or null for an entry that has no
