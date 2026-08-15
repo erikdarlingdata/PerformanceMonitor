@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -386,6 +387,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await SeedTickRowsAsync(connection, Table, daysBack: 10, rows: 50_000, ct);
         await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d1 = await ReadJobDurationMsAsync(connection, jobId, ct);
+        var work1 = await DescribeJobWorkAsync(connection, Table, jobId, ct);   /* #2266 */
         Assert.True(d1 > 0,
             "a scheduler-driven run left job_stats.last_run_duration unmeasurable — the premise the " +
             "V56 telemetry and the #2141 alert both stand on. (Foreground run_job is already known " +
@@ -397,13 +399,28 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 500_000, ct);
         await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d10 = await ReadJobDurationMsAsync(connection, jobId, ct);
+        var work10 = await DescribeJobWorkAsync(connection, Table, jobId, ct);   /* #2266 */
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
 
         /* 1. The capacity claim itself: more volume, longer run. Monotonicity, not a ratio — runner
-           jitter owns the constant factor, the direction is ours. */
+           jitter owns the constant factor, the direction is ours.
+
+           #2266: the failure message now reports what the job DID, not only how long it took. This test
+           has failed intermittently on diffs that cannot reach it, and the reading that mattered was
+           d1=689ms / d10=689ms — BYTE-IDENTICAL. Two independent sub-second timings of different
+           workloads do not land on the same millisecond by chance, so the earlier "runner jitter"
+           explanation cannot be right; something is making both runs do the same work. The scheduler
+           helper already rules out a stale read (it waits for last_successful_finish to ADVANCE), which
+           leaves "both runs compressed the same amount, plausibly none" — and that is invisible from a
+           duration alone. Chunk counts make it visible the first time it recurs, without a rig. */
         Assert.True(d10 > d1,
             $"10x volume did not run longer than 1x (d1={d1}ms, d10={d10}ms) — job runtime is not " +
-            "scaling with volume, which invalidates the #2136 capacity model.");
+            "scaling with volume, which invalidates the #2136 capacity model." +
+            $"\n  after 1x  ({50_000} rows seeded): {work1}" +
+            $"\n  after 10x ({500_000} rows seeded): {work10}" +
+            "\n  If the compressed-chunk counts are EQUAL, the two runs did the same work and this " +
+            "assertion was never measuring the capacity model — the volumes are not producing " +
+            "compressible chunks, which is a fixture defect rather than a timing tolerance one (#2266).");
 
         /* 2. The telemetry recorded the growth: two series points for this job, in order, growing. */
         await using (var series = new NpgsqlCommand(@"
@@ -508,6 +525,56 @@ FROM generate_series(1, {rows}) AS g", ct);
         command.Parameters.AddWithValue(jobId);
         var value = await command.ExecuteScalarAsync(ct);
         return value is DateTime finish ? finish : DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// What the compression job actually DID, as one line for a failure message (#2266).
+    ///
+    /// <para>Added because a duration alone cannot distinguish "this run compressed ten times as much and the
+    /// machine was noisy" from "both runs compressed nothing and the cost is all fixed overhead" — and the
+    /// intermittent failures of this test have produced BYTE-IDENTICAL durations, which only the second story
+    /// explains. Reporting chunk counts turns the next recurrence into a diagnosis instead of another re-run.</para>
+    ///
+    /// <para>Deliberately best-effort and never throwing: it exists to explain a failure, so a fault here must
+    /// not replace the assertion's own message with its own — that is the #1902 mistake in miniature. A missing
+    /// Timescale view or a renamed column degrades to a note saying so.</para>
+    /// </summary>
+    private static async Task<string> DescribeJobWorkAsync(
+        NpgsqlConnection connection, string table, long jobId, CancellationToken ct)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(@"
+SELECT
+    (SELECT count(*) FROM timescaledb_information.chunks
+     WHERE hypertable_schema = 'collect' AND hypertable_name = $1) AS chunks_total,
+    (SELECT count(*) FROM timescaledb_information.chunks
+     WHERE hypertable_schema = 'collect' AND hypertable_name = $1 AND is_compressed) AS chunks_compressed,
+    (SELECT total_runs::bigint FROM timescaledb_information.job_stats WHERE job_id = $2) AS total_runs,
+    (SELECT last_run_status::text FROM timescaledb_information.job_stats WHERE job_id = $2) AS last_run_status,
+    (SELECT last_successful_finish::text FROM timescaledb_information.job_stats
+     WHERE job_id = $2) AS last_successful_finish",
+                connection);
+            command.Parameters.AddWithValue(table);
+            command.Parameters.AddWithValue(jobId);
+
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+            {
+                return "(job_stats returned no row)";
+            }
+
+            return $"chunks={reader.GetInt64(0)} compressed={reader.GetInt64(1)} " +
+                   $"total_runs={(reader.IsDBNull(2) ? "?" : reader.GetInt64(2).ToString(CultureInfo.InvariantCulture))} " +
+                   $"last_run_status={(reader.IsDBNull(3) ? "?" : reader.GetString(3))} " +
+                   $"last_successful_finish={(reader.IsDBNull(4) ? "?" : reader.GetString(4))}";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Broad on purpose: see the summary. An explanation that throws is worse than no explanation,
+               because it replaces the failure being explained. */
+            return $"(could not describe the job's work: {ex.GetType().Name}: {ex.Message})";
+        }
     }
 
     private static async Task<long> ReadJobDurationMsAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
