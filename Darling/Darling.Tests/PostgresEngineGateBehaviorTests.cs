@@ -54,7 +54,8 @@ public sealed class PostgresEngineGateBehaviorTests
 {
     /// <summary>
     /// The HOST is what identity derives from, which is the trap this test tripped over first:
-    /// <c>MonitoredServer.StorageName</c> is <c>BuildStorageName(Host, Database, ReadOnlyIntent)</c> — NOT
+    /// <c>MonitoredServer.StorageName</c> is <c>BuildStorageName(Host, Database, ReadOnlyIntent, Engine, Port)</c>
+    /// (#2218 added the last two) — NOT
     /// <c>Name</c> — and <c>RunAnalyzeNowAsync</c> finds a server by hashing that. A server_id hashed from
     /// anything else simply is not found, and the gate then returns "server not monitored" rather than the
     /// arm under test. Unique hosts so neither case can collide with a real server's analysis_state row.
@@ -75,8 +76,15 @@ public sealed class PostgresEngineGateBehaviorTests
     private const string SnapshotCollector = "wait_stats";
 
     /// <summary>Derived through the SAME helper the worker uses, so the test cannot drift from the lookup.</summary>
-    private static int ServerIdFor(string host) =>
-        ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(host, null, false));
+    /// <summary>
+    /// #2218: the ENGINE is part of the derivation now, so a PostgreSQL host must be hashed with it or this
+    /// helper computes an id the product never uses — and the gate then returns "server not monitored" instead
+    /// of the arm under test, which is the same trap the class comment above describes for <c>Name</c> vs
+    /// <c>Host</c>. Defaulted to null so the SQL Server call sites are unchanged, exactly as the shared helper
+    /// is.
+    /// </summary>
+    private static int ServerIdFor(string host, string? engine = null) =>
+        ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(host, null, false, engine, 0));
 
     [Fact]
     public async Task AnalyzeNow_AgainstAPostgresTarget_WritesTheEngineTombstone_AndDoesNotRunThePass()
@@ -86,7 +94,7 @@ public sealed class PostgresEngineGateBehaviorTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the analyze_now engine-gate test.");
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var serverId = ServerIdFor(PgHost);
+        var serverId = ServerIdFor(PgHost, "postgres");
 
         /* Fabricated worker, the CollectorMemoryKnobTests.SweepGate idiom: the real ctor wants a host's worth
            of dependencies, and the gate under test reads exactly three fields. Reflection because pinning the
@@ -268,7 +276,7 @@ public sealed class PostgresEngineGateBehaviorTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the snapshot_now engine-gate test.");
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var serverId = ServerIdFor(PgSnapshotHost);
+        var serverId = ServerIdFor(PgSnapshotHost, "postgres");
 
         var bodySucceeded = false;
         try
@@ -356,7 +364,7 @@ public sealed class PostgresEngineGateBehaviorTests
         ConnectionString = $"Host={PgHost};Database=postgres;Username=monitor",
         Target = new CollectorTargetInfo { Engine = engine },
         StorageName = PgHost,
-        ServerId = ServerIdFor(PgHost),
+        ServerId = ServerIdFor(PgHost, "postgres"),
     };
 
     private static void SetField(DarlingWorker worker, string name, object value) =>

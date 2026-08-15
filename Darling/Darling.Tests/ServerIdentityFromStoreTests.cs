@@ -245,7 +245,11 @@ public sealed class ServerIdentityFromStoreTests
 
         /* The seed writes the derivation, which is what makes every existing store migration-free. Assert it
            rather than assume it -- if this ever stops holding, the "no data moves" claim stops holding too. */
-        var seededId = Derived("identity-host", "identityDb", readOnlyIntent: true);
+        /* #2218: derived from the SERVER'S OWN StorageName rather than from a re-statement of the rule here.
+           This test previously hashed (host, database, readOnlyIntent) by hand, which silently stopped matching
+           the moment the derivation grew the engine and port the seeded server actually carries — and the
+           failure reads as "the seed wrote the wrong id" rather than "the test's copy of the rule is stale". */
+        var seededId = ServerIdHelper.GetDeterministicHashCode(seeded.StorageName);
         Assert.Equal(seededId, await ReadServerIdByNameAsync(dataSource, "identity-roundtrip", ct));
 
         /* Now the thing production cannot produce yet: re-key the row so the stored id disagrees with the hash
