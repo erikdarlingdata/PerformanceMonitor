@@ -173,25 +173,111 @@ public sealed class StoreConfigProvider
             return;
         }
 
-        /* INFORMATION, not a warning, and the wording covers BOTH causes — because this cannot tell them
-           apart. The Viewer's Remove action hard-deletes the store row and deliberately never touches
-           darling.json (the file is a one-time bootstrap; SeedMonitoredServersAsync's own comment notes a
-           Viewer deletion is never resurrected by a re-seed). So an operator who removed a server on purpose
-           and left the file alone is in a CORRECT state, and a warning telling them to re-add it would be
-           wrong advice repeated on every start forever. Distinguishing the two needs a tombstone the store
-           does not keep — filed separately; until then this reconciles rather than accuses, and names the
-           edit that silences it. */
-        _logger?.LogInformation(
-            "darling.json lists {FileCount} server(s) and the store has {StoreCount}; {IgnoredCount} in the file "
-            + "are not monitored: {Ignored}. The store is authoritative after the first seed. If you added these "
-            + "to the file expecting them to be picked up, that does not work and a restart cannot change it — "
-            + "add them with the Viewer's Add Server dialog or the MCP add_servers tool. If you removed them "
-            + "deliberately, this is expected; delete them from darling.json to silence this line. Either way "
-            + "--test-connection reads darling.json, so it will keep reporting them as PASS.",
-            config.Servers.Count,
-            storeIds.Count,
-            fileOnly.Count,
-            string.Join(", ", fileOnly));
+        /* #2258: the OBSERVED registry is the tombstone, and it already exists. collect.servers gets a row
+           upserted on every successful connect, and the Viewer's Remove deletes only from
+           config_monitored_servers (the DESIRED config) — so a row surviving there means "this server really
+           was monitored once", which is exactly the fact that separates the two causes. Nothing purges it
+           either: it is a registry, not a time series, so retention leaves it alone. */
+        var everMonitored = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var observed = new NpgsqlCommand("SELECT display_name, server_name FROM collect.servers", connection))
+        await using (var reader = await observed.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    everMonitored.Add(reader.GetString(0));
+                }
+
+                if (!reader.IsDBNull(1))
+                {
+                    everMonitored.Add(reader.GetString(1));
+                }
+            }
+        }
+
+        var (neverRegistered, deliberatelyRemoved) = SplitByEverMonitored(fileOnly, everMonitored);
+
+        /* Cause 1 — in the file, never monitored. This is the field report (#2252): the operator edited the
+           file expecting it to be picked up, and it silently was not. A WARNING, because it is the case where
+           something the operator wants is not happening and only they can fix it. */
+        if (neverRegistered.Count > 0)
+        {
+            _logger?.LogWarning(
+                "darling.json lists {Count} server(s) that are NOT monitored and never have been: {Servers}. "
+                + "The store is authoritative after the first seed, so adding a server to the file does not "
+                + "register it and a restart cannot change that — add them with the Viewer's Add Server dialog "
+                + "or the MCP add_servers tool. Note --test-connection reads darling.json, so it will keep "
+                + "reporting them as PASS while they collect nothing.",
+                neverRegistered.Count,
+                string.Join(", ", neverRegistered));
+        }
+
+        /* Cause 2 — monitored once, then removed, and the file was left alone. A CORRECT state, so this is
+           Information and says so plainly rather than advising anything. It is not silent because the file
+           still names them and --test-connection will still call them PASS, which is worth one line at
+           startup; but it no longer tells the operator to re-add a server they deliberately dropped. */
+        if (deliberatelyRemoved.Count > 0)
+        {
+            _logger?.LogInformation(
+                "darling.json still lists {Count} server(s) that were monitored and have since been removed: "
+                + "{Servers}. That is expected — the Viewer's Remove deletes the registration and never edits "
+                + "the file. Delete them from darling.json to silence this line; their collected history is "
+                + "kept either way.",
+                deliberatelyRemoved.Count,
+                string.Join(", ", deliberatelyRemoved));
+        }
+    }
+
+    /// <summary>
+    /// Splits the file-only servers into "never monitored" and "monitored once, since removed" (#2258), using the
+    /// observed registry as the evidence.
+    ///
+    /// <para><b>Why this needs no tombstone table.</b> #2258 proposed one — a <c>config_removed_servers</c> table
+    /// or an <c>is_removed</c> flag, plus a rung. But the fact it wanted is already recorded:
+    /// <c>collect.servers</c> holds a row per server the service has successfully connected to, the Viewer's
+    /// Remove deletes only from <c>config_monitored_servers</c>, and nothing purges the observed registry. So
+    /// "was this ever really monitored" is answerable today, for free, without a schema change and without a
+    /// second piece of state that could disagree with the first.</para>
+    ///
+    /// <para>An <c>is_removed</c> flag was the option worth rejecting explicitly: <c>is_enabled = FALSE</c>
+    /// already means "registered but paused", so a second flag on the same row makes
+    /// <c>(is_enabled, is_removed)</c> a four-state space where two combinations are meaningless, and every
+    /// existing reader of that table would have to learn the new flag or silently start including removed
+    /// servers. That is the same seam failure that #2280 had to fix in the dedupe gate — a widened concept that
+    /// old call sites never learned about.</para>
+    ///
+    /// <para><b>The limits, stated because they bound what the log may claim.</b> A server registered but never
+    /// successfully connected to has no observed row, so it reports as never-monitored — which is the right
+    /// answer to the operator's actual question ("is this being monitored?"), even though it is the wrong answer
+    /// to "was it ever registered?". And a store rebuilt from scratch has no observed rows at all, so everything
+    /// reads as never-monitored until it connects once; that degrades to a warning rather than to silence, which
+    /// is the safe direction for a fresh store where the file genuinely is the intent.</para>
+    ///
+    /// <para>Matched on either name for the reason <see cref="ServersOnlyInFile"/> gives: the observed registry
+    /// carries both the storage name and the display name, and identity drift predating #2158 means the id is
+    /// the less reliable key of the three. A miss here warns rather than going quiet, so the failure direction
+    /// is the harmless one.</para>
+    /// </summary>
+    internal static (IReadOnlyList<string> NeverRegistered, IReadOnlyList<string> DeliberatelyRemoved)
+        SplitByEverMonitored(IEnumerable<string> fileOnlyNames, ISet<string> everMonitoredNames)
+    {
+        var never = new List<string>();
+        var removed = new List<string>();
+
+        foreach (var name in fileOnlyNames ?? Enumerable.Empty<string>())
+        {
+            if (everMonitoredNames is not null && everMonitoredNames.Contains(name))
+            {
+                removed.Add(name);
+            }
+            else
+            {
+                never.Add(name);
+            }
+        }
+
+        return (never, removed);
     }
 
     /// <summary>
