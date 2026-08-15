@@ -141,24 +141,33 @@ public sealed class StoreConfigProvider
     /// outputs that were each correct about different things and no way to see the disagreement: config edit,
     /// service restart, support round trip.</para>
     ///
-    /// <para>Compared on <b>server_id</b>, not name — that is the identity the collectors and the registry
-    /// actually key on, so a file entry whose host or read-only intent differs is correctly reported as
-    /// absent even if a same-named row exists. Reported BY name, because that is what the operator typed.</para>
+    /// <para>Compared on <b>server_id OR name</b> (#2158). It used to be id alone, on the grounds that the id
+    /// is what the collectors key on — correct while every row's id equalled the hash of its own address, and
+    /// wrong the moment an edit began PRESERVING a row's identity so a re-addressed server keeps its history.
+    /// After such an edit the file's derived id matches nothing, and an id-only comparison would report a
+    /// server that IS monitored as absent, then advise re-adding it — wrong advice, on every start, about the
+    /// one server the operator had just fixed. The name arm covers that; a genuinely removed server is gone
+    /// from the store under both keys, so the Viewer-Remove case still reports exactly as before.</para>
     /// </summary>
     private async Task WarnAboutFileOnlyServersAsync(
         NpgsqlConnection connection, DarlingConfig config, CancellationToken ct)
     {
         var storeIds = new HashSet<int>();
-        using (var command = new NpgsqlCommand("SELECT server_id FROM config_monitored_servers", connection))
+        var storeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var command = new NpgsqlCommand("SELECT server_id, name FROM config_monitored_servers", connection))
         await using (var reader = await command.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))
             {
                 storeIds.Add(reader.GetInt32(0));
+                if (!reader.IsDBNull(1))
+                {
+                    storeNames.Add(reader.GetString(1));
+                }
             }
         }
 
-        var fileOnly = ServersOnlyInFile(config.Servers, storeIds);
+        var fileOnly = ServersOnlyInFile(config.Servers, storeIds, storeNames);
         if (fileOnly.Count == 0)
         {
             return;
@@ -190,7 +199,7 @@ public sealed class StoreConfigProvider
     /// comparison is testable without a store — the log line above is the only part that needs one.
     /// </summary>
     internal static IReadOnlyList<string> ServersOnlyInFile(
-        IEnumerable<MonitoredServer> fileServers, ISet<int> storeServerIds)
+        IEnumerable<MonitoredServer> fileServers, ISet<int> storeServerIds, ISet<string>? storeNames = null)
     {
         var missing = new List<string>();
         if (fileServers is null)
@@ -200,14 +209,28 @@ public sealed class StoreConfigProvider
 
         foreach (var server in fileServers)
         {
-            /* A file entry has no StoredServerId, so ServerId here IS the derivation — which is what this
-               comparison needs: it is asking "would the id this file entry describes be in the store". Once
-               identity stops being derivable (#2218) that question stops being answerable this way and has
-               to move onto the observed-identity fingerprint; noted on #2228 rather than pre-solved here. */
-            if (!storeServerIds.Contains(server.ServerId))
+            /* A file entry has no StoredServerId, so ServerId here IS the derivation: "would the id this file
+               entry describes be in the store". That was the whole test until #2158 made an edit preserve its
+               identity — a re-addressed server keeps its own id so its history stays attached, which means the
+               file's derived id no longer matches it and the id arm alone now reports a monitored server as
+               absent. The NAME arm answers the question the log actually asks, "is this file entry represented
+               in the store at all", and it is the operator-facing key: the display name is what they typed and
+               what the Viewer shows, and an edit does not change it.
+
+               Deliberately either-or rather than name-only. Two different file entries can share a display
+               name (nothing enforces uniqueness), so name-only would hide a genuinely unmonitored server
+               behind a same-named sibling; and the id arm still resolves the common case exactly. */
+            if (storeServerIds.Contains(server.ServerId))
             {
-                missing.Add(server.DisplayName);
+                continue;
             }
+
+            if (storeNames is not null && storeNames.Contains(server.DisplayName))
+            {
+                continue;
+            }
+
+            missing.Add(server.DisplayName);
         }
 
         return missing;

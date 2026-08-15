@@ -348,7 +348,13 @@ public partial class AddServerDialog : Window
 
         return new MonitoredServerRow
         {
-            ServerId = ViewerDataService.ComputeServerId(host, database, readOnlyIntent),
+            /* #2158: an EDIT keeps the row's identity; only an Add derives one. Changing a server's address
+               does not make it a different server — it is the same monitored instance — and every collect.*
+               row is keyed by this id, so re-deriving it abandons the whole of that server's history. The old
+               shape wrote a row under the new hash and deleted the old one, which left the REGISTRY tidy and
+               the history orphaned with nothing pointing at it: the failure looked like a server that had
+               never been monitored. Derivation now runs only where there is no history to lose. */
+            ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent),
             Name = displayName,
             Host = host,
             Database = database,
@@ -397,24 +403,28 @@ public partial class AddServerDialog : Window
                 return;
             }
 
-            /* Refuse to silently overwrite a DIFFERENT existing server that shares this identity — the upsert's
-               ON CONFLICT DO UPDATE would clobber its excluded databases / capture override. Covers Add and an
-               edit that re-points host/database/read-only-intent onto another server's identity. */
-            if (_originalServerId != row.ServerId
-                && await _dataService.GetMonitoredServerAsync(row.ServerId) is not null)
+            /* Refuse to point this definition at an address another server already monitors: on Add the
+               upsert's ON CONFLICT DO UPDATE would clobber that row's excluded databases / capture override,
+               and on Edit it would leave two registrations collecting the same real instance under two
+               identities — #2228's shape, arrived at from the registry side.
+
+               #2158: checked against the ADDRESS rather than against a derived id. Now that an edit preserves
+               its identity, a row's server_id no longer has to equal the hash of its own address, so the old
+               id-based lookup would miss exactly the row it exists to protect. Comparing ids afterwards is
+               what excludes "collided with myself" — an edit that leaves the address alone, or that only
+               renames or re-credentials the server. */
+            var occupant = await _dataService.GetMonitoredServerByAddressAsync(row.Host, row.Database, row.ReadOnlyIntent);
+            if (occupant is not null && occupant.ServerId != row.ServerId)
             {
                 StatusText.Text = "A server with this address (and database / read-only intent) is already monitored. Edit it from Manage Servers instead.";
                 SaveButton.IsEnabled = true;
                 return;
             }
 
-            /* Write the NEW row first, THEN drop the old identity on an edit that moved it — if the delete
-               fails we leave a recoverable duplicate rather than losing the definition entirely. */
+            /* One row, one identity, in place — no delete. The upsert's ON CONFLICT (server_id) arm rewrites
+               the address on the row that already owns this id, so the server's collected history stays
+               attached to it. */
             await _dataService.UpsertMonitoredServerAsync(row);
-            if (_originalServerId is int original && original != row.ServerId)
-            {
-                await _dataService.DeleteMonitoredServerAsync(original);
-            }
 
             /* Favorites are viewer-local (the service never reads them) — keyed by the server address. */
             _serverStore.SetFavorite(row.Host, FavoriteCheckBox.IsChecked == true);
