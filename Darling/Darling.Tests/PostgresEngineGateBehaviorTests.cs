@@ -75,13 +75,14 @@ public sealed class PostgresEngineGateBehaviorTests
     /// the ONLY thing that can decide whether it is dispatched.</summary>
     private const string SnapshotCollector = "wait_stats";
 
-    /// <summary>Derived through the SAME helper the worker uses, so the test cannot drift from the lookup.</summary>
     /// <summary>
-    /// #2218: the ENGINE is part of the derivation now, so a PostgreSQL host must be hashed with it or this
-    /// helper computes an id the product never uses — and the gate then returns "server not monitored" instead
-    /// of the arm under test, which is the same trap the class comment above describes for <c>Name</c> vs
-    /// <c>Host</c>. Defaulted to null so the SQL Server call sites are unchanged, exactly as the shared helper
-    /// is.
+    /// Derived through the SAME helper the worker uses, so the test cannot drift from the lookup.
+    ///
+    /// <para>#2218 is that drift happening: the ENGINE joined the derivation, and because this helper hashed
+    /// without it, a PostgreSQL host produced an id the product never uses — so the gate returned "server not
+    /// monitored" rather than the arm under test, which is the same trap the class comment above describes for
+    /// <c>Name</c> vs <c>Host</c>. The engine is defaulted to null so the SQL Server call sites stay unchanged,
+    /// exactly as the shared helper does it.</para>
     /// </summary>
     private static int ServerIdFor(string host, string? engine = null) =>
         ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(host, null, false, engine, 0));
