@@ -518,9 +518,7 @@ public sealed class DarlingMcpServerAdminTools
     /* ─────────────────────────────── store I/O ─────────────────────────────── */
 
     /// <summary>Reads the identity fields of every existing monitored server so the dedupe gate can be seeded from
-    /// the authoritative set (mirrors the bulk dialog's <c>LoadExistingKeysAsync</c>). Non-secret columns only.</summary>
-    /// <summary>Reads the identity fields of every existing monitored server so the dedupe gate can be seeded from
-    /// the authoritative set. Non-secret columns only.
+    /// the authoritative set (mirrors the bulk dialog's <c>LoadExistingKeysAsync</c>). Non-secret columns only.
     ///
     /// <para>#2218 added <c>engine</c> and <c>port</c> to the identity, so they have to be read here too. Without
     /// them the gate keys on a NARROWER identity than the product does, and a PostgreSQL instance on a host that
