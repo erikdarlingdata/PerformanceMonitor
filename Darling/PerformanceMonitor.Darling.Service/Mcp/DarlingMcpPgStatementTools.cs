@@ -24,7 +24,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgStatementTools
 {
-    [McpServerTool(Name = "get_pg_top_queries"), Description("Gets the top PostgreSQL query shapes by total execution time over a time period, for Amazon Aurora PostgreSQL targets. Includes Aurora's I/O source breakdown, which stock PostgreSQL cannot provide: a block 'read' may have come from the distributed storage volume or from the local NVMe Optimized Reads cache, and the two have very different costs. Also reports peak memory per statement, the closest PostgreSQL equivalent of a memory grant, and WAL bytes generated, which has no SQL Server DMV counterpart. Queries are identified by queryid, not text: queryid is stable within a major version but changes across a major upgrade, so do not treat it as permanent. This is a separate tool from get_top_queries_by_cpu, which covers SQL Server.")]
+    [McpServerTool(Name = "get_pg_top_queries"), Description("Gets the top PostgreSQL query shapes by total execution time over a time period, for Amazon Aurora PostgreSQL targets. Includes Aurora's I/O source breakdown, which stock PostgreSQL cannot provide: a block 'read' may have come from the distributed storage volume or from the local NVMe Optimized Reads cache, and the two have very different costs. Also reports peak memory per statement, the closest PostgreSQL equivalent of a memory grant, and WAL bytes generated, which has no SQL Server DMV counterpart. Returns query_text for each statement, captured hourly and keyed on queryid, or null when none has been captured yet (a statement first seen minutes ago, or a queryid minted by a major-version upgrade). queryid itself is stable within a major version but changes across a major upgrade — which is exactly why the text is STORED rather than fetched live: after an upgrade the live view no longer holds the old ids, so their text would otherwise be unrecoverable and the history would read as a list of integers. This is a separate tool from get_top_queries_by_cpu, which covers SQL Server.")]
     public static async Task<string> GetPgTopQueries(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -88,6 +88,11 @@ public sealed class DarlingMcpPgStatementTools
                     temp_blks_written = r.TempBlocksWritten,
                     wal_bytes = r.WalBytes,
                     max_exec_peakmem_bytes = r.MaxPeakMemBytes,
+                    // #2219: the statement text, or null when none has been captured for this queryid yet.
+                    // Null is honest rather than a placeholder — text refreshes hourly, so a statement first
+                    // seen minutes ago has none, and after a major-version upgrade re-keys queryid the new ids
+                    // have none until the next refresh. An empty string would read as "the query is blank".
+                    query_text = r.QueryText,
                 };
             });
 

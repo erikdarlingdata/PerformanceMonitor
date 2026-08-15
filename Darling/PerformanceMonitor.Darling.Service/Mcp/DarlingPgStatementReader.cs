@@ -40,7 +40,13 @@ public static class DarlingPgStatementReader
         long TempBlocksRead,
         long TempBlocksWritten,
         long WalBytes,
-        long MaxPeakMemBytes);
+        long MaxPeakMemBytes,
+        /* #2219: the statement text, or null when none has been captured for this queryid yet. Null is the
+           HONEST answer rather than a placeholder: text is refreshed hourly, so a statement first seen minutes
+           ago genuinely has none, and after a major-version upgrade re-keys queryid the new ids have none until
+           the next refresh. Distinguishing "not captured yet" from "" is what stops a caller reading an empty
+           string as the query. */
+        string? QueryText = null);
 
     /// <summary>
     /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
@@ -110,8 +116,16 @@ public static class DarlingPgStatementReader
             CAST(coalesce(SUM(d_temp_blks_read), 0) AS bigint) AS temp_blks_read,
             CAST(coalesce(SUM(d_temp_blks_written), 0) AS bigint) AS temp_blks_written,
             CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) AS wal_bytes,
-            CAST(MAX(max_exec_peakmem_bytes) AS bigint) AS max_exec_peakmem_bytes
+            CAST(MAX(max_exec_peakmem_bytes) AS bigint) AS max_exec_peakmem_bytes,
+            /* #2219: the statement text, from the (server_id, queryid) store. MAX rather than a join column
+               because the grain here is (queryid, database_id) while text is keyed on queryid alone — one text
+               per group by construction, so MAX picks it without widening the GROUP BY. LEFT JOIN, so a
+               queryid whose text has not been captured yet still ranks; it simply reads as null. */
+            MAX(t.query_text) AS query_text
         FROM differenced
+        LEFT JOIN collect.pg_statement_text AS t
+               ON  t.server_id = $1
+               AND t.queryid = differenced.queryid
         GROUP BY queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
         ORDER BY SUM(delta_total_exec_time_ms) DESC
@@ -149,7 +163,9 @@ public static class DarlingPgStatementReader
                 reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                reader.IsDBNull(13) ? 0 : reader.GetInt64(13)));
+                reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+                /* #2219: null stays null — see PgStatementRow.QueryText for why an empty string would be a lie. */
+                reader.IsDBNull(14) ? null : reader.GetString(14)));
         }
 
         return rows;

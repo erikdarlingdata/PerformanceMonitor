@@ -1985,12 +1985,128 @@ public sealed class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<int, QueryStoreServerGate> _queryStoreGates = new();
 
     /// <summary>
+    /// #2219: whether this is the PostgreSQL statement-stats collector, whose success is what triggers a text
+    /// refresh. Compared against the collector's OWN declared name rather than a literal, so renaming it cannot
+    /// silently unhook the text path — the same reasoning as <see cref="IsQueryStoreCollector"/>.
+    /// </summary>
+    internal static bool IsPgStatementStatsCollector(string collectorName) =>
+        string.Equals(collectorName, PgStatementStatsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// #2165: whether a dispatched collector name is the Query Store collector the gate covers. Compared
     /// against the collector's OWN declared name rather than a literal, so renaming the collector cannot
     /// silently unhook the gate and let the two loops overlap again.
     /// </summary>
     internal static bool IsQueryStoreCollector(string collectorName) =>
         string.Equals(collectorName, QueryStoreCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #2219: refreshes this PostgreSQL server's statement text if it is due, and swallows everything if not.
+    ///
+    /// <para><b>Best-effort by construction.</b> It runs after the statistics have already been collected and
+    /// logged, so nothing here can cost a collection: unreadable text is a degraded read, a lost collection is
+    /// lost data, and those are not the same severity. Every fault mode — the target refusing
+    /// <c>aurora_stat_statements</c>, a store write failing, the cadence query erroring — logs once and leaves
+    /// the statistics intact.</para>
+    ///
+    /// <para><b>Due-ness is asked of the STORE</b> (<see cref="PgStatementText.IsDueSql"/>), not remembered here.
+    /// A restart therefore cannot re-fetch the fleet, and two hosts writing one store cannot disagree about when
+    /// text was last written. The same <c>now</c> is used for the decision and the rows it stamps, so the cadence
+    /// cannot drift against its own timestamps.</para>
+    ///
+    /// <para>Only for PostgreSQL targets: <c>aurora_stat_statements</c> does not exist elsewhere, and the
+    /// statement-stats collector is already engine-gated, so this mirrors that gate rather than trusting it.</para>
+    /// </summary>
+    private async Task TryRefreshPgStatementTextAsync(ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (runtime.Target.Engine != CollectorTargetEngine.PostgreSql)
+        {
+            return;
+        }
+
+        try
+        {
+            var now = PgStatementText.Naive(DateTime.UtcNow);
+            var due = now - PgStatementText.RefreshInterval;
+
+            await using (var isDue = _postgres!.CreateCommand(PgStatementText.IsDueSql))
+            {
+                isDue.Parameters.AddWithValue(runtime.ServerId);
+                isDue.Parameters.AddWithValue(PgStatementText.Naive(due));
+                if (await isDue.ExecuteScalarAsync(cancellationToken) is not true)
+                {
+                    return;
+                }
+            }
+
+            var (queryIds, texts) = await ReadPgStatementTextAsync(runtime, cancellationToken);
+            if (queryIds.Count == 0)
+            {
+                return;
+            }
+
+            var stamps = new DateTime[queryIds.Count];
+            Array.Fill(stamps, now);
+
+            await using var upsert = _postgres!.CreateCommand(PgStatementText.UpsertSql);
+            upsert.Parameters.AddWithValue(Enumerable.Repeat(runtime.ServerId, queryIds.Count).ToArray());
+            upsert.Parameters.AddWithValue(queryIds.ToArray());
+            upsert.Parameters.AddWithValue(texts.ToArray());
+            upsert.Parameters.AddWithValue(stamps);
+            await upsert.ExecuteNonQueryAsync(cancellationToken);
+
+            _logger.LogInformation(
+                "  [{Server}] pg_statement_text => {Count} statement text(s) refreshed (#2219)",
+                runtime.Config.DisplayName, queryIds.Count);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Deliberately broad — see the summary. The statistics for this cycle are already stored and logged;
+               losing their text is not worth failing the sweep over. */
+            _logger.LogWarning(
+                "  [{Server}] pg_statement_text refresh failed, statistics are unaffected: {Message} (#2219)",
+                runtime.Config.DisplayName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Reads <c>(queryid, query)</c> from the monitored PostgreSQL server with <c>showtext = true</c> (#2219).
+    /// Capped, and ordered by total execution time so a catalog larger than the cap keeps the text for the
+    /// queries anyone would actually look at rather than an arbitrary slice.
+    /// </summary>
+    private static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
+        ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        var queryIds = new List<long>();
+        var texts = new List<string>();
+
+        await using var connection = new Npgsql.NpgsqlConnection(runtime.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new Npgsql.NpgsqlCommand(PgStatementText.FetchSql, connection) { CommandTimeout = 60 };
+        command.Parameters.AddWithValue(PgStatementTextRowCap);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.IsDBNull(0) || reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            queryIds.Add(reader.GetInt64(0));
+            texts.Add(reader.GetString(1));
+        }
+
+        return (queryIds, texts);
+    }
+
+    /// <summary>#2219: the row cap for one text fetch — comfortably above PostgreSQL's default
+    /// <c>pg_stat_statements.max</c> of 5,000, so a normally-configured instance is never truncated, while a
+    /// pathologically raised setting cannot turn one fetch into an unbounded transfer.</summary>
+    private const int PgStatementTextRowCap = 10_000;
 
     /// <summary>#2148: per-server abandonment guards for the backfill loop — keyed by ServerId so a
     /// removed-and-re-added server reuses its guard (harmless), and a wedged server never blocks its
@@ -4025,6 +4141,16 @@ LIMIT 1";
                than on error_message, so the note is inert outside the Collection Log detail grid. */
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, result.Note, _logger, cancellationToken);
+
+            /* #2219: statement TEXT rides alongside the statement stats, on its own hourly cadence. Hung off the
+               stats collector's success rather than given its own loop because it is meaningless without those
+               rows and must never run against a server whose stats collection is failing — one less loop that
+               can be independently wrong. Best-effort: a text fetch that fails leaves the statistics collected
+               and logs, because unreadable text is a degraded read while a failed collection is lost data. */
+            if (IsPgStatementStatsCollector(collectorName))
+            {
+                await TryRefreshPgStatementTextAsync(runtime, cancellationToken);
+            }
             return result.Rows;
         }
         catch (OperationCanceledException)

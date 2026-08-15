@@ -129,6 +129,7 @@ public static class PgMigrations
         new Migration(70, "monitored-server-engine", V70Sql),
         new Migration(71, "pg-blocking-edges", V71Sql),
         new Migration(72, "query-store-plan-map", V72Sql),
+        new Migration(73, "pg-statement-text", V73Sql),
     };
 
     /// <summary>
@@ -1640,6 +1641,52 @@ CREATE TABLE IF NOT EXISTS collect.pg_blocking_edges (
 
 CREATE INDEX IF NOT EXISTS idx_pg_blocking_edges_time
     ON collect.pg_blocking_edges(server_id, collection_time);";
+
+    /// <summary>
+    /// V73 — <c>collect.pg_statement_text</c>: one row per <c>(server_id, queryid)</c> holding the statement text
+    /// for a PostgreSQL target, so <c>get_pg_top_queries</c> can return something a human can read (#2219).
+    ///
+    /// <para><b>The gap this closes.</b> <c>pg_statement_stats</c> identifies queries by <c>queryid</c> and stores
+    /// no text, because <c>aurora_stat_statements</c>'s <c>showtext</c> costs real money per collection and
+    /// normalized text is highly repetitive. But <c>queryid</c> is NOT stable across a major version upgrade, so
+    /// after one the stored history joins to nothing readable — a list of integers that used to be your slowest
+    /// queries. Keying text on <c>(server_id, queryid)</c> is what preserves the OLD ids' text when the live view
+    /// re-keys, which is the whole point: no live fetch can recover it afterwards.</para>
+    ///
+    /// <para><b>Inline text, not a <c>query_text_dim</c> digest, and that is a deliberate reversal of what V64's
+    /// comment promised.</b> The dimension route is blocked and would stay expensive to unblock: V38 is GENERATED
+    /// from <c>PayloadDimensions.All</c>, so registering <c>pg_statement_stats</c> makes V38 emit an
+    /// <c>ALTER TABLE</c> against a table it has not created yet on every upgraded store, and it would also break
+    /// V64's own ladder diff, which asserts each rung equals the generated schema. More importantly the dimension
+    /// needs the liveness interlock <see cref="QueryStorePlanMap"/> documents at length — the GC sweeps on
+    /// <c>last_seen</c> rather than counting references, so a dim row can be collected while live facts still
+    /// point at it, and the failure mode is SILENTLY missing text. Inline cannot dangle. It costs cross-server
+    /// dedup — one row per server per queryid rather than one per distinct text — which on a 52-server fleet of
+    /// <c>pg_stat_statements.max = 5000</c> is a few hundred MB against a store whose Query Store plan XML alone
+    /// measured 43 GB. Paying that to make a silent-loss mode impossible is the trade.</para>
+    ///
+    /// <para>Not a hypertable and not a collector table: one row per statement per server, near-static once a
+    /// workload is warm, so it is dimension-shaped and pruned on <c>last_seen</c> rather than by
+    /// <c>drop_chunks</c>. That also keeps it out of the generated-schema ladder diff, exactly as V72's
+    /// <c>query_store_plan_map</c> is — the established shape for content keyed to facts rather than collected
+    /// as facts.</para>
+    ///
+    /// <para><c>first_seen</c> is kept alongside <c>last_seen</c> because they answer different questions: when a
+    /// statement shape first appeared on this server (which survives the upgrade re-key and is the only record of
+    /// it) versus whether the text is still live enough to keep. NUMBERED <c>max(dev) + 1</c> without a gap, for
+    /// the reason V72's comment gives — a gap is skipped silently on every upgraded store.</para>
+    /// </summary>
+    private const string V73Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
+    server_id integer NOT NULL,
+    queryid bigint NOT NULL,
+    query_text text NOT NULL,
+    first_seen timestamp NOT NULL,
+    last_seen timestamp NOT NULL,
+    PRIMARY KEY (server_id, queryid)
+);
+CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
+    ON collect.pg_statement_text(last_seen);";
 
     /// <summary>
     /// V72 — the Query Store plan map (#2210): <c>(server_id, database_name, plan_id) → digest</c>, so Query

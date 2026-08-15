@@ -385,6 +385,27 @@ public static class DarlingRetention
                    cutoffs makes the recoverable end-state the only reachable one, and
                    QueryStorePlanMap.MarginOrderingHolds is pinned against ChunkIntervalDays so shrinking that
                    constant cannot invert it unnoticed. */
+                /* #2219: PostgreSQL statement text, on the same principle as the plan map below but with the
+                   margin in the OPPOSITE direction, because the asymmetry is the other way round. Text is what a
+                   fact row points AT, so it must OUTLIVE the statistics that reference it: text kept past its
+                   facts is a few dead bytes, whereas facts kept past their text is a top-queries answer that
+                   reads as a list of integers — the exact failure this table was added to fix. Hence a margin
+                   ADDED to the fact horizon rather than subtracted from it. */
+                var textCutoff = utcNow.AddDays(-(widestFactRetentionDays + PgStatementText.PruneMarginDays));
+                var textDeleted = await PurgeOneAsync(
+                    postgres, PgStatementText.TableName,
+                    PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
+                    textCutoff, logger, cancellationToken);
+                if (textDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += textDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+
                 var mapCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStorePlanMap.PruneMarginDays));
                 var mapDeleted = await PurgeOneAsync(
                     postgres, QueryStorePlanMap.TableName,
