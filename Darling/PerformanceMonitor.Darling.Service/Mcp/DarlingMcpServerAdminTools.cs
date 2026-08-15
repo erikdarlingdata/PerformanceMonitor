@@ -133,6 +133,16 @@ public sealed class DarlingMcpServerAdminTools
             var (ready, duplicates) = PartitionDuplicates(entries, existingKeys);
             results.AddRange(duplicates);
 
+            /* #2280: the identities claimed so far — the store's, plus every entry this batch is about to add.
+               The gate above compares DECLARED identities; the check inside the loop compares each entry's ACTUAL
+               database (what the server just told the probe) against this set, which is what catches two
+               registrations resolving to one database while claiming different ones. */
+            var claimed = new HashSet<string>(existingKeys, StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in ready)
+            {
+                claimed.Add(entry.StorageKey);
+            }
+
             foreach (var entry in ready)
             {
                 /* Validate the connection IN-PROCESS (the service holds the network path + credentials). A failure
@@ -144,6 +154,22 @@ public sealed class DarlingMcpServerAdminTools
                         string.IsNullOrWhiteSpace(probeResult.Error)
                             ? "Could not connect to the server."
                             : $"Could not connect: {probeResult.Error}"));
+                    continue;
+                }
+
+                /* #2280: the probe just asked the server which database it actually reached. If that is a
+                   DIFFERENT database from the one this entry names, and some other registration already claims
+                   that one, then adding this would give one real database two identities and two full copies of
+                   every collected row — the #2220 field report, prevented at the point of creation instead of
+                   reported at every connect by #2277's tripwire.
+
+                   Compared against the ACTUAL database and only when it differs from the declared one: an entry
+                   that names what it reached is the normal case and is already covered by the declared gate
+                   above, so re-checking it would just re-detect that gate's own decision. */
+                var collision = ActualIdentityCollision(entry, probeResult.ConnectedDatabase, claimed);
+                if (collision is not null)
+                {
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, "collides", collision));
                     continue;
                 }
 
@@ -400,7 +426,9 @@ public sealed class DarlingMcpServerAdminTools
             Port = port,
         };
 
-        var storageKey = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent);
+        /* #2218: the FULL identity, matching what the store derives — engine and port included, so a PostgreSQL
+           entry does not collide with a SQL Server one on the same host. */
+        var storageKey = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
         return (new ParsedServerEntry(index, displayName, storageKey, probeConfig, plaintextPassword), null);
     }
 
@@ -410,6 +438,60 @@ public sealed class DarlingMcpServerAdminTools
     /// entries to probe + insert and the <c>Duplicates</c> as ready-to-report results. Unit-testable without a
     /// store or probe.
     /// </summary>
+    /// <summary>
+    /// The #2280 check: why this entry must not be added, or null when it may be.
+    ///
+    /// <para>Compares the identity this entry would have if keyed on the database the server ACTUALLY reached
+    /// against the identities already claimed. Only fires when the actual database DIFFERS from the declared one
+    /// — an entry that reached what it named is the ordinary case and the declared gate has already ruled on it,
+    /// so re-checking would only re-detect that gate's decision under a more confusing name.</para>
+    ///
+    /// <para><b>Silent when the probe did not report a database</b> (a stub probe, or a target that returned
+    /// none): unknown is not the same as colliding, and refusing on an absent value would block registrations
+    /// for a reason nobody could act on.</para>
+    ///
+    /// <para><b>Keyed on the FULL identity, not on (host, database).</b> A read-only-intent registration
+    /// alongside a read-write one for the same database is legitimate and <c>read_only_intent</c> is part of the
+    /// identity, so comparing without it would refuse a valid pair. Same for engine and port after #2218.</para>
+    ///
+    /// <para>Note the asymmetry this cannot see: existing rows record only the database they DECLARE, so this
+    /// catches "the new one lands where an existing one lives" and not "both mis-resolve to a database neither
+    /// names". Closing that needs the actual database persisted per row; #2277's tripwire reports it at connect
+    /// for both in the meantime, which is why this is a guard and not the whole answer.</para>
+    /// </summary>
+    internal static string? ActualIdentityCollision(
+        ParsedServerEntry entry, string? connectedDatabase, ISet<string> claimedKeys)
+    {
+        if (entry is null || claimedKeys is null || string.IsNullOrWhiteSpace(connectedDatabase))
+        {
+            return null;
+        }
+
+        var declared = entry.ProbeConfig.Database;
+        if (!string.IsNullOrWhiteSpace(declared)
+            && string.Equals(declared.Trim(), connectedDatabase.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var actualKey = ServerIdHelper.BuildStorageName(
+            entry.ProbeConfig.Host, connectedDatabase.Trim(), entry.ProbeConfig.ReadOnlyIntent,
+            entry.ProbeConfig.Engine, entry.ProbeConfig.Port);
+
+        if (string.Equals(actualKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase)
+            || !claimedKeys.Contains(actualKey))
+        {
+            return null;
+        }
+
+        var declaredText = string.IsNullOrWhiteSpace(declared) ? "no database" : $"database '{declared}'";
+        return $"Not added: this registration names {declaredText} but its connection lands in " +
+               $"'{connectedDatabase.Trim()}', which another monitored server already covers. Adding it would " +
+               "store that one database's history under two identities and alert twice for every incident. " +
+               "Point it at the database you meant (check Initial Catalog), or monitor the existing " +
+               "registration instead.";
+    }
+
     internal static (List<ParsedServerEntry> Ready, List<ServerResult> Duplicates) PartitionDuplicates(
         IReadOnlyList<ParsedServerEntry> entries, IEnumerable<string> existingKeys)
     {
@@ -437,7 +519,15 @@ public sealed class DarlingMcpServerAdminTools
 
     /// <summary>Reads the identity fields of every existing monitored server so the dedupe gate can be seeded from
     /// the authoritative set (mirrors the bulk dialog's <c>LoadExistingKeysAsync</c>). Non-secret columns only.</summary>
-    public const string ExistingServersSql = "SELECT host, database, read_only_intent FROM config_monitored_servers";
+    /// <summary>Reads the identity fields of every existing monitored server so the dedupe gate can be seeded from
+    /// the authoritative set. Non-secret columns only.
+    ///
+    /// <para>#2218 added <c>engine</c> and <c>port</c> to the identity, so they have to be read here too. Without
+    /// them the gate keys on a NARROWER identity than the product does, and a PostgreSQL instance on a host that
+    /// already has a SQL Server registration reads as a duplicate and is refused — a valid pair rejected because
+    /// the gate could not see what distinguishes them.</para></summary>
+    public const string ExistingServersSql =
+        "SELECT host, database, read_only_intent, engine, port FROM config_monitored_servers";
 
     /// <summary>The INSERT — column set + shape mirrored from <c>StoreConfigProvider.SeedMonitoredServersAsync</c>
     /// (the seed authority), so a tool-added row is byte-identical to a seeded one. <c>capture_plans</c> and
@@ -463,7 +553,9 @@ ON CONFLICT (server_id) DO NOTHING";
             var host = reader.GetString(0);
             var database = reader.IsDBNull(1) ? null : reader.GetString(1);
             var readOnlyIntent = !reader.IsDBNull(2) && reader.GetBoolean(2);
-            keys.Add(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent));
+            var engine = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var port = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
+            keys.Add(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port));
         }
 
         return keys;

@@ -356,6 +356,7 @@ SELECT
                 IsAwsRds: runtime.IsAwsRds,
                 HasMsdbAccess: runtime.HasMsdbAccess,
                 Error: null,
+                ConnectedDatabase: runtime.ConnectedDatabase,
                 Engine: runtime.Target.Engine,
                 PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
                 PostgresVersionNum: runtime.Target.PostgresVersionNum,
@@ -466,7 +467,11 @@ public sealed record ConnectionProbeResult(
     int PostgresMajorVersion = 0,
     int PostgresVersionNum = 0,
     bool IsAurora = false,
-    bool IsInRecovery = false)
+    bool IsInRecovery = false,
+    /* #2280: the database the connection ACTUALLY reached, so a registration-time collision check can compare
+       what the SERVER says against what other registrations claim, rather than comparing two claims. Trailing
+       and defaulted, so every existing construction of this record still compiles unchanged. */
+    string? ConnectedDatabase = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually
