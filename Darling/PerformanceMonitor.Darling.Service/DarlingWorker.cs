@@ -434,6 +434,13 @@ public sealed class DarlingWorker : BackgroundService
            now genuinely unreachable) prints in full again. */
         public string? LastConnectFailureLogged { get; set; }
 
+        /* #2228: the database-mismatch state last reported for this server, so the tripwire fires on the
+           TRANSITION rather than once per connect. A mismatch is a standing misconfiguration — it persists
+           until an operator edits the registration — so logging it every reconnect would bury the one line
+           that matters, which is how a tripwire gets trained past and stops working. Null = last seen
+           correct; the message itself = last seen wrong, compared so a change of mismatch re-reports. */
+        public string? LastDatabaseMismatchLogged { get; set; }
+
         /* MinValue = the first loop pass after connect evaluates alerts immediately. */
         public DateTime NextAlertSweep { get; set; } = DateTime.MinValue;
 
@@ -3158,6 +3165,37 @@ LIMIT 1", connection);
                message as one from before this connect. Without this, a fixed-then-broken-again cause would be
                suppressed as a repeat of something the operator had already scrolled past. */
             server.LastConnectFailureLogged = null;
+
+            /* #2228: the tripwire. The connection just told us which database it actually landed in, so this
+               is the one moment the registration's claim can be checked against the server's own answer.
+               Identity is registration-derived and never verified against the connection, so without this a
+               registration pointing somewhere else collects that other database's rows under its own id,
+               indefinitely and silently — and if a sibling registration names that database too, both collect
+               it and the history is duplicated under two identities (#2220's byte-identical graphs).
+
+               ERROR, not Warning: nothing clears this on its own and every sweep in the meantime stores
+               mis-attributed rows. Logged on the TRANSITION so a standing misconfiguration does not bury
+               itself. */
+            var mismatch = DarlingServerConnector.DescribeDatabaseMismatch(
+                server.Config.Database, runtime.ConnectedDatabase, server.Config.DisplayName);
+
+            if (!string.Equals(server.LastDatabaseMismatchLogged, mismatch, StringComparison.Ordinal))
+            {
+                server.LastDatabaseMismatchLogged = mismatch;
+                if (mismatch is not null)
+                {
+                    _logger.LogError("[{Server}] {Mismatch}", server.Config.DisplayName, mismatch);
+                }
+                else
+                {
+                    /* The transition BACK is worth one line too: it is the confirmation that an operator's
+                       edit actually took, which otherwise requires trusting silence. */
+                    _logger.LogInformation(
+                        "[{Server}] now connected to the database it is registered for ('{Database}') — the " +
+                        "earlier mismatch (#2228) is resolved.",
+                        server.Config.DisplayName, runtime.ConnectedDatabase);
+                }
+            }
             /* Force the long-query trace (#1496) to re-reconcile on the next sweep after every (re)connect:
                an Azure database-scoped session can stop on reconnect, so a still-"applied" flag would
                otherwise skip restarting it. Cheap — the reconcile no-ops unless the desired state differs
