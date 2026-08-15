@@ -58,6 +58,7 @@ public sealed class HostObjectRollupLiveTests
         await CleanupAsync(connection, ct);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var succeeded = false;
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -121,10 +122,18 @@ public sealed class HostObjectRollupLiveTests
             /* ---- totals are conserved: a rollup must redistribute CPU, never invent or lose it. */
             Assert.Equal(perHash.Sum(r => r.TotalCpuUs), rolled.Sum(r => r.TotalCpuUs));
             Assert.Equal(perHash.Sum(r => r.TotalExecutions), rolled.Sum(r => r.TotalExecutions));
+
+            succeeded = true;
         }
         finally
         {
-            await CleanupAsync(connection, ct);
+            /* #1902: teardown on its OWN connection, never the body's. A finally that cleans up on the
+               body's connection throws from the finally and REPLACES the body's exception with the
+               teardown's — and it is the body's failure that closed the connection, so the teardown fails
+               because of the very thing it then hides. Enforced by
+               LiveCleanupConversionRatchetTests.NoLiveTestCleansUpOnItsOwnBodysConnection. */
+            await LiveStoreCleanup.RunAsync(connectionString!, succeeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, cleanupCt));
         }
     }
 
