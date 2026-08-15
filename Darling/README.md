@@ -1252,6 +1252,8 @@ What the token does gate is the monitor's own configuration and collected data: 
 
 **MCP has no TLS — the MITM control is a TLS reverse proxy.** A self-signed cert breaks real MCP clients, so the MCP endpoint is plain HTTP and the bearer token travels **cleartext on the segment**; an active on-path attacker (ARP spoof, rogue DHCP, compromised switch) could capture and replay it. The in-app CIDR bounds *who can route to* the port; it does **not** protect the wire. If your segment is not fully trusted, put a **TLS-terminating reverse proxy** in front of the MCP port and point clients at that — the named MITM control for this endpoint. (The store endpoint needs no such proxy: it has verify-full TLS built in.)
 
+**Output format (GCF).** By default the MCP tools return JSON. Setting `DARLING_OUTPUT_FORMAT=gcf` makes the server return [Graph Compact Format](https://gcformat.com) instead: the repeated field names of the record arrays these tools return (blocking pairs, wait stats, index bloat, config rows, …) are factored into a single header and the indentation dropped, cutting the token cost of a result (about a quarter across a mixed real workload, and more than half on the most uniform tools). It is opt-in and conservative — applied per result, only when the GCF wire is both smaller than and a lossless round-trip of the JSON (otherwise that result stays JSON), so no result is ever grown, dropped, or garbled. `BlackwellSystems.Gcf` is a zero-dependency package.
+
 ### Web endpoint (browser over the LAN)
 
 Add a `network` block to `web` (managed mode; `web.enabled` must be `true`):
