@@ -889,10 +889,44 @@ END;
            leading DROP TABLE IF EXISTS covers pooled-connection reuse. TOP ... WITH TIES, the ship
            order, and the derived-watermark semantics live on the final SELECT, unchanged.
 
-           BOTH statements carry OPTION(RECOMPILE) (review catch): split out on its own, the staging
+           EVERY statement carries OPTION(RECOMPILE) (review catch): split out on its own, the staging
            statement would otherwise be cached via sp_executesql's parameterized text and sniffed
            across live vs backfill windows of wildly different selectivity — the same fixed-guess
            failure mode this rewrite removes, reintroduced one statement earlier. */
+
+        /* THE ROW CHOICE IS MADE ON THE NARROW SET (#2150). #pm_qs_keys exists because TOP cannot bound
+           a sort it sits on top of: to find the top N by last_execution_time the sort must first read
+           ALL qualifying input, and a Top-N Sort carries every output column through with it — so
+           query_sql_text (nvarchar(max)) was materialized for the whole qualifying set to choose the
+           50,000 rows that ship. Measured on a 1,608-plan Azure SQL DB store (96 KB average plan,
+           50 eDTU pool), time-to-first-row on the final statement: staging alone 0.36s · staging plus
+           the plan/query/text join WITHOUT the wide columns 0.55s · full payload as shipped 15.94s ·
+           the same payload minus ORDER BY/WITH TIES 0.84s. TOP is provably not the lever — TOP (500)
+           and TOP (50000) both measured 15.89s — and neither is the client byte budget, which is flat
+           across 4/8/16/32/64/256 MB (19.0/17.7/16.7/16.7/17.5/20.1s) because the server has finished
+           before the client sees a byte. Choosing the rows off #pm_qs_slice first, where every column
+           is an int or a datetime, then joining for the text over only the chosen rows, measured
+           20.82s -> 4.81s on a full drain of the SAME rows and the same 169.9 MB.
+
+           WHY THE SHIPPED ROW SET IS UNCHANGED, which is the only thing that could make this unsafe.
+           The ORDER BY key is qsrs.last_execution_time, which comes off the slice in both forms, and
+           every join below is one-row-per-slice-row: plan_id, query_id and query_text_id are the keys
+           of their respective catalog views, and both the replica and interval joins are LEFT on their
+           own key. So no join can multiply or reorder rows, and applying TOP ... WITH TIES before them
+           selects the same set it selected after them. WITH TIES still completes the boundary tie group
+           — on the narrow set now — so #1960's derived-watermark invariant is untouched: a bounded
+           cycle still leaves MAX(last_execution_time) sitting exactly at the shipped boundary.
+
+           The one behavioural difference, stated rather than discovered later: the three INNER joins can
+           still eliminate a row whose plan Query Store evicted between the staging INSERT and the join,
+           and that elimination now happens AFTER the cap rather than before it, so such a cycle ships
+           slightly fewer than the cap instead of backfilling up to it. That costs a little throughput in
+           a race that was already possible; it cannot open a watermark hole, because the watermark is
+           derived from the rows actually stored.
+
+           The final TOP ... WITH TIES stays. Over a set already cut to the cap it is idempotent, and
+           leaving it there keeps the row-bounding contract on the statement that ships, where the byte
+           budget and the reader's tie-group completion in ReadRowsAsync already reason about it. */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DROP TABLE IF EXISTS #pm_qs_slice;
@@ -945,6 +979,15 @@ GROUP BY
     qsrs.execution_type_desc{replicaGroupKey}
 HAVING
     {intervalHaving}
+OPTION(RECOMPILE);
+
+DROP TABLE IF EXISTS #pm_qs_keys;
+
+SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
+    qsrs.*
+INTO #pm_qs_keys
+FROM #pm_qs_slice AS qsrs
+ORDER BY qsrs.last_execution_time {shipOrder}
 OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
@@ -1004,7 +1047,7 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     {replicaRoleCol},
     runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
     interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')
-FROM #pm_qs_slice AS qsrs
+FROM #pm_qs_keys AS qsrs
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
 JOIN sys.query_store_query AS qsq
