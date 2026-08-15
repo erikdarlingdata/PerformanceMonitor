@@ -15,6 +15,22 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>
+    /// Whether the last deviation sweep for a server SKIPPED its maintenance block (#2266). Transition-logged
+    /// from this, so a sustained contention window reports once rather than once per sweep.
+    ///
+    /// <para><b>Why this needs recording at all.</b> The maintenance block below — the baseline seed, the #2189
+    /// heal, the #2203 forget and the prune — is best-effort: it opens the write connection with a 5-second lock
+    /// acquisition and, on <c>TimeoutException</c>, skips everything and lets the deviation read run anyway.
+    /// Skipping is the right call and the block comment there argues it well, but it was completely SILENT, so a
+    /// sustained window of write-lock contention meant baselines quietly stopped being seeded and healed with no
+    /// evidence anywhere. That matters because #2189 exists precisely because an unhealed baseline inverts the
+    /// alert permanently — the failure it prevents is invisible, so its absence has to be visible.</para>
+    ///
+    /// <para>Per server, because the lock is process-wide but the consequence is not: one server's skipped heal
+    /// says nothing about another's. Never pruned — one bool per server ever swept.</para>
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, bool> _lastMaintenanceSkipped = new();
     /* Effective state = STANDBY for a read-only log-shipping secondary (is_in_standby), else the raw
        state_desc. A standby secondary reports state_desc = ONLINE with is_in_standby = 1 and flips through
        RESTORING on every log restore; collapsing it to a single stable STANDBY token means it baselines as
@@ -53,6 +69,7 @@ public partial class LocalDataService
            arm already handles. The alternative — letting the timeout escape — would either crash the sweep or,
            if swallowed into an empty result, read as "every database recovered" and clear the alert memory for
            all of them. Skipping maintenance is the only failure mode here that loses nothing. */
+        var maintenanceSkipped = false;
         try
         {
             using var maintenance = await OpenWriteConnectionAsync();
@@ -171,6 +188,32 @@ AND   database_name NOT IN (
         {
             /* Archival or compaction holds the write lock. Skip this cycle's maintenance and read anyway —
                see the block comment at the top of the method for why skipping is the only lossless option. */
+            maintenanceSkipped = true;
+        }
+
+        /* #2266: report the skip, on the TRANSITION. Warn rather than Error, because a single skipped cycle is
+           the expected benign outcome of colliding with archival and the next sweep re-runs everything; it is a
+           SUSTAINED run of them that means baselines have stopped being seeded and healed. One line when it
+           starts and one when it recovers, rather than a line per sweep that would read as noise and be
+           filtered — which is how the silence would effectively return. */
+        if (maintenanceSkipped)
+        {
+            if (!_lastMaintenanceSkipped.TryGetValue(serverId, out var wasSkipped) || !wasSkipped)
+            {
+                _lastMaintenanceSkipped[serverId] = true;
+                AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
+                    $"server {serverId}: skipped this cycle's database-state maintenance — could not acquire the " +
+                    "store write lock within 5s (archival or compaction holds it). Baselines are not being " +
+                    "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
+                    "occasionally — if it repeats, the write lock is contended.");
+            }
+        }
+        else if (_lastMaintenanceSkipped.TryGetValue(serverId, out var hadSkipped) && hadSkipped)
+        {
+            _lastMaintenanceSkipped[serverId] = false;
+            AppLogger.Info(nameof(GetDatabaseStateDeviationsAsync),
+                $"server {serverId}: database-state maintenance is running again after one or more skipped " +
+                "cycles (#2266).");
         }
 
         using var connection = await OpenConnectionAsync();
