@@ -263,6 +263,80 @@ public sealed partial class ViewerDataService : IAsyncDisposable
             ? ApplyConnectionTimeout(connectionString, seconds)
             : connectionString;
         _dataSource = NpgsqlDataSource.Create(effectiveConnectionString);
+        StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
+    }
+
+    /// <summary>
+    /// Whether this viewer's store is reached over loopback — the best available proxy for "the Darling service
+    /// runs on THIS machine" (#2279).
+    ///
+    /// <para><b>Why it is a proxy for that at all.</b> A DPAPI blob is <c>LocalMachine</c>-scoped, so a
+    /// credential this viewer encrypts is decryptable only on this machine, and the service is the thing that
+    /// has to decrypt it. The managed deploy builds its store connection on literal <c>127.0.0.1</c>
+    /// (<c>ViewerSettings</c>, matching the service's own <c>DarlingManagedPostgres.BuildConnectionString</c>),
+    /// and the service runs where its managed store runs. So a loopback store means viewer and service share a
+    /// machine and a saved credential will work — which is the single-box deploy the DPAPI design targets, and
+    /// where a warning would be pure noise.</para>
+    ///
+    /// <para><b>What it deliberately does not claim.</b> A non-loopback store does NOT prove the viewer is
+    /// remote — a bring-your-own store on another host with the service local is a real configuration, and it
+    /// reads as false here. That is why #2279 warns rather than refuses: this signal is good enough to decide
+    /// whether to SAY something, and not good enough to decide whether to BLOCK. Getting that backwards would
+    /// refuse a legitimate first-run Add on the service host.</para>
+    /// </summary>
+    public bool StoreIsOnThisMachine { get; }
+
+    /// <summary>
+    /// True when a store connection string names a loopback host, or names none at all (#2279).
+    ///
+    /// <para>Static and pure so the rule is testable without a store — it is the whole basis of the warning, and
+    /// a viewer cannot be stood up in a unit test. Uses the base <see cref="DbConnectionStringBuilder"/> rather
+    /// than Npgsql's, for the reason documented on <see cref="ApplyConnectionTimeout"/>: the Npgsql builder
+    /// answers <c>ContainsKey</c> for every KNOWN key rather than only the present ones, so it cannot tell an
+    /// omitted host from a specified one.</para>
+    ///
+    /// <para>An omitted host counts as loopback because that is what it MEANS — Npgsql defaults to localhost, so
+    /// a string with no <c>Host</c> is a local store and must not warn. <c>::1</c> and <c>localhost</c> are
+    /// included alongside <c>127.0.0.1</c> even though the managed path always writes the literal IPv4 form,
+    /// because a hand-written BYO string pointing at the local box is still local and warning about it would be
+    /// wrong.</para>
+    /// </summary>
+    internal static bool StoreHostIsLoopback(string? connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            return true;
+        }
+
+        string? host = null;
+        try
+        {
+            var builder = new DbConnectionStringBuilder { ConnectionString = connectionString };
+            if (builder.ContainsKey("Host"))
+            {
+                host = builder["Host"]?.ToString();
+            }
+            else if (builder.ContainsKey("Server"))
+            {
+                host = builder["Server"]?.ToString();
+            }
+        }
+        catch (ArgumentException)
+        {
+            /* An unparseable string is not evidence the store is remote, and this decides only whether to show
+               a hint — so fail toward silence rather than toward a warning nobody can act on. */
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return true;
+        }
+
+        var trimmed = host.Trim();
+        return trimmed.Equals("127.0.0.1", StringComparison.Ordinal)
+            || trimmed.Equals("::1", StringComparison.Ordinal)
+            || trimmed.Equals("localhost", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

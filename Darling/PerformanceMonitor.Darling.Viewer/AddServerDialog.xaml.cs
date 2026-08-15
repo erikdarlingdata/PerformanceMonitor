@@ -221,7 +221,36 @@ public partial class AddServerDialog : Window
         {
             StatusText.Text = "";
         }
+        /* #2279: SQL auth means a password, and a password is stored as a DPAPI LocalMachine blob that ONLY the
+           machine writing it can decrypt. The service is what has to decrypt it, so a credential saved from a
+           viewer on another PC can never be used and the server fails to connect on every sweep afterwards —
+           the #2255 report. Said as soon as the mode is picked, in the same place and the same way the Azure
+           arm above says its piece, so it lands before the password is typed rather than after the save.
+
+           WARNED, not refused: a non-loopback store does not prove this viewer is remote (a BYO store on
+           another host with the service local reads the same), and refusing would block a legitimate first-run
+           Add. Silent for a loopback store, which is the managed single-box deploy and the overwhelmingly
+           common case — a hint that fires for everyone is a hint nobody reads. */
+        else if (SqlAuthRadio.IsChecked == true && _dataService is { StoreIsOnThisMachine: false })
+        {
+            StatusText.Text = SqlCredentialMachineBoundHint;
+        }
+        else if (StatusText.Text == SqlCredentialMachineBoundHint)
+        {
+            StatusText.Text = "";
+        }
     }
+
+    /// <summary>
+    /// The #2279 hint. A const so <see cref="AuthMode_Changed"/> can clear exactly its own message when the mode
+    /// changes away — the same self-clearing discipline the Azure arm uses, which is what stops a stale hint
+    /// sitting under an unrelated mode.
+    /// </summary>
+    private const string SqlCredentialMachineBoundHint =
+        "This viewer's store is not on this machine. A SQL-auth password is encrypted for THIS machine only, " +
+        "so if the Darling service runs elsewhere it will not be able to decrypt it and the server will fail " +
+        "to connect. Add it from a viewer on the service's host, run --add-server there, or use an env:/file: " +
+        "reference instead.";
 
     private string GetSelectedEncryptMode() => EncryptModeComboBox.SelectedIndex switch
     {
