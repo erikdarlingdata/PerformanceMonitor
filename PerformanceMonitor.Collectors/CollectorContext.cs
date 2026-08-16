@@ -126,6 +126,29 @@ public sealed class CollectorContext
     public bool CapturePlanXml { get; init; }
 
     /// <summary>
+    /// When true, the query_store payload leaves <c>query_sql_text</c> NULL and the host is responsible
+    /// for resolving statement text through <see cref="QueryStoreCollector.BuildTextFetchQuery"/> instead
+    /// (#2150). Default false, which keeps the text inline exactly as it ships today.
+    ///
+    /// <para><b>Why the text has to leave that projection.</b> The payload selects it inside a
+    /// <c>TOP ... WITH TIES ... ORDER BY last_execution_time</c>, and a Top-N Sort carries every output
+    /// column through the sort while reading ALL of its input before emitting a row — so choosing the rows
+    /// to ship materialized <c>nvarchar(max)</c> text for the entire qualifying set. Measured on a
+    /// purpose-built Azure SQL DB store with #2210's plan XML already gone, the ONE column being the only
+    /// difference: time-to-first-row 4.67s against 0.45s at 1,505 rows, 5.02s against 0.57s at 4,037.
+    /// Neither knob bounds it — <c>TOP (500)</c> measured the same as <c>TOP (50000)</c>, and wall time was
+    /// flat from a 4 MB to a 256 MB client budget, because the server finishes before the client sees a
+    /// byte.</para>
+    ///
+    /// <para><b>Why this is a flag and not simply removed</b>, which is the part worth being careful about:
+    /// Lite stores that text inline in DuckDB and its grid reads it from there, so nulling the column
+    /// unconditionally would blind Lite. Gated, the emitted column keeps its ORDINAL either way — same
+    /// shape, one value — which is the pattern the version-gated columns in this collector already use, and
+    /// it means a host that has not built text storage keeps working unchanged.</para>
+    /// </summary>
+    public bool FetchQueryTextSeparately { get; init; }
+
+    /// <summary>
     /// When true (the default — today's behavior), the default_trace_events collector records
     /// Object:Created/Altered/Deleted schema-change (DDL) events; when false its
     /// <c>@include_object_ddl</c> gate drops that entire slice while leaving every other curated

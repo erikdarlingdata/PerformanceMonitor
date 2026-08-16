@@ -724,6 +724,25 @@ END;
            itself is a separate, later migration. */
         const string planTextCol = "query_plan_text = CONVERT(nvarchar(1), NULL),";
 
+        /* #2150: the LAST nvarchar(max) in this projection, and now the whole remaining cost of it. The cap
+           and ship order sit above these joins, so a Top-N Sort carries the text through the sort and reads
+           all of its input before emitting row one — choosing 50,000 rows materialized text for the entire
+           qualifying set. Measured with #2210's plan XML already gone and this column as the only
+           difference: time-to-first-row 4.67s vs 0.45s at 1,505 rows, 5.02s vs 0.57s at 4,037. Neither knob
+           bounds it (TOP (500) == TOP (50000); wall time flat from a 4 MB to a 256 MB client budget).
+
+           Gated rather than removed, because Lite stores this text inline in DuckDB and reads it from
+           there — nulling it unconditionally would blind Lite, which is why this is a host flag and not a
+           deletion. The ORDINAL is identical either way, the same discipline the version-gated columns
+           above follow, so a host that has not built text storage is byte-compatible.
+
+           The query_text JOIN deliberately STAYS when the column is nulled: it is one row per key and the
+           measurement above was taken with it in place, so removing it would be an unmeasured change riding
+           along on a measured one. */
+        string queryTextCol = context.FetchQueryTextSeparately
+            ? "query_sql_text = CONVERT(nvarchar(1), NULL),"
+            : "query_sql_text = qst.query_sql_text,";
+
         /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
            version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
            ordinal — byte-identical shape to the attributed form. The interval-identity pair (#1841 tier 2)
@@ -961,7 +980,7 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
                 OBJECT_SCHEMA_NAME(qsq.object_id) + N'.' + OBJECT_NAME(qsq.object_id),
                 N'Unknown')
         END,
-    query_sql_text = qst.query_sql_text,
+    {queryTextCol}
     query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
     count_executions = qsrs.count_executions,
     avg_duration = qsrs.avg_duration,
@@ -1217,6 +1236,101 @@ SELECT
 FROM budgeted AS b
 WHERE b.running_bytes - b.plan_bytes < {budget}
 ORDER BY b.plan_id
+OPTION(RECOMPILE);";
+
+        var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
+
+        var text = $@"
+EXECUTE [{escapedDbName}].sys.sp_executesql
+    N'{escapedBody}';";
+
+        return new CollectorQuery(text, new List<CollectorParameter>());
+    }
+
+    /// <summary>
+    /// Statement text for one database, resumed from a <c>query_id</c> watermark and cut by a byte budget
+    /// (#2150) — the sibling of <see cref="BuildPlanFetchQuery"/>, and the other half of taking
+    /// <c>query_sql_text</c> out of the runtime stream.
+    ///
+    /// <para><b>Ordered by <c>query_id</c>, which is what makes a budget cut safe.</b> The cut falls between
+    /// two statements, so everything up to it is stored and the highest stored id is a resume point with no
+    /// hole — the same suffix argument the plan fetch rests on. <c>query_id</c> is also already a stored
+    /// payload column on the runtime row, so this needs no new fact-table column and no migration to be
+    /// joinable.</para>
+    ///
+    /// <para><b>Simpler than the plan fetch on purpose.</b> There is no candidate-window estimator here
+    /// because <c>DATALENGTH(query_sql_text)</c> is cheap: <c>sys.query_store_plan.query_plan</c> is
+    /// decompressed BY the view on access, which is what forces the plan side to bound how many plans a
+    /// windowed running total may touch, and <c>query_sql_text</c> has no such cost. A flat coarse bound
+    /// plus the exact running total is enough. There is no content hash either — plan XML can be rewritten
+    /// in place, whereas a statement's text is fixed for the life of its id.</para>
+    ///
+    /// <para><c>ROWS UNBOUNDED PRECEDING</c> rather than the <c>RANGE</c> default, for the same reason as
+    /// the plan fetch: <c>RANGE</c> would tie-group peers and force a spool, and the frame has to be per-row
+    /// because the cut falls between two rows.</para>
+    /// </summary>
+    public CollectorQuery BuildTextFetchQuery(string item, CollectorContext context, long watermark, int candidateTexts, long budgetBytes)
+    {
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        /* Same enforcement as the plan fetch's CapturePlanXml gate: this query exists only because the
+           payload stopped carrying the text, so issuing it from a host that still ships the text inline is a
+           caller bug rather than a harmless extra round trip — it would fetch and store text nobody reads. */
+        if (!context.FetchQueryTextSeparately)
+        {
+            throw new InvalidOperationException(
+                "BuildTextFetchQuery requires FetchQueryTextSeparately; a host that still ships query_sql_text inline must not issue the text fetch.");
+        }
+
+        /* A non-positive budget makes the predicate `running_bytes - text_bytes < 0` exclude even the FIRST
+           candidate (its running total before it is 0, and 0 < 0 is false), so the pass ships nothing, the
+           watermark holds, and the next pass re-selects the same statements — a stall that looks like a
+           quiet database. */
+        if (budgetBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(budgetBytes), budgetBytes, "The text-fetch byte budget must be positive; a zero or negative budget ships nothing and stalls the watermark.");
+        }
+
+        /* Same stall, other route: TOP (0) returns no rows and a negative literal is a syntax error. */
+        if (candidateTexts <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(candidateTexts), candidateTexts, "The candidate text count must be positive; TOP (0) ships nothing and stalls the watermark.");
+        }
+
+        var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
+        var k = candidateTexts.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var floor = watermark.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        var body = $@"WITH candidates AS (
+    SELECT TOP ({k})
+        query_id = qsq.query_id,
+        query_sql_text = qst.query_sql_text
+    FROM sys.query_store_query AS qsq
+    JOIN sys.query_store_query_text AS qst
+      ON qst.query_text_id = qsq.query_text_id
+    WHERE qsq.query_id > {floor}
+    ORDER BY qsq.query_id
+),
+budgeted AS (
+    SELECT
+        query_id = c.query_id,
+        query_sql_text = c.query_sql_text,
+        text_bytes = COALESCE(DATALENGTH(c.query_sql_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(c.query_sql_text), 0)) OVER (ORDER BY c.query_id ROWS UNBOUNDED PRECEDING)
+    FROM candidates AS c
+)
+SELECT
+    query_id = b.query_id,
+    query_sql_text = b.query_sql_text
+FROM budgeted AS b
+WHERE b.running_bytes - b.text_bytes < {budget}
+ORDER BY b.query_id
 OPTION(RECOMPILE);";
 
         var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);

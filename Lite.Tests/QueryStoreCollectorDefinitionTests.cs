@@ -37,7 +37,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         object? probeResult = null,
         DateTime? watermark = null,
         DateTime? collectionTime = null,
-        bool capturePlanXml = false)
+        bool capturePlanXml = false,
+        bool fetchQueryTextSeparately = false)
         => new()
         {
             ServerId = 42,
@@ -48,6 +49,7 @@ public sealed class QueryStoreCollectorDefinitionTests
             Watermark = watermark,
             EnumerationProbeResult = probeResult,
             CapturePlanXml = capturePlanXml,
+            FetchQueryTextSeparately = fetchQueryTextSeparately,
         };
 
     /// <summary>
@@ -510,6 +512,109 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time ASC\nOPTION(RECOMPILE);", Lf(text), StringComparison.Ordinal);
         Assert.DoesNotContain("LOOP JOIN", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2150: with the flag off — which is Lite, always — the payload is UNCHANGED, text and all.
+    ///
+    /// <para>This is the pin that makes the feature safe to add at all. Lite stores <c>query_sql_text</c>
+    /// inline in DuckDB and its grid reads it from there, so nulling that column unconditionally would
+    /// blind Lite. The flag exists for exactly that reason, and "off changes nothing" is the property that
+    /// has to be enforced rather than assumed.</para>
+    /// </summary>
+    [Fact]
+    public void WithoutTheFlag_TheTextStaysInline()
+    {
+        foreach (var azure in new[] { false, true })
+        {
+            var text = PayloadSql(MakeContext(isAzureSqlDb: azure));
+
+            Assert.Contains("query_sql_text = qst.query_sql_text,", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("query_sql_text = CONVERT", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #2150: with the flag on the text column becomes a placeholder AT THE SAME ORDINAL, and nothing else
+    /// about the payload moves.
+    ///
+    /// <para>The ordinal is the load-bearing part: the readers index this row by number, so a column that
+    /// changed position would silently shift every later field onto the wrong value. Asserted by
+    /// normalizing the one column out of both forms and requiring the remainder to be identical — which
+    /// covers "nothing else moved" for every column at once, rather than for the handful someone thought
+    /// to list.</para>
+    ///
+    /// <para>The <c>query_store_query_text</c> join deliberately REMAINS. It is one row per key, and the
+    /// 10x measurement behind this change was taken with it in place, so dropping it would be an
+    /// unmeasured change riding along on a measured one.</para>
+    /// </summary>
+    [Fact]
+    public void WithTheFlag_TheTextIsNulledAtTheSameOrdinal()
+    {
+        var inline = PayloadSql(MakeContext());
+        var nulled = PayloadSql(MakeContext(fetchQueryTextSeparately: true));
+
+        Assert.DoesNotContain("query_sql_text = qst.query_sql_text", nulled, StringComparison.Ordinal);
+        Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),", nulled, StringComparison.Ordinal);
+        /* Immediately before query_hash, exactly where the real column sat. */
+        Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),\n    query_hash", Lf(nulled), StringComparison.Ordinal);
+        Assert.Contains("JOIN sys.query_store_query_text AS qst", nulled, StringComparison.Ordinal);
+
+        Assert.Equal(
+            inline.Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal),
+            nulled.Replace("query_sql_text = CONVERT(nvarchar(1), NULL),", "@@TEXT@@", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #2150: the text fetch resumes from a <c>query_id</c> watermark, is cut by an exact byte budget, and
+    /// ships in <c>query_id</c> order — the ordering being what makes a budget cut a SUFFIX, so the highest
+    /// stored id resumes with no hole.
+    /// </summary>
+    [Fact]
+    public void TextFetch_ResumesFromTheWatermark_AndIsBudgetCutInQueryIdOrder()
+    {
+        var sql = QueryStoreCollector.Instance.BuildTextFetchQuery(
+            "SO", MakeContext(fetchQueryTextSeparately: true), watermark: 4242,
+            candidateTexts: QueryStoreTextState.CandidateTexts, budgetBytes: 12 * 1024 * 1024).Text;
+
+        Assert.Contains("EXECUTE [SO].sys.sp_executesql", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE qsq.query_id > 4242", sql, StringComparison.Ordinal);
+        Assert.Contains($"TOP ({QueryStoreTextState.CandidateTexts})", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsq.query_id", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY b.query_id", sql, StringComparison.Ordinal);
+        Assert.Contains("b.running_bytes - b.text_bytes < 12582912", sql, StringComparison.Ordinal);
+        /* ROWS, not the RANGE default: RANGE tie-groups peers and forces a spool, and the frame has to be
+           per-row because the cut falls BETWEEN two statements. */
+        Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE)", sql, StringComparison.Ordinal);
+        /* It fetches text and nothing else — plan XML has its own fetch, with its own watermark. */
+        Assert.DoesNotContain("query_plan", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2150: every input that would make the fetch ship nothing and silently stall the watermark throws
+    /// instead. A stalled watermark looks exactly like a quiet database, which is why these are exceptions
+    /// rather than no-ops — the plan fetch learned this the hard way from several directions.
+    /// </summary>
+    [Fact]
+    public void TextFetch_RefusesInputsThatWouldStallTheWatermark()
+    {
+        var enabled = MakeContext(fetchQueryTextSeparately: true);
+
+        /* Issuing it while the host still ships text inline would fetch and store text nobody reads. */
+        Assert.Throws<InvalidOperationException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", MakeContext(), 0, 5_000, 1024));
+
+        /* `running_bytes - text_bytes < 0` excludes even the first candidate, so the pass ships nothing. */
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", enabled, 0, 5_000, 0));
+
+        /* TOP (0) returns no rows; a negative literal is a syntax error. */
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", enabled, 0, 0, 1024));
+
+        Assert.Throws<ArgumentNullException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", null!, 0, 5_000, 1024));
     }
 
     /// <summary>
