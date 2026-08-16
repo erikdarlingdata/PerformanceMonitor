@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -32,7 +31,14 @@ public static class GcfCallToolFilter
         if (wire == null)
             return result;
 
-        result.Content = new List<ContentBlock> { new TextContentBlock { Text = wire } };
-        return result;
+        // Return a new result with only the text block replaced, rather than mutating the
+        // one the tool produced; the other fields are carried over unchanged.
+        return new CallToolResult
+        {
+            Content = new List<ContentBlock> { new TextContentBlock { Text = wire } },
+            StructuredContent = result.StructuredContent,
+            IsError = result.IsError,
+            Meta = result.Meta,
+        };
     }
 }

@@ -24,9 +24,10 @@ public static class GcfOutput
         );
 
     // Returns a GCF wire for the given JSON, or null to keep the JSON. Null is returned
-    // whenever the JSON does not parse, GCF is not smaller than the JSON (never-grow
-    // guard), or the wire does not round-trip (fail-safe), so enabling GCF never grows or
-    // garbles a tool result.
+    // whenever the JSON does not parse, contains a number GCF cannot carry exactly (a
+    // non-integer beyond double precision, e.g. a high-precision decimal), GCF is not
+    // smaller than the JSON (never-grow guard), or the decoded wire does not equal the input
+    // (fail-safe), so enabling GCF never grows, drops, or garbles a tool result.
     public static string? TryEncode(string json)
     {
         if (string.IsNullOrEmpty(json))
@@ -58,12 +59,15 @@ public static class GcfOutput
         if (wire.Length >= json.Length)
             return null;
 
-        // Fail-safe: require a stable round-trip (decode then re-encode reproduces the
-        // wire). Combined with the int64-preserving decode below, this rejects any value
-        // GCF cannot represent losslessly.
+        // Fail-safe: verify the wire against the INPUT, not against itself. Decode the wire
+        // back to a value and require it to equal the model the tool's JSON parsed to
+        // (`native`). FromJson has already declined any number the wire could not carry
+        // exactly, so a match here means the JSON survives the full JSON -> GCF -> value
+        // round-trip. Object key order may normalize to header order (semantically equal for
+        // JSON objects), so the key comparison is order-insensitive.
         try
         {
-            if (Gcf.EncodeGeneric(Gcf.DecodeGeneric(wire)) != wire)
+            if (!ValuesEqual(Gcf.DecodeGeneric(wire), native))
                 return null;
         }
         catch
@@ -72,6 +76,59 @@ public static class GcfOutput
         }
 
         return wire;
+    }
+
+    // Order-insensitive structural equality over the gcf-dotnet model (OrderedMap / List /
+    // long / double / string / bool / null), used to confirm a decoded wire equals the
+    // input model.
+    private static bool ValuesEqual(object? a, object? b)
+    {
+        if (a is null || b is null)
+            return a is null && b is null;
+
+        if (a is OrderedMap ma && b is OrderedMap mb)
+        {
+            if (ma.Count != mb.Count)
+                return false;
+            foreach (var key in ma.Keys)
+            {
+                if (!mb.TryGetValue(key, out var vb) || !ValuesEqual(ma[key], vb))
+                    return false;
+            }
+            return true;
+        }
+
+        if (a is List<object?> la && b is List<object?> lb)
+        {
+            if (la.Count != lb.Count)
+                return false;
+            for (var i = 0; i < la.Count; i++)
+                if (!ValuesEqual(la[i], lb[i]))
+                    return false;
+            return true;
+        }
+
+        if (a is string sa && b is string sb)
+            return sa == sb;
+        if (a is bool ba && b is bool bb)
+            return ba == bb;
+        if (IsNumber(a) && IsNumber(b))
+            return NumbersEqual(a!, b!);
+        return false;
+    }
+
+    private static bool IsNumber(object? v) => v is long || v is double;
+
+    // long/long compare exactly; a long and an integer-valued double (an integer can decode
+    // as either) compare by value. Precision-lossy numbers never reach here: FromJson
+    // declined them before the wire was produced.
+    private static bool NumbersEqual(object a, object b)
+    {
+        if (a is long al && b is long bl)
+            return al == bl;
+        var da = a is long la ? la : (double)a;
+        var db = b is long lb ? lb : (double)b;
+        return da.Equals(db);
     }
 
     // Converts a parsed JSON value into the gcf-dotnet native model (OrderedMap / List /
@@ -99,7 +156,15 @@ public static class GcfOutput
             case JsonValueKind.Number:
                 if (e.TryGetInt64(out var l))
                     return l;
-                return e.GetDouble();
+                // A non-integer is carried on the wire as an IEEE-754 double (SPEC 2.3.2).
+                // Keep it only when the double holds the JSON token exactly; otherwise
+                // decline the whole payload (this throw is caught in TryEncode and the tool
+                // result stays JSON) rather than emit a wire that has silently dropped
+                // precision. A token outside the decimal range is inherently double-domain.
+                var d = e.GetDouble();
+                if (e.TryGetDecimal(out var exact) && (decimal)d != exact)
+                    throw new NotSupportedException("number not exactly representable as a double");
+                return d;
 
             case JsonValueKind.True:
                 return true;

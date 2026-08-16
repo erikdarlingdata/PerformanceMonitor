@@ -88,6 +88,46 @@ public class GcfOutputTests : IDisposable
         Assert.Null(GcfOutput.TryEncode("{not json"));
     }
 
+    private static string Numbered(object value, int rows)
+    {
+        var arr = Enumerable
+            .Range(0, rows)
+            .Select(_ => new Dictionary<string, object> { ["metric"] = value, ["server"] = "SQLPROD01" })
+            .ToList();
+        return JsonSerializer.Serialize(
+            new { rows = arr },
+            new JsonSerializerOptions { WriteIndented = true }
+        );
+    }
+
+    [Fact]
+    public void TryEncode_Keeps_Decimal_That_Fits_Double()
+    {
+        // 33.5 is exactly representable as a double, so it round-trips and GCF is kept.
+        var wire = GcfOutput.TryEncode(Numbered(33.5, 20));
+
+        Assert.NotNull(wire);
+        Assert.Contains("33.5", wire);
+    }
+
+    [Fact]
+    public void TryEncode_Declines_High_Precision_Decimal()
+    {
+        // 33.333333333333333 (17 significant digits) cannot be held by a double without
+        // loss. A same-shape array of integers at this size encodes to GCF (asserted by the
+        // Blocking round-trip test), so a null here is the precision guard declining rather
+        // than the never-grow guard: the result stays JSON instead of a silently rounded wire.
+        Assert.Null(GcfOutput.TryEncode(Numbered(33.333333333333333m, 20)));
+    }
+
+    [Fact]
+    public void TryEncode_Declines_UInt64_Above_Int64()
+    {
+        // ulong.MaxValue exceeds Int64 and is not exactly a double either; keep JSON.
+        var json = Numbered(18446744073709551615UL, 20);
+        Assert.Null(GcfOutput.TryEncode(json));
+    }
+
     [Fact]
     public void TryEncode_Preserves_Int64_Above_2Pow53()
     {
