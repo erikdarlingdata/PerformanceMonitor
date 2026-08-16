@@ -72,12 +72,53 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>>> _cache = new();
 
     /// <summary>
+    /// When this (server, collector) pair was last looked at, and the look before that:
+    /// serverId -> collectorName -> (current pass, previous pass).
+    ///
+    /// <para>Needed by <see cref="CalculateDeltaWithSeriesAge"/> to answer "did this counter series begin
+    /// since we last looked?" for a key that has no history of its own. The PREVIOUS pass is the useful
+    /// one, and it is tracked separately from the per-key timestamps because a brand-new key has none.</para>
+    ///
+    /// <para>Advanced only when the collection time actually CHANGES, which is what makes it stable
+    /// across the many rows of one pass: a collector calls in per row, and if the first row rolled the
+    /// window forward every later row in the same pass would compare against its own pass and see a zero
+    /// gap — quietly disabling the credit for every row but the first.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, (DateTime Current, DateTime? Previous)>> _passes = new();
+
+    /// <summary>
+    /// Rolls the (server, collector) pass window forward when <paramref name="collectionTime"/> is a new
+    /// pass, and returns the previous pass — the boundary a series age is measured against.
+    /// </summary>
+    private DateTime? PreviousPass(int serverId, string collectorName, DateTime? collectionTime)
+    {
+        if (!collectionTime.HasValue)
+        {
+            return null;
+        }
+
+        var byCollector = _passes.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, (DateTime, DateTime?)>());
+        var updated = byCollector.AddOrUpdate(
+            collectorName,
+            _ => (collectionTime.Value, null),
+            (_, existing) => existing.Current == collectionTime.Value
+                ? existing
+                : (collectionTime.Value, existing.Current));
+
+        return updated.Previous;
+    }
+
+    /// <summary>
     /// Removes all cached entries for a server (e.g., when the server tab is closed).
     /// Next collection will re-seed from database if needed.
     /// </summary>
     public void ClearServer(int serverId)
     {
         _cache.TryRemove(serverId, out _);
+        /* The pass window goes with the baselines it is interpreted against. Left behind, a re-added
+           server's first pass would measure a series age against a look from before it was removed and
+           credit a full counter to an interval that never happened. */
+        _passes.TryRemove(serverId, out _);
     }
 
     /// <summary>
@@ -108,7 +149,24 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     /// </summary>
     public long CalculateDeltaWithInterval(int serverId, string collectorName, string key, long currentValue,
         out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
+        => Core(serverId, collectorName, key, currentValue, seriesAgeSeconds: null, out intervalSeconds,
+            collectionTime, maxGapSeconds);
+
+    /// <inheritdoc />
+    public long CalculateDeltaWithSeriesAge(int serverId, string collectorName, string key, long currentValue,
+        int? seriesAgeSeconds, out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
+        => Core(serverId, collectorName, key, currentValue, seriesAgeSeconds, out intervalSeconds,
+            collectionTime, maxGapSeconds);
+
+    private long Core(int serverId, string collectorName, string key, long currentValue,
+        int? seriesAgeSeconds, out int intervalSeconds, DateTime? collectionTime, int maxGapSeconds)
     {
+        /* Read (and roll) the pass window BEFORE touching the key cache: the Add path below needs the
+           previous pass, and a key that is new has no timestamp of its own to supply it. Always called,
+           even when no series age was passed, so the window advances on every pass rather than only on
+           the passes that happen to use the hint. */
+        var previousPass = PreviousPass(serverId, collectorName, collectionTime);
+
         var serverCache = _cache.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>>());
         var collectorCache = serverCache.GetOrAdd(collectorName, _ => new ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>());
 
@@ -118,11 +176,36 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         collectorCache.AddOrUpdate(
             key,
             /* Add: first time seeing this key — store the baseline only and return 0.
-               All callers track cumulative counters (perfmon, wait stats, file IO, etc.). */
+               All callers track cumulative counters (perfmon, wait stats, file IO, etc.).
+
+               #2235 exception, and the ONLY case where a first sighting can report real work: when the
+               caller supplies a series age younger than the gap since our previous pass, the counter
+               demonstrably STARTED inside that gap, so its whole value accrued there and its baseline
+               was 0 rather than currentValue. Without this a recompiling plan reports 0 forever — it
+               presents a new plan_handle, hence a new key, on nearly every sighting. A real interval is
+               reported alongside it because this delta IS knowable; the (0, 0) pairing stays reserved
+               for the cases that genuinely are not. */
             _ =>
             {
                 delta = 0;
                 interval = 0;
+
+                if (seriesAgeSeconds.HasValue && seriesAgeSeconds.Value >= 0
+                    && collectionTime.HasValue && previousPass.HasValue)
+                {
+                    var gap = (collectionTime.Value - previousPass.Value).TotalSeconds;
+
+                    /* Bounded by the same gap policy as the reset branch: past it, attributing a whole
+                       cumulative counter to one interval is the inflated spike that guard exists to
+                       prevent — a plan compiled during an hour-long outage is not an hour of work in
+                       the next minute. */
+                    if (gap > 0 && (maxGapSeconds <= 0 || gap <= maxGapSeconds) && seriesAgeSeconds.Value <= gap)
+                    {
+                        delta = currentValue;
+                        interval = (int)gap;
+                    }
+                }
+
                 return (currentValue, collectionTime);
             },
             /* Update: compute delta atomically */

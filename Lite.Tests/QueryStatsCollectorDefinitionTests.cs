@@ -165,20 +165,22 @@ public sealed class QueryStatsCollectorDefinitionTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = MakeContext(deltas: deltas, capturePlanXml: true);
 
-        /* Flag on = the SELECT carries host_object_name at ordinal 42 (#2012 stage 2) and the
-           trailing query_plan_xml column at ordinal 43. */
-        var row44 = new object[44];
-        row44[0] = "SO"; row44[1] = "0xQH"; row44[2] = "0xQPH";
-        row44[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
-        row44[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
-        for (int i = 5; i < 36; i++) row44[i] = (long)i;
-        row44[22] = 4L; row44[23] = 8L;
-        row44[36] = "0xSH"; row44[37] = "0xPH"; row44[38] = "SELECT 1";
-        row44[39] = 3L; row44[40] = 66; row44[41] = 512;
-        row44[42] = "dbo.HostProc";
-        row44[43] = "<ShowPlanXML>captured</ShowPlanXML>";
+        /* Flag on = the SELECT carries host_object_name at ordinal 42 (#2012 stage 2), then
+           compile_age_seconds at 43 (#2235, inside SelectColumnsText so it is present in BOTH capture
+           modes), then the trailing query_plan_xml column at 44. */
+        var row45 = new object[45];
+        row45[0] = "SO"; row45[1] = "0xQH"; row45[2] = "0xQPH";
+        row45[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
+        row45[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
+        for (int i = 5; i < 36; i++) row45[i] = (long)i;
+        row45[22] = 4L; row45[23] = 8L;
+        row45[36] = "0xSH"; row45[37] = "0xPH"; row45[38] = "SELECT 1";
+        row45[39] = 3L; row45[40] = 66; row45[41] = 512;
+        row45[42] = "dbo.HostProc";
+        row45[43] = 17;
+        row45[44] = "<ShowPlanXML>captured</ShowPlanXML>";
 
-        using var reader = new FakeCollectorDataReader(row44);
+        using var reader = new FakeCollectorDataReader(row45);
         var rows = await QueryStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         var writer = new RecordingCollectorRowWriter();
@@ -187,6 +189,12 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Equal(51, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>captured</ShowPlanXML>", writer.Values[37]);   /* query_plan_xml payload slot */
         Assert.Equal("dbo.HostProc", writer.Values[50]);                          /* host_object_name payload slot */
+
+        /* #2235: the compile age reaches the delta calculator and is NOT stored — 51 payload values, as
+           pinned above, and one age per delta'd counter. Nine, because crediting only some of them would
+           make one row's metrics disagree about how much work it did. */
+        Assert.Equal(8, deltas.SeriesAges.Count);
+        Assert.All(deltas.SeriesAges, age => Assert.Equal(17, age));
     }
 
     private static string Collapse(string sql) => Regex.Replace(sql, @"\s+", "");
@@ -246,17 +254,20 @@ public sealed class QueryStatsCollectorDefinitionTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = CollectorTestContext.Make(deltas);
 
-        var row43 = new object[43];
-        row43[0] = "SO"; row43[1] = "0xQH"; row43[2] = "0xQPH";
-        row43[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
-        row43[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
-        for (int i = 5; i < 36; i++) row43[i] = (long)i;
-        row43[22] = 4L; row43[23] = 8L;   /* dop as long via GetValue */
-        row43[36] = "0xSH"; row43[37] = "0xPH"; row43[38] = "SELECT 1";
-        row43[39] = 3L; row43[40] = 66; row43[41] = 512;
-        row43[42] = "dbo.HostProc";       /* host_object_name (#2012 stage 2) */
+        /* 44 wide with the plan flag OFF: compile_age_seconds (#2235) lives inside SelectColumnsText, so
+           unlike query_plan_xml it is present in both capture modes and its ordinal never moves. */
+        var row44 = new object[44];
+        row44[0] = "SO"; row44[1] = "0xQH"; row44[2] = "0xQPH";
+        row44[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
+        row44[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
+        for (int i = 5; i < 36; i++) row44[i] = (long)i;
+        row44[22] = 4L; row44[23] = 8L;   /* dop as long via GetValue */
+        row44[36] = "0xSH"; row44[37] = "0xPH"; row44[38] = "SELECT 1";
+        row44[39] = 3L; row44[40] = 66; row44[41] = 512;
+        row44[42] = "dbo.HostProc";       /* host_object_name (#2012 stage 2) */
+        row44[43] = 25;                   /* compile_age_seconds (#2235) */
 
-        using var reader = new FakeCollectorDataReader(row43);
+        using var reader = new FakeCollectorDataReader(row44);
         var rows = await QueryStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         var writer = new RecordingCollectorRowWriter();
@@ -271,5 +282,14 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Equal(
             new[] { "query_stats_exec", "query_stats_worker", "query_stats_elapsed", "query_stats_reads", "query_stats_writes", "query_stats_phys_reads", "query_stats_rows", "query_stats_spills" },
             deltas.Calls.Select(c => c.Group).ToArray());
+
+        /* #2235: plan_handle is IN that key, so a recompile presents a new key and the first sighting of
+           it reports 0 — which on a churning instance is most of the server's CPU, and is invisible
+           because the honest "unknowable" path needs the same key to reappear lower. The compile age is
+           what lets the calculator tell "new to us" from "new to the world", so every one of the eight
+           counters must receive it: crediting only some would make one row's metrics disagree about how
+           much work it did. */
+        Assert.Equal(8, deltas.SeriesAges.Count);
+        Assert.All(deltas.SeriesAges, age => Assert.Equal(25, age));
     }
 }
