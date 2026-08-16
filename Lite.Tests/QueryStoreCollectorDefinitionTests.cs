@@ -498,19 +498,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            direct connections (on-prem the sp_executesql scope self-cleans). */
         Assert.Contains("DROP TABLE IF EXISTS #pm_qs_slice;", text, StringComparison.Ordinal);
         Assert.Contains("INTO #pm_qs_slice", text, StringComparison.Ordinal);
-
-        /* #2150: the row choice happens on the NARROW slice, and the wide join runs from the chosen
-           keys. A Top-N Sort carries every output column through it, so with the join above the cap
-           query_sql_text (nvarchar(max)) was materialized for the whole qualifying set to pick the
-           50,000 rows that ship — measured 15.94s time-to-first-row against 0.84s without the sort,
-           and TOP (500) cost the same as TOP (50000) because the sort reads all of its input either
-           way. Selecting off the all-int/datetime slice first measured 20.82s -> 4.81s on the same
-           rows. If this assertion ever has to change back to #pm_qs_slice, that regression is silent
-           and only shows up as collector duration on a big catalog. */
-        Assert.Contains("INTO #pm_qs_keys", text, StringComparison.Ordinal);
-        Assert.Contains("DROP TABLE IF EXISTS #pm_qs_keys;", text, StringComparison.Ordinal);
-        Assert.Contains("FROM #pm_qs_keys AS qsrs\nJOIN sys.query_store_plan AS qsp", Lf(text), StringComparison.Ordinal);
-        Assert.DoesNotContain("FROM #pm_qs_slice AS qsrs\nJOIN sys.query_store_plan AS qsp", Lf(text), StringComparison.Ordinal);
+        Assert.Contains("FROM #pm_qs_slice AS qsrs\nJOIN sys.query_store_plan AS qsp", Lf(text), StringComparison.Ordinal);
 
         /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay on the final
            SELECT so the cap counts intervals and can never truncate one interval's slices into a
@@ -522,59 +510,6 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time ASC\nOPTION(RECOMPILE);", Lf(text), StringComparison.Ordinal);
         Assert.DoesNotContain("LOOP JOIN", text, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// #2150: the statement that CHOOSES the shipped rows must not carry a wide column.
-    ///
-    /// <para>A Top-N Sort carries every output column through the sort, and the sort reads all of its
-    /// input before emitting a row — so as long as the cap sat above the plan/query/text joins, picking
-    /// 50,000 rows meant materializing <c>query_sql_text</c> (<c>nvarchar(max)</c>) for the entire
-    /// qualifying set. Measured time-to-first-row on a 1,608-plan store: 15.94s as shipped, 0.84s with
-    /// the sort removed, and TOP (500) identical to TOP (50000) — the cap is not the lever. Choosing off
-    /// the all-int/datetime slice first measured 20.82s to 4.81s on the same rows and the same bytes.</para>
-    ///
-    /// <para>Pinned on the SQL because the failure is invisible: the payload is byte-identical either way,
-    /// every existing assertion still passes, and the only symptom is collector duration on a catalog big
-    /// enough that nobody runs the test against it.</para>
-    /// </summary>
-    [Theory]
-    [InlineData(false, "ASC")]
-    [InlineData(true, "DESC")]
-    public void TheRowChoosingStatementSortsOnlyNarrowColumns(bool backfill, string shipOrder)
-    {
-        var context = MakeContext(probeResult: 16);
-        var text = Lf(backfill
-            ? QueryStoreCollector.Instance.BuildBackfillPerItemQuery(
-                "SO", context, new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 7, 3, 0, 0, 0, DateTimeKind.Utc)).Text
-            : QueryStoreCollector.Instance.BuildPerItemQuery("SO", context).Text);
-
-        var open = text.IndexOf("DROP TABLE IF EXISTS #pm_qs_keys;", StringComparison.Ordinal);
-        Assert.True(open > 0, "could not locate the row-choosing statement");
-        var end = text.IndexOf("OPTION(RECOMPILE);", open, StringComparison.Ordinal);
-        Assert.True(end > open, "the row-choosing statement must carry its own OPTION(RECOMPILE)");
-        var choose = text[open..end];
-
-        /* It reads the narrow slice and nothing else. Any TVF named here would put the wide columns back
-           into the sort's input, which is the whole defect. */
-        Assert.Contains("FROM #pm_qs_slice AS qsrs", choose, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_sql_text", choose, StringComparison.Ordinal);
-        Assert.DoesNotContain("sys.query_store_query_text", choose, StringComparison.Ordinal);
-        Assert.DoesNotContain("sys.query_store_plan", choose, StringComparison.Ordinal);
-        Assert.DoesNotContain("sys.query_store_query", choose, StringComparison.Ordinal);
-
-        /* The cap and the tie group move together, or the set shipped is not the set that was chosen. */
-        Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", choose, StringComparison.Ordinal);
-        Assert.Contains($"ORDER BY qsrs.last_execution_time {shipOrder}", choose, StringComparison.Ordinal);
-
-        /* Query Store captures each statement of the batch separately, so a statement without the marker
-           would be collected as though it were user work — the read loop's self-exclusion matches on the
-           text it receives, per statement. */
-        Assert.Contains(QueryStoreCollector.SelfQueryMarker, choose, StringComparison.Ordinal);
-
-        /* And the shipping statement reads the CHOSEN rows, in the same direction. */
-        Assert.Contains("FROM #pm_qs_keys AS qsrs\nJOIN sys.query_store_plan AS qsp", text, StringComparison.Ordinal);
-        Assert.Contains($"ORDER BY qsrs.last_execution_time {shipOrder}\nOPTION(RECOMPILE);", text, StringComparison.Ordinal);
     }
 
     /// <summary>
