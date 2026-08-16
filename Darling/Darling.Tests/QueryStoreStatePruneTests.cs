@@ -123,6 +123,10 @@ public sealed class QueryStoreStatePruneTests
 
         Assert.Contains(typeof(QueryStorePlanXmlState), stateClasses);
         Assert.Contains(typeof(QueryStoreBackfillState), stateClasses);
+        /* #2150 added a third, and the discovery above found it without being told — which is the property
+           this guard exists for. Named here anyway so a rename that quietly drops it out of the pattern
+           fails rather than silently shrinking the set under test. */
+        Assert.Contains(typeof(QueryStoreTextState), stateClasses);
 
         var declared = stateClasses
             .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static))
@@ -158,6 +162,12 @@ public sealed class QueryStoreStatePruneTests
             QueryStorePerDatabaseState.PrunableKeys);
         Assert.Contains(
             (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix),
+            QueryStorePerDatabaseState.PrunableKeys);
+        /* #2150: paired with its OWN collector name, not the plan fetch's. The two watermarks are stored
+           separately on purpose (they walk different catalogs at different rates), so borrowing the plan
+           fetch's owner here would prune nothing and look exactly like having nothing to prune. */
+        Assert.Contains(
+            (QueryStoreTextState.StateCollectorName, QueryStoreTextState.WatermarkKeyPrefix),
             QueryStorePerDatabaseState.PrunableKeys);
     }
 

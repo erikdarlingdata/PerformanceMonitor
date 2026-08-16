@@ -125,13 +125,16 @@ public sealed class AzureForeignStatePruneTests
     [Fact]
     public void BothArmsPruneEveryPerDatabasePrefix()
     {
-        Assert.Equal(3, QueryStorePerDatabaseState.PrunableKeys.Count);
+        Assert.Equal(4, QueryStorePerDatabaseState.PrunableKeys.Count);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStorePlanXmlState.WatermarkKeyPrefix);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.DoneKeyPrefix);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.HoleKeyPrefix);
+        /* #2150: the text watermark, keyed prefix + databaseName exactly like the plan watermark. */
+        Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
+            k => k.Prefix == QueryStoreTextState.WatermarkKeyPrefix);
 
         /* Nothing may sit outside both lists — a server-scoped key added to PrunableKeys by reflex would be
            deleted every cycle. */

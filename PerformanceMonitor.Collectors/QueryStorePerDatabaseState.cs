@@ -48,6 +48,11 @@ public static class QueryStorePerDatabaseState
         (QueryStorePlanXmlState.StateCollectorName, QueryStorePlanXmlState.WatermarkKeyPrefix),
         (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.DoneKeyPrefix),
         (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix),
+        /* #2150: the text watermark is keyed prefix + databaseName exactly like the plan watermark above,
+           so a dropped database's key must go with it. Paired with its OWN collector name rather than the
+           plan fetch's — the two watermarks are stored separately on purpose, and a prefix pruned under
+           the wrong owner silently deletes nothing. */
+        (QueryStoreTextState.StateCollectorName, QueryStoreTextState.WatermarkKeyPrefix),
     };
 
     /// <summary>
