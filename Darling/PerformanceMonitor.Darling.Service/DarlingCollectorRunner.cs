@@ -232,6 +232,37 @@ public sealed class DarlingCollectorRunner
                 server.ServerId, QueryStorePlanXmlState.StateCollectorName, cancellationToken);
         }
 
+        /* #2150: the text watermark lives under its OWN state owner, so it is a second read merged into the
+           same dictionary — the two prefixes (planwm: / textwm:) cannot collide, and the definition still
+           sees one flat State. Read unconditionally for query_store rather than behind _capturePlans(),
+           because the text fetch is not gated on plan capture: a host that turned plans off still needs its
+           statement text. Merged rather than replacing, so a store that has plan state but no text state
+           yet (every store before this rung) keeps working. */
+        if (string.Equals(definition.Name, "query_store", StringComparison.Ordinal))
+        {
+            var textState = await GetCollectorStateAsync(
+                server.ServerId, QueryStoreTextState.StateCollectorName, cancellationToken);
+
+            if (textState is { Count: > 0 })
+            {
+                var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+                if (collectorState is not null)
+                {
+                    foreach (var entry in collectorState)
+                    {
+                        merged[entry.Key] = entry.Value;
+                    }
+                }
+
+                foreach (var entry in textState)
+                {
+                    merged[entry.Key] = entry.Value;
+                }
+
+                collectorState = merged;
+            }
+        }
+
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -247,6 +278,13 @@ public sealed class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = _capturePlans(),
+            /* #2150: left FALSE deliberately until the readers resolve text from collect.query_store_text.
+               Flipping this nulls query_sql_text in the payload, and six reader surfaces still project
+               query_text straight off query_store_stats — so the flip and the reader conversion have to
+               land together or those surfaces silently lose text for new rows. The fetch, its watermark,
+               the store and the prune all ship here so the schema and the code path are in place and
+               reviewable on their own. */
+            FetchQueryTextSeparately = false,
             /* #2164: 0 from the default provider means "no override" — the collector keeps its own
                constant. Converted MB -> bytes here so the store knob stays operator-friendly. */
             TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
@@ -743,6 +781,20 @@ public sealed class DarlingCollectorRunner
                             await FetchAndStorePlansAsync(planFetchConnection, server, item, context, itemTimeout, ct);
                         }
 
+                        /* #2150: and this database's statement-text fetch, for the same reason and with the
+                           same shape — the payload no longer carries query_sql_text, because selecting it
+                           inside the shipping TOP/ORDER BY made a Top-N Sort materialize nvarchar(max) text
+                           for the whole qualifying set (measured 4.67s vs 0.45s time-to-first-row). Ships in
+                           query_id order so a budget cut is a suffix, which is what lets the watermark
+                           advance from a cut pass.
+
+                           Gated on the same flag the payload branches on, so the two can never disagree
+                           about who owns the text: if the column is nulled, this runs. */
+                        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
+                        {
+                            await FetchAndStoreQueryTextAsync(textFetchConnection, server, item, context, itemTimeout, ct);
+                        }
+
                         return batch;
                     },
                     writeBatch: (batch, ct) => WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, ct),
@@ -881,7 +933,33 @@ public sealed class DarlingCollectorRunner
                 ? QueryStorePlanXmlState.StateCollectorName
                 : definition.Name;
 
-            await SaveCollectorStateAsync(server.ServerId, stateOwner, context.PendingState, cancellationToken);
+            /* #2150: query_store's pending state now carries TWO watermarks with two owners, so it is split
+               by prefix on the way out. Writing the text watermark under the plan fetch's owner would still
+               read back (the load above merges both), but it would then never be pruned: the shared prune
+               set pairs textwm: with query_store_text, and a prefix pruned under the wrong owner deletes
+               nothing — which is indistinguishable from having nothing to prune. */
+            var textKeys = context.PendingState
+                .Where(entry => entry.Key.StartsWith(QueryStoreTextState.WatermarkKeyPrefix, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+
+            if (textKeys.Count > 0)
+            {
+                var others = context.PendingState
+                    .Where(entry => !textKeys.ContainsKey(entry.Key))
+                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+
+                await SaveCollectorStateAsync(
+                    server.ServerId, QueryStoreTextState.StateCollectorName, textKeys, cancellationToken);
+
+                if (others.Count > 0)
+                {
+                    await SaveCollectorStateAsync(server.ServerId, stateOwner, others, cancellationToken);
+                }
+            }
+            else
+            {
+                await SaveCollectorStateAsync(server.ServerId, stateOwner, context.PendingState, cancellationToken);
+            }
         }
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
@@ -1052,6 +1130,13 @@ public sealed class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = _capturePlans(),
+            /* #2150: left FALSE deliberately until the readers resolve text from collect.query_store_text.
+               Flipping this nulls query_sql_text in the payload, and six reader surfaces still project
+               query_text straight off query_store_stats — so the flip and the reader conversion have to
+               land together or those surfaces silently lose text for new rows. The fetch, its watermark,
+               the store and the prune all ship here so the schema and the code path are in place and
+               reviewable on their own. */
+            FetchQueryTextSeparately = false,
             /* #2164: 0 from the default provider means "no override" — the collector keeps its own
                constant. Converted MB -> bytes here so the store knob stays operator-friendly. */
             TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
@@ -1227,6 +1312,97 @@ public sealed class DarlingCollectorRunner
         {
             _logger?.LogWarning(ex,
                 "query_store plan fetch failed on '{Server}' database [{Database}] — runtime statistics are unaffected and the watermark is unchanged, so the next pass re-selects the same plans.",
+                server.Config.DisplayName, databaseName);
+        }
+    }
+
+    /// <summary>
+    /// One database's statement-text fetch (#2150), the sibling of <see cref="FetchAndStorePlansAsync"/>.
+    ///
+    /// <para>Exists because the runtime-stats payload stopped carrying <c>query_sql_text</c>: selecting it
+    /// inside the shipping <c>TOP ... ORDER BY</c> made a Top-N Sort materialize <c>nvarchar(max)</c> text
+    /// for the entire qualifying set before emitting row one (measured 4.67s against 0.45s
+    /// time-to-first-row, and neither the row cap nor the byte budget could bound it).</para>
+    ///
+    /// <para><b>A failure here is text-only.</b> Runtime statistics are already written by the time this
+    /// runs, and the watermark only advances on what LANDED — so a throw leaves the rows in place with their
+    /// text unresolved and the next pass re-selects the same statements. That is why this is a warning
+    /// rather than a failure of the collector.</para>
+    ///
+    /// <para><b>Known property of a first fill, stated rather than discovered.</b> The walk is ASCENDING by
+    /// <c>query_id</c>, because that is what makes a byte-budget cut a resumable suffix. On a store whose
+    /// watermark is still 0 that means the OLDEST statements resolve first, while the rows being collected
+    /// right now reference the newest ids — so a fresh store shows missing text for recent statements until
+    /// the walk catches up. Steady state is the opposite and is the case that matters: the watermark sits
+    /// near the top, so a newly-seen statement is fetched on the next pass.</para>
+    /// </summary>
+    private async Task FetchAndStoreQueryTextAsync(
+        SqlConnection sqlConnection,
+        ServerRuntime server,
+        string databaseName,
+        CollectorContext context,
+        int itemTimeout,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var watermark = QueryStoreTextState.Resolve(context.State, databaseName, context.CollectionTime);
+            var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
+
+            var query = QueryStoreCollector.Instance.BuildTextFetchQuery(
+                databaseName, context, watermark, QueryStoreTextState.CandidateTexts, budget);
+
+            var fetched = new List<FetchedQueryText>();
+            using (var command = CreateCollectorCommand(query, sqlConnection, itemTimeout))
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    fetched.Add(new FetchedQueryText(
+                        reader.GetInt64(0),
+                        reader.IsDBNull(1) ? null : reader.GetString(1)));
+                }
+            }
+
+            if (fetched.Count == 0)
+            {
+                return;
+            }
+
+            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var landed = await QueryStoreTextWriter.WriteAsync(
+                pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+
+            var advance = QueryStoreTextState.AdvanceWatermark(watermark, landed);
+            if (!advance.ArrivedInQueryIdOrder)
+            {
+                /* Loud rather than swallowed, same as the plan fetch: the ORDER BY is what makes a budget cut
+                   a suffix, so out-of-order arrival means that safety argument no longer holds and the pass
+                   earns no advance. */
+                _logger?.LogWarning(
+                    "query_store text fetch on '{Server}' database [{Database}]: statements arrived OUT OF query_id order — watermark held at {Watermark}. The ORDER BY is what makes a cut safe, so this pass earned no advance.",
+                    server.Config.DisplayName, databaseName, watermark);
+                return;
+            }
+
+            if (advance.Watermark > watermark)
+            {
+                /* Stamp carried FORWARD across an advance and stamped fresh only when the standing watermark
+                   was 0 (this pass WAS the full walk). Re-stamping on every advance would push the refresh
+                   horizon out forever on any database that keeps seeing new statements — which is exactly
+                   where a Query Store reset, the thing the horizon exists to recover from, would hurt most. */
+                var stamp = watermark > 0
+                    ? QueryStoreTextState.ResolveStamp(context.State, databaseName) ?? context.CollectionTime
+                    : context.CollectionTime;
+
+                context.PendingState[QueryStoreTextState.KeyFor(databaseName)] =
+                    QueryStoreTextState.Format(advance.Watermark, stamp);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(ex,
+                "query_store text fetch failed on '{Server}' database [{Database}] — runtime statistics are already written and the watermark is unchanged, so those rows keep unresolved text and the next pass re-selects the same statements.",
                 server.Config.DisplayName, databaseName);
         }
     }

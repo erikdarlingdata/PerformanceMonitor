@@ -59,7 +59,12 @@ public sealed class PgStatementTextTests
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(73, versions.Max());
+        /* #2150 added V74, so this rung is no longer the top — the "I am the top" claim moves to the newest
+           rung's own test (QueryStoreTextStoreTests) and this one keeps the invariants that stay true
+           forever: the rung is PRESENT, the ladder is ordered and dense, and the build's schema version
+           tracks the maximum. A gap is skipped SILENTLY on every upgraded store, so the objects would never
+           exist and no later upgrade would repair it. */
+        Assert.Contains(73, versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
 

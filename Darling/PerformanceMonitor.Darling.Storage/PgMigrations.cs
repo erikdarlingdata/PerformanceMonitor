@@ -130,6 +130,7 @@ public static class PgMigrations
         new Migration(71, "pg-blocking-edges", V71Sql),
         new Migration(72, "query-store-plan-map", V72Sql),
         new Migration(73, "pg-statement-text", V73Sql),
+        new Migration(74, "query-store-text", V74Sql),
     };
 
     /// <summary>
@@ -1687,6 +1688,36 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V74 — where the query-text fetch lands statement text (#2150), keyed
+    /// <c>(server_id, database_name, query_id)</c>.
+    ///
+    /// <para>The runtime-stats payload carried <c>query_sql_text</c> (<c>nvarchar(max)</c>) inside a
+    /// <c>TOP ... WITH TIES ... ORDER BY last_execution_time</c>, and a Top-N Sort carries every output
+    /// column through the sort while reading ALL of its input first — so choosing the rows to ship
+    /// materialized text for the entire qualifying set. With #2210's plan XML already gone and that column
+    /// as the only difference, time-to-first-row measured 4.67s against 0.45s at 1,505 rows and 5.02s
+    /// against 0.57s at 4,037.</para>
+    ///
+    /// <para>Keyed on <c>query_id</c> rather than <c>query_text_id</c> because <c>query_id</c> is ALREADY a
+    /// stored column on the fact table — so this rung adds a table and touches nothing existing, and readers
+    /// get the join key for free. Text is stored INLINE rather than as a digest into <c>query_plan_dim</c>'s
+    /// sibling: Query Store already de-duplicates it one row per statement per database, so there is nothing
+    /// to squeeze, and inline removes the dimension GC liveness interlock whose failure mode is silently
+    /// missing text. Not a hypertable — it has a PRIMARY KEY and no time dimension — so it is pruned on
+    /// <c>last_seen</c> rather than by <c>drop_chunks</c>, exactly like <c>query_store_plan_map</c>.</para>
+    /// </summary>
+    private const string V74Sql = @"CREATE TABLE IF NOT EXISTS collect.query_store_text (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    query_id bigint NOT NULL,
+    query_sql_text text,
+    last_seen timestamp NOT NULL,
+    PRIMARY KEY (server_id, database_name, query_id)
+);
+CREATE INDEX IF NOT EXISTS idx_query_store_text_last_seen
+    ON collect.query_store_text(last_seen);";
 
     /// <summary>
     /// V72 — the Query Store plan map (#2210): <c>(server_id, database_name, plan_id) → digest</c>, so Query
