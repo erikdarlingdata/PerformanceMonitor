@@ -276,15 +276,33 @@ public sealed partial class ViewerDataService
             r.max_num_physical_io_reads,
             r.replica_role
         FROM ranked AS r
+        /* #2150: resolve the text ONCE, inside the lateral, so everything downstream still reads a single
+           t.query_text — the projection above and the WAITFOR self-exclusion below both get the resolved
+           value without either having to know where it came from.
+           First arm: collect.query_store_text, one row per (server, database, query_id), which is where the
+           collector lands text once the separate fetch is on. Second arm: the newest inline query_text on
+           the fact row, which is where text lived BEFORE the cutover — it stays because dropping it would
+           blank the text on all existing history. */
         LEFT JOIN LATERAL (
-            SELECT query_text
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   query_id = r.query_id
-            AND   database_name = r.database_name
-            AND   query_text IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
+            SELECT COALESCE(
+                       (
+                           SELECT x.query_sql_text
+                           FROM query_store_text AS x
+                           WHERE x.server_id = $1
+                           AND   x.database_name = r.database_name
+                           AND   x.query_id = r.query_id
+                       ),
+                       (
+                           SELECT s.query_text
+                           FROM query_store_stats AS s
+                           WHERE s.server_id = $1
+                           AND   s.query_id = r.query_id
+                           AND   s.database_name = r.database_name
+                           AND   s.query_text IS NOT NULL
+                           ORDER BY s.collection_time DESC
+                           LIMIT 1
+                       )
+                   ) AS query_text
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
         ORDER BY r.total_executions * r.avg_duration_ms DESC
@@ -390,6 +408,9 @@ public sealed partial class ViewerDataService
                so both arms are treated identically. */
             SELECT
                 database_name,
+                /* #2150: query_id is projected (it was already a partition key) so the period CTEs can
+                   resolve text from collect.query_store_text, which is keyed on it. */
+                query_id,
                 query_hash,
                 query_text,
                 execution_count,
@@ -409,6 +430,9 @@ public sealed partial class ViewerDataService
         deduped_baseline AS (
             SELECT
                 database_name,
+                /* #2150: query_id is projected (it was already a partition key) so the period CTEs can
+                   resolve text from collect.query_store_text, which is keyed on it. */
+                query_id,
                 query_hash,
                 query_text,
                 execution_count,
@@ -457,11 +481,21 @@ public sealed partial class ViewerDataService
                    SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
                    SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
                    SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-                   MAX(qs.query_text) AS query_text
+                   /* #2150: this comparison groups by query_hash, but text is stored per query_id, so the
+                      side table is joined on the finer key and MAX still picks one member's text for the
+                      group — the same arbitrary-but-deterministic choice MAX(qs.query_text) made before.
+                      The join cannot fan out (query_store_text is one row per server/database/query_id, by
+                      primary key), so the execution-count SUMs above are unaffected. The COALESCE keeps
+                      pre-cutover rows, whose text is still inline, reading exactly as they used to. */
+                   MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
             FROM top_hashes th
             INNER JOIN deduped_current qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
+            LEFT JOIN query_store_text AS x
+              ON  x.server_id = $1
+              AND x.database_name = qs.database_name
+              AND x.query_id = qs.query_id
             WHERE qs.rn = 1
             AND   qs.execution_count > 0
             GROUP BY th.database_name, th.query_hash
@@ -472,11 +506,18 @@ public sealed partial class ViewerDataService
                    SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
                    SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
                    SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-                   MAX(qs.query_text) AS query_text
+                   /* #2150 — same resolution as current_period above. Both arms need it because the final
+                      projection takes COALESCE(c.query_text, b.query_text): converting only one arm would
+                      leave a GONE row (present in baseline only) with no text to fall back to. */
+                   MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
             FROM top_hashes th
             INNER JOIN deduped_baseline qs
               ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
               AND qs.database_name IS NOT DISTINCT FROM th.database_name
+            LEFT JOIN query_store_text AS x
+              ON  x.server_id = $1
+              AND x.database_name = qs.database_name
+              AND x.query_id = qs.query_id
             WHERE qs.rn = 1
             AND   qs.execution_count > 0
             GROUP BY th.database_name, th.query_hash

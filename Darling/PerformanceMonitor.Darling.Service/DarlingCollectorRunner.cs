@@ -278,13 +278,17 @@ public sealed class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = _capturePlans(),
-            /* #2150: left FALSE deliberately until the readers resolve text from collect.query_store_text.
-               Flipping this nulls query_sql_text in the payload, and six reader surfaces still project
-               query_text straight off query_store_stats — so the flip and the reader conversion have to
-               land together or those surfaces silently lose text for new rows. The fetch, its watermark,
-               the store and the prune all ship here so the schema and the code path are in place and
-               reviewable on their own. */
-            FetchQueryTextSeparately = false,
+            /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
+               per query_id into collect.query_store_text (FetchAndStoreQueryTextAsync, below) and resolved
+               back by the readers, all six of which now prefer that table and fall back to the fact row's
+               own column.
+               Why this had to be one change and not two: text is immutable per query_id, but the runtime
+               rows are re-collected every cycle, so the inline column re-shipped the same statement text on
+               every snapshot — that is what made query_store_stats the largest table in the store. Flipping
+               nulls the inline column, so a reader that had not been converted would have shown blank text
+               for new rows while looking perfectly healthy. Rows collected BEFORE this flip still carry
+               their text inline, which is why the readers keep the fallback instead of switching over. */
+            FetchQueryTextSeparately = true,
             /* #2164: 0 from the default provider means "no override" — the collector keeps its own
                constant. Converted MB -> bytes here so the store knob stays operator-friendly. */
             TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
@@ -1130,12 +1134,12 @@ public sealed class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = _capturePlans(),
-            /* #2150: left FALSE deliberately until the readers resolve text from collect.query_store_text.
-               Flipping this nulls query_sql_text in the payload, and six reader surfaces still project
-               query_text straight off query_store_stats — so the flip and the reader conversion have to
-               land together or those surfaces silently lose text for new rows. The fetch, its watermark,
-               the store and the prune all ship here so the schema and the code path are in place and
-               reviewable on their own. */
+            /* #2150: stays FALSE here, and NOT because the readers are behind — this is FetchRowsAsync, the
+               on-demand live fetch. It returns the rows straight to the caller and writes nothing: no store
+               insert, no text fetch, no watermark. Turning it on would null query_sql_text in rows that have
+               no side table to be resolved from, so text would simply be gone. Today's only caller is the
+               active-queries snapshot, which has no Query Store text at all, so this is a guard for the next
+               caller rather than a live behaviour. */
             FetchQueryTextSeparately = false,
             /* #2164: 0 from the default provider means "no override" — the collector keeps its own
                constant. Converted MB -> bytes here so the store knob stays operator-friendly. */

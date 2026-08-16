@@ -429,7 +429,11 @@ scored AS
              AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
                 THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
         END AS regression_factor,
-        LEFT(l.query_text, 500) AS query_text,
+        -- #2150: text lives in collect.query_store_text now, keyed on (server, database, query_id) — the
+        -- grain `latest` is already at — so it resolves with the keyed join below rather than being carried
+        -- up through any_value(). l.query_text stays as the fallback: it is where text lived before the
+        -- cutover, so history collected earlier still shows a statement instead of an empty drill-down.
+        LEFT(COALESCE(x.query_sql_text, l.query_text), 500) AS query_text,
         l.replica_role,
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
@@ -451,6 +455,13 @@ scored AS
       -- is UNKNOWN — matching on it with = would join nothing and silently empty this drill-down for the
       -- overwhelming majority of installs. The NULL-safe operator groups those rows as DISTINCT ON does.
       AND b.replica_role IS NOT DISTINCT FROM l.replica_role
+    -- #2150 text resolution (see the projection). LEFT, so a query whose text has not been fetched yet
+    -- still reports its regression; one row per key by primary key, so no fan-out and none of the
+    -- aggregates above are affected.
+    LEFT JOIN query_store_text AS x
+      ON  x.server_id = $1
+      AND x.database_name = l.database_name
+      AND x.query_id = l.query_id
     WHERE l.query_plan_hash <> b.query_plan_hash
 )
 SELECT

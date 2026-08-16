@@ -26,11 +26,11 @@ namespace Darling.Tests;
 /// Neither the row cap nor the client byte budget bounds it (TOP (500) measured the same as TOP (50000);
 /// wall time flat from a 4 MB to a 256 MB budget).</para>
 ///
-/// <para><b>This rung is inert on purpose.</b> <c>FetchQueryTextSeparately</c> is still false, because
-/// flipping it nulls the payload column while six reader surfaces still project <c>query_text</c> straight
-/// off <c>query_store_stats</c> — the flip and the reader conversion have to land together or those
-/// surfaces silently lose text for new rows. The table, fetch, watermark and prune ship here so the schema
-/// and the code path are reviewable on their own.</para>
+/// <para><b>The fetch is live as of the reader conversion.</b> <c>FetchQueryTextSeparately</c> is on for the
+/// sweep, so the payload's inline <c>query_sql_text</c> is null for newly collected rows and all six reader
+/// surfaces resolve text from this table, falling back to the inline column for history collected before the
+/// cutover. The flip and that conversion had to land together: an unconverted reader would have shown blank
+/// text for new rows while looking perfectly healthy.</para>
 /// </summary>
 public sealed class QueryStoreTextStoreTests
 {
@@ -173,17 +173,32 @@ public sealed class QueryStoreTextStoreTests
             "a zero or negative margin would retire text at or before the facts that reference it");
 
     /// <summary>
-    /// Inert until the readers are converted — asserted so the flip cannot happen by accident, without the
-    /// six reader surfaces that still project query_text off query_store_stats.
+    /// The flip is ON for the scheduled sweep and OFF for the on-demand read, and that difference is not
+    /// cosmetic: the sweep STORES the text it stops shipping inline, while <c>FetchRowsAsync</c> hands rows
+    /// straight back to its caller and writes nothing — no store insert, no text fetch, no watermark — so
+    /// nulling the inline column there would lose the statement outright rather than relocate it.
+    /// Asserted by splitting the source on the method rather than by counting occurrences, because the
+    /// failure mode worth catching is a flag flipped in the WRONG context, which any count would pass.
     /// </summary>
     [Fact]
-    public void TheFetchIsStillGatedOff()
+    public void TheFetchIsOnForTheSweepAndOffForTheOnDemandRead()
     {
         var source = ReadRunnerSource();
 
-        Assert.Contains("FetchQueryTextSeparately = false,", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("FetchQueryTextSeparately = true,", source, StringComparison.Ordinal);
-        /* The pass IS wired, so flipping the flag is all it takes once the readers resolve text. */
+        var split = source.IndexOf("FetchRowsAsync<TRow>", StringComparison.Ordinal);
+        Assert.True(split > 0,
+            "FetchRowsAsync was renamed or moved — this guard can no longer tell the sweep context from the on-demand one");
+
+        var sweep = source[..split];
+        var onDemand = source[split..];
+
+        Assert.Contains("FetchQueryTextSeparately = true,", sweep, StringComparison.Ordinal);
+        Assert.DoesNotContain("FetchQueryTextSeparately = false,", sweep, StringComparison.Ordinal);
+        Assert.Contains("FetchQueryTextSeparately = false,", onDemand, StringComparison.Ordinal);
+        Assert.DoesNotContain("FetchQueryTextSeparately = true,", onDemand, StringComparison.Ordinal);
+
+        /* The pass the flip depends on: with the flag on and this call gone, the payload would ship no text
+           and nothing would land any, which is the one combination that loses data silently. */
         Assert.Contains("FetchAndStoreQueryTextAsync(textFetchConnection", source, StringComparison.Ordinal);
     }
 

@@ -918,15 +918,31 @@ internal static class DarlingDataReader
             t.query_text,
             r.replica_role
         FROM ranked AS r
+        /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
+           both keep reading one t.query_text. First arm is collect.query_store_text (one row per
+           query_id, where the collector lands text once the separate fetch is on); second arm is the
+           newest inline query_text, which is where text lived before the cutover and is what keeps
+           existing history readable. */
         LEFT JOIN LATERAL (
-            SELECT query_text
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   query_id = r.query_id
-            AND   database_name = r.database_name
-            AND   query_text IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
+            SELECT COALESCE(
+                       (
+                           SELECT x.query_sql_text
+                           FROM query_store_text AS x
+                           WHERE x.server_id = $1
+                           AND   x.database_name = r.database_name
+                           AND   x.query_id = r.query_id
+                       ),
+                       (
+                           SELECT s.query_text
+                           FROM query_store_stats AS s
+                           WHERE s.server_id = $1
+                           AND   s.query_id = r.query_id
+                           AND   s.database_name = r.database_name
+                           AND   s.query_text IS NOT NULL
+                           ORDER BY s.collection_time DESC
+                           LIMIT 1
+                       )
+                   ) AS query_text
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
         ORDER BY r.total_executions * r.avg_duration_ms DESC

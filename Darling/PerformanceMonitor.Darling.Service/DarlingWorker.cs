@@ -3815,14 +3815,41 @@ LIMIT 1";
     /// query_text is the same query either way, so this is strictly more robust — the sibling stored-plan
     /// readers' semantics.
     /// </para></summary>
+    /* #2150: the text now comes from collect.query_store_text and only FALLS BACK to the fact row's own
+       column, which is where it lived before the cutover — pre-cutover rows keep working unchanged, and
+       post-cutover rows (NULL inline) resolve from the side table. The lookup is keyed on exactly the
+       identifier this resolver already has, and all three keys are the statement's own parameters, so it
+       is an uncorrelated scalar subquery: resolved once, then named once by the derived table so the
+       IS NOT NULL filter can test the RESOLVED text rather than the raw column. Testing the raw column
+       is the trap — it would exclude every post-cutover row, the whole set this change exists to serve. */
     public const string ResolveStoredQueryStoreForActualPlanSql = @"
-SELECT query_text, query_plan_text, NULL::text AS transaction_isolation_level, NULL::bytea AS query_plan_gz
-FROM query_store_stats
-WHERE server_id = $1
-AND   database_name = $2
-AND   query_id = $3
-AND   query_text IS NOT NULL
-ORDER BY (query_plan_text IS NOT NULL) DESC, collection_time DESC
+SELECT r.query_text,
+       r.query_plan_text,
+       NULL::text AS transaction_isolation_level,
+       NULL::bytea AS query_plan_gz
+FROM
+(
+    SELECT
+        COALESCE
+        (
+            (
+                SELECT x.query_sql_text
+                FROM query_store_text AS x
+                WHERE x.server_id = $1
+                AND   x.database_name = $2
+                AND   x.query_id = $3
+            ),
+            s.query_text
+        ) AS query_text,
+        s.query_plan_text,
+        s.collection_time
+    FROM query_store_stats AS s
+    WHERE s.server_id = $1
+    AND   s.database_name = $2
+    AND   s.query_id = $3
+) AS r
+WHERE r.query_text IS NOT NULL
+ORDER BY (r.query_plan_text IS NOT NULL) DESC, r.collection_time DESC
 LIMIT 1";
 
     /// <summary>The <c>query_snapshots</c> resolver — the Wait drill-down surface's identifier (server_id +
