@@ -380,7 +380,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                the store is down) — and a fallback that is only reached when the store cannot answer
                cannot be the thing that disagrees with it. */
             IReadOnlyList<MonitoredServer> registryServers = config.Servers;
-            var storeView = await new StoreConfigProvider(postgres, _logger).LoadViewAsync(config, stoppingToken);
+            /* includeNotification: false — the MCP host does not deliver alerts and references neither Smtp
+               nor Webhooks, and the notification row is the one read here that touches columns the mcp role
+               is deliberately denied (the SMTP password, and the Teams/Slack/generic/PagerDuty bearer URLs).
+               Asking for them returned 42501 for the whole table, and since every section of the load shares
+               one try/catch that discarded the reads that HAD succeeded — costing MCP the monitored-server
+               registry and silently falling it back to darling.json for live plan fetches. */
+            var storeView = await new StoreConfigProvider(postgres, _logger)
+                .LoadViewAsync(config, stoppingToken, includeNotification: false);
             if (storeView is not null)
             {
                 registryServers = storeView.EnabledServers;

@@ -529,7 +529,8 @@ ON CONFLICT (server_id) DO NOTHING", connection);
     /// SQL-auth servers whose store row carries no DPAPI blob (never persisted; matched by <c>server_id</c>).
     /// Returns null when the store is unreachable, so the caller keeps the current live config.
     /// </summary>
-    public async Task<StoreConfigView?> LoadViewAsync(DarlingConfig bootstrap, CancellationToken cancellationToken)
+    public async Task<StoreConfigView?> LoadViewAsync(
+        DarlingConfig bootstrap, CancellationToken cancellationToken, bool includeNotification = true)
     {
         if (bootstrap is null)
         {
@@ -542,7 +543,25 @@ ON CONFLICT (server_id) DO NOTHING", connection);
 
             var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
-            var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
+
+            /* The notification row is the ONLY read here that touches secret columns — the SMTP password and
+               username, and the Teams/Slack/generic/PagerDuty bearer URLs. DarlingManagedRoles deliberately
+               revokes table-wide SELECT on config_notification from BOTH viewer and mcp and re-grants only
+               the non-secret columns, so a caller connecting as one of those roles and asking for the full
+               row gets 42501 for the whole table.
+               A caller that does not DELIVER alerts must therefore skip it. The MCP host is exactly that: it
+               reads config to learn the monitored-server registry and the service knobs, and references
+               neither Smtp nor Webhooks anywhere. Before this, its read of a password it never used failed,
+               and because every section shares one try/catch, that failure discarded the four reads that
+               HAD succeeded -- so MCP lost the server registry and silently fell back to darling.json for
+               live plan fetches. One denied column cost the registry. */
+            var smtp = bootstrap.Smtp;
+            var webhooks = bootstrap.Webhooks;
+            if (includeNotification)
+            {
+                (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
+            }
+
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
             var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
 
