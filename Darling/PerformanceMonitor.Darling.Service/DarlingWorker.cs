@@ -399,12 +399,18 @@ public sealed class DarlingWorker : BackgroundService
        without a restart. */
     private readonly WebRuntimeState _webState;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState)
+    /* #2298: the live monitored-server registry seam — published beside the two above, read by the MCP
+       host's plan-fetch resolver so it never re-reads config_monitored_servers as the mcp role (whose
+       encrypted_password SELECT-carve fails that whole read). */
+    private readonly MonitoredServerRegistryState _registryState;
+
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
         _mcpState = mcpState;
         _webState = webState;
+        _registryState = registryState;
     }
 
     private sealed class ServerLoopState
@@ -1003,6 +1009,10 @@ public sealed class DarlingWorker : BackgroundService
            holds — including on a store-unreachable boot. Re-published on every reload below. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
         _webState.Publish(config.Web.Enabled, config.Web.Port);
+        /* #2298: publish the effective server set the same way — store-authoritative when the view loaded,
+           else the darling.json servers, which is what this run will actually collect from either way. The
+           MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
+        _registryState.Publish(initialServers);
 
         /* Capture-plans is read live (() => config.CapturePlans) so a store reload of
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
@@ -2191,6 +2201,9 @@ public sealed class DarlingWorker : BackgroundService
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
         _webState.Publish(config.Web.Enabled, config.Web.Port);
+        /* #2298: re-publish the server set on every reload, so a server added through add_servers or the
+           Viewer reaches the MCP host's plan-fetch resolver on its next resolution — no MCP restart. */
+        _registryState.Publish(view.EnabledServers);
         _scheduleOverrides = view.ScheduleOverrides;
         /* Stage 2: honor a pause/resume issued through the store (config_service.paused) — the collection
            loop reads this on its next tick. Single writer (this reload), so no interlock needed. */

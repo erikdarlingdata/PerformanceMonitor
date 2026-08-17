@@ -34,25 +34,34 @@ namespace Darling.Tests;
 /// <c>darling.json</c> for live plan fetches — a silent capability loss whose cause named a table MCP does
 /// not use.</para>
 ///
-/// <para>The fix is for the reader to agree with the boundary: a caller that does not DELIVER alerts skips
-/// the notification row. These pins hold both halves of that agreement so they cannot drift back apart.</para>
+/// <para>The fix is for the host to stop re-reading as <c>mcp</c> what the process already loaded
+/// privileged. The first cut (#2293) merely skipped the notification row — and the failure moved to the
+/// next denied column — so #2298 removed the host's own config-view read entirely: the plan-fetch resolver
+/// serves the worker-published registry state. These pins hold that agreement so it cannot drift back.</para>
 /// </summary>
 public sealed class McpConfigReadAvoidsSecretColumnsTests
 {
     /// <summary>
-    /// THE FIX: the MCP host asks for the config view WITHOUT the notification row.
+    /// THE FIX, as revised by #2298: the MCP host performs NO config-view read of its own at all.
+    ///
+    /// <para>The first cut (#2293) skipped the notification row — and the failure simply moved to the next
+    /// denied column, because <c>ReadMonitoredServersAsync</c> selects <c>encrypted_password</c>, which the
+    /// section-6 secret ACL SELECT-carves from <c>mcp</c>. Skipping rows one 42501 at a time was chasing the
+    /// carve. The durable agreement with the boundary is that the host does not re-read as <c>mcp</c> what
+    /// the process already loaded privileged: the plan-fetch resolver reads the worker-published
+    /// <c>MonitoredServerRegistryState</c> instead.</para>
     ///
     /// <para>Pinned textually because reproducing it needs a live store provisioned with the least-privilege
     /// roles and a connection as <c>mcp</c> — and the failure is invisible to every other test, because a
     /// host that reads secrets it never uses works perfectly as the owner.</para>
     /// </summary>
     [Fact]
-    public void TheMcpHostSkipsTheNotificationRow()
+    public void TheMcpHostReadsNoConfigViewOfItsOwn()
     {
         var source = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs"));
 
-        Assert.Contains("includeNotification: false", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("LoadViewAsync(config, stoppingToken)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("LoadViewAsync", source, StringComparison.Ordinal);
+        Assert.Contains("_registryState.Read()", source, StringComparison.Ordinal);
     }
 
     /// <summary>
