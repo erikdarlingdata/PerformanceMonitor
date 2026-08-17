@@ -229,7 +229,11 @@ public class WebhookAlertService
             if (!TryParseHeaders(headersJson, out var headers, out var headerError))
                 return headerError;
 
-            var payload = BuildGenericPayload("Test Notification", "", "Webhook configuration verified", "", branding, isTest: true, bodyTemplate: bodyTemplate);
+            /* Same stand-in context as Save-time validation, for the same reason: the Test button must
+               exercise the raw tokens with quote-bearing structure or a mis-quoted one test-sends clean. */
+            var payload = BuildGenericPayload(
+                "Test Notification", "", "Webhook configuration verified", "", branding,
+                isTest: true, bodyTemplate: bodyTemplate, context: ValidationStandInContext());
 
             if (!IsWellFormedJson(payload, out var bodyError))
                 return bodyError;
@@ -835,13 +839,41 @@ public class WebhookAlertService
         }
 
         /* Render with placeholder-shaped stand-ins: substitution is what can break the JSON, so validating
-           the raw template would miss a token sitting outside a string literal. */
+           the raw template would miss a token sitting outside a string literal. The stand-in CONTEXT is
+           what makes the raw tokens honest here (#2310 review catch): with a null context they render to
+           the quote-free `{}` / `[]`, so a mis-quoted raw token — `"context": "{{context_json}}"` —
+           validates clean and only breaks on the first real alert that carries structure. */
         var rendered = BuildGenericPayload(
             "Test Notification", "Test Server", "0", "0",
-            new AlertBranding("Performance Monitor", null), isTest: true, bodyTemplate: bodyTemplate);
+            new AlertBranding("Performance Monitor", null), isTest: true, bodyTemplate: bodyTemplate,
+            context: ValidationStandInContext());
 
         return IsWellFormedJson(rendered, out var bodyError) ? null : bodyError;
     }
+
+    /// <summary>
+    /// The stand-in context Save-time validation and the settings Test send render the raw tokens with.
+    /// Its serialization is guaranteed to contain double quotes (every JSON property name carries them),
+    /// so quoting a raw token in a template breaks <see cref="IsWellFormedJson"/> at Save/Test — where
+    /// the operator can see and fix it — instead of validating clean against the trivial <c>{}</c> and
+    /// failing silently into the log on the first deadlock alert with real structure. One incident, so
+    /// <c>{{incidents_json}}</c> is exercised the same way.
+    /// </summary>
+    internal static AlertContext ValidationStandInContext() => new()
+    {
+        Details =
+        {
+            new AlertDetailItem
+            {
+                Heading = "Validation",
+                Fields = { ("Check", "stand-in \"quoted\" value") }
+            }
+        },
+        Incidents = new List<AlertIncident>
+        {
+            new("0000000000000000", new List<string> { "validation.dbo.stand_in" })
+        }
+    };
 
     /// <summary>
     /// True when the text is the built-in default body template (newline-insensitive), or empty. The settings

@@ -398,6 +398,21 @@ public class GenericWebhookTests
     }
 
     [Fact]
+    public void ValidateGenericConfig_RejectsAQuotedRawToken_AtSaveTime()
+    {
+        /* The trap this forbids (#2310 review catch): with a null context the raw tokens render to the
+           quote-free {} / [], so `"context": "{{context_json}}"` — the exact mistake the doc comment
+           warns about — used to validate clean and test-send clean, then break on the first deadlock
+           alert with real structure. The stand-in context is quote-bearing by construction, so the
+           mistake now fails where the operator can see it. */
+        Assert.NotNull(WebhookAlertService.ValidateGenericConfig(null, """{"context": "{{context_json}}"}"""));
+        Assert.NotNull(WebhookAlertService.ValidateGenericConfig(null, """{"incidents": "{{incidents_json}}"}"""));
+
+        /* And the CORRECT unquoted usage still validates. */
+        Assert.Null(WebhookAlertService.ValidateGenericConfig(null, """{"context": {{context_json}}, "incidents": {{incidents_json}}, "dedup": "{{dedup_key}}"}"""));
+    }
+
+    [Fact]
     public void DefaultTemplate_DoesNotCarryTheAutomationTokens()
     {
         /* #2302's compatibility promise: the shipped default stays byte-identical, so no existing
