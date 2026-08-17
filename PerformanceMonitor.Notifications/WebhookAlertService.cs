@@ -149,7 +149,7 @@ public class WebhookAlertService
 
             if (_settings.GenericWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.GenericWebhookUrl))
             {
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, context);
+                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context);
             }
 
             if (_settings.PagerDutyEnabled && !string.IsNullOrWhiteSpace(_settings.PagerDutyRoutingKey))
@@ -576,6 +576,7 @@ public class WebhookAlertService
         string serverName,
         string currentValue,
         string thresholdValue,
+        string serverId,
         AlertContext? context)
     {
         try
@@ -591,7 +592,7 @@ public class WebhookAlertService
 
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate);
+                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -646,6 +647,18 @@ public class WebhookAlertService
     /// The escaping goes through <see cref="JsonSerializer"/> (see <see cref="EscapeForJson"/>) — NOT
     /// <c>JsonEncodedText.Encode</c>, which throws on the lone surrogates SQL Server names can carry — and the
     /// two surrounding quotes are stripped to leave exactly the escaped INNER text a token inside a literal needs.
+    /// <para>
+    /// #2302: the three automation tokens are the exception, and two of them deliberately BYPASS the
+    /// escaping. <c>{{context_json}}</c> / <c>{{incidents_json}}</c> are raw JSON VALUES substituted
+    /// unquoted (<c>"context": {{context_json}}</c>) — escaping them would turn structure back into the
+    /// flattened string the token exists to replace. Their shape is the SAME
+    /// <see cref="AlertContextSerializer"/> projection persisted as the alert-history ContextJson, so a
+    /// consumer parses one shape whether it reads the webhook or the history row. <c>{{dedup_key}}</c> is
+    /// an ordinary escaped string carrying the same key the PagerDuty channel derives — including its
+    /// stable metric+server fallback when an alert has no incident — so tickets correlate across channels.
+    /// A template that quotes a raw token anyway produces malformed JSON and is caught by the caller's
+    /// well-formedness check, surfacing as a config error rather than a silent bad post.
+    /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
         string metricName,
@@ -655,7 +668,8 @@ public class WebhookAlertService
         AlertBranding branding,
         bool isTest = false,
         AlertContext? context = null,
-        string? bodyTemplate = null)
+        string? bodyTemplate = null,
+        string serverId = "")
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -663,6 +677,12 @@ public class WebhookAlertService
         var contextText = isTest
             ? $"Webhook configuration is working correctly. Sent by {branding.EditionName}."
             : RenderContextForTemplate(context, branding);
+
+        /* PagerDuty's caller passes the numeric serverId when it has one; a test send has neither, so the
+           key falls back to the server name — same precedence as the PagerDuty call site's `serverId ??
+           serverName`, which is what keeps the two channels' keys equal for the same alert. */
+        var dedupKey = DerivePagerDutyDedupKey(
+            string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context);
 
         var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -673,6 +693,11 @@ public class WebhookAlertService
             ["severity"] = EscapeForJson(isTest ? "TEST" : badgeText),
             ["context"] = EscapeForJson(contextText),
             ["timestamp"] = EscapeForJson(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)),
+            /* Raw JSON values — never EscapeForJson (see the doc comment). "{}" / "[]" rather than empty
+               so a template's `"context": {{context_json}}` stays well-formed on a context-less alert. */
+            ["context_json"] = context is null ? "{}" : AlertContextSerializer.Serialize(context),
+            ["incidents_json"] = AlertContextSerializer.SerializeIncidents(context),
+            ["dedup_key"] = EscapeForJson(dedupKey),
         };
 
         /* Single pass: a MatchEvaluator's output is NOT re-scanned, so a value that itself contains the
@@ -682,8 +707,10 @@ public class WebhookAlertService
         return s_genericPlaceholders.Replace(template, m => values[m.Groups[1].Value]);
     }
 
+    /* context_json before context: alternation is ordered, and while the closing \}\} would force a
+       backtrack to the right answer anyway, longest-first means correctness never leans on it. */
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
-        new(@"\{\{(metric|server|value|threshold|severity|context|timestamp)\}\}",
+        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|context|timestamp)\}\}",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
