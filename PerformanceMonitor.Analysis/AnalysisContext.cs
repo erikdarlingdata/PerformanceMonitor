@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -11,6 +12,15 @@ public class AnalysisContext
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }
+
+    /// <summary>
+    /// The host's stopping token, observed by the pass's store reads (#2299). Default
+    /// <see cref="CancellationToken.None"/> — a caller that does not plumb one (Lite, the
+    /// fact-inspection paths) keeps the prior behavior exactly, because every shutdown
+    /// classification requires this token to be SIGNALLED. Carried on the context rather than
+    /// on thirty method signatures because the context already reaches every pipeline stage.
+    /// </summary>
+    public CancellationToken CancellationToken { get; set; }
 
     /// <summary>
     /// The monitored SERVER's UTC offset (SYSDATETIME − SYSUTCDATETIME), captured once at

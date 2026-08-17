@@ -106,6 +106,11 @@ public sealed partial class PgDrillDownCollector
     {
         foreach (var finding in findings)
         {
+            /* #2299: between findings is the natural abandon point — the per-finding catch below
+               deliberately does NOT swallow shutdown residue, so this throw (and any residue from
+               a drill-down mid-read) unwinds the pass to the service's single Information line. */
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
@@ -187,7 +192,7 @@ public sealed partial class PgDrillDownCollector
                 if (finding.DrillDown.Count == 0)
                     finding.DrillDown = null;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
             {
                 _logger?.LogError("[PgDrillDownCollector] Drill-down failed for {StoryPath}: {ExceptionType}: {Message}",
                     finding.StoryPath, ex.GetType().Name, ex.Message);

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -73,12 +74,12 @@ public class PgBaselineProvider
     /// Returns the most specific bucket available, collapsing as needed.
     /// </summary>
     public async Task<BaselineBucket> GetBaselineAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken = default)
     {
         var hourOfDay = analysisTime.Hour;
         var dayOfWeek = (int)analysisTime.DayOfWeek; // Sunday=0 — matches EXTRACT(DOW) in both engines
 
-        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime);
+        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
         if (baselines == null || baselines.Count == 0)
             return BaselineBucket.Empty;
 
@@ -97,7 +98,7 @@ public class PgBaselineProvider
     public void ClearCache() => _cache.Clear();
 
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> GetOrComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var cacheKey = $"{serverId}:{metricName}";
         var roundedHour = new DateTime(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
@@ -109,7 +110,7 @@ public class PgBaselineProvider
             return cached.Buckets;
         }
 
-        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime);
+        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
 
         _cache[cacheKey] = new CachedBaseline
         {
@@ -122,12 +123,12 @@ public class PgBaselineProvider
     }
 
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var query = GetBaselineQuery(metricName);
         if (query == null) return null;
 
-        return await ComputeBucketsAsync(serverId, metricName, analysisTime, query);
+        return await ComputeBucketsAsync(serverId, metricName, analysisTime, query, cancellationToken);
     }
 
     /// <summary>
@@ -152,7 +153,7 @@ public class PgBaselineProvider
         || ex.InnerException is TimeoutException;
 
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBucketsAsync(
-        int serverId, string metricName, DateTime analysisTime, string query)
+        int serverId, string metricName, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
         var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
@@ -162,7 +163,7 @@ public class PgBaselineProvider
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(query, connection);
             cmd.Parameters.AddWithValue(serverId);
@@ -173,13 +174,13 @@ public class PgBaselineProvider
 
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
-            using var reader = await cmd.ExecuteReaderAsync();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
                and carry sentinel tier rows; the two event-family metrics (blocking, deadlock)
                keep the six-column classical shape — detected by column count, so their buckets
                read Median=0/Mad=0 and the robust path degrades for them. */
             var hasRobustColumns = reader.FieldCount >= 8;
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(cancellationToken))
             {
                 var hour = Convert.ToInt32(reader.GetValue(0));
                 var dow = Convert.ToInt32(reader.GetValue(1));
@@ -213,7 +214,7 @@ public class PgBaselineProvider
 
             return buckets;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
         {
             /* A command TIMEOUT and a genuine connection fault are the same message here, and that cost real
                diagnosis time on the dogfood box: Npgsql surfaces its own client-side timeout as

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -105,7 +106,7 @@ public class PgAnomalyDetector
         var anomalies = new List<Fact>();
 
         // Check if baseline period has any data at all — if not, skip all anomaly detection.
-        if (!await HasBaselineDataAsync(context.ServerId))
+        if (!await HasBaselineDataAsync(context.ServerId, context.CancellationToken))
             return anomalies;
 
         // Existing detection methods (upgraded to time-bucketed baselines)
@@ -288,7 +289,7 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
             using (var cmd = new NpgsqlCommand(ObjectGrowthSql, connection))
@@ -297,8 +298,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.AddWithValue(ObjectGrowthMbThreshold);
                 cmd.Parameters.AddWithValue(ObjectGrowthPctThreshold);
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                if (await reader.ReadAsync(context.CancellationToken))
                 {
                     var db = reader.GetString(0);
                     var gSchema = reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString();
@@ -331,8 +332,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(ObjectLockWaitMsDeltaThreshold);
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                if (await reader.ReadAsync(context.CancellationToken))
                 {
                     var db = reader.GetString(0);
                     var cSchema = reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString();
@@ -364,7 +365,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Object stats anomaly detection failed: {Message}", ex.Message);
         }
@@ -374,11 +375,11 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Checks if the server has enough historical data for meaningful baselines.
     /// Uses wait_stats as canary — if waits are collected, other data is too.
     /// </summary>
-    private async Task<bool> HasBaselineDataAsync(int serverId)
+    private async Task<bool> HasBaselineDataAsync(int serverId, CancellationToken cancellationToken)
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(HasBaselineDataSql, connection);
             cmd.Parameters.AddWithValue(serverId);
@@ -386,10 +387,17 @@ ORDER BY ms_delta DESC LIMIT 1";
                made Kind-Unspecified for the naive-UTC timestamp columns. */
             cmd.Parameters.AddWithValue(AsNaive(DateTime.UtcNow.AddDays(-30)));
 
-            var count = Convert.ToInt64(await cmd.ExecuteScalarAsync() ?? 0);
+            var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken) ?? 0);
             return count > 0;
         }
-        catch { return false; }
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
+        {
+            /* Silent on a genuine fault BY DESIGN (Lite's gate posture: an unreadable canary reads
+               as "no baseline data" and detection just sits out the pass) — but shutdown residue is
+               excluded (#2299), or a stop mid-gate would masquerade as an empty baseline instead of
+               unwinding to the pass's single Information line like every other read here. */
+            return false;
+        }
     }
 
     /// <summary>
@@ -400,22 +408,22 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Cpu, context.TimeRangeStart);
+                context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             // No effectiveStdDev<=0 early return — an untrustworthy/zero-dispersion baseline falls
             // back to the absolute bar (below) rather than going silent.
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(CpuWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var peakCpu = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var avgCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -454,7 +462,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] CPU anomaly detection failed: {Message}", ex.Message);
         }
@@ -474,9 +482,9 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart);
+                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             // Current window: all-types wait ms/sec per collection (interval via LAG), then PEAK.
             double peakRate;
@@ -488,8 +496,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 rateCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 rateCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-                using var rateReader = await rateCmd.ExecuteReaderAsync();
-                if (!await rateReader.ReadAsync()) return;
+                using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
+                if (!await rateReader.ReadAsync(context.CancellationToken)) return;
                 peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
                 totalWaitMs = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
                 collectionCount = rateReader.IsDBNull(2) ? 0L : Convert.ToInt64(rateReader.GetValue(2));
@@ -548,8 +556,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 contribCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 contribCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-                using var contribReader = await contribCmd.ExecuteReaderAsync();
-                while (await contribReader.ReadAsync())
+                using var contribReader = await contribCmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await contribReader.ReadAsync(context.CancellationToken))
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
@@ -565,7 +573,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Wait anomaly detection failed: {Message}", ex.Message);
         }
@@ -580,19 +588,19 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart);
+                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
             var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart);
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(BlockingWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var currentBlocking = Convert.ToInt64(reader.GetValue(0));
             var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
@@ -663,7 +671,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 });
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Blocking anomaly detection failed: {Message}", ex.Message);
         }
@@ -677,20 +685,20 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart);
+                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(IoWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var currentReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var currentWriteLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -755,7 +763,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 });
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] I/O anomaly detection failed: {Message}", ex.Message);
         }
@@ -769,20 +777,20 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart);
+                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(BatchRequestWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgBatch = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakBatch = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -819,7 +827,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Batch request anomaly detection failed: {Message}", ex.Message);
         }
@@ -833,20 +841,20 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart);
+                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(SessionWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgConnections = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakConnections = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -883,7 +891,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Session anomaly detection failed: {Message}", ex.Message);
         }
@@ -898,20 +906,20 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart);
+                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(QueryDurationWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgElapsed = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakElapsed = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -948,7 +956,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Query duration anomaly detection failed: {Message}", ex.Message);
         }
@@ -964,20 +972,20 @@ ORDER BY ms_delta DESC LIMIT 1";
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Memory, context.TimeRangeStart);
+                context.ServerId, MetricNames.Memory, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
             var avgPressure = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakPressure = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -1014,7 +1022,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 Metadata = metadata
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgAnomalyDetector] Memory anomaly detection failed: {Message}", ex.Message);
         }
