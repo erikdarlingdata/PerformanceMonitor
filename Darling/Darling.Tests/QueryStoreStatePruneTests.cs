@@ -127,6 +127,8 @@ public sealed class QueryStoreStatePruneTests
            this guard exists for. Named here anyway so a rename that quietly drops it out of the pattern
            fails rather than silently shrinking the set under test. */
         Assert.Contains(typeof(QueryStoreTextState), stateClasses);
+        /* #2312 added a fourth, same treatment. */
+        Assert.Contains(typeof(QueryStoreOpenIntervalState), stateClasses);
 
         var declared = stateClasses
             .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static))
@@ -168,6 +170,10 @@ public sealed class QueryStoreStatePruneTests
            fetch's owner here would prune nothing and look exactly like having nothing to prune. */
         Assert.Contains(
             (QueryStoreTextState.StateCollectorName, QueryStoreTextState.WatermarkKeyPrefix),
+            QueryStorePerDatabaseState.PrunableKeys);
+        /* #2312: the open-interval stamp, per database like the three above, under its own owner. */
+        Assert.Contains(
+            (QueryStoreOpenIntervalState.StateCollectorName, QueryStoreOpenIntervalState.WatermarkKeyPrefix),
             QueryStorePerDatabaseState.PrunableKeys);
     }
 

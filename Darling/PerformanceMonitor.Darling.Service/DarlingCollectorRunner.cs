@@ -263,6 +263,36 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        /* #2312: the open-interval refresh stamps, the third owner merged into the same flat State —
+           qsowm: cannot collide with planwm:/textwm:. Read unconditionally for query_store like the
+           text watermark (the skip applies regardless of plan capture), and merged the same way so a
+           store predating this state keeps working: absent keys read as "include the open interval",
+           which is today's behavior exactly. */
+        if (string.Equals(definition.Name, "query_store", StringComparison.Ordinal))
+        {
+            var openIntervalState = await GetCollectorStateAsync(
+                server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, cancellationToken);
+
+            if (openIntervalState is { Count: > 0 })
+            {
+                var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+                if (collectorState is not null)
+                {
+                    foreach (var entry in collectorState)
+                    {
+                        merged[entry.Key] = entry.Value;
+                    }
+                }
+
+                foreach (var entry in openIntervalState)
+                {
+                    merged[entry.Key] = entry.Value;
+                }
+
+                collectorState = merged;
+            }
+        }
+
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -434,6 +464,20 @@ public sealed class DarlingCollectorRunner
                                     "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
                                     server.Config.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
                                 context.Watermark = tighterFloor;
+                            }
+                        }
+
+                        /* #2312, Azure arm: same per-database open-interval decision as the enumerated
+                           delegate, BEFORE BuildQuery bakes the predicate. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
+                                context.State, databaseName, collectionTime);
+                            context.IncludeOpenInterval = includeOpen;
+                            if (includeOpen)
+                            {
+                                context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] =
+                                    QueryStoreOpenIntervalState.Format(collectionTime);
                             }
                         }
 
@@ -749,6 +793,24 @@ public sealed class DarlingCollectorRunner
                             }
 
                             context.Watermark = clamped;
+
+                            /* #2312: decide per database whether this cycle reads the OPEN interval, and
+                               stamp the inclusion into PendingState — persisted only after the cycle
+                               completes, so a failed cycle re-includes next time (conservative, like the
+                               watermark itself). Name-guarded like the hole records: only query_store's
+                               payload reads the flag. */
+                            if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                            {
+                                var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
+                                    context.State, item, collectionTime);
+                                context.IncludeOpenInterval = includeOpen;
+                                if (includeOpen)
+                                {
+                                    context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] =
+                                        QueryStoreOpenIntervalState.Format(collectionTime);
+                                }
+                            }
+
                             context.PerItemWatermarkMs = watermarkWatch.ElapsedMilliseconds;
                         },
                     readItem: async (item, ct) =>
@@ -937,23 +999,35 @@ public sealed class DarlingCollectorRunner
                 ? QueryStorePlanXmlState.StateCollectorName
                 : definition.Name;
 
-            /* #2150: query_store's pending state now carries TWO watermarks with two owners, so it is split
-               by prefix on the way out. Writing the text watermark under the plan fetch's owner would still
-               read back (the load above merges both), but it would then never be pruned: the shared prune
-               set pairs textwm: with query_store_text, and a prefix pruned under the wrong owner deletes
-               nothing — which is indistinguishable from having nothing to prune. */
+            /* #2150/#2312: query_store's pending state now carries THREE watermark families with three
+               owners, so it is split by prefix on the way out. Writing one under another's owner would
+               still read back (the load above merges all three), but it would then never be pruned: the
+               shared prune set pairs each prefix with its owner, and a prefix pruned under the wrong
+               owner deletes nothing — which is indistinguishable from having nothing to prune. */
             var textKeys = context.PendingState
                 .Where(entry => entry.Key.StartsWith(QueryStoreTextState.WatermarkKeyPrefix, StringComparison.Ordinal))
                 .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+            var openIntervalKeys = context.PendingState
+                .Where(entry => entry.Key.StartsWith(QueryStoreOpenIntervalState.WatermarkKeyPrefix, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
 
-            if (textKeys.Count > 0)
+            if (textKeys.Count > 0 || openIntervalKeys.Count > 0)
             {
                 var others = context.PendingState
-                    .Where(entry => !textKeys.ContainsKey(entry.Key))
+                    .Where(entry => !textKeys.ContainsKey(entry.Key) && !openIntervalKeys.ContainsKey(entry.Key))
                     .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
 
-                await SaveCollectorStateAsync(
-                    server.ServerId, QueryStoreTextState.StateCollectorName, textKeys, cancellationToken);
+                if (textKeys.Count > 0)
+                {
+                    await SaveCollectorStateAsync(
+                        server.ServerId, QueryStoreTextState.StateCollectorName, textKeys, cancellationToken);
+                }
+
+                if (openIntervalKeys.Count > 0)
+                {
+                    await SaveCollectorStateAsync(
+                        server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, openIntervalKeys, cancellationToken);
+                }
 
                 if (others.Count > 0)
                 {

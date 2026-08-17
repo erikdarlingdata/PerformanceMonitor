@@ -149,6 +149,18 @@ public sealed class CollectorContext
     public bool FetchQueryTextSeparately { get; init; }
 
     /// <summary>
+    /// Whether this cycle's query_store payload includes the OPEN Query Store interval (#2312). Default
+    /// true — today's behavior for every caller that never touches it. When false, the interval
+    /// pre-filter adds <c>i.end_time &lt;= SYSUTCDATETIME()</c>, shipping only CLOSED intervals — which
+    /// are immutable and therefore final on first collection, while the open interval's cumulative
+    /// snapshot is the whole re-read bill on a big primary (40–110 s per run measured). Set PER ITEM by
+    /// the hosts' per-database watermark delegates from
+    /// <see cref="QueryStoreOpenIntervalState.ShouldIncludeOpenInterval"/>, like <see cref="Watermark"/>;
+    /// mutable (not init) for exactly that reason. Only the query_store payload reads it.
+    /// </summary>
+    public bool IncludeOpenInterval { get; set; } = true;
+
+    /// <summary>
     /// When true (the default — today's behavior), the default_trace_events collector records
     /// Object:Created/Altered/Deleted schema-change (DDL) events; when false its
     /// <c>@include_object_ddl</c> gate drops that entire slice while leaving every other curated

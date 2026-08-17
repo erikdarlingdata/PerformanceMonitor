@@ -880,10 +880,25 @@ END;
            promotion the HAVING's last_execution_time comparison has always relied on. The catalog bound
            is a SUPERSET (an interval can end after the cutoff while all its rows are older); the HAVING
            below stays the exact row-level filter, so shipped semantics are unchanged. */
+        /* #2312: the live path has two forms. Most cycles ship CLOSED intervals only — immutable, so
+           final on first collection — and skip the OPEN interval's cumulative snapshot, which is the
+           whole re-read bill on a big multi-tenant primary (40–110 s per run measured, every one of
+           those snapshots but the latest discarded by the read side's rn = 1). The host opts a cycle
+           back in via context.IncludeOpenInterval (default true = today's exact form) on the
+           QueryStoreOpenIntervalState cadence. SYSUTCDATETIME() promotes to datetimeoffset with a zero
+           offset against end_time — the same implicit UTC-instant promotion the @cutoff_time comparison
+           has always relied on — and being server-evaluated it adds no parameter, so the
+           single-parameter sp_executesql contract is unchanged. Correctness of the skip leans on the
+           cumulative-snapshot contract: a closed interval whose final content differs from our last
+           open-snapshot must carry executions newer than the watermark, so the standing HAVING readmits
+           it; one whose content did not change IS our last snapshot. */
         var intervalPreFilter = backfill
             ? @"i.end_time > @floor_time
     AND   i.start_time < @ceiling_time"
-            : "i.end_time > @cutoff_time";
+            : context.IncludeOpenInterval
+                ? "i.end_time > @cutoff_time"
+                : @"i.end_time > @cutoff_time
+    AND   i.end_time <= SYSUTCDATETIME()";
         var intervalHaving = backfill
             ? @"MAX(qsrs.last_execution_time) > @floor_time
     AND MAX(qsrs.last_execution_time) < @ceiling_time"

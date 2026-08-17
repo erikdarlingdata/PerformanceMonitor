@@ -1398,4 +1398,77 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal(new DateTime(2026, 7, 2, 10, 0, 0), writer.Values[55]); /* interval_start_time_utc, no shift applied */
         Assert.Empty(s_deltas.Calls);                               /* incremental snapshot — no deltas */
     }
+
+    /* ---------------- #2312: the open-interval skip cycles ---------------- */
+
+    /// <summary>
+    /// The closed-only form (#2312): most cycles exclude the OPEN interval — its cumulative snapshot is
+    /// the whole re-read bill on a big primary (40–110 s per run measured) and every snapshot but the
+    /// latest is discarded by the read side's <c>rn = 1</c>. Closed intervals are immutable, so shipping
+    /// only them is final on first collection; the standing HAVING readmits a newly closed interval
+    /// whose content moved past our last open-snapshot, because counters only move with executions.
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_ClosedIntervalsOnly_ExcludesTheOpenInterval()
+    {
+        var context = MakeContext(probeResult: 16);
+        context.IncludeOpenInterval = false;
+        var text = PayloadSql(context);
+
+        Assert.Contains(
+            "WHERE i.end_time > @cutoff_time\n    AND   i.end_time <= SYSUTCDATETIME()",
+            text, StringComparison.Ordinal);
+
+        /* Server-evaluated exclusion — the single-parameter sp_executesql contract is untouched. */
+        Assert.Single(QueryStoreCollector.Instance.BuildPerItemQuery("SO", context).Parameters);
+
+        /* The row-level filter is byte-identical: the skip narrows the interval-id PRUNE only, never
+           the shipped semantics of the rows that do qualify. */
+        Assert.Contains("HAVING\n    MAX(qsrs.last_execution_time) > @cutoff_time", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>Default = today's exact form: no exclusion anywhere, so every untouched caller is byte-identical.</summary>
+    [Fact]
+    public void BuildPerItemQuery_DefaultIncludesTheOpenInterval_TodaysExactForm()
+    {
+        var text = PayloadSql(MakeContext(probeResult: 16));
+
+        Assert.Contains("WHERE i.end_time > @cutoff_time\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYSUTCDATETIME", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The remainder pin, same discipline as the text-flag one: normalize the ONE legal difference out
+    /// of the closed-only form and everything else must be byte-identical to the open form — the pin
+    /// that catches a future edit landing in one arm only.
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_ClosedOnly_ChangesNothingButTheIntervalPrune()
+    {
+        var closedContext = MakeContext(probeResult: 16);
+        closedContext.IncludeOpenInterval = false;
+
+        var open = PayloadSql(MakeContext(probeResult: 16));
+        var closed = PayloadSql(closedContext);
+
+        var normalized = closed.Replace(
+            "\n    AND   i.end_time <= SYSUTCDATETIME()", "", StringComparison.Ordinal);
+        Assert.NotEqual(open, closed);
+        Assert.Equal(open, normalized);
+    }
+
+    /// <summary>The backfill window pre-dates the open interval by construction; the flag must not touch it.</summary>
+    [Fact]
+    public void BuildBackfillPerItemQuery_IgnoresTheOpenIntervalFlag()
+    {
+        var floor = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var ceiling = new DateTime(2026, 6, 2, 0, 0, 0, DateTimeKind.Utc);
+
+        var flagged = MakeContext(probeResult: 16);
+        flagged.IncludeOpenInterval = false;
+
+        Assert.Equal(
+            Lf(QueryStoreCollector.Instance.BuildBackfillPerItemQuery("SO", MakeContext(probeResult: 16), floor, ceiling).Text),
+            Lf(QueryStoreCollector.Instance.BuildBackfillPerItemQuery("SO", flagged, floor, ceiling).Text));
+    }
 }

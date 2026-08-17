@@ -53,6 +53,9 @@ public static class QueryStorePerDatabaseState
            plan fetch's — the two watermarks are stored separately on purpose, and a prefix pruned under
            the wrong owner silently deletes nothing. */
         (QueryStoreTextState.StateCollectorName, QueryStoreTextState.WatermarkKeyPrefix),
+        /* #2312: the open-interval refresh stamp, per database like the three above, under its own owner
+           for the same never-prune-under-the-wrong-name reason. */
+        (QueryStoreOpenIntervalState.StateCollectorName, QueryStoreOpenIntervalState.WatermarkKeyPrefix),
     };
 
     /// <summary>
