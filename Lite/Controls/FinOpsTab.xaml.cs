@@ -810,6 +810,16 @@ public partial class FinOpsTab : UserControl
     private async void ServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         ResetStorageDrill(); // a new server invalidates any open object/index drill
+
+        /* #2306: column filters belong to the previous server too — same mechanism as Darling's FinOps
+           tab: a filter set against server A silently zeroes server B's grid while the count indicators
+           (computed from the unfiltered list) stay full, and Refresh cannot clear it. Cleared via the
+           map every FinOps manager registers into, so a new grid inherits this without a second edit. */
+        foreach (var manager in _filterManagers.Values)
+        {
+            manager.ClearFilters();
+        }
+
         await LoadPerServerDataAsync();
     }
 
