@@ -1021,7 +1021,7 @@
                             <TextBlock Text="Analyzed from the latest collected snapshot (no live proc)." Margin="16,0,0,0" VerticalAlignment="Center" FontStyle="Italic" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
 
-<!-- #2300: the banner strip is CAPPED and scrolls. The analyzer emits one Note banner per stated
+                        <!-- #2300: the banner strip is CAPPED and scrolls. The analyzer emits one Note banner per stated
                              limitation (six on a real server), and an uncapped Auto row let them plus the rollup grid
                              consume the whole tab — the Recommendations grid's star row collapsed to its header and
                              the 2,078 rows it held had no viewport, which reads as "the grid is empty". Banners are
@@ -1074,7 +1074,7 @@
 
                             <TextBlock Grid.Row="2" Text="Recommendations" FontWeight="SemiBold" FontSize="12" Margin="0,8,0,4" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-<!-- MinHeight is the #2300 backstop: even if the rows above grow again, this grid keeps enough
+                            <!-- MinHeight is the #2300 backstop: even if the rows above grow again, this grid keeps enough
                                  viewport to prove it has data — a grid that CAN show rows beats one that fits the window. -->
                             <DataGrid x:Name="FinOpsIndexAnalysisDetailGrid" Grid.Row="3" MinHeight="120" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto" AutoGenerateColumns="False" IsReadOnly="True">
                                 <DataGrid.Columns>
