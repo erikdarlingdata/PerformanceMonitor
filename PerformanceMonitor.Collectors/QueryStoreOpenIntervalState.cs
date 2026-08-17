@@ -39,7 +39,10 @@ namespace PerformanceMonitor.Collectors;
 /// configured drift (at fleet scale the delivered cadence runs well behind the configured one, and an
 /// every-Nth-cycle rule would stretch with it). <b>Include is the conservative default</b>: an absent,
 /// malformed or future-stamped row reads as "include the open interval now", so a first run, a restarted
-/// host and a broken store all behave exactly like today's collector rather than silently going stale.</para>
+/// host and a broken store all behave exactly like today's collector rather than silently going stale.
+/// The same conservatism governs the write side: both hosts land the stamp only after that database's
+/// read AND flush succeed, so a per-database fault the sweep tolerates re-includes next cycle instead of
+/// spending the refresh window on a cycle that captured nothing.</para>
 /// </summary>
 public static class QueryStoreOpenIntervalState
 {

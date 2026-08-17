@@ -404,6 +404,11 @@ public sealed class DarlingCollectorRunner
                 using var dbBudget = EnumeratedCollectorDriver.StartItemBudget(
                     definition.PerItemWallClockBudget, cancellationToken);
                 var dbToken = dbBudget?.Token ?? cancellationToken;
+
+                /* #2312: this database's open-interval stamp, staged at decision time and landed only
+                   after its read and flush succeed — per iteration, so a fault cannot leak a stamp
+                   into a sibling database's landing. */
+                string? stagedOpenIntervalStamp = null;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -468,7 +473,9 @@ public sealed class DarlingCollectorRunner
                         }
 
                         /* #2312, Azure arm: same per-database open-interval decision as the enumerated
-                           delegate, BEFORE BuildQuery bakes the predicate. */
+                           delegate, BEFORE BuildQuery bakes the predicate. Staged into the local, landed
+                           only in the post-flush success block below — a per-database fault this loop
+                           tolerates must re-include next cycle, not spend the refresh window. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
@@ -476,8 +483,7 @@ public sealed class DarlingCollectorRunner
                             context.IncludeOpenInterval = includeOpen;
                             if (includeOpen)
                             {
-                                context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] =
-                                    QueryStoreOpenIntervalState.Format(collectionTime);
+                                stagedOpenIntervalStamp = QueryStoreOpenIntervalState.Format(collectionTime);
                             }
                         }
 
@@ -565,6 +571,12 @@ public sealed class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(server.ServerId, databaseName);
+
+                        /* #2312: read and flush both landed — the staged open-interval stamp may too. */
+                        if (stagedOpenIntervalStamp is not null)
+                        {
+                            context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] = stagedOpenIntervalStamp;
+                        }
                     }
                 }
                 catch (OutOfMemoryException)
@@ -714,6 +726,14 @@ public sealed class DarlingCollectorRunner
                    database on it, flushing each before reading the next. */
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
+                /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
+                   into PendingState only from onItemComplete — which the driver invokes solely after the
+                   item's read AND flush succeeded. Staging them straight into PendingState would let a
+                   per-item fault the driver tolerates still "spend" the 15-minute refresh window for a
+                   cycle that captured nothing (the review catch): PendingState flushes as long as the
+                   whole run survives. Keyed per item, so one database's decision cannot land on another. */
+                var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
+
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
                     /* Per-database watermark refresh + the 24h catch-up clamp, computed INSIDE the loop —
@@ -794,11 +814,12 @@ public sealed class DarlingCollectorRunner
 
                             context.Watermark = clamped;
 
-                            /* #2312: decide per database whether this cycle reads the OPEN interval, and
-                               stamp the inclusion into PendingState — persisted only after the cycle
-                               completes, so a failed cycle re-includes next time (conservative, like the
-                               watermark itself). Name-guarded like the hole records: only query_store's
-                               payload reads the flag. */
+                            /* #2312: decide per database whether this cycle reads the OPEN interval. The
+                               stamp is only STAGED here — it lands in PendingState from onItemComplete,
+                               after this item's read and flush actually succeeded, so a per-item fault
+                               (which this driver swallows by design) re-includes next time instead of
+                               spending the refresh window on a cycle that captured nothing. Name-guarded
+                               like the hole records: only query_store's payload reads the flag. */
                             if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                             {
                                 var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
@@ -806,7 +827,7 @@ public sealed class DarlingCollectorRunner
                                 context.IncludeOpenInterval = includeOpen;
                                 if (includeOpen)
                                 {
-                                    context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] =
+                                    stagedOpenIntervalStamps[QueryStoreOpenIntervalState.KeyFor(item)] =
                                         QueryStoreOpenIntervalState.Format(collectionTime);
                                 }
                             }
@@ -871,6 +892,14 @@ public sealed class DarlingCollectorRunner
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             OnQueryStoreItemSucceeded(server.ServerId, item);
+
+                            /* #2312: NOW the open-interval stamp may land — this hook only fires after
+                               the item's read and flush both succeeded. Remove, not read: a stamp left
+                               staged (read faulted) must not leak into a later run's landing. */
+                            if (stagedOpenIntervalStamps.Remove(QueryStoreOpenIntervalState.KeyFor(item), out var landedStamp))
+                            {
+                                context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
+                            }
                         }
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
