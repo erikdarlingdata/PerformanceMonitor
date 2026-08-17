@@ -530,7 +530,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
     /// Returns null when the store is unreachable, so the caller keeps the current live config.
     /// </summary>
     public async Task<StoreConfigView?> LoadViewAsync(
-        DarlingConfig bootstrap, CancellationToken cancellationToken, bool includeNotification = true)
+        DarlingConfig bootstrap, CancellationToken cancellationToken)
     {
         if (bootstrap is null)
         {
@@ -548,19 +548,14 @@ ON CONFLICT (server_id) DO NOTHING", connection);
                username, and the Teams/Slack/generic/PagerDuty bearer URLs. DarlingManagedRoles deliberately
                revokes table-wide SELECT on config_notification from BOTH viewer and mcp and re-grants only
                the non-secret columns, so a caller connecting as one of those roles and asking for the full
-               row gets 42501 for the whole table.
-               A caller that does not DELIVER alerts must therefore skip it. The MCP host is exactly that: it
-               reads config to learn the monitored-server registry and the service knobs, and references
-               neither Smtp nor Webhooks anywhere. Before this, its read of a password it never used failed,
-               and because every section shares one try/catch, that failure discarded the four reads that
-               HAD succeeded -- so MCP lost the server registry and silently fell back to darling.json for
-               live plan fetches. One denied column cost the registry. */
-            var smtp = bootstrap.Smtp;
-            var webhooks = bootstrap.Webhooks;
-            if (includeNotification)
-            {
-                (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
-            }
+               row gets 42501 for the whole table — and because every section here shares one try/catch, one
+               denied column would cost the WHOLE view (that is how #2293 lost the MCP host its registry).
+               That is precisely why no restricted-role caller reads this view any more: the MCP host used to
+               (skipping this row via an includeNotification parameter, #2293) until #2298 removed its config
+               read entirely — the worker publishes the server registry to it instead. Every remaining caller
+               is the worker or a test on the privileged connection, so the row is read unconditionally and
+               the skip parameter is gone with its last caller. */
+            var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
 
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
             var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
