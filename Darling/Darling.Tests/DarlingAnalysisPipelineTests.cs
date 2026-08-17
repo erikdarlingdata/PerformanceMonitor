@@ -309,6 +309,11 @@ public sealed class DarlingAnalysisPipelineTests
         Assert.True(analysis.NotificationsEnabled);
         Assert.Equal(1.5, analysis.NotifySeverity);
         Assert.Equal(TimeSpan.FromSeconds(120), DarlingWorker.AnalysisTimeout);
+        /* #2299: the shutdown grace a stopping sweep grants its in-flight analysis pass. Must stay WELL
+           inside the worker's 15s shutdown drain budget and the host's 30s ShutdownTimeout — the await
+           runs inside a drained sweep body, so a grace near either ceiling would turn a clean stop into
+           a force-kill. */
+        Assert.Equal(TimeSpan.FromSeconds(5), DarlingWorker.AnalysisShutdownGrace);
     }
 
     [Fact]

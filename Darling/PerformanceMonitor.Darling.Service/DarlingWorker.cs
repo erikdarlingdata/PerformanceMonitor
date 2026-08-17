@@ -250,6 +250,16 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>Test hook: the hardcoded per-run analysis budget, pinned against Lite's default.</summary>
     internal static TimeSpan AnalysisTimeout => s_analysisTimeout;
 
+    /* #2299: how long a stopping sweep holds its analysis pass open so the pass can unwind BEFORE
+       the loop's data source is disposed at RunCollectionLoopAsync scope exit. The pass observes
+       the same stopping token (via AnalysisContext), so this is normally milliseconds; the bound
+       exists for a pass stuck inside a store read. Sized WELL INSIDE the 15s s_shutdownDrainBudget
+       (this await runs inside a drained sweep body) and the host's 30s ShutdownTimeout. */
+    private static readonly TimeSpan s_analysisShutdownGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>Test hook: the shutdown grace granted to an in-flight analysis pass (#2299).</summary>
+    internal static TimeSpan AnalysisShutdownGrace => s_analysisShutdownGrace;
+
     /// <summary>
     /// The Stage 2 pause gate: whether the collection sweep does work this tick. FALSE while the service is
     /// paused (<c>config_service.paused</c>, mirrored into <c>_paused</c> on reload) — the loop then skips all
@@ -2989,7 +2999,7 @@ LIMIT 1", connection);
         try
         {
             var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger);
-            var analyzeTask = analysisService.AnalyzeAsync(serverId, storageName, hoursBack: 4);
+            var analyzeTask = analysisService.AnalyzeAsync(serverId, storageName, hoursBack: 4, stoppingToken);
 
             /* Clear the in-flight marker only when the task truly finishes — not
                when the timeout below moves us on — so a hung server is not relaunched. */
@@ -3001,6 +3011,29 @@ LIMIT 1", connection);
 
             if (stoppingToken.IsCancellationRequested)
             {
+                /* #2299: the pass observes the same token (AnalysisContext.CancellationToken), so
+                   hold this sweep open for a bounded grace and let it unwind — the loop's data
+                   source is disposed when the sweeps drain, and before this hold it was disposed
+                   UNDERNEATH the still-running pass, which cost a clean stop seven ERRORs. A pass
+                   that outlives the grace keeps running into the disposal; its residue is then
+                   classified as shutdown (Information) by the pass itself, and the in-flight
+                   marker keeps it from being relaunched either way. */
+                try
+                {
+                    /* CancellationToken.None on purpose: stoppingToken has already FIRED — passing
+                       it would cancel this wait instantly and defeat the grace. */
+                    await analyzeTask.WaitAsync(s_analysisShutdownGrace, CancellationToken.None);
+                }
+                catch (OperationCanceledException)
+                {
+                    /* Shutdown — quiet and expected. */
+                }
+                catch (TimeoutException)
+                {
+                    _logger.LogDebug(
+                        "[{Server}] Analysis pass did not unwind within {Grace}s of shutdown — its residue is classified as shutdown, not fault",
+                        displayName, (int)s_analysisShutdownGrace.TotalSeconds);
+                }
                 return new AnalysisPassResult(AnalysisPassStatus.Skipped, 0, "service is stopping");
             }
 
