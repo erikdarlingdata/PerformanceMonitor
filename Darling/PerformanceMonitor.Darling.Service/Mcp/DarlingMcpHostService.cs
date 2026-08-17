@@ -395,8 +395,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* Review note on #2298: the old permanent-failure WARN is gone with the failing read, but the
-               transient pre-publish window deserves a breadcrumb — once per host start, at Debug, because
-               it is self-healing by design and a per-fetch log would just be noise. */
+               transient pre-publish window deserves a breadcrumb — once per inner-server (re)start (the
+               supervisor's Start and port-rebind Restart both come through here), at Debug, because it is
+               self-healing by design and a per-fetch log would just be noise. */
             if (_registryState.Read() is null)
             {
                 _logger.LogDebug(
