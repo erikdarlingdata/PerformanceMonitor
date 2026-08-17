@@ -90,13 +90,21 @@ jobs:
           LOOKUP_OUT=''
           lookup() {
             local what=$1; shift
-            if ! LOOKUP_OUT=$(gh api "$@" 2>&1); then
-              echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${LOOKUP_OUT}."\
+            # stderr goes to its OWN capture, never into LOOKUP_OUT: a SUCCESSFUL gh call that
+            # prints a warning (deprecation notice, scope hint) must not pollute a value the call
+            # sites compare ("$step" != "success") or feed to arithmetic -- that would be this
+            # exact defect class reintroduced through the fix (review catch on #2309's own PR).
+            local errfile err
+            errfile=$(mktemp)
+            if ! LOOKUP_OUT=$(gh api "$@" 2>"$errfile"); then
+              err=$(cat "$errfile" 2>/dev/null); rm -f "$errfile"
+              echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${err:-$LOOKUP_OUT}."\
                 "A lookup failure must not become a review verdict (#2309), so the review is"\
                 "UNCONFIRMED -- read the PR's comments to confirm it by eye, or re-run this guard."
               summary "- Guard lookup failed at ${what}; review UNCONFIRMED (#2309)."
               exit 0
             fi
+            rm -f "$errfile"
           }
 
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
