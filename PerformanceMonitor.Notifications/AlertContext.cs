@@ -331,15 +331,32 @@ public static class AlertContextSerializer
                 d.Body,
                 d.IsCodeBlock,
                 ToDto(d.Remediation))),
-            context.Incidents?.ConvertAll(i => new AlertIncidentDto(
-                i.DedupKey,
-                new List<string>(i.InvolvedObjects),
-                i.OccurrenceCount,
-                i.WaitRange,
-                i.TotalOccurrences,
-                i.IncidentStartedUtc)));
+            ToDto(context.Incidents));
         return JsonSerializer.Serialize(dto);
     }
+
+    /// <summary>
+    /// #2302: just the incidents array, for the generic webhook's <c>{{incidents_json}}</c> token —
+    /// the SAME <see cref="AlertIncidentDto"/> projection <see cref="Serialize"/> embeds in the
+    /// persisted ContextJson (one shape for every consumer, this method and the full write cannot
+    /// drift because both go through the same mapping). <c>"[]"</c> for a null context or an alert
+    /// with no fingerprintable incident, so a template's <c>"incidents": {{incidents_json}}</c>
+    /// stays well-formed JSON either way.
+    /// </summary>
+    public static string SerializeIncidents(AlertContext? context)
+    {
+        var incidents = ToDto(context?.Incidents);
+        return incidents is null ? "[]" : JsonSerializer.Serialize(incidents);
+    }
+
+    private static List<AlertIncidentDto>? ToDto(List<AlertIncident>? incidents) =>
+        incidents?.ConvertAll(i => new AlertIncidentDto(
+            i.DedupKey,
+            new List<string>(i.InvolvedObjects),
+            i.OccurrenceCount,
+            i.WaitRange,
+            i.TotalOccurrences,
+            i.IncidentStartedUtc));
 
     /// <summary>
     /// Serializes a single <see cref="RemediationAction"/> to JSON for persistence on a

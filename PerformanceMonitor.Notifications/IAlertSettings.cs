@@ -61,7 +61,9 @@ public interface IAlertSettings
     /// <summary>
     /// The JSON request body, with <c>{{metric}}</c>, <c>{{server}}</c>, <c>{{value}}</c>,
     /// <c>{{threshold}}</c>, <c>{{severity}}</c>, <c>{{context}}</c> and <c>{{timestamp}}</c>
-    /// placeholders substituted per alert. Empty falls back to
+    /// placeholders substituted per alert, plus the #2302 automation tokens:
+    /// <c>{{context_json}}</c> / <c>{{incidents_json}}</c> (raw JSON values, substituted unquoted)
+    /// and <c>{{dedup_key}}</c> (the PagerDuty-shape correlation key). Empty falls back to
     /// <see cref="WebhookAlertService.DefaultGenericBodyTemplate"/>.
     /// </summary>
     string GenericWebhookBodyTemplate { get; }
