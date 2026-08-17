@@ -168,7 +168,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
+            var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId, cancellationToken);
 
             foreach (var story in stories)
             {
@@ -449,7 +449,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// twins: an unreadable mute registry returns the hashes read so far (usually empty) and
     /// findings flow through unfiltered rather than being suppressed.
     /// </summary>
-    private async Task<HashSet<string>> GetMutedHashesAsync(NpgsqlConnection connection, int serverId)
+    private async Task<HashSet<string>> GetMutedHashesAsync(NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
     {
         var hashes = new HashSet<string>();
 
@@ -458,14 +458,22 @@ VALUES ($1, $2, $3, $4, $5, $6)";
             using var command = new NpgsqlCommand(GetMutedHashesSql, connection);
             command.Parameters.AddWithValue(serverId);
 
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
                 hashes.Add(reader.GetString(0));
             }
         }
         catch (Exception ex)
         {
+            /* #2299 (review catch): this helper swallows to fail OPEN, which also swallowed the stop's
+               residue before the caller's classification could see it — the one unclassified ERROR left
+               in the filter path. Same two-factor gate as the caller's. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgFindingStore] GetMutedHashesAsync failed: {Message}", ex.Message);
         }
 
