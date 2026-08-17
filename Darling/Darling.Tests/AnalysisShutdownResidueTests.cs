@@ -107,9 +107,13 @@ public sealed class AnalysisShutdownResidueTests
 
         /* The detector: NO bare catch is permitted at all — its nine identical per-detector catches were
            the bulk of the burst, and a tenth detector must arrive classified. Every `catch (Exception ex)`
-           must therefore BE the filtered form, so the two counts are equal by construction. */
+           must therefore BE one of the two filtered forms (the detectors carry the context token; the
+           baseline-data gate carries its own parameter), so the counts are equal by construction. */
         var detector = ReadSource(Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
-        Assert.Equal(Count(detector, "catch (Exception ex)"), Count(detector, "catch (Exception ex) " + contextFilter));
+        Assert.Equal(
+            Count(detector, "catch (Exception ex)"),
+            Count(detector, "catch (Exception ex) " + contextFilter)
+                + Count(detector, "catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))"));
         Assert.True(Count(detector, contextFilter) >= 9, "a detector catch lost its shutdown classification");
 
         /* The baseline provider: its single catch produced five of the seven lines. */

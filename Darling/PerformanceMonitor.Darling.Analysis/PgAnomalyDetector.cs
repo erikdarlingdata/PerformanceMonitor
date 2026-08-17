@@ -390,7 +390,14 @@ ORDER BY ms_delta DESC LIMIT 1";
             var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken) ?? 0);
             return count > 0;
         }
-        catch { return false; }
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
+        {
+            /* Silent on a genuine fault BY DESIGN (Lite's gate posture: an unreadable canary reads
+               as "no baseline data" and detection just sits out the pass) — but shutdown residue is
+               excluded (#2299), or a stop mid-gate would masquerade as an empty baseline instead of
+               unwinding to the pass's single Information line like every other read here. */
+            return false;
+        }
     }
 
     /// <summary>
