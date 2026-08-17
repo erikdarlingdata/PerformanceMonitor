@@ -340,6 +340,13 @@ public sealed class DarlingWorker : BackgroundService
        (Lite's CollectionBackgroundService in-flight guard). */
     private readonly ConcurrentDictionary<int, byte> _analysisInFlight = new();
 
+    /* #2299: the DETACHED analysis tasks themselves, so shutdown can drain them before the store's data
+       source scope closes. The 120s-timeout path abandons its await by design (a hung pass must not block
+       the loop), which used to leave the task racing the disposal at stop — computing baselines against a
+       stopping postmaster and a disposed NpgsqlDataSource, seven ERRORs per clean stop. Same lifecycle as
+       _analysisInFlight: removed by the completion continuation, never by the timeout. */
+    private readonly ConcurrentDictionary<int, Task> _analysisTasks = new();
+
     /* MinValue = the first sweep after startup runs the retention purge, then daily. */
     private DateTime _nextPurgeUtc = DateTime.MinValue;
 
@@ -1509,6 +1516,21 @@ public sealed class DarlingWorker : BackgroundService
             {
                 /* Expected on shutdown. */
             }
+        }
+
+        /* #2299: drain the DETACHED analysis passes before this method returns and the `await using`
+           data source above disposes. The sweep drain cannot cover these — the analysis timeout path
+           abandons its await by design, so a pass can outlive the sweep body that launched it. With the
+           stopping token now threaded into the pass, each task exits at its next stage boundary, so this
+           normally completes in well under the budget; a genuinely hung pass is still abandoned when the
+           budget lapses, exactly like a hung sweep. The tasks cannot fault (AnalyzeAsync converts its
+           residue to a return), so awaiting WhenAll through WhenAny leaves nothing unobserved. */
+        var analysisDrain = _analysisTasks.Values.ToArray();
+        if (analysisDrain.Length > 0)
+        {
+            await Task.WhenAny(
+                Task.WhenAll(analysisDrain),
+                Task.Delay(s_shutdownDrainBudget, CancellationToken.None));
         }
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
@@ -2976,12 +2998,24 @@ LIMIT 1", connection);
         try
         {
             var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger);
-            var analyzeTask = analysisService.AnalyzeAsync(serverId, storageName, hoursBack: 4);
+            /* #2299: the pass observes the STOPPING token — at its stage boundaries and inside its
+               components' failure paths — so a stop cancels the underlying work instead of merely
+               abandoning the await below while the pass grinds on against a disposing store. */
+            var analyzeTask = analysisService.AnalyzeAsync(serverId, storageName, hoursBack: 4, stoppingToken);
+
+            /* #2299: registered so the loop's shutdown drain can await detached passes before the
+               data source scope closes — the timeout path below deliberately abandons the await,
+               which used to leave the task racing the disposal. */
+            _analysisTasks[serverId] = analyzeTask;
 
             /* Clear the in-flight marker only when the task truly finishes — not
                when the timeout below moves us on — so a hung server is not relaunched. */
             _ = analyzeTask.ContinueWith(
-                completed => _analysisInFlight.TryRemove(serverId, out _),
+                completed =>
+                {
+                    _analysisInFlight.TryRemove(serverId, out _);
+                    _analysisTasks.TryRemove(serverId, out _);
+                },
                 TaskScheduler.Default);
 
             var finished = await Task.WhenAny(analyzeTask, Task.Delay(s_analysisTimeout, stoppingToken));
@@ -3036,6 +3070,7 @@ LIMIT 1", connection);
             /* If analyzeTask was never created (e.g. ctor threw), the continuation
                never ran — clear the marker defensively. */
             _analysisInFlight.TryRemove(serverId, out _);
+            _analysisTasks.TryRemove(serverId, out _);
             return new AnalysisPassResult(AnalysisPassStatus.Error, 0, ex.Message);
         }
     }

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -150,7 +151,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// windows) gets an identity conversion, so both twins' callers are served.
     /// </summary>
     public async Task<List<AnalysisFinding>> FilterMutedFindingsAsync(
-        List<AnalysisStory> stories, AnalysisContext context)
+        List<AnalysisStory> stories, AnalysisContext context, CancellationToken cancellationToken = default)
     {
         if (stories is null)
         {
@@ -166,7 +167,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
 
             foreach (var story in stories)
@@ -210,6 +211,14 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-filter is the stop's residue, not a store fault - rethrow as the
+               cancellation the pass already handles so it logs once, at Information, at the top.
+               Only with the token signalled; the same shapes mid-run keep the ERROR below. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgFindingStore] FilterMutedFindingsAsync failed: {Message}", ex.Message);
         }
 

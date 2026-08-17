@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -115,7 +116,7 @@ public sealed class DarlingAnalysisService
     /// Default time range is the last 4 hours. Host-UTC window (Lite's clock semantics —
     /// Darling's collectors stamp rows with the service host's UTC clock).
     /// </summary>
-    public async Task<List<AnalysisFinding>> AnalyzeAsync(int serverId, string serverName, int hoursBack = 4)
+    public async Task<List<AnalysisFinding>> AnalyzeAsync(int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -128,13 +129,16 @@ public sealed class DarlingAnalysisService
             TimeRangeEnd = timeRangeEnd
         };
 
-        return await AnalyzeAsync(context);
+        return await AnalyzeAsync(context, cancellationToken);
     }
 
     /// <summary>
-    /// Runs the full analysis pipeline with a specific context.
+    /// Runs the full analysis pipeline with a specific context. The token is the SERVICE's stopping token
+    /// (#2299), observed at stage boundaries and inside the I/O-heavy components, so a pass caught mid-flight
+    /// by a stop exits before the host disposes the data source under it — and its residue logs as ONE
+    /// Information line here rather than a burst of per-component ERRORs.
     /// </summary>
-    public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)
+    public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context, CancellationToken cancellationToken = default)
     {
         if (IsAnalyzing)
             return [];
@@ -177,8 +181,12 @@ public sealed class DarlingAnalysisService
                 return [];
             }
 
+            /* #2299: stage-boundary checkpoints. The components each observe the token in their own
+               failure paths; these keep a stopping pass from ENTERING the next I/O-heavy stage at all. */
+            cancellationToken.ThrowIfCancellationRequested();
+
             // 1.5. Detect anomalies (compare analysis window against baseline)
-            var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
+            var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context, cancellationToken);
             facts.AddRange(anomalies);
 
             // 2. Score facts (base severity + amplifiers)
@@ -211,7 +219,9 @@ public sealed class DarlingAnalysisService
             //    reorder) — WITHOUT inserting yet, so enrichment + action-build happen on the
             //    survivors first and the BUILT RemediationAction is persisted on each row. Muted/
             //    absolution findings are dropped here and never enriched.
-            var findings = await _findingStore.FilterMutedFindingsAsync(stories, context);
+            var findings = await _findingStore.FilterMutedFindingsAsync(stories, context, cancellationToken);
+
+            cancellationToken.ThrowIfCancellationRequested();
 
             // 5. Enrich the survivors with drill-down data (ephemeral except through the built
             //    action; the cheap config drill-downs run below the 0.5 gate inside the collector).
@@ -256,6 +266,19 @@ public sealed class DarlingAnalysisService
                 context.ServerName, findings.Count, findings.Count > 0 ? findings.Max(f => f.Severity) : 0);
 
             return findings;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #2299: the residue of a service stop — the stage checkpoints above and the components'
+               ShutdownResidue rethrows all land here. ONE Information line, not a per-component ERROR
+               burst, and it says what was lost: this pass's remaining work was abandoned, which the next
+               scheduled pass simply redoes. Only reachable with the stopping token signalled — the same
+               shapes while the service is meant to be running still take the ERROR arm below, because
+               then they are evidence of a real bug. */
+            _logger?.LogInformation(
+                "[DarlingAnalysisService] Analysis for {Server} abandoned at shutdown — this pass's remaining baselines and findings were not computed; the next pass redoes them",
+                context.ServerName);
+            return [];
         }
         catch (Exception ex)
         {

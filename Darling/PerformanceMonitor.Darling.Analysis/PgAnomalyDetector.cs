@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -98,9 +99,13 @@ public class PgAnomalyDetector
 
     /// <summary>
     /// Detects anomalies by comparing the analysis window against time-bucketed baselines.
-    /// Returns anomaly facts to be merged into the main fact list.
+    /// Returns anomaly facts to be merged into the main fact list. The token is the service's stopping
+    /// token (#2299): each sub-detector swallows its own failures by design (one bad metric must not
+    /// silence the other eight), so without the checkpoints below a stopping service would grind through
+    /// all nine against a dying store — nine ERRORs for one stop. A shutdown-shaped failure with the
+    /// token signalled rethrows as cancellation instead, and the loop never reaches the next detector.
     /// </summary>
-    public async Task<List<Fact>> DetectAnomaliesAsync(AnalysisContext context)
+    public async Task<List<Fact>> DetectAnomaliesAsync(AnalysisContext context, CancellationToken cancellationToken = default)
     {
         var anomalies = new List<Fact>();
 
@@ -109,17 +114,25 @@ public class PgAnomalyDetector
             return anomalies;
 
         // Existing detection methods (upgraded to time-bucketed baselines)
-        await DetectCpuAnomalies(context, anomalies);
-        await DetectWaitAnomalies(context, anomalies);
-        await DetectBlockingAnomalies(context, anomalies);
-        await DetectIoAnomalies(context, anomalies);
+        await DetectCpuAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await DetectWaitAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await DetectBlockingAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await DetectIoAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
 
         // New detection methods
-        await DetectBatchRequestAnomalies(context, anomalies);
-        await DetectSessionAnomalies(context, anomalies);
-        await DetectQueryDurationAnomalies(context, anomalies);
-        await DetectMemoryAnomalies(context, anomalies);
-        await DetectObjectStatsAnomalies(context, anomalies);
+        await DetectBatchRequestAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await DetectSessionAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await DetectQueryDurationAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await DetectMemoryAnomalies(context, anomalies, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await DetectObjectStatsAnomalies(context, anomalies, cancellationToken);
 
         return anomalies;
     }
@@ -284,11 +297,11 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Emits ANOMALY_OBJECT_GROWTH for the biggest table grower over threshold and
     /// ANOMALY_OBJECT_CONTENTION for the index with the largest new lock-wait time.
     /// </summary>
-    private async Task DetectObjectStatsAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectObjectStatsAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
             using (var cmd = new NpgsqlCommand(ObjectGrowthSql, connection))
@@ -297,8 +310,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.AddWithValue(ObjectGrowthMbThreshold);
                 cmd.Parameters.AddWithValue(ObjectGrowthPctThreshold);
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
                 {
                     var db = reader.GetString(0);
                     var gSchema = reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString();
@@ -331,8 +344,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(ObjectLockWaitMsDeltaThreshold);
 
-                using var reader = await cmd.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
                 {
                     var db = reader.GetString(0);
                     var cSchema = reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString();
@@ -366,6 +379,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] Object stats anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -395,27 +415,27 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// <summary>
     /// Detects CPU utilization anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectCpuAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectCpuAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Cpu, context.TimeRangeStart);
+                context.ServerId, MetricNames.Cpu, context.TimeRangeStart, cancellationToken);
 
             if (baseline.SampleCount == 0) return;
             // No effectiveStdDev<=0 early return — an untrustworthy/zero-dispersion baseline falls
             // back to the absolute bar (below) rather than going silent.
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(CpuWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return;
 
             var peakCpu = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var avgCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -456,6 +476,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] CPU anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -469,14 +496,14 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// all-types-vs-all-types on the honest per-second scale fixes units, aggregation, and the
     /// per-type cascade together.
     /// </summary>
-    private async Task DetectWaitAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectWaitAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart);
+                context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart, cancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             // Current window: all-types wait ms/sec per collection (interval via LAG), then PEAK.
             double peakRate;
@@ -488,8 +515,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 rateCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 rateCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-                using var rateReader = await rateCmd.ExecuteReaderAsync();
-                if (!await rateReader.ReadAsync()) return;
+                using var rateReader = await rateCmd.ExecuteReaderAsync(cancellationToken);
+                if (!await rateReader.ReadAsync(cancellationToken)) return;
                 peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
                 totalWaitMs = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
                 collectionCount = rateReader.IsDBNull(2) ? 0L : Convert.ToInt64(rateReader.GetValue(2));
@@ -548,8 +575,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                 contribCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 contribCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-                using var contribReader = await contribCmd.ExecuteReaderAsync();
-                while (await contribReader.ReadAsync())
+                using var contribReader = await contribCmd.ExecuteReaderAsync(cancellationToken);
+                while (await contribReader.ReadAsync(cancellationToken))
                 {
                     var waitType = contribReader.GetString(0);
                     metadata[$"contrib_{waitType}"] = Convert.ToDouble(contribReader.GetValue(1));
@@ -567,6 +594,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] Wait anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -575,24 +609,24 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Detects blocking/deadlock anomalies — event rates significantly above
     /// baseline for this time bucket. Uses ratio-based scoring.
     /// </summary>
-    private async Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectBlockingAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart);
+                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, cancellationToken);
             var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart);
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, cancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(BlockingWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return;
 
             var currentBlocking = Convert.ToInt64(reader.GetValue(0));
             var currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
@@ -665,6 +699,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] Blocking anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -672,25 +713,25 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// <summary>
     /// Detects I/O latency anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart);
+                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, cancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(IoWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return;
 
             var currentReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var currentWriteLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -757,6 +798,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] I/O anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -764,25 +812,25 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// <summary>
     /// Detects batch requests/sec anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectBatchRequestAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectBatchRequestAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart);
+                context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart, cancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(BatchRequestWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return;
 
             var avgBatch = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakBatch = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -821,6 +869,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] Batch request anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -828,25 +883,25 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// <summary>
     /// Detects session/connection count anomalies using z-score against time-bucketed baseline.
     /// </summary>
-    private async Task DetectSessionAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectSessionAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart);
+                context.ServerId, MetricNames.SessionCount, context.TimeRangeStart, cancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(SessionWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return;
 
             var avgConnections = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakConnections = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -885,6 +940,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] Session anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -893,25 +955,25 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Detects query duration aggregate anomalies using z-score against time-bucketed baseline.
     /// Measures total elapsed time across all queries per collection interval.
     /// </summary>
-    private async Task DetectQueryDurationAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectQueryDurationAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart);
+                context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, cancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(QueryDurationWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return;
 
             var avgElapsed = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakElapsed = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -950,6 +1012,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] Query duration anomaly detection failed: {Message}", ex.Message);
         }
     }
@@ -959,25 +1028,25 @@ ORDER BY ms_delta DESC LIMIT 1";
     /// Ported from Lite (Darling, Lite, and Dashboard all collect memory metrics).
     /// Measures total_server_memory_mb / target_server_memory_mb as memory pressure %.
     /// </summary>
-    private async Task DetectMemoryAnomalies(AnalysisContext context, List<Fact> anomalies)
+    private async Task DetectMemoryAnomalies(AnalysisContext context, List<Fact> anomalies, CancellationToken cancellationToken)
     {
         try
         {
             var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Memory, context.TimeRangeStart);
+                context.ServerId, MetricNames.Memory, context.TimeRangeStart, cancellationToken);
 
             if (baseline.SampleCount == 0) return;
             var effectiveStdDev = baseline.EffectiveStdDev;
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryWindowSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return;
 
             var avgPressure = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
             var peakPressure = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
@@ -1016,6 +1085,13 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
         catch (Exception ex)
         {
+            /* #2299: a stop mid-detection is not this metric's fault - rethrow as the cancellation
+               the pass already handles, so one INFO line replaces nine of these. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgAnomalyDetector] Memory anomaly detection failed: {Message}", ex.Message);
         }
     }
