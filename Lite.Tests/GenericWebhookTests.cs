@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Text.Json;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -359,6 +360,41 @@ public class GenericWebhookTests
         /* And the serverName stands in when no id exists — the PagerDuty call site's own precedence. */
         var byName = Build("High CPU", "SRV", template: template);
         Assert.Equal("SRV:High CPU", JsonDocument.Parse(byName).RootElement.GetProperty("dedup").GetString());
+    }
+
+    [Fact]
+    public void ContextJsonToken_RedactsRemediationTsql_LikeEveryOtherChannel()
+    {
+        /* The review catch: every channel replaces copy-paste T-SQL with the "see email / in-app dialog"
+           hint before anything leaves the process, and the raw token must not be the one exception. */
+        var context = TwoIncidentContext();
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Remediation T-SQL",
+            Body = "ALTER DATABASE [x] SET READ_COMMITTED_SNAPSHOT ON;",
+            IsCodeBlock = true,
+            Remediation = new RemediationAction("RCSI_OFF", "DB_CONFIG", new List<ForcePlanTarget>())
+        });
+
+        const string template = """{"context": {{context_json}}}""";
+        var payload = WebhookAlertService.BuildGenericPayload(
+            "Deadlocks Detected", "SRV", "2", "0", Branding, context: context, bodyTemplate: template);
+
+        /* The T-SQL never reaches the wire; the hint and the code-block FLAG do, so a consumer still
+           learns a remediation exists and where to read it. */
+        Assert.DoesNotContain("ALTER DATABASE", payload, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("RCSI_OFF", payload, System.StringComparison.Ordinal);
+        var details = JsonDocument.Parse(payload).RootElement.GetProperty("context").GetProperty("Details");
+        var codeBlock = details[1];
+        Assert.True(codeBlock.GetProperty("IsCodeBlock").GetBoolean());
+        Assert.Contains("in-app Alert Details", codeBlock.GetProperty("Body").GetString(), System.StringComparison.Ordinal);
+        Assert.Equal(JsonValueKind.Null, codeBlock.GetProperty("Remediation").ValueKind);
+
+        /* Redaction copies — the SAME context instance flows on to email/Teams afterwards, and those
+           channels legitimately carry the T-SQL (email) or their own hint. Mutation here would be a
+           cross-channel bug this pin exists to forbid. */
+        Assert.Equal("ALTER DATABASE [x] SET READ_COMMITTED_SNAPSHOT ON;", context.Details[1].Body);
+        Assert.NotNull(context.Details[1].Remediation);
     }
 
     [Fact]

@@ -653,7 +653,9 @@ public class WebhookAlertService
     /// unquoted (<c>"context": {{context_json}}</c>) — escaping them would turn structure back into the
     /// flattened string the token exists to replace. Their shape is the SAME
     /// <see cref="AlertContextSerializer"/> projection persisted as the alert-history ContextJson, so a
-    /// consumer parses one shape whether it reads the webhook or the history row. <c>{{dedup_key}}</c> is
+    /// consumer parses one shape whether it reads the webhook or the history row — except that code-block
+    /// bodies and remediation payloads are redacted first (<see cref="RedactForWebhook"/>): the copy-paste
+    /// T-SQL follows the same never-on-a-webhook rule as every other channel here. <c>{{dedup_key}}</c> is
     /// an ordinary escaped string carrying the same key the PagerDuty channel derives — including its
     /// stable metric+server fallback when an alert has no incident — so tickets correlate across channels.
     /// A template that quotes a raw token anyway produces malformed JSON and is caught by the caller's
@@ -678,9 +680,11 @@ public class WebhookAlertService
             ? $"Webhook configuration is working correctly. Sent by {branding.EditionName}."
             : RenderContextForTemplate(context, branding);
 
-        /* PagerDuty's caller passes the numeric serverId when it has one; a test send has neither, so the
-           key falls back to the server name — same precedence as the PagerDuty call site's `serverId ??
-           serverName`, which is what keeps the two channels' keys equal for the same alert. */
+        /* Keyed on the numeric serverId the fan-out passes — the same identity the LIVE PagerDuty path
+           feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert. The
+           serverName arm is THIS channel's own fallback for callers with no id (the settings-window test
+           send); it is not a guarantee PagerDuty's path shares, so a caller wanting cross-channel
+           correlation must pass the id. */
         var dedupKey = DerivePagerDutyDedupKey(
             string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context);
 
@@ -694,8 +698,10 @@ public class WebhookAlertService
             ["context"] = EscapeForJson(contextText),
             ["timestamp"] = EscapeForJson(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)),
             /* Raw JSON values — never EscapeForJson (see the doc comment). "{}" / "[]" rather than empty
-               so a template's `"context": {{context_json}}` stays well-formed on a context-less alert. */
-            ["context_json"] = context is null ? "{}" : AlertContextSerializer.Serialize(context),
+               so a template's `"context": {{context_json}}` stays well-formed on a context-less alert.
+               Serialized from a REDACTED copy: the copy-paste remediation T-SQL never leaves the process
+               on any webhook channel, and a raw token is not an exception to that rule. */
+            ["context_json"] = context is null ? "{}" : AlertContextSerializer.Serialize(RedactForWebhook(context)),
             ["incidents_json"] = AlertContextSerializer.SerializeIncidents(context),
             ["dedup_key"] = EscapeForJson(dedupKey),
         };
@@ -748,6 +754,49 @@ public class WebhookAlertService
         }
 
         return parts.Count == 0 ? $"Sent by {branding.EditionName}" : string.Join(" | ", parts);
+    }
+
+    /// <summary>
+    /// The webhook posture applied to structure (#2302 review catch): every channel in this file replaces
+    /// copy-paste remediation T-SQL with <see cref="TsqlWebhookHint"/> before anything leaves the process —
+    /// Teams, Slack, PagerDuty's custom_details, and this channel's own <c>{{context}}</c> flattening — and
+    /// a raw-JSON token is not an exception. Code-block items keep their heading and the flag (so a consumer
+    /// can see a remediation EXISTS) but carry the hint as their body and no <c>Remediation</c> payload; the
+    /// typed payload is likewise stripped from every item defensively. Returns a COPY — the same context
+    /// instance flows on to the other channels, and mutating it here would redact their email too.
+    /// </summary>
+    private static AlertContext RedactForWebhook(AlertContext context)
+    {
+        var redacted = new AlertContext { Incidents = context.Incidents };
+        foreach (var detail in context.Details)
+        {
+            if (detail.IsCodeBlock)
+            {
+                redacted.Details.Add(new AlertDetailItem
+                {
+                    Heading = detail.Heading,
+                    Body = TsqlWebhookHint,
+                    IsCodeBlock = true
+                });
+                continue;
+            }
+
+            if (detail.Remediation is null)
+            {
+                redacted.Details.Add(detail);
+                continue;
+            }
+
+            redacted.Details.Add(new AlertDetailItem
+            {
+                Heading = detail.Heading,
+                Fields = detail.Fields,
+                Body = detail.Body,
+                IsCodeBlock = false
+            });
+        }
+
+        return redacted;
     }
 
     /// <summary>
