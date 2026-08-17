@@ -353,6 +353,11 @@ if (OperatingSystem.IsWindows())
 builder.Services.AddSingleton<McpRuntimeState>();
 builder.Services.AddSingleton<WebRuntimeState>();
 
+/* #2298: the worker-published monitored-server registry the MCP host's plan-fetch resolver reads,
+   replacing its own mcp-role re-read of rows whose encrypted_password column that role is
+   deliberately denied. */
+builder.Services.AddSingleton<MonitoredServerRegistryState>();
+
 builder.Services.AddHostedService<DarlingWorker>();
 
 /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on

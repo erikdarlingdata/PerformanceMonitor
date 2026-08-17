@@ -67,15 +67,22 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// pivot or the carved secret columns. It also gets its own <see cref="DarlingAnalysisService"/>. Store
 /// migration + role provisioning are the WORKER's job; the <c>mcp</c>-role credential is written AFTER
 /// migration (later than the owner's), so the first-boot poll budget tolerates the delay. The plan fetcher
-/// resolves a finding's serverId to a live connection string built from darling.json (DPAPI resolution
-/// lazy per fetch; any resolution/connection failure degrades the fetch to null inside
-/// <see cref="PgPlanFetcher"/>). On a brand-new store, tool calls before the first migration/connect
+/// resolves a finding's serverId to a live connection string from the worker-published registry
+/// (<see cref="MonitoredServerRegistryState"/>, #2298 — darling.json only before the worker's first
+/// publish; DPAPI resolution lazy per fetch; any resolution/connection failure degrades the fetch to null
+/// inside <see cref="PgPlanFetcher"/>). On a brand-new store, tool calls before the first migration/connect
 /// simply return their error/miss envelopes.</para>
 /// </summary>
 public sealed class DarlingMcpHostService : BackgroundService
 {
     private readonly ILogger<DarlingMcpHostService> _logger;
     private readonly McpRuntimeState _state;
+
+    /* #2298: the worker-published monitored-server registry the plan-fetch resolver reads per fetch —
+       this host never re-reads config_monitored_servers itself (the mcp role's encrypted_password
+       SELECT-carve fails that whole read by design). */
+    private readonly MonitoredServerRegistryState _registryState;
+
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
@@ -87,10 +94,11 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// failure logs on a calm cadence instead of every poll tick.</summary>
     internal static readonly TimeSpan FailedStartBackoff = TimeSpan.FromSeconds(30);
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state)
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState)
     {
         _logger = logger;
         _state = state;
+        _registryState = registryState;
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort)
@@ -363,51 +371,37 @@ public sealed class DarlingMcpHostService : BackgroundService
                connection; first entry wins on a duplicate storage name, mirroring the worker's
                FirstOrDefault over runtimes.
 
-               This used to read config.Servers — i.e. darling.json — which is wrong in two ways that
-               both end in "live plan fetch returns null for a server the MCP tools can otherwise see":
+               The server set comes from the WORKER's published registry (#2298), not a read of our own.
+               This host used to re-read config_monitored_servers over its mcp-role connection, and that
+               read selects encrypted_password — a column the section-6 secret ACL deliberately
+               SELECT-carves from mcp (DarlingManagedRoles: mcp can WRITE a credential blob but never READ
+               one back). The 42501 failed the whole config view read, so live plan fetch silently fell
+               back to darling.json — on a seeded box, exactly the set of servers the file does not know
+               about (#2254/#2256). The worker already loads the same rows over its privileged connection
+               (it must, or it could not collect), so the process already holds everything this host was
+               failing to re-read; a second, deliberately-restricted read of it was the defect. The mcp
+               DATABASE role keeps its carve untouched — this state feeds only the in-process resolver,
+               and no MCP tool exposes it, so a token-holder still cannot obtain a stored credential.
 
-                 1. TODAY: the registry is authoritative after the first seed, so a server added by
-                    add_servers or the Viewer is in the store and NOT in the file (#2254/#2256). It was
-                    therefore absent from this map entirely, while every MCP tool resolved it fine —
-                    DarlingServerResolver reads the STORE. Analysis and plan drill-down for those
-                    servers silently had no connection.
-                 2. AFTER #2218 step 2: [JsonIgnore] keeps StoredServerId off the file, so a file-sourced
-                    MonitoredServer always falls back to the derived id. The tools hand this map the
-                    store's id. They agree only while identity is still derivable.
-
-               So the fix is the same for both: key on the registry. Store-unreachable falls back to the
-               file, which is this host's documented posture (it deliberately starts on darling.json when
-               the store is down) — and a fallback that is only reached when the store cannot answer
-               cannot be the thing that disagrees with it. */
-            IReadOnlyList<MonitoredServer> registryServers = config.Servers;
-            /* includeNotification: false — the MCP host does not deliver alerts and references neither Smtp
-               nor Webhooks, and the notification row is the one read here that touches columns the mcp role
-               is deliberately denied (the SMTP password, and the Teams/Slack/generic/PagerDuty bearer URLs).
-               Asking for them returned 42501 for the whole table, and since every section of the load shares
-               one try/catch that discarded the reads that HAD succeeded — costing MCP the monitored-server
-               registry and silently falling it back to darling.json for live plan fetches. */
-            var storeView = await new StoreConfigProvider(postgres, _logger)
-                .LoadViewAsync(config, stoppingToken, includeNotification: false);
-            if (storeView is not null)
+               Resolution reads the live snapshot PER FETCH rather than copying it once at host start:
+               before the worker's first publish it falls back to darling.json (this host's documented
+               store-down posture), and it heals on the next resolve after the publish — which also means
+               a server added later through add_servers or the Viewer reaches this resolver on the
+               worker's next reload, with no MCP restart. */
+            var fileFallbackById = new Dictionary<int, MonitoredServer>();
+            foreach (var server in config.Servers)
             {
-                registryServers = storeView.EnabledServers;
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "MCP could not read the monitored-server registry — live plan fetch will use darling.json, so any server added through add_servers or the Viewer will have no connection until the store answers.");
-            }
-
-            var serversById = new Dictionary<int, MonitoredServer>();
-            foreach (var server in registryServers)
-            {
-                serversById.TryAdd(server.ServerId, server);
+                fileFallbackById.TryAdd(server.ServerId, server);
             }
 
             var planFetcher = new PgPlanFetcher(
-                serverId => serversById.TryGetValue(serverId, out var server)
-                    ? DarlingServerConnector.ResolveConnectionString(server, _logger)
-                    : null,
+                serverId =>
+                {
+                    var byId = _registryState.Read()?.ById ?? fileFallbackById;
+                    return byId.TryGetValue(serverId, out var server)
+                        ? DarlingServerConnector.ResolveConnectionString(server, _logger)
+                        : null;
+                },
                 _logger);
 
             var builder = WebApplication.CreateBuilder();
