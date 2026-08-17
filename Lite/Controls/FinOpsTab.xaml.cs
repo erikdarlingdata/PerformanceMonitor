@@ -37,6 +37,11 @@ public partial class FinOpsTab : UserControl
 
     private readonly Dictionary<DataGrid, IDataGridFilterManager> _filterManagers = new();
 
+    /* #2306: suppresses ServerSelector_SelectionChanged while RefreshServerList reselects the SAME
+       logical server through a new instance — without it, any Manage Servers edit would clear filters
+       for a server switch that never happened. Darling's FinOps tab carries the same flag. */
+    private bool _populatingServers;
+
     private DataGridFilterManager<DatabaseResourceUsageRow>? _dbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _storageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _dbSizesFilterMgr;
@@ -83,18 +88,33 @@ public partial class FinOpsTab : UserControl
 
         var previousSelection = ServerSelector.SelectedItem as ServerConnection;
         var servers = _serverManager.GetAllServers();
-        ServerSelector.ItemsSource = servers;
 
-        if (previousSelection != null)
+        if (previousSelection != null
+            && servers.FirstOrDefault(s => s.Id == previousSelection.Id) is { } match)
         {
-            var match = servers.FirstOrDefault(s => s.Id == previousSelection.Id);
-            if (match != null)
+            /* #2306 review catch (Darling's _populatingServers, ported): the same logical server
+               reselected through a NEW instance (ServerManager replaces edited entries, and
+               ComboBox compares by reference) still raises SelectionChanged. Without the guard, a
+               tag or favorite edit in Manage Servers would wipe active column filters for a server
+               switch that never happened. Nothing changed for this tab, so the handler — clear,
+               drill reset, reload — is suppressed entirely. */
+            _populatingServers = true;
+            try
             {
+                ServerSelector.ItemsSource = servers;
                 ServerSelector.SelectedItem = match;
-                return;
             }
+            finally
+            {
+                _populatingServers = false;
+            }
+
+            return;
         }
 
+        /* The previous selection is gone (or never existed): the selection genuinely moves, so the
+           assignments below fire the handler on purpose — a real switch clears filters and reloads. */
+        ServerSelector.ItemsSource = servers;
         if (servers.Count > 0)
             ServerSelector.SelectedIndex = 0;
     }
@@ -809,6 +829,8 @@ public partial class FinOpsTab : UserControl
 
     private async void ServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_populatingServers) return; // same-server list repopulation, not a switch — see RefreshServerList
+
         ResetStorageDrill(); // a new server invalidates any open object/index drill
 
         /* #2306: column filters belong to the previous server too — same mechanism as Darling's FinOps
