@@ -34,8 +34,10 @@ namespace Darling.Tests;
 /// <c>darling.json</c> for live plan fetches — a silent capability loss whose cause named a table MCP does
 /// not use.</para>
 ///
-/// <para>The fix is for the reader to agree with the boundary: a caller that does not DELIVER alerts skips
-/// the notification row. These pins hold both halves of that agreement so they cannot drift back apart.</para>
+/// <para>The fix is for the host to stop re-reading as <c>mcp</c> what the process already loaded
+/// privileged. The first cut (#2293) merely skipped the notification row — and the failure moved to the
+/// next denied column — so #2298 removed the host's own config-view read entirely: the plan-fetch resolver
+/// serves the worker-published registry state. These pins hold that agreement so it cannot drift back.</para>
 /// </summary>
 public sealed class McpConfigReadAvoidsSecretColumnsTests
 {
