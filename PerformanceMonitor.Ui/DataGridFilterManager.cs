@@ -25,6 +25,7 @@ public interface IDataGridFilterManager
     Dictionary<string, ColumnFilterState> Filters { get; }
     void SetFilter(ColumnFilterState filterState);
     void UpdateFilterButtonStyles();
+    void ClearFilters();
 }
 
 /// <summary>
@@ -73,6 +74,31 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
             _filters.Remove(filterState.ColumnName);
 
         ApplyFilters();
+        UpdateFilterButtonStyles();
+    }
+
+    /// <summary>
+    /// #2306: drops every filter and restores the unfiltered data (sort preserved, funnel icons dimmed).
+    /// The caller that matters is a SERVER SWITCH on a cross-server surface: a DatabaseName filter set
+    /// against server A silently zeroes server B's grid while count indicators — computed from the
+    /// unfiltered list — stay full, and Refresh cannot clear it because <see cref="UpdateData"/>
+    /// deliberately re-applies active filters. That re-apply is correct for refresh-on-the-same-server
+    /// and is untouched; only an explicit context change goes through here.
+    /// </summary>
+    public void ClearFilters()
+    {
+        if (_filters.Count == 0)
+        {
+            return;
+        }
+
+        _filters.Clear();
+
+        if (_unfilteredData is not null)
+        {
+            SetItemsSourcePreservingSort(_unfilteredData);
+        }
+
         UpdateFilterButtonStyles();
     }
 
