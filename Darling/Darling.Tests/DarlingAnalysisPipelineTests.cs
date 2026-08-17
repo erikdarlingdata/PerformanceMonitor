@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -82,9 +83,10 @@ public sealed class DarlingAnalysisPipelineTests
         }
 
         /* Both AnalyzeAsync shapes: the (serverId, serverName, hoursBack) window builder and
-           the explicit-context pipeline entry. */
+           the explicit-context pipeline entry — since #2299 each also carries the service's
+           stopping token (optional, so every twin-shaped call site stands unchanged). */
         Assert.Equal(2, type.GetMethods().Count(m => m.Name == "AnalyzeAsync"));
-        Assert.NotNull(type.GetMethod("AnalyzeAsync", new[] { typeof(AnalysisContext) }));
+        Assert.NotNull(type.GetMethod("AnalyzeAsync", new[] { typeof(AnalysisContext), typeof(CancellationToken) }));
 
         /* The twins' run-state surface + completion event. */
         Assert.NotNull(type.GetProperty("IsAnalyzing"));
