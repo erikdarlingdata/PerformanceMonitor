@@ -394,6 +394,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 fileFallbackById.TryAdd(server.ServerId, server);
             }
 
+            /* Review note on #2298: the old permanent-failure WARN is gone with the failing read, but the
+               transient pre-publish window deserves a breadcrumb — once per host start, at Debug, because
+               it is self-healing by design and a per-fetch log would just be noise. */
+            if (_registryState.Read() is null)
+            {
+                _logger.LogDebug(
+                    "MCP starting before the worker's first registry publish — live plan fetch resolves from darling.json until it arrives (self-healing; store-registered servers reach the resolver on the worker's next reload).");
+            }
+
             var planFetcher = new PgPlanFetcher(
                 serverId =>
                 {
