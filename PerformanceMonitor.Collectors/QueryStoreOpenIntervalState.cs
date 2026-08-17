@@ -89,8 +89,18 @@ public static class QueryStoreOpenIntervalState
             return true;
         }
 
-        var stamped = DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
-        return stamped > utcNow || utcNow - stamped >= RefreshEvery;
+        /* Same guard as QueryStoreTextState.TryParse: long.TryParse accepts values far outside
+           FromUnixTimeSeconds's year-0001..9999 range, and an out-of-range-but-numeric stamp is just
+           another flavor of corrupt row — the conservative include, not an exception. */
+        try
+        {
+            var stamped = DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
+            return stamped > utcNow || utcNow - stamped >= RefreshEvery;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return true;
+        }
     }
 
     /// <summary>Formats the stamp for one inclusion of the open interval.</summary>

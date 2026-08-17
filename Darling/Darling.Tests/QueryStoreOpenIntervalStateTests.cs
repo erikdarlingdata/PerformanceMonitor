@@ -41,6 +41,10 @@ public sealed class QueryStoreOpenIntervalStateTests
         Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", ""), "SO", Now));
         Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", "not-a-number"), "SO", Now));
         Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", "-5"), "SO", Now));
+        /* Numeric but beyond FromUnixTimeSeconds's year-9999 ceiling (review catch): parses as a long,
+           so it must fall to the ArgumentOutOfRangeException guard, not throw through it. */
+        Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", "999999999999999"), "SO", Now));
+        Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(StateWith("SO", long.MaxValue.ToString()), "SO", Now));
         /* Future stamp = the clock moved backwards; honoring it would pin the snapshot stale for as
            long as the skew lasts. */
         Assert.True(QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
