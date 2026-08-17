@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -102,10 +103,15 @@ public sealed partial class PgDrillDownCollector
     /// <summary>
     /// Enriches each finding's DrillDown dictionary based on its story path.
     /// </summary>
-    public async Task EnrichFindingsAsync(List<AnalysisFinding> findings, AnalysisContext context)
+    public async Task EnrichFindingsAsync(List<AnalysisFinding> findings, AnalysisContext context, CancellationToken cancellationToken = default)
     {
         foreach (var finding in findings)
         {
+            /* #2299: checked per finding — the expensive collectors below (plan fetches, multi-row
+               reads) are exactly where a stop lands, and the per-finding isolation catch must not
+               turn one stop into one ERROR per remaining finding. */
+            cancellationToken.ThrowIfCancellationRequested();
+
             try
             {
                 finding.DrillDown = new Dictionary<string, object>();
@@ -189,6 +195,13 @@ public sealed partial class PgDrillDownCollector
             }
             catch (Exception ex)
             {
+                /* #2299: per-finding isolation is for a bad FINDING; a stop is not one — rethrow into
+                   the pass's single-INFO classification instead of logging per remaining finding. */
+                if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+                {
+                    throw ShutdownResidue.Abandon(ex, cancellationToken);
+                }
+
                 _logger?.LogError("[PgDrillDownCollector] Drill-down failed for {StoryPath}: {ExceptionType}: {Message}",
                     finding.StoryPath, ex.GetType().Name, ex.Message);
                 // Don't null out — keep whatever was collected before the error

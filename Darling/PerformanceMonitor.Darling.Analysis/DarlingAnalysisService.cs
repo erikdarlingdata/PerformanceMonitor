@@ -225,7 +225,7 @@ public sealed class DarlingAnalysisService
 
             // 5. Enrich the survivors with drill-down data (ephemeral except through the built
             //    action; the cheap config drill-downs run below the 0.5 gate inside the collector).
-            await _drillDown.EnrichFindingsAsync(findings, context);
+            await _drillDown.EnrichFindingsAsync(findings, context, cancellationToken);
 
             // 6. Build + attach each finding's RemediationAction from the now drill-down-
             //    populated finding (D2). The builders REQUIRE finding.DrillDown, which the
@@ -246,7 +246,7 @@ public sealed class DarlingAnalysisService
             }
 
             // 7. Insert the survivors in one batched pass, persisting remediation_action_json.
-            await _findingStore.InsertFindingsAsync(findings, context);
+            await _findingStore.InsertFindingsAsync(findings, context, cancellationToken);
 
             LastAnalysisTime = DateTime.UtcNow;
 
@@ -267,14 +267,17 @@ public sealed class DarlingAnalysisService
 
             return findings;
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
         {
             /* #2299: the residue of a service stop — the stage checkpoints above and the components'
-               ShutdownResidue rethrows all land here. ONE Information line, not a per-component ERROR
-               burst, and it says what was lost: this pass's remaining work was abandoned, which the next
-               scheduled pass simply redoes. Only reachable with the stopping token signalled — the same
-               shapes while the service is meant to be running still take the ERROR arm below, because
-               then they are evidence of a real bug. */
+               ShutdownResidue rethrows all land here, and (review catch) so does a RAW shutdown shape
+               from a stage with no internal catch of its own: PgFactCollector deliberately lets its
+               ~20 sub-collectors' failures bubble, so a 57P01 or disposed data source mid-collection
+               arrives here unconverted. ONE Information line, not a per-component ERROR burst, and it
+               says what was lost: this pass's remaining work was abandoned, which the next scheduled
+               pass simply redoes. ShouldAbandon demands the stopping token — the same shapes while the
+               service is meant to be running still take the ERROR arm below, because then they are
+               evidence of a real bug. */
             _logger?.LogInformation(
                 "[DarlingAnalysisService] Analysis for {Server} abandoned at shutdown — this pass's remaining baselines and findings were not computed; the next pass redoes them",
                 context.ServerName);

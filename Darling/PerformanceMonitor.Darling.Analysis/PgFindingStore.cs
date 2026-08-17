@@ -234,7 +234,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// convenience; the in-memory findings are unchanged.
     /// </summary>
     public async Task<List<AnalysisFinding>> InsertFindingsAsync(
-        List<AnalysisFinding> findings, AnalysisContext context)
+        List<AnalysisFinding> findings, AnalysisContext context, CancellationToken cancellationToken = default)
     {
         if (findings is null)
         {
@@ -248,15 +248,29 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             foreach (var finding in findings)
             {
-                await InsertFindingAsync(connection, finding);
+                /* #2299: checked per row — a stop mid-batch must not turn the per-row failure
+                   isolation below into one ERROR per remaining finding. */
+                cancellationToken.ThrowIfCancellationRequested();
+                await InsertFindingAsync(connection, finding, cancellationToken);
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* #2299: the pass's single INFO line reports the abandonment; rows not yet written are
+               simply redone by the next pass (findings are per-run rows, not deltas). */
+            throw;
         }
         catch (Exception ex)
         {
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgFindingStore] InsertFindingsAsync failed: {Message}", ex.Message);
         }
 
@@ -485,7 +499,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// shares a single connection). Per-row failure isolation like the Dashboard twin: one
     /// bad row logs and the batch continues.
     /// </summary>
-    private async Task InsertFindingAsync(NpgsqlConnection connection, AnalysisFinding finding)
+    private async Task InsertFindingAsync(NpgsqlConnection connection, AnalysisFinding finding, CancellationToken cancellationToken)
     {
         try
         {
@@ -528,10 +542,17 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                 Value = (object?)DrillDownSerializer.Serialize(finding.DrillDown) ?? DBNull.Value
             });
 
-            await command.ExecuteNonQueryAsync();
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
         {
+            /* #2299: per-row isolation is for a bad ROW; a stop is not one — rethrow so the batch
+               aborts into the caller's classification instead of logging once per remaining row. */
+            if (ShutdownResidue.ShouldAbandon(ex, cancellationToken))
+            {
+                throw ShutdownResidue.Abandon(ex, cancellationToken);
+            }
+
             _logger?.LogError("[PgFindingStore] InsertFindingAsync failed: {Message}", ex.Message);
         }
     }
