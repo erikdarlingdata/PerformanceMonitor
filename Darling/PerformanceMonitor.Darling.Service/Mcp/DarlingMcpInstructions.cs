@@ -85,7 +85,7 @@ internal static class DarlingMcpInstructions
         | `get_top_procedures_by_cpu` | Most expensive stored procedures by total CPU | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store with query_id / plan_id (survives restarts) | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
         | `list_servers` | All monitored servers with collection-freshness status and last collection time | none |
-        | `get_collection_health` | Per-collector health (running / failing / stale) over the last 7 days | `server_name` |
+        | `get_collection_health` | Per-collector health (running / failing / stale) over the last 7 days, plus the server's sweep_pressure verdict (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) | `server_name` |
         | `get_server_properties` | Instance properties: edition, version, CPU count, memory, socket/core topology, HADR | `server_name` |
 
         ### Diagnostic-depth data-read tools
