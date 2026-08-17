@@ -45,7 +45,7 @@ public partial class FinOpsTab
             _finopsIndexAnalysisRollupFilterMgr!.UpdateData(new List<IndexCleanupRollupRow>());
             _finopsIndexAnalysisFilterMgr!.UpdateData(new List<IndexCleanupRecommendationRow>());
             FinOpsIndexAnalysisBannerPanel.Children.Clear();
-            FinOpsIndexAnalysisBannerPanel.Visibility = Visibility.Collapsed;
+            FinOpsIndexAnalysisBannerScroller.Visibility = Visibility.Collapsed;
             FinOpsIndexAnalysisNoDataMessage.Visibility = Visibility.Visible;
             FinOpsIndexAnalysisCountIndicator.Text = "";
             return;
@@ -89,7 +89,9 @@ public partial class FinOpsTab
             AddIndexAnalysisBanner(note, "#7F8C8D", "#202628");
         }
 
-        FinOpsIndexAnalysisBannerPanel.Visibility =
+        /* #2300: visibility lives on the scroller — the element that occupies the layout row. The panel
+           inside it stays visible; collapsing only the panel would leave an empty scroller holding the row. */
+        FinOpsIndexAnalysisBannerScroller.Visibility =
             FinOpsIndexAnalysisBannerPanel.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 

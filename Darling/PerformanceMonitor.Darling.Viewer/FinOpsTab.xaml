@@ -1021,7 +1021,16 @@
                             <TextBlock Text="Analyzed from the latest collected snapshot (no live proc)." Margin="16,0,0,0" VerticalAlignment="Center" FontStyle="Italic" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
 
-                        <StackPanel x:Name="FinOpsIndexAnalysisBannerPanel" Grid.Row="1" Margin="10,0,10,4" Visibility="Collapsed"/>
+<!-- #2300: the banner strip is CAPPED and scrolls. The analyzer emits one Note banner per stated
+                             limitation (six on a real server), and an uncapped Auto row let them plus the rollup grid
+                             consume the whole tab — the Recommendations grid's star row collapsed to its header and
+                             the 2,078 rows it held had no viewport, which reads as "the grid is empty". Banners are
+                             caveats; they must never evict the content they qualify. Visibility is toggled on the
+                             SCROLLER (the element occupying the row), not the panel inside it. -->
+                        <ScrollViewer x:Name="FinOpsIndexAnalysisBannerScroller" Grid.Row="1" Margin="10,0,10,4" MaxHeight="150"
+                                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Visibility="Collapsed">
+                            <StackPanel x:Name="FinOpsIndexAnalysisBannerPanel"/>
+                        </ScrollViewer>
 
                         <Grid Grid.Row="2" Margin="10,0,10,10">
                             <Grid.RowDefinitions>
@@ -1065,7 +1074,9 @@
 
                             <TextBlock Grid.Row="2" Text="Recommendations" FontWeight="SemiBold" FontSize="12" Margin="0,8,0,4" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                            <DataGrid x:Name="FinOpsIndexAnalysisDetailGrid" Grid.Row="3" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto" AutoGenerateColumns="False" IsReadOnly="True">
+<!-- MinHeight is the #2300 backstop: even if the rows above grow again, this grid keeps enough
+                                 viewport to prove it has data — a grid that CAN show rows beats one that fits the window. -->
+                            <DataGrid x:Name="FinOpsIndexAnalysisDetailGrid" Grid.Row="3" MinHeight="120" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto" AutoGenerateColumns="False" IsReadOnly="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ActionDisplay}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ActionDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Action" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ResultKindDisplay}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ResultKindDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Result Kind" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
