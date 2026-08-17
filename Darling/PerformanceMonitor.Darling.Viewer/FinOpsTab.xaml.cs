@@ -127,6 +127,16 @@ public partial class FinOpsTab : UserControl
         ShowFinOpsStorageView(FinOpsStorageDrillLevel.Parent);
         ShowFinOpsLockingView(FinOpsLockingLevel.Parent);
 
+        /* #2306: column filters belong to the previous server too. A DatabaseName filter set against
+           server A silently zeroes server B's grid while the count indicators — computed from the
+           unfiltered list — stay full, and Refresh cannot clear it (UpdateData deliberately re-applies
+           active filters, which is right for same-server refresh and untouched here). Cleared via the
+           map every FinOps manager registers into, so a new grid inherits this without a second edit. */
+        foreach (var manager in _filterManagers.Values)
+        {
+            manager.ClearFilters();
+        }
+
         await RefreshActiveSubTabAsync();
     }
 
