@@ -1285,8 +1285,10 @@ internal sealed class CollectorHealth
 
     /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
     /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
-    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity.</summary>
-    private int FrequencyMinutes =>
+    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity.
+    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average
+    /// duration by this same cadence, so both readers of it share one resolution.</summary>
+    internal int FrequencyMinutes =>
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(

@@ -36,7 +36,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `list_servers` | Lists all monitored SQL Server instances with status and last collection time | none |
-        | `get_collection_health` | Shows collector health: running, failing, or stale | `server_name` |
+        | `get_collection_health` | Shows collector health: running, failing, or stale, plus the sweep_pressure verdict (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) | `server_name` |
         | `get_server_summary` | Quick health overview: CPU %, memory, blocking/deadlock counts | `server_name` |
         | `get_daily_summary` | Daily composite health band + wait/query/deadlock/blocking/CPU/memory/alert rollup for one day | `server_name`, `summary_date` (yyyy-MM-dd, default today) |
 

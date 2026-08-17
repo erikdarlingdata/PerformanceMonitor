@@ -697,7 +697,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on.")]
+    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes.")]
     public static async Task<string> GetCollectionHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -741,9 +741,43 @@ public sealed class DarlingMcpDataTools
                     r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases)
             });
 
+            /* #2296: the roll-up that makes half-rate collection visible. Every collector on a saturated
+               server reads HEALTHY — from each one's own seat nothing is wrong — so the condition only
+               existed as a service-log warning ("collection body has not completed … skipping relaunch").
+               The verdict compares the collectors' combined execution demand (average duration amortized
+               by cadence) against the minute the fastest cadence holds; heaviest_collectors names where
+               the budget goes, which is the actionable half of the answer. */
+            var pressure = SweepPressureClassifier.Compute(
+                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.FrequencyMinutes)));
+            var heaviest = rows
+                .Where(r => r.FrequencyMinutes > 0 && r.AvgDurationMs > 0)
+                .OrderByDescending(r => r.AvgDurationMs / r.FrequencyMinutes)
+                .Take(3)
+                .Select(r => new
+                {
+                    collector = r.CollectorName,
+                    avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
+                    frequency_minutes = r.FrequencyMinutes
+                });
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                sweep_pressure = new
+                {
+                    busy_ms_per_minute = Math.Round(pressure.BusyMsPerMinute, 0),
+                    busy_percent = Math.Round(pressure.BusyPercent, 1),
+                    verdict = pressure.Verdict,
+                    heaviest_collectors = heaviest,
+                    note = pressure.Verdict switch
+                    {
+                        SweepPressureClassifier.Saturated =>
+                            "The collection body cannot finish inside its cadence: relaunches are skipped every cycle and this server collects at a multiple of its configured interval, while each collector above correctly reads healthy from its own seat. The lever is capacity or placement (lighter or fewer scheduled collectors, a longer cadence, or a collector closer to the target), not collector repair.",
+                        SweepPressureClassifier.AtRisk =>
+                            "The collection body's average demand is close to its cadence; variance will intermittently push it over, skipping relaunches and stretching the delivered interval.",
+                        _ => null
+                    }
+                },
                 collectors = result
             }, McpHelpers.JsonOptions);
         }

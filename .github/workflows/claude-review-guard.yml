@@ -79,15 +79,51 @@ jobs:
           # the rest, with nothing to show that it did. Identical for the single-argument calls.
           summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
 
+          # #2309: every one-shot catalog lookup below goes through this, because under `set -e` a
+          # bare $(gh api ...) assignment that fails KILLS the step with one context-free stderr
+          # line -- which is how a transient 404/503 became a deterministic-looking hard red on
+          # three PRs in one afternoon, with no annotation naming the call that died. A lookup
+          # failure is not a review verdict (the same rule the sentinel read at the bottom already
+          # encodes): name the endpoint, mark the review UNCONFIRMED, exit 0. The helper assigns to
+          # LOOKUP_OUT instead of being command-substituted because an exit inside $() only leaves
+          # the subshell -- the one shape that CANNOT work here.
+          LOOKUP_OUT=''
+          lookup() {
+            local what=$1; shift
+            # stderr goes to its OWN capture, never into LOOKUP_OUT: a SUCCESSFUL gh call that
+            # prints a warning (deprecation notice, scope hint) must not pollute a value the call
+            # sites compare ("$step" != "success") or feed to arithmetic -- that would be this
+            # exact defect class reintroduced through the fix (review catch on #2309's own PR).
+            local errfile err
+            # The plumbing itself must not be able to kill the step either (review catch on the
+            # #2309 fix): a failed mktemp degrades to /dev/null (stderr is then lost but the
+            # verdict path survives), and the cat/rm are failure-tolerant for the same reason.
+            errfile=$(mktemp 2>/dev/null || echo /dev/null)
+            if ! LOOKUP_OUT=$(gh api "$@" 2>"$errfile"); then
+              err=$(cat "$errfile" 2>/dev/null || true)
+              [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+              echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${err:-$LOOKUP_OUT}."\
+                "A lookup failure must not become a review verdict (#2309), so the review is"\
+                "UNCONFIRMED -- read the PR's comments to confirm it by eye, or re-run this guard."
+              summary "- Guard lookup failed at ${what}; review UNCONFIRMED (#2309)."
+              exit 0
+            fi
+            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+          }
+
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
           # means review is not operating here at all -- no secret, or a fork PR, which the review
           # workflow no-ops by design and which is not this guard's business.
+          # The poll deliberately does NOT use lookup(): a transient API failure mid-poll should
+          # consume one attempt and try again, not end the guard -- `|| line=''` keeps `set -e`
+          # out of it, and an empty line is already the loop's no-run-yet case (#2309).
           run_id=''; status=''; conclusion=''; created=''; seen=''
           for attempt in $(seq 1 70); do
             line=$(gh api \
               "repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=1" \
               --jq '.workflow_runs[0] // empty
-                    | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"')
+                    | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"' \
+              2>/dev/null || true)
             if [ -n "$line" ]; then
               read -r run_id status conclusion created <<<"$line"
               seen=1
@@ -116,8 +152,9 @@ jobs:
           fi
 
           # The step's own conclusion, which separates a clean no-op from a real run.
-          step=$(gh api "repos/$R/actions/runs/$run_id/jobs" --paginate \
-            --jq '[.jobs[].steps[] | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty')
+          lookup "review-run jobs (step conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
+            --jq '[.jobs[].steps[] | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
+          step=$LOOKUP_OUT
 
           if [ -z "$step" ]; then
             echo "::error title=Guard cannot find the review step::No step named"\
@@ -139,7 +176,8 @@ jobs:
           # before execution_file and conclusion are ever set. Actions job ids double as check-run
           # ids, which is what makes the annotation readable from a different workflow.
           never_ran=''
-          for job in $(gh api "repos/$R/actions/runs/$run_id/jobs" --paginate --jq '.jobs[].id'); do
+          lookup "review-run jobs (annotation scan)" "repos/$R/actions/runs/$run_id/jobs" --paginate --jq '.jobs[].id'
+          for job in $LOOKUP_OUT; do
             if gh api "repos/$R/check-runs/$job/annotations" --jq '.[].message' 2>/dev/null \
                  | grep -qF 'Skipping action due to workflow validation'; then
               never_ran=1
@@ -148,8 +186,8 @@ jobs:
           done
 
           if [ -n "$never_ran" ]; then
-            touched=$(gh api "repos/$R/pulls/$PR/files" --paginate --jq '.[].filename' \
-              | { grep -Fx "$WF" || true; })
+            lookup "PR changed files" "repos/$R/pulls/$PR/files" --paginate --jq '.[].filename'
+            touched=$(printf '%s' "$LOOKUP_OUT" | { grep -Fx "$WF" || true; })
             summary '### Claude review never ran'
             if [ -n "$touched" ]; then
               # Expected and unavoidable: the action requires that file to match the default branch
@@ -187,13 +225,16 @@ jobs:
           # ever renamed this reports a false "posted nothing" -- loud and wrong, which is the safer
           # direction for a guard to fail.
           mine='select(.user.login == env.REVIEW_BOT)'
-          issue=$(gh api "repos/$R/issues/$PR/comments" --paginate \
-            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length")
-          inline=$(gh api "repos/$R/pulls/$PR/comments" --paginate \
-            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length")
-          reviews=$(gh api "repos/$R/pulls/$PR/reviews" --paginate \
+          lookup "issue-comment tally" "repos/$R/issues/$PR/comments" --paginate \
+            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
+          issue=$LOOKUP_OUT
+          lookup "inline-comment tally" "repos/$R/pulls/$PR/comments" --paginate \
+            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
+          inline=$LOOKUP_OUT
+          lookup "review tally" "repos/$R/pulls/$PR/reviews" --paginate \
             --jq "[.[] | $mine | select(.submitted_at != null
-                                        and .submitted_at > \"$created\")] | length")
+                                        and .submitted_at > \"$created\")] | length"
+          reviews=$LOOKUP_OUT
           total=$(( issue + inline + reviews ))
           echo "posted by $REVIEW_BOT since $created -- issue: $issue, inline: $inline,"\
             "reviews: $reviews"
