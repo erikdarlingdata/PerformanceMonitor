@@ -95,16 +95,20 @@ jobs:
             # sites compare ("$step" != "success") or feed to arithmetic -- that would be this
             # exact defect class reintroduced through the fix (review catch on #2309's own PR).
             local errfile err
-            errfile=$(mktemp)
+            # The plumbing itself must not be able to kill the step either (review catch on the
+            # #2309 fix): a failed mktemp degrades to /dev/null (stderr is then lost but the
+            # verdict path survives), and the cat/rm are failure-tolerant for the same reason.
+            errfile=$(mktemp 2>/dev/null || echo /dev/null)
             if ! LOOKUP_OUT=$(gh api "$@" 2>"$errfile"); then
-              err=$(cat "$errfile" 2>/dev/null); rm -f "$errfile"
+              err=$(cat "$errfile" 2>/dev/null || true)
+              [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
               echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${err:-$LOOKUP_OUT}."\
                 "A lookup failure must not become a review verdict (#2309), so the review is"\
                 "UNCONFIRMED -- read the PR's comments to confirm it by eye, or re-run this guard."
               summary "- Guard lookup failed at ${what}; review UNCONFIRMED (#2309)."
               exit 0
             fi
-            rm -f "$errfile"
+            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
           }
 
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
