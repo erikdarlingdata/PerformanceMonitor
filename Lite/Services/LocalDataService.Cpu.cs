@@ -59,30 +59,35 @@ ORDER BY sample_time";
 
     /// <summary>
     /// #2320: the attribution denominator's raw ingredients for one window — average SQL-process CPU
-    /// percent and the sample count the coverage gate needs. Mirrors Darling's
-    /// GetCpuWindowAverageAsync; windows on server-local sample_time exactly like
-    /// <see cref="GetCpuUtilizationAsync"/> above, because that is this store's clock for this table.
+    /// percent, the sample count, and the sampled span the coverage gate needs. Mirrors Darling's
+    /// GetCpuWindowAverageAsync. Windows on collection_time in TRUE UTC — deliberately NOT the
+    /// server-local sample_time the charting read above uses (the round-6 review catch):
+    /// GetTimeRangeServerLocal leans on the GLOBAL ambient ServerTimeHelper.UtcOffsetMinutes, which
+    /// tracks whichever UI tab was last selected rather than the server this method was asked about,
+    /// so in a multi-server install the denominator's window could cover a different real-world
+    /// period than the numerator's. The stats numerator windows collection_time in UTC; so does this.
     /// </summary>
     public async Task<(double? AvgSqlCpuPercent, int Samples, double SpanHours)> GetCpuWindowAverageAsync(int serverId, int hoursBack)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null);
+        var endUtc = DateTime.UtcNow;
+        var startUtc = endUtc.AddHours(-hoursBack);
 
         /* Span rides along for the cadence-agnostic coverage gate — mirrors Darling. */
         command.CommandText = @"
 SELECT
     AVG(sqlserver_cpu_utilization),
     COUNT(*),
-    COALESCE(EXTRACT(EPOCH FROM (MAX(sample_time) - MIN(sample_time))) / 3600.0, 0)
+    COALESCE(EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0, 0)
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-AND   sample_time >= $2
-AND   sample_time <= $3";
+AND   collection_time >= $2
+AND   collection_time <= $3";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
 
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
