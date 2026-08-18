@@ -173,6 +173,35 @@ public static class QueryStorePlanXmlState
         plansShipped <= 0 || planBytesShipped <= 0 ? null : planBytesShipped / plansShipped;
 
     /// <summary>
+    /// One database's carried plan-size estimate (#2312 Finding 1): the observed average the next pass
+    /// sizes its candidate window from, and whether the walk is mid-backlog (which biases the sample
+    /// small — the <see cref="CandidatePlanCount(long?, long, bool, out bool)"/> overload floors it).
+    /// <c>AvgBytes</c> of zero means "never learned"; callers pass null to CandidatePlanCount then.
+    /// </summary>
+    public readonly record struct PlanSizeEstimate(long AvgBytes, bool CatchUpInProgress);
+
+    /// <summary>
+    /// Folds one pass's outcome into the carried estimate. The rules, each load-bearing:
+    /// a pass that shipped nothing teaches nothing about size (previous average stands) but DOES
+    /// prove the walk is caught up (nothing qualified past the watermark), so catch-up clears;
+    /// a pass cut by either bound — the candidate window consumed or the byte budget reached —
+    /// proves a backlog remains, so catch-up sets; an ordinary partial pass learns its average and
+    /// clears catch-up. Pure so the table is pinnable; the runner owns only the dictionary.
+    /// </summary>
+    public static PlanSizeEstimate Learn(
+        PlanSizeEstimate previous, long bytesShipped, int plansShipped, int candidateWindow, long budgetBytes)
+    {
+        if (plansShipped <= 0)
+        {
+            return new PlanSizeEstimate(previous.AvgBytes, CatchUpInProgress: false);
+        }
+
+        var catchUp = plansShipped >= candidateWindow || bytesShipped >= budgetBytes;
+        var avg = ObservedAvgPlanBytes(bytesShipped, plansShipped) ?? previous.AvgBytes;
+        return new PlanSizeEstimate(avg, catchUp);
+    }
+
+    /// <summary>
     /// How many plans one pass may CONSIDER: enough that the byte budget is the binding constraint, few enough
     /// that the server never decompresses a catalog to discover which plans fit.
     ///

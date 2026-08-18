@@ -115,6 +115,17 @@ public sealed class DarlingCollectorRunner
     private void OnQueryStoreItemSucceeded(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryRemove((serverId, database), out _);
 
+    /// <summary>
+    /// Per-DATABASE observed plan-XML size estimate for the plan fetch's candidate sizing (#2312
+    /// Finding 1): <see cref="QueryStorePlanXmlState.CandidatePlanCount(long?, long, bool, out bool)"/>
+    /// was designed to learn each database's real average from its own shipped passes — the 11x fleet
+    /// spread is the whole argument for it — and the call site passed null, so every pass on every
+    /// database sized its decompression window from the 160KB first-contact seed. In-memory like the
+    /// failure counters and for the same reason: a restart forgetting the estimate costs exactly one
+    /// first-contact-sized pass.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), QueryStorePlanXmlState.PlanSizeEstimate> _observedPlanSize = new();
+
     private static readonly TimeSpan AzureMasterRecheckInterval = TimeSpan.FromMinutes(15);
 
     public const int CommandTimeoutSeconds = 60;
@@ -1378,8 +1389,14 @@ public sealed class DarlingCollectorRunner
         {
             var watermark = QueryStorePlanXmlState.Resolve(context.State, databaseName, context.CollectionTime);
             var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
+
+            /* #2312 Finding 1: size the window from THIS database's learned average instead of the
+               160KB seed every pass — zero AvgBytes means never learned, which is the seed's job. */
+            var estimate = _observedPlanSize.TryGetValue((server.ServerId, databaseName), out var carried)
+                ? carried
+                : default;
             var candidates = QueryStorePlanXmlState.CandidatePlanCount(
-                observedAvgPlanBytes: null, budget, out var clamped);
+                estimate.AvgBytes > 0 ? estimate.AvgBytes : null, budget, estimate.CatchUpInProgress, out var clamped);
 
             if (clamped)
             {
@@ -1403,6 +1420,17 @@ public sealed class DarlingCollectorRunner
                         PlanHash: null));
                 }
             }
+
+            /* Learn from what this pass actually decompressed and shipped — BEFORE the empty-pass
+               early return, because an empty pass is the one that proves the walk caught up (nvarchar
+               length * 2 is DATALENGTH exactly, no server round-trip needed). */
+            var shippedBytes = 0L;
+            foreach (var plan in fetched)
+            {
+                shippedBytes += plan.PlanXml is null ? 0L : (long)plan.PlanXml.Length * 2;
+            }
+            _observedPlanSize[(server.ServerId, databaseName)] =
+                QueryStorePlanXmlState.Learn(estimate, shippedBytes, fetched.Count, candidates, budget);
 
             if (fetched.Count == 0)
             {
