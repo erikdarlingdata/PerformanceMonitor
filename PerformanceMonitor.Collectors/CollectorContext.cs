@@ -246,13 +246,32 @@ public sealed class CollectorContext
     public long PerItemWatermarkMs { get; set; }
 
     /// <summary>
+    /// Milliseconds the item's separate plan-XML fetch took (#2312 investigation), set by the host that
+    /// runs one (Darling; Lite has no separate fetch and leaves it zero). The fetch is INSIDE the driver's
+    /// per-item <c>sql:</c> stopwatch but is neither open nor drain — it is its own query against
+    /// <c>sys.query_store_plan</c>, and on a database with a huge Query Store catalog it can dominate the
+    /// whole item (ayr-01: a 0-row closed-only cycle still cost 298s, and the blended number could not say
+    /// where). Measured so drain stops absorbing it, exactly the #2164 argument one seam further down.
+    /// </summary>
+    public long PerItemPlanFetchMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the item's separate statement-text fetch took (#2150's fetch, split out for the #2312
+    /// investigation) — same contract as <see cref="PerItemPlanFetchMs"/>: inside <c>sql:</c>, not drain,
+    /// zero when the host runs no separate fetch.
+    /// </summary>
+    public long PerItemTextFetchMs { get; set; }
+
+    /// <summary>
     /// The item's row-STREAMING time: the driver's blended per-item total minus the phases that are not
-    /// streaming (<see cref="PerItemWatermarkMs"/>, <see cref="PerItemOpenMs"/>). Lives here rather than at
+    /// streaming (<see cref="PerItemWatermarkMs"/>, <see cref="PerItemOpenMs"/>,
+    /// <see cref="PerItemPlanFetchMs"/>, <see cref="PerItemTextFetchMs"/>). Lives here rather than at
     /// the log site so the subtraction has exactly one definition and a test can pin the shipped arithmetic
     /// instead of a copy of it. Clamped at zero: the phases are measured on separate stopwatches, so tiny
     /// skew must never surface as negative drain.
     /// </summary>
-    public long DrainMsFrom(long itemSqlMs) => Math.Max(0, itemSqlMs - PerItemOpenMs - PerItemWatermarkMs);
+    public long DrainMsFrom(long itemSqlMs) =>
+        Math.Max(0, itemSqlMs - PerItemOpenMs - PerItemWatermarkMs - PerItemPlanFetchMs - PerItemTextFetchMs);
 
     /// <summary>
     /// Cumulative text bytes the budgeted read actually materialized for the item just read (#1960),

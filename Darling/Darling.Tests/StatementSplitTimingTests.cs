@@ -73,4 +73,35 @@ public sealed class StatementSplitTimingTests
 
         Assert.Equal(sqlMs, context.PerItemWatermarkMs + context.PerItemOpenMs + context.DrainMsFrom(sqlMs));
     }
+
+    /// <summary>
+    /// #2312: the separate plan-XML and text fetches run INSIDE the driver's <c>sql:</c> stopwatch but are
+    /// their own queries against the Query Store catalogs — on ayr-01 a 0-row closed-only cycle still cost
+    /// 298s and the blended number could not say where. They must come out of drain exactly like the
+    /// watermark phase, or drain silently absorbs the one cost this investigation needs isolated.
+    /// </summary>
+    [Fact]
+    public void DrainExcludesTheSeparateFetchPhases()
+    {
+        var context = NewContext();
+        context.PerItemWatermarkMs = 5_000;
+        context.PerItemOpenMs = 1_000;
+        context.PerItemPlanFetchMs = 200_000;
+        context.PerItemTextFetchMs = 90_000;
+        const long sqlMs = 300_000;
+
+        Assert.Equal(4_000, context.DrainMsFrom(sqlMs));
+        Assert.Equal(sqlMs,
+            context.PerItemWatermarkMs + context.PerItemOpenMs
+            + context.PerItemPlanFetchMs + context.PerItemTextFetchMs + context.DrainMsFrom(sqlMs));
+    }
+
+    /// <summary>Zero must mean "no separate fetch ran" — the log gates its long form on exactly that.</summary>
+    [Fact]
+    public void FetchPhases_DefaultToZero_SoAFetchlessCollectorIsNotReadAsMeasured()
+    {
+        var context = NewContext();
+        Assert.Equal(0, context.PerItemPlanFetchMs);
+        Assert.Equal(0, context.PerItemTextFetchMs);
+    }
 }

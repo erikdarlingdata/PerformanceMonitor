@@ -847,8 +847,10 @@ public sealed class DarlingCollectorRunner
                         /* Cleared BEFORE the open so an item whose open faults cannot log the previous
                            item's split as its own — a stale timing is worse than no timing. The watermark
                            phase is NOT cleared here: it ran already, for THIS item, and clearing it would
-                           hand its milliseconds to drain. */
+                           hand its milliseconds to drain. The fetch phases clear on the same rule. */
                         context.PerItemOpenMs = 0;
+                        context.PerItemPlanFetchMs = 0;
+                        context.PerItemTextFetchMs = 0;
                         var openWatch = Stopwatch.StartNew();
                         using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
                         context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
@@ -865,7 +867,12 @@ public sealed class DarlingCollectorRunner
                            the catalog for that would be an invariant held somewhere else. */
                         if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
                         {
+                            /* #2312 investigation: timed so the log split can say whether the invariant
+                               per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
+                               blended sql: could not distinguish them. */
+                            var planFetchWatch = Stopwatch.StartNew();
                             await FetchAndStorePlansAsync(planFetchConnection, server, item, context, itemTimeout, ct);
+                            context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
                         }
 
                         /* #2150: and this database's statement-text fetch, for the same reason and with the
@@ -879,7 +886,10 @@ public sealed class DarlingCollectorRunner
                            about who owns the text: if the column is nulled, this runs. */
                         if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
                         {
+                            /* #2312 investigation: same split as the plan fetch above. */
+                            var textFetchWatch = Stopwatch.StartNew();
                             await FetchAndStoreQueryTextAsync(textFetchConnection, server, item, context, itemTimeout, ct);
+                            context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
                         }
 
                         return batch;
@@ -915,9 +925,21 @@ public sealed class DarlingCollectorRunner
                                budget and the link are the levers. Only emitted when the host measured it. */
                             if (context.PerItemOpenMs > 0)
                             {
-                                _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
-                                    server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
-                                    context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs), itemStorageMs);
+                                /* #2312: the fetch phases print only when a separate fetch actually ran,
+                                   so every other collector's line is byte-identical to before. */
+                                if (context.PerItemPlanFetchMs > 0 || context.PerItemTextFetchMs > 0)
+                                {
+                                    _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms)",
+                                        server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
+                                        context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
+                                        context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
+                                }
+                                else
+                                {
+                                    _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
+                                        server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
+                                        context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs), itemStorageMs);
+                                }
                             }
                             else
                             {
