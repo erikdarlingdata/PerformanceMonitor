@@ -191,6 +191,21 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);        /* window on the reliable clock */
     }
 
+    /// <summary>#2320: the attribution denominator windows on collection_time — the SAME bounds the
+    /// rankings use, so numerator and denominator share collection gaps — and aggregates rather than
+    /// pulling sample rows.</summary>
+    [Fact]
+    public void CpuWindowAggregateSql_WindowsOnCollectionTime_BothEdges()
+    {
+        var sql = DarlingDataReader.CpuWindowAggregateSql;
+        Assert.Contains("FROM cpu_utilization_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("AVG(sqlserver_cpu_utilization)", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void WaitStatsSql_AggregatesDeltas_HeaviestFirst()
     {
@@ -377,6 +392,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingDataReader.ServerListSql))]
     [InlineData(nameof(DarlingDataReader.CollectionHealthSql))]
     [InlineData(nameof(DarlingDataReader.LatestServerPropertiesSql))]
+    [InlineData(nameof(DarlingDataReader.CpuWindowAggregateSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {
         var sql = SqlByName(sqlName);
@@ -405,6 +421,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         nameof(DarlingDataReader.QueryStoreTopSql) => DarlingDataReader.QueryStoreTopSql,
         nameof(DarlingDataReader.ServerListSql) => DarlingDataReader.ServerListSql,
         nameof(DarlingDataReader.CollectionHealthSql) => DarlingDataReader.CollectionHealthSql,
+        nameof(DarlingDataReader.CpuWindowAggregateSql) => DarlingDataReader.CpuWindowAggregateSql,
         _ => DarlingDataReader.LatestServerPropertiesSql,
     };
 

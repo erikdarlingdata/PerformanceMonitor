@@ -174,6 +174,46 @@ internal static class DarlingDataReader
         return samples;
     }
 
+    public sealed record CpuWindowAggregate(int SampleCount, DateTime? FirstSample, DateTime? LastSample, double? AvgSqlCpuPercent);
+
+    /// <summary>
+    /// The attributed-CPU denominator's pieces (#2320): sample count, coverage bounds, and average SQL
+    /// CPU%% over the window. Windowed on collection_time — the SAME bounds the top-queries/procedures
+    /// rankings use — so numerator and denominator share collection gaps; sample_time skew is irrelevant
+    /// to an average. $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string CpuWindowAggregateSql = """
+        SELECT
+            COUNT(*),
+            MIN(collection_time),
+            MAX(collection_time),
+            AVG(sqlserver_cpu_utilization)::double precision
+        FROM cpu_utilization_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        """;
+
+    public static async Task<CpuWindowAggregate> GetCpuWindowAggregateAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CpuWindowAggregateSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new CpuWindowAggregate(0, null, null, null);
+        }
+
+        return new CpuWindowAggregate(
+            reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture),
+            reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+            reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+            reader.IsDBNull(3) ? null : reader.GetDouble(3));
+    }
+
     /* ─────────────────────────── wait stats ─────────────────────────── */
 
     /// <summary>

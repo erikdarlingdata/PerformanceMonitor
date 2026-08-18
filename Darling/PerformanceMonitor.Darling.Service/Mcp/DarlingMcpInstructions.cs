@@ -81,8 +81,8 @@ internal static class DarlingMcpInstructions
         | `get_file_io_stats` | Latest per-file I/O: reads/writes/bytes/stall and computed read/write latency | `server_name` |
         | `get_tempdb_trend` | TempDB space over time (user / internal / version store / unallocated) + top consumer | `server_name`, `hours_back` (default 24) |
         | `get_perfmon_stats` | Latest perfmon counters (value + delta); filter by counter / instance | `server_name`, `counter_name`, `instance_name` |
-        | `get_top_queries_by_cpu` | Expensive queries from query stats (plan cache) with query_hash / sql_handle | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name`, `parallel_only`, `min_dop` |
-        | `get_top_procedures_by_cpu` | Most expensive stored procedures by total CPU | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
+        | `get_top_queries_by_cpu` | Expensive queries from query stats (plan cache) with query_hash / sql_handle; `cpu_attribution.attributed_cpu_ratio` says how much of the box's measured CPU the returned rows explain | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name`, `parallel_only`, `min_dop` |
+        | `get_top_procedures_by_cpu` | Most expensive stored procedures by total CPU, with the same `cpu_attribution` disclosure | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store with query_id / plan_id (survives restarts) | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
         | `list_servers` | All monitored servers with collection-freshness status and last collection time | none |
         | `get_collection_health` | Per-collector health (running / failing / stale) over the last 7 days, plus the server's sweep_pressure verdict (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) | `server_name` |

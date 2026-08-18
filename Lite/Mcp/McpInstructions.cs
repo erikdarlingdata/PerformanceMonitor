@@ -68,8 +68,8 @@ internal static class McpInstructions
         ### Query Performance Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash. `max_dop` is a lifetime-max for the cached plan, not current parallelism - confirm with `analyze_query_plan` | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop` |
-        | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time | `server_name`, `hours_back`, `top`, `database_name` |
+        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash. `max_dop` is a lifetime-max for the cached plan, not current parallelism - confirm with `analyze_query_plan`. `cpu_attribution.attributed_cpu_ratio` says how much of the box's measured CPU the returned rows explain | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop` |
+        | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time, with the same `cpu_attribution` disclosure | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` |
         | `get_query_duration_trend` | Average query duration over time (detect degradation) | `server_name`, `hours_back` |
