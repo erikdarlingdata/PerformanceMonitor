@@ -473,9 +473,13 @@ public sealed class DarlingMcpDataTools
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
-               ratio is omitted rather than invented when a denominator piece is missing. */
-            var cpuAggregate = await DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
-            var properties = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+               ratio is omitted rather than invented when a denominator piece is missing. The two reads
+               are independent, so they run concurrently (review catch). */
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 filtered.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 now.AddHours(-hours_back), now,
@@ -581,9 +585,13 @@ public sealed class DarlingMcpDataTools
                     "unavailable",
                     "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
-            /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation. */
-            var cpuAggregate = await DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
-            var properties = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+            /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
+               same concurrent independent reads. */
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
                 now.AddHours(-hours_back), now,

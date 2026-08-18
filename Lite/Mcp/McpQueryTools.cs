@@ -43,10 +43,15 @@ public sealed class McpQueryTools
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
-               ratio is omitted rather than invented when a denominator piece is missing. */
-            var cpuAggregate = await dataService.GetCpuWindowAggregateAsync(resolved.ServerId, hours_back);
-            var properties = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
+               ratio is omitted rather than invented when a denominator piece is missing. One nowUtc
+               backs the aggregate read AND the ratio math, and the two independent reads run
+               concurrently (review catches; Darling has both by construction). */
             var nowUtc = DateTime.UtcNow;
+            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
+            var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 filtered.Sum(r => r.TotalCpuMs) / 1000.0,
                 nowUtc.AddHours(-hours_back), nowUtc,
@@ -142,10 +147,14 @@ public sealed class McpQueryTools
                     "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
             }
 
-            /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation. */
-            var cpuAggregate = await dataService.GetCpuWindowAggregateAsync(resolved.ServerId, hours_back);
-            var properties = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
+            /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation, one
+               nowUtc backing aggregate and ratio, same concurrent independent reads. */
             var nowUtc = DateTime.UtcNow;
+            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
+            var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuMs) / 1000.0,
                 nowUtc.AddHours(-hours_back), nowUtc,

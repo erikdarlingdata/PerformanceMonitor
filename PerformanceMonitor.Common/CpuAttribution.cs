@@ -43,9 +43,11 @@ namespace PerformanceMonitor.Common
         public const double OverAttributionThreshold = 1.1;
 
         /// <summary>
-        /// <see cref="SqlCpuSecondsInWindow"/> and <see cref="AttributedCpuRatio"/> are null together, with
-        /// <see cref="Note"/> saying why; when the ratio is present the note is null unless the ratio is
-        /// low or impossible.
+        /// A null <see cref="AttributedCpuRatio"/> always comes with a <see cref="Note"/> saying why.
+        /// <see cref="SqlCpuSecondsInWindow"/> is usually null alongside it (the denominator could not be
+        /// measured) — EXCEPT the measured-zero case, where the zero is reported and only the ratio is
+        /// omitted, so the caller sees WHY dividing was refused. When the ratio is present the note is
+        /// null unless the ratio is low or impossible.
         /// </summary>
         public sealed record Result(
             double RankedCpuSeconds,

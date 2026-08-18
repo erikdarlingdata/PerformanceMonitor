@@ -61,14 +61,14 @@ ORDER BY sample_time";
     /// The attributed-CPU denominator's pieces (#2320): sample count, coverage bounds, and average SQL
     /// CPU% over the window. Windowed on collection_time (UTC) — the SAME bounds the top-queries and
     /// top-procedures rankings use — so numerator and denominator share collection gaps; sample_time's
-    /// server-local skew is irrelevant to an average.
+    /// server-local skew is irrelevant to an average. Takes the window EXPLICITLY (not hours_back) so
+    /// the caller can hand the identical bounds to CpuAttribution.Compute — review catch: three
+    /// independently-sampled UtcNow calls backing one disclosure is drift by construction.
     /// </summary>
-    public async Task<CpuWindowAggregateRow> GetCpuWindowAggregateAsync(int serverId, int hoursBack)
+    public async Task<CpuWindowAggregateRow> GetCpuWindowAggregateAsync(int serverId, DateTime startUtc, DateTime endUtc)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null);
 
         command.CommandText = @"
 SELECT
@@ -82,8 +82,8 @@ AND   collection_time >= $2
 AND   collection_time <= $3";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
 
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
