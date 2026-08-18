@@ -208,6 +208,10 @@ public static class DuckDbSchemaGenerator
             ["database_config.database_name"] = "NOT NULL",
             ["database_scoped_config.database_name"] = "NOT NULL",
             ["database_scoped_config.configuration_name"] = "NOT NULL",
+            /* #2319: the row is named by the database it was enumerated from; every other column is
+               nullable because sys.database_query_store_options answers even for a QS-off database and
+               nothing else on the row is guaranteed. */
+            ["query_store_health.database_name"] = "NOT NULL",
             /* Every plan_correction row is named by the database it was enumerated from — including the
                enablement-only row a database with no recommendations produces. Nothing else on the row
                is guaranteed non-null (a database that has never had a regression carries no

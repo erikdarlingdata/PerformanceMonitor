@@ -695,14 +695,16 @@ public partial class ServerTab : UserControl
             var serverConfigTask = Helpers.MethodProfiler.TimeAsync("Config.ServerConfig", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestServerConfigAsync(_serverId))));
             var databaseConfigTask = Helpers.MethodProfiler.TimeAsync("Config.DatabaseConfig", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestDatabaseConfigAsync(_serverId, SelectedDatabaseFilter))));
             var databaseScopedConfigTask = Helpers.MethodProfiler.TimeAsync("Config.DatabaseScopedConfig", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestDatabaseScopedConfigAsync(_serverId, SelectedDatabaseFilter))));
+            var queryStoreHealthTask = Helpers.MethodProfiler.TimeAsync("Config.QueryStoreHealth", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestQueryStoreHealthAsync(_serverId, SelectedDatabaseFilter))));
             var automaticTuningTask = Helpers.MethodProfiler.TimeAsync("Config.AutomaticTuning", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestAutomaticTuningAsync(_serverId, SelectedDatabaseFilter))));
             var traceFlagsTask = Helpers.MethodProfiler.TimeAsync("Config.TraceFlags", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLatestTraceFlagsAsync(_serverId))));
 
-            await System.Threading.Tasks.Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, automaticTuningTask, traceFlagsTask);
+            await System.Threading.Tasks.Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, queryStoreHealthTask, automaticTuningTask, traceFlagsTask);
 
             _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
             _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+            _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
             _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
         }

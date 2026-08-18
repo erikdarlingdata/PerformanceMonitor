@@ -42,6 +42,16 @@ public partial class RemoteCollectorService
         => RunCollectorDefinitionAsync(DatabaseScopedConfigCollector.Instance, server, cancellationToken);
 
     /// <summary>
+    /// Collects per-database Query Store health via the shared <see cref="QueryStoreHealthCollector"/>
+    /// definition (#2319 — the database enumeration with the AG-primary filter and the
+    /// [db].sys.sp_executesql per-database loop live there, the cross-SKU parity contract). Hourly, not
+    /// on-load: actual_state and the storage numbers change by themselves, and the cap-hit transition
+    /// to READ_ONLY is the point of collecting this.
+    /// </summary>
+    private Task<int> CollectQueryStoreHealthAsync(ServerConnection server, CancellationToken cancellationToken)
+        => RunCollectorDefinitionAsync(QueryStoreHealthCollector.Instance, server, cancellationToken);
+
+    /// <summary>
     /// Collects active trace flags via the shared <see cref="TraceFlagsCollector"/> definition.
     /// Wrapped in a permission-tolerant catch — DBCC may be denied — so a failure degrades to
     /// zero rows with a warning, exactly as the original collector did. On-load only.

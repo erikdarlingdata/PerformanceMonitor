@@ -39,6 +39,7 @@ public static class CollectorCatalog
         DatabaseStateCollector.Instance,
         TraceFlagsCollector.Instance,
         DatabaseScopedConfigCollector.Instance,
+        QueryStoreHealthCollector.Instance,
         SessionStatsCollector.Instance,
         SessionSummaryStatsCollector.Instance,
         WaitingTasksCollector.Instance,

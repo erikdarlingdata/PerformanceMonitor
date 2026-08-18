@@ -132,6 +132,7 @@ public static class PgMigrations
         new Migration(73, "pg-statement-text", V73Sql),
         new Migration(74, "query-store-text", V74Sql),
         new Migration(75, "plan-content-retention-knob", V75Sql),
+        new Migration(76, "query-store-health", V76Sql),
     };
 
     /// <summary>
@@ -1689,6 +1690,38 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V76 — the per-database Query Store health table (#2319): what database_config's single
+    /// is_query_store_on bit cannot say — actual vs desired state (the cap-hit READ_ONLY transition
+    /// and its readonly_reason), current vs max storage, cleanup mode and thresholds, and the
+    /// runtime-stats interval length. Body matches PgSchemaGenerator's emission for the definition
+    /// (verified by generating it) plus the rung's explicit collect. prefix, so fresh stores (which
+    /// generate from the catalog) and upgraded stores (which run this rung) agree byte-for-byte.
+    /// Hypertable conversion is automatic from CollectorCatalog on the next service start, the same
+    /// path pvs_stats took in V47. The v_ passthrough keeps the two viewers' SQL byte-identical.
+    /// </summary>
+    private const string V76Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_health (
+    config_id bigint NOT NULL,
+    capture_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    actual_state text,
+    desired_state text,
+    readonly_reason integer,
+    current_storage_size_mb bigint,
+    max_storage_size_mb bigint,
+    size_based_cleanup_mode text,
+    stale_query_threshold_days integer,
+    max_plans_per_query integer,
+    interval_length_minutes bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_health_time ON collect.query_store_health(server_id, capture_time);
+
+CREATE OR REPLACE VIEW v_query_store_health AS SELECT * FROM query_store_health;";
 
     /// <summary>
     /// V75 — the plan-content retention knob (#2316). The payload dimensions' GC horizon is coupled to

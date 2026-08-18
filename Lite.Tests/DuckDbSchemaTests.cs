@@ -160,7 +160,7 @@ public class DuckDbSchemaTests : IDisposable
            (#1952 automatic plan correction), pvs_stats (#1951 ADR persistent version store),
            the database-state alert's database_states collector + config_database_state_expected
            control table, and the fleet-tag tables server_tags + server_tag_map (#2020 2b-i). */
-        Assert.Equal(53, tableCount);
+        Assert.Equal(54, tableCount);
     }
 
     [Fact]

@@ -78,6 +78,11 @@ public static class CollectorScheduleDefaults
            retention mirror the sibling XE collectors. */
         ["long_query_completions"] = new(1, 30, DefaultEnabled: false),
         ["database_scoped_config"] = new(0, 30),
+        /* #2319: hourly, NOT the config family's on-load cadence — actual_state, readonly_reason and
+           current_storage_size_mb change BY THEMSELVES (the cap-hit transition to READ_ONLY is the point
+           of collecting this), and an on-load snapshot would miss the transition until the next
+           reconnect. One cheap row per database per hour; 30 days to match its config siblings. */
+        ["query_store_health"] = new(60, 30),
         ["trace_flags"] = new(0, 30),
         ["running_jobs"] = new(5, 7),
         ["database_size_stats"] = new(60, 90),

@@ -235,9 +235,9 @@ public sealed class QueryStoreTextStoreTests
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
-        /* #2316 appended hasPlanContentRetentionKnob after this rung's parameter — pass it FALSE so
-           these facts keep exercising the V74/V73 arms rather than the newer one. */
-        var args = leading.Concat(new object[] { hasQueryStoreText, false }).ToArray();
+        /* #2316 and #2319 appended parameters after this rung's — pass them FALSE so these facts keep
+           exercising the V74/V73 arms rather than the newer ones. */
+        var args = leading.Concat(new object[] { hasQueryStoreText, false, false }).ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;

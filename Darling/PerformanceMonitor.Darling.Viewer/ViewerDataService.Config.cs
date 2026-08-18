@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -61,6 +62,16 @@ public sealed partial class ViewerDataService
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY database_name, configuration_name
+        """;
+
+
+    public const string QueryStoreHealthSql = """
+        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes
+        FROM v_query_store_health
+        WHERE server_id = $1
+        AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
+        ORDER BY database_name
         """;
 
     public const string TraceFlagsSql = """
@@ -167,6 +178,36 @@ public sealed partial class ViewerDataService
         return items;
     }
 
+
+    /// <summary>Latest per-database Query Store health snapshot for one server (Query Store grid, #2319).</summary>
+    public async Task<List<QueryStoreHealthRow>> GetLatestQueryStoreHealthAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        var items = new List<QueryStoreHealthRow>();
+
+        await using var command = _dataSource.CreateCommand(QueryStoreHealthSql);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new QueryStoreHealthRow
+            {
+                DatabaseName = reader.GetString(0),
+                ActualState = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                DesiredState = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                ReadonlyReason = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                CurrentStorageMb = reader.IsDBNull(4) ? 0L : reader.GetInt64(4),
+                MaxStorageMb = reader.IsDBNull(5) ? 0L : reader.GetInt64(5),
+                SizeBasedCleanupMode = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                StaleQueryThresholdDays = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                MaxPlansPerQuery = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+                IntervalLengthMinutes = reader.IsDBNull(9) ? 0L : reader.GetInt64(9),
+            });
+        }
+
+        return items;
+    }
+
     /// <summary>Latest trace-flags snapshot for one server (Trace Flags grid).</summary>
     public async Task<List<TraceFlagRow>> GetLatestTraceFlagsAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -255,6 +296,51 @@ public class DatabaseConfigRow
     public string AdrDisplay => IsAcceleratedDatabaseRecoveryOn ? "Yes" : "No";
     public string MemoryOptimizedDisplay => IsMemoryOptimizedEnabled ? "Yes" : "No";
     public string OptimizedLockingDisplay => IsOptimizedLockingOn ? "Yes" : "No";
+}
+
+
+/// <summary>
+/// One database's Query Store health row (#2319) — the latest collected
+/// sys.database_query_store_options snapshot. <see cref="StateDisplay"/> folds the classic silent
+/// failure into one glanceable cell: actual and desired agreeing shows one state; disagreeing shows
+/// both, because desired READ_WRITE with actual READ_ONLY is precisely the condition this collector
+/// exists to surface. <see cref="ReadonlyReasonDisplay"/> decodes the bitmask values an operator
+/// actually meets; unknown bits fall back to the raw number rather than guessing.
+/// </summary>
+public class QueryStoreHealthRow
+{
+    public string DatabaseName { get; set; } = "";
+    public string ActualState { get; set; } = "";
+    public string DesiredState { get; set; } = "";
+    public int ReadonlyReason { get; set; }
+    public long CurrentStorageMb { get; set; }
+    public long MaxStorageMb { get; set; }
+    public string SizeBasedCleanupMode { get; set; } = "";
+    public int StaleQueryThresholdDays { get; set; }
+    public int MaxPlansPerQuery { get; set; }
+    public long IntervalLengthMinutes { get; set; }
+
+    public string StateDisplay =>
+        string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
+            ? ActualState
+            : $"{ActualState} (wanted {DesiredState})";
+
+    /// <summary>Percent of the storage cap in use; blank when the cap is 0 (unlimited/unknown).</summary>
+    public string PercentOfCapDisplay =>
+        MaxStorageMb > 0 ? $"{100.0 * CurrentStorageMb / MaxStorageMb:F0}%" : "";
+
+    public string ReadonlyReasonDisplay => ReadonlyReason switch
+    {
+        0 => "",
+        1 => "database is read-only",
+        2 => "database is in single-user mode",
+        4 => "database is in emergency mode",
+        8 => "database is a secondary replica",
+        65536 => "storage cap reached",
+        131072 => "internal error",
+        262144 => "user request",
+        _ => $"reason {ReadonlyReason.ToString(CultureInfo.InvariantCulture)}",
+    };
 }
 
 public class DatabaseScopedConfigRow

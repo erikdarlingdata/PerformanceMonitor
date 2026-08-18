@@ -569,6 +569,7 @@ public partial class RemoteCollectorService
                 "blocked_process_report" => await CollectBlockedProcessReportsAsync(server, cancellationToken),
                 "long_query_completions" => await CollectLongQueryCompletionsAsync(server, cancellationToken),
                 "database_scoped_config" => await CollectDatabaseScopedConfigAsync(server, cancellationToken),
+                "query_store_health" => await CollectQueryStoreHealthAsync(server, cancellationToken),
                 "trace_flags" => await CollectTraceFlagsAsync(server, cancellationToken),
                 "running_jobs" => await CollectRunningJobsAsync(server, cancellationToken),
                 "database_size_stats" => await CollectDatabaseSizeStatsAsync(server, cancellationToken),

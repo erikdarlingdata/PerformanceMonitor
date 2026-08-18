@@ -319,6 +319,22 @@ internal static class GoldenCollectorSchema
     value VARCHAR,
     value_for_secondary VARCHAR
 )",
+        ["query_store_health"] = @"CREATE TABLE IF NOT EXISTS query_store_health (
+    config_id BIGINT PRIMARY KEY,
+    capture_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    database_name VARCHAR NOT NULL,
+    actual_state VARCHAR,
+    desired_state VARCHAR,
+    readonly_reason INTEGER,
+    current_storage_size_mb BIGINT,
+    max_storage_size_mb BIGINT,
+    size_based_cleanup_mode VARCHAR,
+    stale_query_threshold_days INTEGER,
+    max_plans_per_query INTEGER,
+    interval_length_minutes BIGINT
+)",
         ["session_stats"] = @"CREATE TABLE IF NOT EXISTS session_stats (
     collection_id BIGINT PRIMARY KEY,
     collection_time TIMESTAMP NOT NULL,
@@ -1004,6 +1020,7 @@ internal static class GoldenCollectorSchema
         ["server_properties"] = @"CREATE INDEX IF NOT EXISTS idx_server_properties_time ON server_properties(server_id, collection_time)",
         ["trace_flags"] = @"CREATE INDEX IF NOT EXISTS idx_trace_flags_time ON trace_flags(server_id, capture_time)",
         ["database_scoped_config"] = @"CREATE INDEX IF NOT EXISTS idx_database_scoped_config_time ON database_scoped_config(server_id, capture_time)",
+        ["query_store_health"] = @"CREATE INDEX IF NOT EXISTS idx_query_store_health_time ON query_store_health(server_id, capture_time)",
         ["session_stats"] = @"CREATE INDEX IF NOT EXISTS idx_session_stats_time ON session_stats(server_id, collection_time)",
         ["session_summary_stats"] = @"CREATE INDEX IF NOT EXISTS idx_session_summary_stats_time ON session_summary_stats(server_id, collection_time)",
         ["waiting_tasks"] = @"CREATE INDEX IF NOT EXISTS idx_waiting_tasks_time ON waiting_tasks(server_id, collection_time)",

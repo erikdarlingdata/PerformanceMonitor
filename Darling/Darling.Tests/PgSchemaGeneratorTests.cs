@@ -33,12 +33,13 @@ public sealed class PgSchemaGeneratorTests
            (baseline-deviation database-state alert) = 41, plus pg_wait_stats (the first PostgreSQL
            collector) = 42, plus pg_statement_stats = 43, plus pg_wraparound_stats = 44, plus pg_xmin_horizon = 45,
            plus pg_replication_slot_stats = 46, plus pg_autovacuum_stats (the first per-database PostgreSQL
-           collector) = 47, plus pg_io_stats = 48, plus pg_blocking = 49. The catalog is deliberately
+           collector) = 47, plus pg_io_stats = 48, plus pg_blocking = 49, plus query_store_health
+           (#2319) = 50. The catalog is deliberately
            engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(49, CollectorCatalog.All.Count);
+        Assert.Equal(50, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -435,6 +436,14 @@ public sealed class PgSchemaGeneratorTests
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_job_history_time ON collect.job_history(server_id, collection_time);", v24, StringComparison.Ordinal);
         Assert.Contains(CollectQualified(AgentStatusCollector.Instance), v25, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_agent_status_time ON collect.agent_status(server_id, collection_time);", v25, StringComparison.Ordinal);
+
+        /* V76 (#2319) creates query_store_health for an already-existing store — same contract as the
+           blocks below. */
+        var v76 = Lf(PgMigrations.Scripts.Single(m => m.Version == 76).Sql);
+
+        Assert.Contains(CollectQualified(QueryStoreHealthCollector.Instance), v76, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_query_store_health_time ON collect.query_store_health(server_id, capture_time);", v76, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE VIEW v_query_store_health AS SELECT * FROM query_store_health;", v76, StringComparison.Ordinal);
 
         /* V47 (#1951) creates pvs_stats for an already-existing store; a fresh store gets it from V1's
            GenerateFullSchema. Same contract as V24/V25 — and it is the ONLY thing standing between a

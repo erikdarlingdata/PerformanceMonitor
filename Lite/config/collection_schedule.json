@@ -23,6 +23,7 @@
     { "name": "running_jobs", "enabled": true, "frequency_minutes": 5, "retention_days": 7, "description": "Currently running SQL Agent jobs with duration comparison" },
     { "name": "ag_replica_states", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Availability Group replica health from sys.dm_hadr_availability_replica_states (#991)" },
     { "name": "ag_database_replica_states", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Availability Group per-database replica health, queues, rates and secondary lag from sys.dm_hadr_database_replica_states (#991)" },
-    { "name": "pvs_stats", "enabled": true, "frequency_minutes": 60, "retention_days": 90, "description": "ADR persistent version store size and cleanup state per database from sys.dm_tran_persistent_version_store_stats (#1951)" }
+    { "name": "pvs_stats", "enabled": true, "frequency_minutes": 60, "retention_days": 90, "description": "ADR persistent version store size and cleanup state per database from sys.dm_tran_persistent_version_store_stats (#1951)" },
+    { "name": "query_store_health", "enabled": true, "frequency_minutes": 60, "retention_days": 30, "description": "Per-database Query Store health from sys.database_query_store_options: actual vs desired state, readonly_reason, storage vs cap, cleanup thresholds, interval length (#2319)" }
   ]
 }

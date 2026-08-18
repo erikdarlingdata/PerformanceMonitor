@@ -36,6 +36,7 @@ public partial class ServerTab : UserControl
         _serverConfigFilterMgr = new DataGridFilterManager<ServerConfigRow>(ServerConfigGrid);
         _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
+        _queryStoreHealthFilterMgr = new DataGridFilterManager<QueryStoreHealthRow>(QueryStoreHealthGrid);
         _automaticTuningFilterMgr = new DataGridFilterManager<AutomaticTuningRow>(AutomaticTuningGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
         _collectionHealthFilterMgr = new DataGridFilterManager<CollectorHealthRow>(CollectionHealthGrid);
@@ -69,6 +70,7 @@ public partial class ServerTab : UserControl
         _filterManagers[ServerConfigGrid] = _serverConfigFilterMgr;
         _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
+        _filterManagers[QueryStoreHealthGrid] = _queryStoreHealthFilterMgr;
         _filterManagers[AutomaticTuningGrid] = _automaticTuningFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
         _filterManagers[CollectionHealthGrid] = _collectionHealthFilterMgr;
