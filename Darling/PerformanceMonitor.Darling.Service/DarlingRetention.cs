@@ -147,6 +147,13 @@ public static class DarlingRetention
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0)
     {
+        /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
+           arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
+           store-unreachable boot the worker passes darling.json's RAW value, and a file value of 1-6
+           would prune plan content below the [7,365] contract — the failure direction is data loss, so
+           the sink does not trust its callers. */
+        planContentRetentionDays = StoreConfigProvider.ClampPlanContentRetentionDays(planContentRetentionDays);
+
         var sw = Stopwatch.StartNew();
         var tablesPurged = 0;
         var totalRowsDeleted = 0;

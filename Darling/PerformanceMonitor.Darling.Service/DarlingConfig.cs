@@ -81,6 +81,7 @@ public sealed class DarlingConfig
     /// retention; a plan older than this renders as a missing plan, which every reader handles.
     /// 0 disables (fact-coupled horizon alone); enabled values clamp to [7,365] on read.
     /// </summary>
+    [JsonPropertyName("planContentRetentionDays")]
     public int PlanContentRetentionDays { get; set; } = 21;
 
     /// <summary>

@@ -195,6 +195,30 @@ public sealed class PlanContentRetentionTests
         Assert.Equal(old, DarlingRetention.ComputeMapCutoff(Now, 30, planContentRetentionDays: 0));
     }
 
+    /// <summary>
+    /// The destructive-sink clamp (review catch, twice: the first "fix" commit lost the edit to a
+    /// failed batch-script assertion and shipped only its comment). PurgeAsync cannot be executed here
+    /// without a live store, so this pins the clamp the way the repo pins other unexecutable seams —
+    /// at the source: the sink must re-clamp before first use, because on a store-unreachable boot the
+    /// worker passes darling.json's RAW value and a file value of 1-6 would prune plan content below
+    /// the [7,365] contract. Proven to fail against the unclamped code before the fix landed.
+    /// </summary>
+    [Fact]
+    public void PurgeAsyncClampsTheKnobAtTheDestructiveSink()
+    {
+        var source = ReadRetentionSource();
+        var body = source[source.IndexOf("public static async Task<PurgeSummary> PurgeAsync", StringComparison.Ordinal)..];
+
+        var clampAt = body.IndexOf("planContentRetentionDays = StoreConfigProvider.ClampPlanContentRetentionDays(planContentRetentionDays);", StringComparison.Ordinal);
+        Assert.True(clampAt > 0, "PurgeAsync no longer clamps planContentRetentionDays at the destructive sink");
+
+        /* And the clamp must come BEFORE the first use — both cutoff computations. */
+        var firstUse = body.IndexOf("ComputeDimensionCutoff(", StringComparison.Ordinal);
+        var mapUse = body.IndexOf("ComputeMapCutoff(", StringComparison.Ordinal);
+        Assert.True(clampAt < firstUse, "the clamp sits after the dimension cutoff computation");
+        Assert.True(clampAt < mapUse, "the clamp sits after the map cutoff computation");
+    }
+
     /* ---------------- the viewer probe ---------------- */
 
     [Fact]
@@ -245,6 +269,19 @@ public sealed class PlanContentRetentionTests
     {
         var dir = System.IO.Path.GetDirectoryName(thisFile)!;
         var relative = System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
+        {
+            dir = System.IO.Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
+    }
+
+    private static string ReadRetentionSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var dir = System.IO.Path.GetDirectoryName(thisFile)!;
+        var relative = System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
         while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
         {
             dir = System.IO.Path.GetDirectoryName(dir);
