@@ -430,7 +430,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. cpu_window reports what fraction of the box's MEASURED SQL CPU the returned rows explain (attributed_ratio, from the collected utilization series x core count); null when that series cannot support the denominator - omitted, never fabricated.")]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -462,16 +462,27 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
+            var windowStart = now.AddHours(-hours_back);
             var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp);
+                postgres, resolved.ServerId, windowStart, now, top, database_name, rollUpByHostObject: rollUp);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
 
-            IEnumerable<DarlingDataReader.TopQueryRow> filtered = rows;
+            var filtered = rows.AsEnumerable();
             if (parallel_only || min_dop > 1)
                 filtered = filtered.Where(r => r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2));
+            var kept = filtered.ToList();
 
-            var result = filtered.Select(r => new
+            /* #2320: the denominator the ranking never handed the caller — what fraction of the SQL
+               CPU the box ACTUALLY burned do the returned rows explain. Omitted (null) rather than
+               fabricated when the utilization series or core count can't support it. */
+            var (avgSqlCpu, cpuSamples) = await DarlingDataReader.GetCpuWindowAverageAsync(
+                postgres, resolved.ServerId, windowStart, now);
+            var cores = await DarlingDataReader.GetLatestCpuCountAsync(postgres, resolved.ServerId);
+            var attribution = CpuAttribution.Compute(
+                kept.Sum(r => r.TotalCpuUs / 1000.0), avgSqlCpu, cpuSamples, cores, hours_back);
+
+            var result = kept.Select(r => new
             {
                 database_name = r.DatabaseName,
                 query_hash = r.QueryHash,
@@ -529,6 +540,17 @@ public sealed class DarlingMcpDataTools
                 /* #2235: echoed so a stored or pasted payload cannot be misread as the other grouping —
                    the two answer different questions and the rows look alike. */
                 group_by = rollUp ? "host_object" : "query_hash",
+                /* #2320: null means the utilization series or core count could not support the
+                   denominator — omitted, never fabricated. */
+                cpu_window = attribution is { } a
+                    ? new
+                    {
+                        measured_sql_cpu_seconds = Math.Round(a.MeasuredSqlCpuSeconds),
+                        attributed_cpu_seconds = Math.Round(a.AttributedCpuSeconds),
+                        attributed_ratio = Math.Round(a.AttributedRatio, 3),
+                        note = a.Note,
+                    }
+                    : null,
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -538,7 +560,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time. Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note.")]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time. Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. cpu_window reports what fraction of the box's MEASURED SQL CPU the returned rows explain (attributed_ratio, from the collected utilization series x core count); null when that series cannot support the denominator - omitted, never fabricated.")]
     public static async Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -557,11 +579,19 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var windowStart = now.AddHours(-hours_back);
+            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, windowStart, now, top, database_name);
             if (rows.Count == 0)
                 return McpHelpers.Status(
                     "unavailable",
                     "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
+
+            /* #2320: same attribution denominator as the queries tool. */
+            var (avgSqlCpu, cpuSamples) = await DarlingDataReader.GetCpuWindowAverageAsync(
+                postgres, resolved.ServerId, windowStart, now);
+            var cores = await DarlingDataReader.GetLatestCpuCountAsync(postgres, resolved.ServerId);
+            var attribution = CpuAttribution.Compute(
+                rows.Sum(r => r.TotalCpuUs / 1000.0), avgSqlCpu, cpuSamples, cores, hours_back);
 
             var result = rows.Select(r => new
             {
@@ -593,6 +623,17 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #2320: null means the utilization series or core count could not support the
+                   denominator — omitted, never fabricated. */
+                cpu_window = attribution is { } a
+                    ? new
+                    {
+                        measured_sql_cpu_seconds = Math.Round(a.MeasuredSqlCpuSeconds),
+                        attributed_cpu_seconds = Math.Round(a.AttributedCpuSeconds),
+                        attributed_ratio = Math.Round(a.AttributedRatio, 3),
+                        note = a.Note,
+                    }
+                    : null,
                 procedures = result
             }, McpHelpers.JsonOptions);
         }

@@ -56,6 +56,68 @@ ORDER BY sample_time";
 
         return items;
     }
+
+    /// <summary>
+    /// #2320: the attribution denominator's raw ingredients for one window — average SQL-process CPU
+    /// percent and the sample count the coverage gate needs. Mirrors Darling's
+    /// GetCpuWindowAverageAsync; windows on server-local sample_time exactly like
+    /// <see cref="GetCpuUtilizationAsync"/> above, because that is this store's clock for this table.
+    /// </summary>
+    public async Task<(double? AvgSqlCpuPercent, int Samples)> GetCpuWindowAverageAsync(int serverId, int hoursBack)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null);
+
+        command.CommandText = @"
+SELECT
+    AVG(sqlserver_cpu_utilization),
+    COUNT(*)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   sample_time >= $2
+AND   sample_time <= $3";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return (null, 0);
+        }
+
+        var avg = reader.IsDBNull(0) ? (double?)null : reader.GetDouble(0);
+        var samples = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
+        return (avg, samples);
+    }
+
+    /// <summary>
+    /// #2320: the server's core count for the denominator — the same Azure-aware
+    /// COALESCE(vcore_count, cpu_count) read the FinOps utilization CTE uses. Null when properties
+    /// were never collected; the caller omits the ratio then.
+    /// </summary>
+    public async Task<int?> GetLatestCpuCountAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT COALESCE(vcore_count, cpu_count)
+FROM v_server_properties
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        var result = await command.ExecuteScalarAsync();
+        if (result is null || result is DBNull)
+        {
+            return null;
+        }
+
+        var cores = Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
+        return cores > 0 ? cores : null;
+    }
 }
 
 public class CpuUtilizationRow

@@ -155,6 +155,59 @@ internal static class DarlingDataReader
         ORDER BY sample_time
         """;
 
+    /// <summary>
+    /// #2320: the attribution denominator's raw ingredients for one window — the average SQL-process
+    /// CPU percent and how many samples that average rests on (the coverage gate's input; the shared
+    /// CpuAttribution.Compute owns the trust decision). Windows on collection_time like every other
+    /// windowed read here; the de-skewed sample_time is irrelevant to an average.
+    /// </summary>
+    public static async Task<(double? AvgSqlCpuPercent, int Samples)> GetCpuWindowAverageAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        const string sql = """
+            SELECT
+                AVG(sqlserver_cpu_utilization)::float8,
+                COUNT(*)::int
+            FROM cpu_utilization_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            """;
+        await using var command = postgres.CreateCommand(sql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, 0);
+        }
+
+        return (reader.IsDBNull(0) ? null : reader.GetDouble(0), reader.GetInt32(1));
+    }
+
+    /// <summary>
+    /// #2320: the server's core count from its latest properties snapshot — the other half of the
+    /// denominator. Null when properties were never collected; the caller omits the ratio then.
+    /// </summary>
+    public static async Task<int?> GetLatestCpuCountAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        /* COALESCE(vcore_count, cpu_count) — the same Azure-aware read the FinOps utilization CTE
+           uses in both SKUs: on Azure SQL DB the vcore count is the honest denominator. */
+        const string sql = """
+            SELECT COALESCE(vcore_count, cpu_count)
+            FROM server_properties
+            WHERE server_id = $1
+            ORDER BY collection_time DESC
+            LIMIT 1
+            """;
+        await using var command = postgres.CreateCommand(sql);
+        AddInt(command, serverId);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is int cores && cores > 0 ? cores : null;
+    }
+
     public static async Task<List<CpuSample>> GetCpuUtilizationAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, CancellationToken cancellationToken = default)
     {
