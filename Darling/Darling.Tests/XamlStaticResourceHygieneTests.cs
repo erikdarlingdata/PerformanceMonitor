@@ -108,9 +108,10 @@ public sealed class XamlStaticResourceHygieneTests
     }
 
     /// <summary>The keys defined in a file plus, transitively, in every dictionary it merges via
-    /// <c>Source=</c> (relative or <c>;component/</c> pack paths — resolved against the file, falling back
-    /// to the repo layout). A Source that cannot be resolved contributes nothing, which only ever makes the
-    /// scan stricter.</summary>
+    /// <c>Source=</c> (relative paths, and <c>;component/</c> pack paths with the prefix stripped and the
+    /// remainder resolved against the referencing file — correct for same-assembly sources, the only kind
+    /// this repo uses; a cross-assembly pack URI would not resolve here). A Source that cannot be resolved
+    /// contributes nothing, which only ever makes the scan stricter.</summary>
     private static HashSet<string> TransitiveDefinitions(string file, HashSet<string> seenFiles)
     {
         var keys = new HashSet<string>(StringComparer.Ordinal);
