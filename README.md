@@ -108,7 +108,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-41 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
+42 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
 
 | Collector | Default | Source |
 |---|---|---|
@@ -147,6 +147,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
 | database_size_stats | 1 hour | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
 | pvs_stats | 1 hour | `sys.dm_tran_persistent_version_store_stats` + `sys.databases` (ADR persistent version store size and cleanup state per database; SQL Server 2019+ only, always collected on Azure SQL DB) |
+| query_store_health | 1 hour | `sys.database_query_store_options` per database (actual vs desired state, readonly_reason, storage used vs cap, cleanup thresholds, runtime-stats interval length; SQL Server 2016+, one row per database with OFF recorded explicitly) |
 | server_properties | on connect | `SERVERPROPERTY()` hardware and licensing metadata |
 | index_object_stats | Daily | `sys.dm_db_partition_stats` + `sys.dm_db_index_usage_stats` + `sys.dm_db_index_operational_stats` |
 | server_config | On connect | `sys.configurations` |
