@@ -445,6 +445,11 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
             builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger));
 
+            /* #2320 (review catch): the SERVICE's logger instance, so a tool's deliberate
+               degrade-to-null path can still leave a trace — the host's own logging factory has its
+               providers cleared above, which would make an injected ILogger<T> a black hole. */
+            builder.Services.AddSingleton<Microsoft.Extensions.Logging.ILogger>(_logger);
+
             /* Register MCP server with the analysis tool class. */
             builder.Services
                 .AddMcpServer(options =>
