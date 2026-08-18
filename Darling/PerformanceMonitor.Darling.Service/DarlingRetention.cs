@@ -684,9 +684,9 @@ public static class DarlingRetention
            GC unable to fire until a month after projected disk-full). With the knob enabled, a fact
            older than the window keeps its metrics, hashes and text but renders a MISSING plan — the
            null every reader already handles — in exchange for a bounded store. The same one-day
-           margin as the measured side covers the hourly last_seen refresh guard. Taking the NEWER of
-           the two cutoffs is what makes 0 (disabled) degrade to exactly the old behavior: DateTime
-           .MinValue can never win the comparison. */
+           margin as the measured side covers the hourly last_seen refresh guard. Disabled (0 or
+           below) returns the coupled cutoff before any dedicated value is computed, so the old
+           behavior is reproduced exactly rather than approximated through a comparison. */
         if (planContentRetentionDays <= 0)
         {
             return coupled;
