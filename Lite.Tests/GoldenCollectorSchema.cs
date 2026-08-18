@@ -331,8 +331,8 @@ internal static class GoldenCollectorSchema
     current_storage_size_mb BIGINT,
     max_storage_size_mb BIGINT,
     size_based_cleanup_mode VARCHAR,
-    stale_query_threshold_days INTEGER,
-    max_plans_per_query INTEGER,
+    stale_query_threshold_days BIGINT,
+    max_plans_per_query BIGINT,
     interval_length_minutes BIGINT
 )",
         ["session_stats"] = @"CREATE TABLE IF NOT EXISTS session_stats (

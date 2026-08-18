@@ -58,8 +58,8 @@ public sealed class QueryStoreHealthCollector : CollectorDefinitionBase<QuerySto
         public long CurrentStorageMb { get; set; }
         public long MaxStorageMb { get; set; }
         public string? SizeBasedCleanupMode { get; set; }
-        public int StaleQueryThresholdDays { get; set; }
-        public int MaxPlansPerQuery { get; set; }
+        public long StaleQueryThresholdDays { get; set; }
+        public long MaxPlansPerQuery { get; set; }
         public long IntervalLengthMinutes { get; set; }
     }
 
@@ -166,8 +166,8 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
                 CurrentStorageMb = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture),
                 MaxStorageMb = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
                 SizeBasedCleanupMode = reader.IsDBNull(5) ? null : reader.GetString(5),
-                StaleQueryThresholdDays = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture),
-                MaxPlansPerQuery = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
+                StaleQueryThresholdDays = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6), CultureInfo.InvariantCulture),
+                MaxPlansPerQuery = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture),
                 IntervalLengthMinutes = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8), CultureInfo.InvariantCulture),
             });
         }
@@ -186,8 +186,8 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
         new CollectorColumn("current_storage_size_mb", CollectorColumnType.BigInt),
         new CollectorColumn("max_storage_size_mb", CollectorColumnType.BigInt),
         new CollectorColumn("size_based_cleanup_mode", CollectorColumnType.Varchar),
-        new CollectorColumn("stale_query_threshold_days", CollectorColumnType.Integer),
-        new CollectorColumn("max_plans_per_query", CollectorColumnType.Integer),
+        new CollectorColumn("stale_query_threshold_days", CollectorColumnType.BigInt),
+        new CollectorColumn("max_plans_per_query", CollectorColumnType.BigInt),
         new CollectorColumn("interval_length_minutes", CollectorColumnType.BigInt),
     };
 

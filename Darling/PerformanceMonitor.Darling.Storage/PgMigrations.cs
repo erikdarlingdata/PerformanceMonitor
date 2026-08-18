@@ -1714,8 +1714,8 @@ CREATE TABLE IF NOT EXISTS collect.query_store_health (
     current_storage_size_mb bigint,
     max_storage_size_mb bigint,
     size_based_cleanup_mode text,
-    stale_query_threshold_days integer,
-    max_plans_per_query integer,
+    stale_query_threshold_days bigint,
+    max_plans_per_query bigint,
     interval_length_minutes bigint
 );
 

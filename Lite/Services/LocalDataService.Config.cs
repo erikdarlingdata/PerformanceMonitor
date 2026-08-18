@@ -148,8 +148,8 @@ ORDER BY database_name";
                 CurrentStorageMb = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
                 MaxStorageMb = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
                 SizeBasedCleanupMode = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                StaleQueryThresholdDays = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
-                MaxPlansPerQuery = reader.IsDBNull(8) ? 0 : Convert.ToInt32(reader.GetValue(8)),
+                StaleQueryThresholdDays = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
+                MaxPlansPerQuery = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                 IntervalLengthMinutes = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
             });
         }
@@ -307,8 +307,8 @@ public class QueryStoreHealthRow
     public long CurrentStorageMb { get; set; }
     public long MaxStorageMb { get; set; }
     public string SizeBasedCleanupMode { get; set; } = "";
-    public int StaleQueryThresholdDays { get; set; }
-    public int MaxPlansPerQuery { get; set; }
+    public long StaleQueryThresholdDays { get; set; }
+    public long MaxPlansPerQuery { get; set; }
     public long IntervalLengthMinutes { get; set; }
 
     public string StateDisplay =>

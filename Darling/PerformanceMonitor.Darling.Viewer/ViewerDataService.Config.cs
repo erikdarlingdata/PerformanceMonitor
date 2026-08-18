@@ -199,8 +199,8 @@ public sealed partial class ViewerDataService
                 CurrentStorageMb = reader.IsDBNull(4) ? 0L : reader.GetInt64(4),
                 MaxStorageMb = reader.IsDBNull(5) ? 0L : reader.GetInt64(5),
                 SizeBasedCleanupMode = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                StaleQueryThresholdDays = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
-                MaxPlansPerQuery = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+                StaleQueryThresholdDays = reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
+                MaxPlansPerQuery = reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
                 IntervalLengthMinutes = reader.IsDBNull(9) ? 0L : reader.GetInt64(9),
             });
         }
@@ -316,8 +316,8 @@ public class QueryStoreHealthRow
     public long CurrentStorageMb { get; set; }
     public long MaxStorageMb { get; set; }
     public string SizeBasedCleanupMode { get; set; } = "";
-    public int StaleQueryThresholdDays { get; set; }
-    public int MaxPlansPerQuery { get; set; }
+    public long StaleQueryThresholdDays { get; set; }
+    public long MaxPlansPerQuery { get; set; }
     public long IntervalLengthMinutes { get; set; }
 
     public string StateDisplay =>
