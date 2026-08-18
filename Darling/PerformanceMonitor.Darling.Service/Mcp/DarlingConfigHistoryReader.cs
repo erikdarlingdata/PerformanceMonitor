@@ -45,9 +45,11 @@ internal static class DarlingConfigHistoryReader
 
     /* ─────────────────────────── query store health snapshot row (not part of the change diff) ─────────────────────────── */
 
+    /* String fields coalesce DBNull to "" — the same defaults as both viewers' QueryStoreHealthRow —
+       so the two SKUs' MCP tools serialize identical JSON even in the never-observed null case. */
     public sealed record QueryStoreHealthReadRow(
-        string DatabaseName, string? ActualState, string? DesiredState, int ReadonlyReason,
-        long CurrentStorageMb, long MaxStorageMb, string? SizeBasedCleanupMode,
+        string DatabaseName, string ActualState, string DesiredState, int ReadonlyReason,
+        long CurrentStorageMb, long MaxStorageMb, string SizeBasedCleanupMode,
         long StaleQueryThresholdDays, long MaxPlansPerQuery, long IntervalLengthMinutes);
 
     /* ─────────────────────────── server config snapshots ─────────────────────────── */
@@ -248,12 +250,12 @@ internal static class DarlingConfigHistoryReader
         {
             rows.Add(new QueryStoreHealthReadRow(
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
-                reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
                 reader.IsDBNull(4) ? 0L : reader.GetInt64(4),
                 reader.IsDBNull(5) ? 0L : reader.GetInt64(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(6) ? "" : reader.GetString(6),
                 reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0L : reader.GetInt64(9)));

@@ -207,7 +207,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip | Server-bound |
-| MCP server (LLM integration) | Built-in (74 tools) | On request | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (77 tools) | On request | Built into Dashboard (66 tools) |
 
 ---
 
@@ -343,7 +343,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 74 tools; **Darling** exposes the analysis + data-read surface on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 77 tools; **Darling** exposes the analysis + data-read surface on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
@@ -360,7 +360,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 | TempDB | `get_tempdb_trend` |
 | Perfmon | `get_perfmon_stats`, `get_perfmon_trend` |
 | Jobs | `get_running_jobs` |
-| Configuration | `get_server_config`, `get_database_config`, `get_database_scoped_config`, `get_trace_flags` |
+| Configuration | `get_server_config`, `get_database_config`, `get_database_scoped_config`, `get_query_store_health`, `get_trace_flags` |
 | Server Info | `get_server_properties`, `get_database_sizes` |
 | Object/Index Stats | `get_table_index_sizes`, `get_index_usage`, `get_object_locking` |
 | Sessions | `get_session_stats` |
