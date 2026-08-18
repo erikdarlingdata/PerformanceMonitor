@@ -447,8 +447,10 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* #2320 (review catch): the SERVICE's logger instance, so a tool's deliberate
                degrade-to-null path can still leave a trace — the host's own logging factory has its
-               providers cleared above, which would make an injected ILogger<T> a black hole. */
-            builder.Services.AddSingleton<Microsoft.Extensions.Logging.ILogger>(_logger);
+               providers cleared above, which would make anything it minted a black hole. A static
+               ambient rather than a DI registration, so the ADVERTISED tool schema can never depend
+               on what happens to be registered at schema-build time (see DegradeLogger's doc). */
+            DarlingMcpDataTools.DegradeLogger = _logger;
 
             /* Register MCP server with the analysis tool class. */
             builder.Services

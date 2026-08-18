@@ -77,7 +77,7 @@ public sealed class DistinctTextsLiveTests
             Assert.Equal(0, rows.Single(r => r.QueryHash == "0xLEGACYHASH").DistinctTexts);
 
             /* ---- tool envelope: distinct_texts rides out, and text_note fires ONLY on the blend. */
-            var json = await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ServerName, hours_back: 2, top: 10);
+            var json = await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, hours_back: 2, top: 10);
             using var doc = JsonDocument.Parse(json);
             var queries = doc.RootElement.GetProperty("queries").EnumerateArray().ToList();
 

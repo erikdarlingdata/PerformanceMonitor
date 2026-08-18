@@ -602,14 +602,14 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             AssertServerEnvelope(await DarlingMcpDataTools.GetPerfmonStats(postgres, ServerName), "counters");
 
             /* ---- query performance ---- */
-            var q = await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ServerName);
+            var q = await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName);
             AssertServerEnvelope(q, "queries");
             Assert.Contains("0xE2EDATAHASH", q, StringComparison.Ordinal);   /* the planted query surfaced */
-            AssertServerEnvelope(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ServerName), "procedures");
+            AssertServerEnvelope(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName), "procedures");
             AssertServerEnvelope(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName), "queries");
 
             /* database_name filter narrows without erroring. */
-            AssertServerEnvelope(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ServerName, 24, 20, Db), "queries");
+            AssertServerEnvelope(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 24, 20, Db), "queries");
 
             /* ---- discovery / health ---- */
             var list = await DarlingMcpDataTools.ListServers(postgres);
