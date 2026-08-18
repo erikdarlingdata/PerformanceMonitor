@@ -166,7 +166,10 @@ internal static class DarlingDataReader
     {
         /* The span (last minus first sample) rides along because the coverage gate judges SPAN, not
            count-per-minute — the collector's cadence is user-configurable, so a count expectation
-           would permanently disqualify a legitimately slowed server (the review catch). */
+           would permanently disqualify a legitimately slowed server (the review catch). NULL-valued
+           rows are excluded up front (the round-9 catch): AVG would skip them anyway, but COUNT(*)
+           and the span must rest on the same rows the average does, or Samples overstates the
+           evidence behind it. */
         const string sql = """
             SELECT
                 AVG(sqlserver_cpu_utilization)::float8,
@@ -176,6 +179,7 @@ internal static class DarlingDataReader
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+            AND   sqlserver_cpu_utilization IS NOT NULL
             """;
         await using var command = postgres.CreateCommand(sql);
         AddInt(command, serverId);

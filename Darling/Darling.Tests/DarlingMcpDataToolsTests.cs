@@ -578,6 +578,11 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             var newer = older.AddMinutes(1);
 
             await PlantCpuAsync(connection, newer, ct);
+            /* #2320: two more CPU samples, hours apart, so the attribution gate's floors are met for
+               the default 24h window (>= 3 samples spanning >= half of it) and cpu_window computes
+               through the REAL tool call — the wiring the pure-math pins cannot reach. */
+            await PlantCpuAsync(connection, newer.AddHours(-23), ct);
+            await PlantCpuAsync(connection, newer.AddHours(-13), ct);
             await PlantWaitStatsAsync(connection, older, newer, ct);
             await PlantMemoryStatsAsync(connection, newer, ct);
             await PlantMemoryClerksAsync(connection, newer, ct);
@@ -605,6 +610,19 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             var q = await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName);
             AssertServerEnvelope(q, "queries");
             Assert.Contains("0xE2EDATAHASH", q, StringComparison.Ordinal);   /* the planted query surfaced */
+
+            /* #2320: cpu_window computed END TO END — reader SQL against the real schema (a column
+               typo would hide behind the degrade-to-null catch forever, which is why this exists),
+               the planted 40% average x cpu_count 16 x the 24h window, and the tiny planted
+               numerator drawing the below-half note. */
+            using (var qDoc = JsonDocument.Parse(q))
+            {
+                var cpuWindow = qDoc.RootElement.GetProperty("cpu_window");
+                Assert.NotEqual(JsonValueKind.Null, cpuWindow.ValueKind);
+                Assert.Equal(0.40 * 16 * 24 * 3600, cpuWindow.GetProperty("measured_sql_cpu_seconds").GetDouble(), precision: 0);
+                Assert.True(cpuWindow.GetProperty("attributed_ratio").GetDouble() < 0.5);
+                Assert.Contains("below the ranking cut", cpuWindow.GetProperty("note").GetString(), StringComparison.Ordinal);
+            }
             AssertServerEnvelope(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName), "procedures");
             AssertServerEnvelope(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName), "queries");
 

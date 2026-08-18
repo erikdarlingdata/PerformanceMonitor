@@ -74,7 +74,8 @@ ORDER BY sample_time";
         var endUtc = DateTime.UtcNow;
         var startUtc = endUtc.AddHours(-hoursBack);
 
-        /* Span rides along for the cadence-agnostic coverage gate — mirrors Darling. */
+        /* Span rides along for the cadence-agnostic coverage gate — mirrors Darling, including the
+           IS NOT NULL guard: COUNT and span must rest on the same rows the average does. */
         command.CommandText = @"
 SELECT
     AVG(sqlserver_cpu_utilization),
@@ -83,7 +84,8 @@ SELECT
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   collection_time <= $3
+AND   sqlserver_cpu_utilization IS NOT NULL";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
