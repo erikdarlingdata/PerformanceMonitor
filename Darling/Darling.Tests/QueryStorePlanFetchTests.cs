@@ -303,7 +303,8 @@ public class QueryStorePlanFetchTests
     {
         var k = QueryStorePlanXmlState.CandidatePlanCount(null, 12L * 1024 * 1024, out var clamped);
 
-        Assert.Equal(118, k);
+        /* ceil(12MB / 160KB * 1.5) = 116 — the arithmetic, not the issue text's rounded "~118". */
+        Assert.Equal(116, k);
         Assert.False(clamped);
     }
 

@@ -255,9 +255,9 @@ public sealed class DarlingCollectorRunner
             }
         }
 
-        /* #2312: the plan-XML and text watermark reads that used to merge in here (planwm:/textwm:, the
-           #2164/#2150 host-owned state) are GONE — the fetches are activity-driven against the store's own
-           map/text tables now, so there is no persisted resume point to load. V77 deleted the orphaned rows. */
+        /* #2312: the plan and text watermark reads that used to merge in here (the #2164/#2150 host-owned
+           state families) are GONE — the fetches are activity-driven against the store's own map/text
+           tables now, so there is no persisted resume point to load. V77 deleted the orphaned rows. */
 
         /* #2312: the open-interval refresh stamps, merged into the flat State. Read unconditionally for
            query_store (the skip applies regardless of plan capture), and merged rather than replacing so a
@@ -866,8 +866,8 @@ public sealed class DarlingCollectorRunner
                                per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
                                blended sql: could not distinguish them. */
                             var planFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStorePlansAsync(
-                                planFetchConnection, server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
+                            await FetchAndStorePlansAsync(planFetchConnection,
+                                server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
                             context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
                         }
 
@@ -884,8 +884,8 @@ public sealed class DarlingCollectorRunner
                         {
                             /* #2312 investigation: same split as the plan fetch above. */
                             var textFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStoreQueryTextAsync(
-                                textFetchConnection, server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
+                            await FetchAndStoreQueryTextAsync(textFetchConnection,
+                                server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
                             context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
                         }
 
@@ -1042,7 +1042,7 @@ public sealed class DarlingCollectorRunner
             /* #2312: query_store's pending state is down to ONE family — the open-interval refresh stamps
                (qsowm:), which belong to the host's own state owner rather than the definition's name (the
                definition declares no state keys, so a row written under "query_store" would never be read
-               back). The planwm:/textwm: families that used to be split out here retired with the
+               back). The plan/text watermark families that used to be split out here retired with the
                watermarks themselves; the split-by-prefix survives only as the qsowm: extraction, so a
                future fourth family cannot silently land under the wrong owner and become unprunable. */
             var openIntervalKeys = context.PendingState
@@ -1325,26 +1325,6 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
-    /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
-    /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
-    /// id, budget-bounded, and land them into the shared dimension plus the map. The store is the
-    /// watermark: a caught-up database's missing set is EMPTY and no target query runs at all, which is the
-    /// property the retired catalog walk lacked (measured 23s per cycle to discover "nothing new").
-    ///
-    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on
-    /// top of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It
-    /// logs and returns; whatever did not land is still missing from the store, so the next cycle that
-    /// references it re-selects it by construction.</para>
-    ///
-    /// <para>Budget-deferred and capped ids go to <see cref="_planFetchCarryover"/>, because the probe's
-    /// input is each cycle's batch references: a plan referenced ONCE whose fetch was deferred would
-    /// otherwise never re-enter the probe. Ids the target no longer has (Query Store cleanup took the plan
-    /// between reference and fetch) are dropped from the debt — but only on a pass that provably completed
-    /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
-    /// indistinguishable from the client.</para>
-    /// </summary>
-    /// <summary>
     /// The cycle's distinct referenced plans with their live hashes — the probe's whole input (#2312).
     /// Generic because the dispatch loop is; any batch that is not query_store rows extracts nothing, and
     /// the caller's <c>CapturePlanXml</c> gate means that never actually happens. When one plan appears in
@@ -1414,6 +1394,26 @@ public sealed class DarlingCollectorRunner
         return references;
     }
 
+    /// <summary>
+    /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
+    /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
+    /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
+    /// id, budget-bounded, and land them into the shared dimension plus the map. The store is the
+    /// watermark: a caught-up database's missing set is EMPTY and no target query runs at all, which is the
+    /// property the retired catalog walk lacked (measured 23s per cycle to discover "nothing new").
+    ///
+    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on
+    /// top of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It
+    /// logs and returns; whatever did not land is still missing from the store, so the next cycle that
+    /// references it re-selects it by construction.</para>
+    ///
+    /// <para>Budget-deferred and capped ids go to <see cref="_planFetchCarryover"/>, because the probe's
+    /// input is each cycle's batch references: a plan referenced ONCE whose fetch was deferred would
+    /// otherwise never re-enter the probe. Ids the target no longer has (Query Store cleanup took the plan
+    /// between reference and fetch) are dropped from the debt — but only on a pass that provably completed
+    /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
+    /// indistinguishable from the client.</para>
+    /// </summary>
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
         ServerRuntime server,

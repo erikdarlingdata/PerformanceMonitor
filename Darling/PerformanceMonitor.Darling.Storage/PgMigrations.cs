@@ -1693,16 +1693,6 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
 
     /// <summary>
-    /// V76 — the per-database Query Store health table (#2319): what database_config's single
-    /// is_query_store_on bit cannot say — actual vs desired state (the cap-hit READ_ONLY transition
-    /// and its readonly_reason), current vs max storage, cleanup mode and thresholds, and the
-    /// runtime-stats interval length. Body matches PgSchemaGenerator's emission for the definition
-    /// (verified by generating it) plus the rung's explicit collect. prefix, so fresh stores (which
-    /// generate from the catalog) and upgraded stores (which run this rung) agree byte-for-byte.
-    /// Hypertable conversion is automatic from CollectorCatalog on the next service start, the same
-    /// path pvs_stats took in V47. The v_ passthrough keeps the two viewers' SQL byte-identical.
-    /// </summary>
-    /// <summary>
     /// V77 — the activity-driven plan/text fetch (#2312 Finding 2). Three small strokes for one shape
     /// change: the fetch stops walking the target's plan catalog by watermark and instead fetches exactly
     /// the plans/texts the cycle's collected rows reference that the store does not hold, making the store
@@ -1735,6 +1725,16 @@ ALTER TABLE collect.query_store_text ADD COLUMN IF NOT EXISTS query_hash text;
 DELETE FROM collector_state WHERE collector_name = 'query_store_plan_xml' AND state_key LIKE 'planwm:%';
 DELETE FROM collector_state WHERE collector_name = 'query_store_text' AND state_key LIKE 'textwm:%';";
 
+    /// <summary>
+    /// V76 — the per-database Query Store health table (#2319): what database_config's single
+    /// is_query_store_on bit cannot say — actual vs desired state (the cap-hit READ_ONLY transition
+    /// and its readonly_reason), current vs max storage, cleanup mode and thresholds, and the
+    /// runtime-stats interval length. Body matches PgSchemaGenerator's emission for the definition
+    /// (verified by generating it) plus the rung's explicit collect. prefix, so fresh stores (which
+    /// generate from the catalog) and upgraded stores (which run this rung) agree byte-for-byte.
+    /// Hypertable conversion is automatic from CollectorCatalog on the next service start, the same
+    /// path pvs_stats took in V47. The v_ passthrough keeps the two viewers' SQL byte-identical.
+    /// </summary>
     private const string V76Sql = @"
 CREATE TABLE IF NOT EXISTS collect.query_store_health (
     config_id bigint NOT NULL,
