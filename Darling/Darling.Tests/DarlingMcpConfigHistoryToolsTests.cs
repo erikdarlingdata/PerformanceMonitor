@@ -27,7 +27,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the config / trace-flag diagnostic-depth MCP slice — get_server_config_changes,
-/// get_database_config_changes, get_trace_flag_changes, get_database_scoped_config over the Postgres store.
+/// get_database_config_changes, get_trace_flag_changes, and the latest-snapshot pair
+/// get_database_scoped_config + get_query_store_health (#2319) over the Postgres store.
 /// The Dashboard reads pre-materialized report.*_changes tables Darling does not have, so the change tools
 /// diff the store's append-only config snapshots IN C#; the bulk of these tests exercise that diff directly
 /// (no live PG). Also pins the tool surface, param contracts, snapshot-read SQL, the 27-setting database-config
@@ -39,6 +40,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
     {
         "get_database_config_changes",
         "get_database_scoped_config",
+        "get_query_store_health",
         "get_server_config_changes",
         "get_trace_flag_changes",
     };
@@ -49,7 +51,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheFourConfigTools()
+    public void ToolSurface_ExactlyTheFiveConfigTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -77,6 +79,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
     [InlineData("get_database_config_changes", "server_name,hours_back")]
     [InlineData("get_trace_flag_changes", "server_name,hours_back")]
     [InlineData("get_database_scoped_config", "server_name,database_name")]
+    [InlineData("get_query_store_health", "server_name,database_name")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
@@ -130,11 +133,26 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
         Assert.Contains("MAX(capture_time)", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>The read must be the same latest-snapshot shape as the scoped-config sibling, over the
+    /// passthrough view, selecting the reader's ten ordinals in the collector's payload order.</summary>
+    [Fact]
+    public void QueryStoreHealthSql_LatestSnapshot_SelectsPayloadOrder()
+    {
+        var sql = Reader.QueryStoreHealthSql;
+        Assert.Contains("FROM v_query_store_health", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(capture_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes",
+            sql, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(nameof(Reader.ServerConfigSnapshotsSql))]
     [InlineData(nameof(Reader.DatabaseConfigSnapshotsSql))]
     [InlineData(nameof(Reader.TraceFlagSnapshotsSql))]
     [InlineData(nameof(Reader.DatabaseScopedConfigSql))]
+    [InlineData(nameof(Reader.QueryStoreHealthSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {
         var sql = sqlName switch
@@ -142,7 +160,8 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
             nameof(Reader.ServerConfigSnapshotsSql) => Reader.ServerConfigSnapshotsSql,
             nameof(Reader.DatabaseConfigSnapshotsSql) => Reader.DatabaseConfigSnapshotsSql,
             nameof(Reader.TraceFlagSnapshotsSql) => Reader.TraceFlagSnapshotsSql,
-            _ => Reader.DatabaseScopedConfigSql,
+            nameof(Reader.DatabaseScopedConfigSql) => Reader.DatabaseScopedConfigSql,
+            _ => Reader.QueryStoreHealthSql,
         };
         var lower = sql.ToLowerInvariant();
         Assert.DoesNotContain("getdate", lower);
@@ -290,10 +309,10 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllFourTools_NoRequiredParams()
+    public void AdvertisedSchema_IsGeminiClean_ForAllFiveTools_NoRequiredParams()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(4, tools.Count);
+        Assert.Equal(5, tools.Count);
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
         foreach (var t in tools)
@@ -355,6 +374,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                 CollectionIdGenerator.Next(), newer, ServerId, ServerName, Db, "MAXDOP", "8", null);
 
+            /* Query Store health: the cap-hit shape the tool exists to surface — desired READ_WRITE,
+               actual READ_ONLY, readonly_reason 65536 (storage cap reached). */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                CollectionIdGenerator.Next(), newer, ServerId, ServerName, Db, "READ_ONLY", "READ_WRITE", 65536, 1000L, 1000L, "AUTO", 30L, 200L, 60L);
+
             var serverChanges = await DarlingMcpConfigHistoryTools.GetServerConfigChanges(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(serverChanges, ServerName, "changes");
             Assert.Contains("max degree of parallelism", serverChanges, StringComparison.Ordinal);
@@ -367,6 +393,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             DarlingMcpTestData.AssertEnvelope(scoped, ServerName, "databases");
             Assert.Contains("MAXDOP", scoped, StringComparison.Ordinal);
 
+            var qsh = await DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, ServerName);
+            DarlingMcpTestData.AssertEnvelope(qsh, ServerName, "databases");
+            Assert.Contains("\"state_matches_desired\": false", qsh, StringComparison.Ordinal);
+            Assert.Contains("storage cap reached", qsh, StringComparison.Ordinal);
+            Assert.Contains("\"pct_of_cap\": 100", qsh, StringComparison.Ordinal);
+
             bodySucceeded = true;
         }
         finally
@@ -378,7 +410,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
-        var sql = string.Join(" ", new[] { "server_config", "database_config", "trace_flags", "database_scoped_config" }
+        var sql = string.Join(" ", new[] { "server_config", "database_config", "trace_flags", "database_scoped_config", "query_store_health" }
             .Select(tbl => $"DELETE FROM {tbl} WHERE server_id = {ServerId};"))
             + $" DELETE FROM servers WHERE server_id = {ServerId};";
         using var cleanup = new NpgsqlCommand(sql, connection);

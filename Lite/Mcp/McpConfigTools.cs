@@ -154,6 +154,59 @@ public sealed class McpConfigTools
         }
     }
 
+    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off).")]
+    public static async Task<string> GetQueryStoreHealth(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null)
+    {
+        var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var rows = await dataService.GetLatestQueryStoreHealthAsync(resolved.ServerId);
+            if (rows.Count == 0)
+                return McpHelpers.Status(
+                    "unavailable",
+                    "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
+
+            IEnumerable<QueryStoreHealthRow> filtered = rows;
+            if (!string.IsNullOrEmpty(database_name))
+                filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
+
+            var result = filtered.Select(r => new
+            {
+                database_name = r.DatabaseName,
+                actual_state = r.ActualState,
+                desired_state = r.DesiredState,
+                /* The condition this collector exists to surface, pre-folded so a client cannot miss it. */
+                state_matches_desired = string.Equals(r.ActualState, r.DesiredState, StringComparison.OrdinalIgnoreCase),
+                readonly_reason = r.ReadonlyReason,
+                readonly_reason_decoded = r.ReadonlyReason == 0 ? null : QueryStoreReadonlyReason.Decode(r.ReadonlyReason),
+                current_storage_size_mb = r.CurrentStorageMb,
+                max_storage_size_mb = r.MaxStorageMb,
+                pct_of_cap = r.MaxStorageMb > 0 ? Math.Round(100.0 * r.CurrentStorageMb / r.MaxStorageMb, 1) : (double?)null,
+                size_based_cleanup_mode = string.IsNullOrEmpty(r.SizeBasedCleanupMode) ? null : r.SizeBasedCleanupMode,
+                stale_query_threshold_days = r.StaleQueryThresholdDays,
+                max_plans_per_query = r.MaxPlansPerQuery,
+                interval_length_minutes = r.IntervalLengthMinutes,
+            }).ToList();
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                database_count = result.Count,
+                databases = result
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_query_store_health", ex);
+        }
+    }
+
     [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped.")]
     public static async Task<string> GetTraceFlags(
         LocalDataService dataService,

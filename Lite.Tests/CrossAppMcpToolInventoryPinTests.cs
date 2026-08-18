@@ -189,6 +189,32 @@ public sealed class CrossAppMcpToolInventoryPinTests
             $"  Listed but no longer Darling-only:            [{Format(KnownLiteMissingMcpTools.Except(darlingOnly))}]");
     }
 
+    /// <summary>
+    /// The Darling MCP instructions' tool census must match the real inventory. It is prose an LLM plans
+    /// against, and nothing pinned it — which is exactly how it sat at "ninety tools" while the server
+    /// exposed one hundred (ten tools landed without the sentence moving, the PostgreSQL reads among
+    /// them). The census now uses digits so this pin can parse it; a new tool on either side fails here
+    /// until the sentence is updated.
+    /// </summary>
+    [Fact]
+    public void DarlingInstructionsCensus_MatchesTheScannedInventory()
+    {
+        var lite = ExtractToolNames(LiteMcpDir);
+        var darling = ExtractToolNames(DarlingMcpDir);
+        var shared = lite.Count(t => darling.Contains(t));
+
+        var instructions = ParitySource.ReadFile(DarlingMcpDir + "/DarlingMcpInstructions.cs");
+        var census = Regex.Match(
+            instructions,
+            @"This server exposes (\d+) tools\. (\d+) are the same names .*?The remaining (\d+) are unique to Darling",
+            RegexOptions.Singleline);
+        Assert.True(census.Success, "The census sentence ('This server exposes N tools. M are the same names ... The remaining K are unique to Darling') was not found in DarlingMcpInstructions.cs — keep it parseable so this pin can hold it to the real inventory.");
+
+        Assert.Equal(darling.Count, int.Parse(census.Groups[1].Value));
+        Assert.Equal(shared, int.Parse(census.Groups[2].Value));
+        Assert.Equal(darling.Count - shared, int.Parse(census.Groups[3].Value));
+    }
+
     private static string Format(IEnumerable<string> names) =>
         string.Join(", ", names.OrderBy(n => n, StringComparer.Ordinal));
 

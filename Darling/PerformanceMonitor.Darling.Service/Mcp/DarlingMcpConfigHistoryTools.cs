@@ -22,12 +22,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// The config / trace-flag diagnostic-depth MCP tools — get_server_config_changes,
-/// get_database_config_changes, get_trace_flag_changes (the Dashboard's change-history names) and
-/// get_database_scoped_config (the Lite latest-snapshot name) — served over Darling's Postgres store. The
-/// three change tools diff the store's append-only config snapshots (the Dashboard reads pre-materialized
-/// <c>report.*_changes</c> tables that Darling does not have, so Darling computes the diff from the raw
-/// snapshot history via <see cref="DarlingConfigHistoryReader"/>); get_database_scoped_config ports Lite's
-/// tool over the viewer's latest-snapshot read. All are STORED reads (no live monitored-server hit).
+/// get_database_config_changes, get_trace_flag_changes (the Dashboard's change-history names) and the two
+/// Lite latest-snapshot names, get_database_scoped_config and get_query_store_health — served over Darling's
+/// Postgres store. The three change tools diff the store's append-only config snapshots (the Dashboard reads
+/// pre-materialized <c>report.*_changes</c> tables that Darling does not have, so Darling computes the diff
+/// from the raw snapshot history via <see cref="DarlingConfigHistoryReader"/>); the latest-snapshot tools
+/// port Lite's over the viewer's reads. All are STORED reads (no live monitored-server hit).
 ///
 /// <para>
 /// Each change tool's Description states the two honest caveats plainly (they are NOT silently dropped):
@@ -221,6 +221,58 @@ public sealed class DarlingMcpConfigHistoryTools
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_database_scoped_config", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_query_store_health"), Description("Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, and the runtime-stats interval length. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off).")]
+    public static async Task<string> GetQueryStoreHealth(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        try
+        {
+            var rows = await DarlingConfigHistoryReader.GetLatestQueryStoreHealthAsync(postgres, resolved.ServerId);
+            if (rows.Count == 0)
+                return McpHelpers.Status(
+                    "unavailable",
+                    "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
+
+            IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = rows;
+            if (!string.IsNullOrEmpty(database_name))
+                filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
+
+            var result = filtered.Select(r => new
+            {
+                database_name = r.DatabaseName,
+                actual_state = r.ActualState,
+                desired_state = r.DesiredState,
+                /* The condition this collector exists to surface, pre-folded so a client cannot miss it. */
+                state_matches_desired = string.Equals(r.ActualState, r.DesiredState, StringComparison.OrdinalIgnoreCase),
+                readonly_reason = r.ReadonlyReason,
+                readonly_reason_decoded = r.ReadonlyReason == 0 ? null : QueryStoreReadonlyReason.Decode(r.ReadonlyReason),
+                current_storage_size_mb = r.CurrentStorageMb,
+                max_storage_size_mb = r.MaxStorageMb,
+                pct_of_cap = r.MaxStorageMb > 0 ? Math.Round(100.0 * r.CurrentStorageMb / r.MaxStorageMb, 1) : (double?)null,
+                size_based_cleanup_mode = string.IsNullOrEmpty(r.SizeBasedCleanupMode) ? null : r.SizeBasedCleanupMode,
+                stale_query_threshold_days = r.StaleQueryThresholdDays,
+                max_plans_per_query = r.MaxPlansPerQuery,
+                interval_length_minutes = r.IntervalLengthMinutes,
+            }).ToList();
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                database_count = result.Count,
+                databases = result
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_query_store_health", ex);
         }
     }
 

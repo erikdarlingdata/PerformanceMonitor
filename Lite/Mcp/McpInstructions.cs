@@ -137,6 +137,7 @@ internal static class McpInstructions
         | `get_server_config` | sp_configure settings with configured and in-use values | `server_name` |
         | `get_database_config` | Database-level settings: RCSI, recovery model, auto-shrink, Query Store, etc. | `server_name`, `database_name` |
         | `get_database_scoped_config` | Database-scoped configuration (MAXDOP, legacy CE, parameter sniffing) | `server_name`, `database_name` |
+        | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds | `server_name`, `database_name` |
         | `get_trace_flags` | Active trace flags with global/session scope | `server_name` |
         | `get_server_config_changes` | sp_configure change history (diff of on-connect snapshots) | `server_name`, `hours_back` (default 168) |
         | `get_database_config_changes` | sys.databases change history (recovery model, RCSI, compat level, etc.) | `server_name`, `hours_back` (default 168) |
@@ -212,7 +213,7 @@ internal static class McpInstructions
         6. **Compare**: Use `compare_analysis` to see if problems are new (compare last 4 hours vs yesterday same time)
         7. **Config**: Use `audit_config` for edition-aware configuration recommendations
         8. **Active queries**: Use `get_active_queries` to see what was running at a specific time — critical for correlating CPU spikes, blocking events, or deadlocks with actual queries
-        9. **Configuration**: Use `get_server_config`, `get_database_config`, or `get_database_scoped_config` to check server and database settings
+        9. **Configuration**: Use `get_server_config`, `get_database_config`, or `get_database_scoped_config` to check server and database settings; `get_query_store_health` shows whether Query Store is actually working per database (the silent failure is desired READ_WRITE with actual READ_ONLY)
         10. **Query investigation**: After finding a problematic query via `get_top_queries_by_cpu`, use `get_query_trend` with its `query_hash` to see performance history
         11. **Plan analysis**: Use `analyze_query_plan` with the `query_hash` from step 10 to get detailed plan analysis with warnings, missing indexes, and optimization recommendations
 

@@ -329,53 +329,8 @@ public class QueryStoreHealthRow
     public string PercentOfCapDisplay =>
         MaxStorageMb > 0 ? $"{100.0 * CurrentStorageMb / MaxStorageMb:F0}%" : "";
 
-    /// <summary>
-    /// readonly_reason is a COMBINABLE bitmask (this codebase already relies on that:
-    /// QueryStoreCollector tests bit 8 with an AND), so it is decoded bit by bit and joined — a switch
-    /// on exact values loses every multi-bit state. Labels are the documented ones for
-    /// sys.database_query_store_options; bits the documentation does not name are reported numerically
-    /// rather than guessed.
-    /// </summary>
-    public string ReadonlyReasonDisplay
-    {
-        get
-        {
-            if (ReadonlyReason == 0)
-            {
-                return "";
-            }
-
-            var parts = new List<string>();
-            var remaining = ReadonlyReason;
-            foreach (var (bit, label) in ReadonlyReasonBits)
-            {
-                if ((remaining & bit) != 0)
-                {
-                    parts.Add(label);
-                    remaining &= ~bit;
-                }
-            }
-
-            if (remaining != 0)
-            {
-                parts.Add($"reason {remaining.ToString(CultureInfo.InvariantCulture)}");
-            }
-
-            return string.Join("; ", parts);
-        }
-    }
-
-    private static readonly (int Bit, string Label)[] ReadonlyReasonBits =
-    {
-        (1, "database is read-only"),
-        (2, "database is in single-user mode"),
-        (4, "database is in emergency mode"),
-        (8, "database is a secondary replica"),
-        (65536, "storage cap reached"),
-        (131072, "statement count reached internal memory limit"),
-        (262144, "persist backlog reached internal memory limit"),
-        (524288, "database reached disk size limit"),
-    };
+    /// <summary>The shared bit-by-bit decode — one label table for every surface that shows this value.</summary>
+    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.Decode(ReadonlyReason);
 }
 
 public class DatabaseScopedConfigRow
