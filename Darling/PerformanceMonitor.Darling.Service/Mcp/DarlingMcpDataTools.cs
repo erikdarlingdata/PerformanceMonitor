@@ -430,6 +430,29 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
+    /// <summary>
+    /// #2320 (review catches, both): the attribution reads must never fail the tool call — the rows
+    /// are already fetched, and a data problem in the DENOMINATOR is exactly the omitted-never-
+    /// fabricated case, so any exception here collapses to "no cpu_window". And the two reads are
+    /// independent of each other, so they run concurrently — one round-trip of latency, not two.
+    /// </summary>
+    private static async Task<CpuAttribution.CpuWindow?> TryComputeCpuWindowAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStart, DateTime windowEnd, double attributedCpuMs, int hoursBack)
+    {
+        try
+        {
+            var averageTask = DarlingDataReader.GetCpuWindowAverageAsync(postgres, serverId, windowStart, windowEnd);
+            var coresTask = DarlingDataReader.GetLatestCpuCountAsync(postgres, serverId);
+            await Task.WhenAll(averageTask, coresTask);
+            var (avgSqlCpu, samples) = averageTask.Result;
+            return CpuAttribution.Compute(attributedCpuMs, avgSqlCpu, samples, coresTask.Result, hoursBack);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. cpu_window reports what fraction of the box's MEASURED SQL CPU the returned rows explain (attributed_ratio, from the collected utilization series x core count); null when that series cannot support the denominator - omitted, never fabricated.")]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
@@ -476,11 +499,8 @@ public sealed class DarlingMcpDataTools
             /* #2320: the denominator the ranking never handed the caller — what fraction of the SQL
                CPU the box ACTUALLY burned do the returned rows explain. Omitted (null) rather than
                fabricated when the utilization series or core count can't support it. */
-            var (avgSqlCpu, cpuSamples) = await DarlingDataReader.GetCpuWindowAverageAsync(
-                postgres, resolved.ServerId, windowStart, now);
-            var cores = await DarlingDataReader.GetLatestCpuCountAsync(postgres, resolved.ServerId);
-            var attribution = CpuAttribution.Compute(
-                kept.Sum(r => r.TotalCpuUs / 1000.0), avgSqlCpu, cpuSamples, cores, hours_back);
+            var attribution = await TryComputeCpuWindowAsync(
+                postgres, resolved.ServerId, windowStart, now, kept.Sum(r => r.TotalCpuUs / 1000.0), hours_back);
 
             var result = kept.Select(r => new
             {
@@ -587,11 +607,8 @@ public sealed class DarlingMcpDataTools
                     "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
             /* #2320: same attribution denominator as the queries tool. */
-            var (avgSqlCpu, cpuSamples) = await DarlingDataReader.GetCpuWindowAverageAsync(
-                postgres, resolved.ServerId, windowStart, now);
-            var cores = await DarlingDataReader.GetLatestCpuCountAsync(postgres, resolved.ServerId);
-            var attribution = CpuAttribution.Compute(
-                rows.Sum(r => r.TotalCpuUs / 1000.0), avgSqlCpu, cpuSamples, cores, hours_back);
+            var attribution = await TryComputeCpuWindowAsync(
+                postgres, resolved.ServerId, windowStart, now, rows.Sum(r => r.TotalCpuUs / 1000.0), hours_back);
 
             var result = rows.Select(r => new
             {

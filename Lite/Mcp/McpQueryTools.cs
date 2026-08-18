@@ -9,6 +9,29 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
+    /// <summary>
+    /// #2320 (review catches, both — mirrors Darling): the attribution reads must never fail the
+    /// tool call; any exception here collapses to "no cpu_window" per the omitted-never-fabricated
+    /// contract. The two reads are independent (each opens its own DuckDB connection) and run
+    /// concurrently.
+    /// </summary>
+    private static async Task<CpuAttribution.CpuWindow?> TryComputeCpuWindowAsync(
+        LocalDataService dataService, int serverId, double attributedCpuMs, int hoursBack)
+    {
+        try
+        {
+            var averageTask = dataService.GetCpuWindowAverageAsync(serverId, hoursBack);
+            var coresTask = dataService.GetLatestCpuCountAsync(serverId);
+            await Task.WhenAll(averageTask, coresTask);
+            var (avgSqlCpu, samples) = averageTask.Result;
+            return CpuAttribution.Compute(attributedCpuMs, avgSqlCpu, samples, coresTask.Result, hoursBack);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. cpu_window reports what fraction of the box's MEASURED SQL CPU the returned rows explain (attributed_ratio, from the collected utilization series x core count); null when that series cannot support the denominator - omitted, never fabricated.")]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
@@ -44,10 +67,8 @@ public sealed class McpQueryTools
 
             /* #2320: the denominator the ranking never handed the caller — mirrors Darling. Null
                (omitted) whenever the utilization series or core count can't support it. */
-            var (avgSqlCpu, cpuSamples) = await dataService.GetCpuWindowAverageAsync(resolved.ServerId, hours_back);
-            var cores = await dataService.GetLatestCpuCountAsync(resolved.ServerId);
-            var attribution = CpuAttribution.Compute(
-                kept.Sum(r => r.TotalCpuMs), avgSqlCpu, cpuSamples, cores, hours_back);
+            var attribution = await TryComputeCpuWindowAsync(
+                dataService, resolved.ServerId, kept.Sum(r => r.TotalCpuMs), hours_back);
 
             var result = kept.Select(r => new
             {
@@ -143,10 +164,8 @@ public sealed class McpQueryTools
             }
 
             /* #2320: same attribution denominator as the queries tool. Mirrors Darling. */
-            var (avgSqlCpu, cpuSamples) = await dataService.GetCpuWindowAverageAsync(resolved.ServerId, hours_back);
-            var cores = await dataService.GetLatestCpuCountAsync(resolved.ServerId);
-            var attribution = CpuAttribution.Compute(
-                rows.Sum(r => r.TotalCpuMs), avgSqlCpu, cpuSamples, cores, hours_back);
+            var attribution = await TryComputeCpuWindowAsync(
+                dataService, resolved.ServerId, rows.Sum(r => r.TotalCpuMs), hours_back);
 
             var result = rows.Select(r => new
             {
