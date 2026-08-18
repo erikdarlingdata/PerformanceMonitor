@@ -118,7 +118,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
            BECAUSE it is the frozen historical shape: if a SQL Server collector is added, this is supposed to
            fail until the oracle is extended by hand. That is the whole point of an oracle. */
         Assert.Equal(catalogTables, goldenTables);
-        Assert.Equal(41, GoldenCollectorSchema.Tables.Count);
+        Assert.Equal(42, GoldenCollectorSchema.Tables.Count);
 
         /* Only server_config and database_config lack an index (matches DuckDbSchemaGenerator.CreateIndex). */
         var goldenIndexless = DuckDbSchemaGenerator.StoredCollectors
