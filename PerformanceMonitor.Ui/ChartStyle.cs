@@ -239,12 +239,25 @@ namespace PerformanceMonitor.Ui
             // the line unfilled.
             /* NaN Ys are #1944's injected gap markers, and Enumerable.Min/Max PROPAGATE NaN - one gap
                would read as minY=maxY=NaN and silently kill the gradient fill for the entire series.
-               The fill must survive a gap (ScottPlot splits it at the break); only real values rank. */
+               Only real values rank. */
             var realYs = pts.Where(p => !double.IsNaN(p.Y)).Select(p => p.Y).ToList();
             double minY = realYs.Count > 0 ? realYs.Min() : 0.0;
             double maxY = realYs.Count > 0 ? realYs.Max() : 0.0;
+            /* #2324: a series carrying gap markers gets NO fill at all — line-only. The earlier reading
+               here ("the fill must survive a gap; ScottPlot splits it at the break") is true of the LINE
+               and false of the FILL: reproduced headlessly against ScottPlot 5.1.59, one NaN in a
+               FillY + ColorPositions series renders the ribbon as OPAQUE BLACK polygons with straight
+               chord edges crossing the gap — Scatter.Render's fill path closes its SKPath contours
+               through the break, and its fill paint under ColorPositions is hardcoded `Colors.Black`
+               with the gradient shader expected to paint over it, which a NaN-bearing series defeats.
+               That black buried every other series on 3.4.0's gapped charts (the field report's one
+               healthy tab was the one whose data happened to have no gaps; 3.3.0 predates gap markers).
+               Lines and markers handle NaN contours correctly, so line-only is the honest degradation:
+               a chart showing an outage keeps its break, and continuous data keeps the full ribbon. */
+            bool hasGapMarkers = realYs.Count != pointCount;
             bool canFill = pointCount >= 2
                 && maxY > minY
+                && !hasGapMarkers
                 && !double.IsNaN(minY) && !double.IsNaN(maxY)
                 && !double.IsInfinity(minY) && !double.IsInfinity(maxY);
             scatter.ColorPositions.Clear();
