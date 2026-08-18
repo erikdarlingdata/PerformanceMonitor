@@ -38,6 +38,7 @@
 
   <ItemGroup>
     <!-- Same package + version as Lite, so both chart hosts pin one ScottPlot. -->
+    <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="ScottPlot.WPF" />
     <!-- System tray icon + balloon toasts (ported from Lite's SystemTrayService). Same package + version
          as Lite so both WPF front ends pin one Hardcodet.NotifyIcon.Wpf. -->
