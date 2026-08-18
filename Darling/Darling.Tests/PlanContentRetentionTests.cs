@@ -129,6 +129,72 @@ public sealed class PlanContentRetentionTests
         Assert.Equal(Now.AddDays(-22), cutoff);
     }
 
+    /* ---------------- the scoping router (review catch) ---------------- */
+
+    /// <summary>
+    /// The dedicated horizon governs the PLAN dimension only — query text keeps the fact-coupled cutoff,
+    /// or the knob would quietly break "text stays analyzable for the facts' full retention", which is
+    /// half its own justification (and buy ~40 MB for the damage).
+    /// </summary>
+    [Fact]
+    public void TheRouterScopesTheKnobToThePlanDimensionOnly()
+    {
+        var coupled = Now.AddDays(-92);
+        var dedicated = Now.AddDays(-22);
+
+        Assert.Equal(dedicated, DarlingRetention.ComputeDimTableCutoff(PayloadDimensions.QueryPlanDimTable, coupled, dedicated));
+        Assert.Equal(coupled, DarlingRetention.ComputeDimTableCutoff(PayloadDimensions.QueryTextDimTable, coupled, dedicated));
+    }
+
+    /* ---------------- the map ordering (review catch) ---------------- */
+
+    /// <summary>
+    /// The invariant the review caught this PR breaking: the DIMENSION must outlive the MAP under every
+    /// knob value, or a live <c>query_store_plan_map</c> row resolves to deleted content — the
+    /// silent-missing-plans failure the margin ordering exists to prevent. Swept across every age from
+    /// inside retention to well past both horizons, for the shipped default, the clamp edges, disabled,
+    /// and a knob wider than the fact horizon.
+    /// </summary>
+    [Theory]
+    [InlineData(30, 0)]
+    [InlineData(30, 7)]
+    [InlineData(30, 21)]
+    [InlineData(90, 21)]
+    [InlineData(90, 365)]
+    [InlineData(7, 21)]
+    [InlineData(1, 7)]
+    public void NeitherPruneOrder_CanLeaveAMapRowResolvingToAnAbsentDigest_UnderTheKnob(int factRetentionDays, int knobDays)
+    {
+        var dimCutoff = DarlingRetention.ComputeDimensionCutoff(Now, factRetentionDays, oldestSurvivingDigestFact: null, planContentRetentionDays: knobDays);
+        var mapCutoff = DarlingRetention.ComputeMapCutoff(Now, factRetentionDays, knobDays);
+
+        /* The dim must outlive the map: strictly older cutoff. */
+        Assert.True(dimCutoff < mapCutoff,
+            $"the dim GC would take content the map still points at: dim cutoff {dimCutoff:o} is not earlier " +
+            $"than map cutoff {mapCutoff:o} at {factRetentionDays}d retention / knob {knobDays}");
+
+        /* And the both-orders sweep: no age where the dim row is takeable while its map row survives. */
+        for (var age = 0; age <= factRetentionDays + 370; age++)
+        {
+            var lastSeen = Now.AddDays(-age);
+            var mapEligible = lastSeen < mapCutoff;
+            var dimEligible = lastSeen < dimCutoff;
+
+            Assert.False(dimEligible && !mapEligible,
+                $"at {age}d the dim row is prunable while its map row survives (retention {factRetentionDays}d, knob {knobDays})");
+        }
+    }
+
+    /// <summary>Disabled must reproduce the pre-knob map cutoff exactly, like the dim's disabled path.</summary>
+    [Fact]
+    public void MapCutoff_Disabled_ReproducesTheOldBehaviorExactly()
+    {
+        var old = Now.AddDays(-(30 + QueryStorePlanMap.PruneMarginDays));
+
+        Assert.Equal(old, DarlingRetention.ComputeMapCutoff(Now, 30));
+        Assert.Equal(old, DarlingRetention.ComputeMapCutoff(Now, 30, planContentRetentionDays: 0));
+    }
+
     /* ---------------- the viewer probe ---------------- */
 
     [Fact]

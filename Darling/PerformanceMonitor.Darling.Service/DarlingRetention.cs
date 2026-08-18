@@ -372,7 +372,8 @@ public static class DarlingRetention
             }
             else
             {
-                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact, planContentRetentionDays);
+                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact);
+                var planDimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact, planContentRetentionDays);
                 if (dimensionCutoff < utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1)))
                 {
                     /* Fixed string, same reasoning as the defer line: the greppable signature of a store
@@ -411,7 +412,14 @@ public static class DarlingRetention
                     tablesFailed++;
                 }
 
-                var mapCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStorePlanMap.PruneMarginDays));
+                /* #2316 review catch: the map must learn the plan-content horizon too, or the dedicated
+                   dim cutoff overtakes this one and a live map row can point at deleted content — the
+                   silent-missing-plans failure the margin ordering exists to prevent. ComputeMapCutoff
+                   keeps the map's cutoff strictly NEWER than the plan dim's under every knob value, so
+                   the only reachable end-state stays the recoverable one (map row gone first, plan
+                   renders as not-collected). The visible consequence is deliberate: a Query Store plan
+                   fetch for an interval older than the knob misses, exactly like the dim itself. */
+                var mapCutoff = ComputeMapCutoff(utcNow, widestFactRetentionDays, planContentRetentionDays);
                 var mapDeleted = await PurgeOneAsync(
                     postgres, QueryStorePlanMap.TableName,
                     QueryStorePlanMap.PruneSql(TimescaleSupport.ChunkIntervalDays),
@@ -446,9 +454,13 @@ public static class DarlingRetention
 
                 foreach (var dimTable in PayloadDimensions.DimTables)
                 {
+                    /* #2316 review catch: the dedicated horizon applies to PLAN content only. query_text_dim
+                       is ~40 MB against the plan dim's 127 GB — shortening it buys nothing and would quietly
+                       break "text stays analyzable for the facts' full retention", which is half the knob's
+                       own justification. The router is pure so the scoping is pinned by tests. */
                     var dimDeleted = await PurgeOneAsync(
                         postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
-                        dimensionCutoff, logger, cancellationToken);
+                        ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff), logger, cancellationToken);
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -681,6 +693,41 @@ public static class DarlingRetention
         }
 
         var dedicated = utcNow.AddDays(-(planContentRetentionDays + 1));
+        return dedicated > coupled ? dedicated : coupled;
+    }
+
+    /// <summary>
+    /// Routes each payload dimension to its cutoff (#2316 review catch): the dedicated plan-content
+    /// horizon governs <c>query_plan_dim</c> ONLY — every other dimension (query text today) keeps the
+    /// fact-coupled cutoff, so text stays resolvable for the facts' full retention. Pure so the scoping
+    /// decision is pinned by tests rather than living as an inline ternary nothing exercises.
+    /// </summary>
+    internal static DateTime ComputeDimTableCutoff(string dimTable, DateTime coupledCutoff, DateTime planDimensionCutoff) =>
+        string.Equals(dimTable, PayloadDimensions.QueryPlanDimTable, StringComparison.Ordinal)
+            ? planDimensionCutoff
+            : coupledCutoff;
+
+    /// <summary>
+    /// The Query Store plan map's prune cutoff, knob-aware (#2316 review catch). The invariant
+    /// (<see cref="QueryStorePlanMap.MarginOrderingHolds"/>): the DIMENSION must outlive the MAP, so the
+    /// only reachable end-state is the recoverable one — a map row pruned while its content survives
+    /// renders "not collected" and self-corrects; content pruned while a map row survives is a live fact
+    /// resolving to absent XML, silently. The coupled pair keeps that gap at ChunkIntervalDays; the
+    /// dedicated pair keeps it at one day (map at knob, dim at knob + 1 — the same one-day stamp-skew
+    /// margin as everywhere else, because <c>TouchSql</c> refreshes the map's stamp eagerly while the
+    /// dim's refresh is hourly-guarded, so the dim's stamp can trail). Both components are strictly
+    /// ordered, so the max-of-newer composition preserves the ordering under every knob value —
+    /// pinned in PlanContentRetentionTests across the full age sweep.
+    /// </summary>
+    internal static DateTime ComputeMapCutoff(DateTime utcNow, int widestFactRetentionDays, int planContentRetentionDays = 0)
+    {
+        var coupled = utcNow.AddDays(-(widestFactRetentionDays + QueryStorePlanMap.PruneMarginDays));
+        if (planContentRetentionDays <= 0)
+        {
+            return coupled;
+        }
+
+        var dedicated = utcNow.AddDays(-planContentRetentionDays);
         return dedicated > coupled ? dedicated : coupled;
     }
 
