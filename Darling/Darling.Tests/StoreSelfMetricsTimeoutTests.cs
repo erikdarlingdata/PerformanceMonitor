@@ -14,7 +14,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The #2317 sweep timeout. The self-metrics sizing queries (<c>hypertable_local_size</c> across every
+/// The #2317 sweep timeout. The self-metrics sizing queries (<c>hypertable_detailed_size</c> across every
 /// hypertable, <c>pg_database_size</c> over the whole store) outgrew Npgsql's default 30 seconds ~5x/day
 /// on the dogfood fleet, and the cancel surfaces as "Exception while reading from stream" — a timeout
 /// wearing a network-fault costume (the #2294 lesson one layer over). Every statement in the sweep must

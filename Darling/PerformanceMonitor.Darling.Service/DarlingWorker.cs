@@ -2918,10 +2918,20 @@ LIMIT 1", connection);
     /// </summary>
     private async Task SweepStoreSelfMetricsAsync(CancellationToken cancellationToken)
     {
+        /* #2327 review catch: this sweep is AWAITED on the main loop, unlike the fire-and-track
+           per-server sweeps — so its worst case stalls per-server dispatch and the disk-pressure and
+           compression checks with it. The budget is therefore ONE SweepTimeoutSeconds for the WHOLE
+           sweep (a linked CTS), not per statement: worst-case loop block stays ~5 minutes, comparable
+           to the old default's 5 x 30s, instead of the 25 minutes five sequential 300s statements
+           could take against a genuinely wedged store. The per-statement CommandTimeout inside
+           StoreSelfMetrics stays as the belt for callers that pass no token. */
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(StoreSelfMetrics.SweepTimeoutSeconds));
+
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-            await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, budget.Token);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -2932,8 +2942,10 @@ LIMIT 1", connection);
             /* #2317: a command TIMEOUT and a genuine fault are the same Npgsql message here ("Exception
                while reading from stream" — the #2294 lesson), and on the dogfood box that costume produced
                ~5 fake network-fault ERRORs a day. Name each cause; both are one-hour series gaps that
-               self-heal on the next tick. */
-            if (PgBaselineProvider.IsCommandTimeout(ex))
+               self-heal on the next tick. The budget CTS surfaces as OperationCanceledException — with
+               the SERVICE token untripped that can only be the sweep budget, so it takes the timeout
+               arm too. */
+            if (PgBaselineProvider.IsCommandTimeout(ex) || (ex is OperationCanceledException && budget.IsCancellationRequested))
             {
                 _logger.LogError(
                     "Store self-metrics sweep did not finish within its {Timeout}s command timeout — this tick's metrics are skipped and the series gains a one-hour gap (the store side logs this as 'canceling statement due to user request'). If it repeats, the store's sizing queries have outgrown the timeout: {Message}",

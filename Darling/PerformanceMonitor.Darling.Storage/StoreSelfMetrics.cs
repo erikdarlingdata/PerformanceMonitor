@@ -53,8 +53,12 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StoreSelfMetrics
 {
     /// <summary>
-    /// Per-statement command timeout for the sweep (#2317). The sizing queries call
-    /// <c>hypertable_local_size</c> across every hypertable and <c>pg_database_size</c> over the whole
+    /// Per-statement command timeout for the sweep (#2317) — and, at the worker's call site, the
+    /// budget for the WHOLE sweep via a linked CTS (see SweepStoreSelfMetricsAsync: this sweep is
+    /// awaited on the main loop, so five sequential per-statement timeouts must not stack). The
+    /// sizing queries call <c>hypertable_detailed_size</c> across every hypertable (whose inner
+    /// <c>hypertable_local_size</c> is the frame the server log names when it cancels) and
+    /// <c>pg_database_size</c> over the whole
     /// store, and on the dogfood fleet (141 objects, a 100+ GB dimension) they outgrew Npgsql's default
     /// 30 seconds ~5x/day under load — surfacing as "Exception while reading from stream" (Npgsql
     /// cancels the statement; the server logs 'canceling statement due to user request'; the client
