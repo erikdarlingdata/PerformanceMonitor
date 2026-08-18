@@ -29,7 +29,7 @@ public sealed class QueryStorePlanSizeLearnTests
     {
         var previous = new QueryStorePlanXmlState.PlanSizeEstimate(40_000, CatchUpInProgress: true);
 
-        var next = QueryStorePlanXmlState.Learn(previous, bytesShipped: 0, plansShipped: 0, candidateWindow: 118, budgetBytes: 12_582_912);
+        var next = QueryStorePlanXmlState.Learn(previous, bytesShipped: 0, plansShipped: 0, plansMeasured: 0, candidateWindow: 118, budgetBytes: 12_582_912);
 
         Assert.Equal(40_000, next.AvgBytes);
         Assert.False(next.CatchUpInProgress);
@@ -40,7 +40,7 @@ public sealed class QueryStorePlanSizeLearnTests
     public void AFullWindowPassSetsCatchUp()
     {
         var next = QueryStorePlanXmlState.Learn(
-            default, bytesShipped: 1_180_000, plansShipped: 118, candidateWindow: 118, budgetBytes: 12_582_912);
+            default, bytesShipped: 1_180_000, plansShipped: 118, plansMeasured: 118, candidateWindow: 118, budgetBytes: 12_582_912);
 
         Assert.True(next.CatchUpInProgress);
         Assert.Equal(10_000, next.AvgBytes);
@@ -55,7 +55,7 @@ public sealed class QueryStorePlanSizeLearnTests
     public void ABudgetCutPassSetsCatchUp()
     {
         var next = QueryStorePlanXmlState.Learn(
-            default, bytesShipped: 13_000_000, plansShipped: 80, candidateWindow: 118, budgetBytes: 12_582_912);
+            default, bytesShipped: 13_000_000, plansShipped: 80, plansMeasured: 80, candidateWindow: 118, budgetBytes: 12_582_912);
 
         Assert.True(next.CatchUpInProgress);
         Assert.Equal(162_500, next.AvgBytes);
@@ -68,7 +68,7 @@ public sealed class QueryStorePlanSizeLearnTests
         var previous = new QueryStorePlanXmlState.PlanSizeEstimate(160_000, CatchUpInProgress: true);
 
         var next = QueryStorePlanXmlState.Learn(
-            previous, bytesShipped: 450_000, plansShipped: 30, candidateWindow: 118, budgetBytes: 12_582_912);
+            previous, bytesShipped: 450_000, plansShipped: 30, plansMeasured: 30, candidateWindow: 118, budgetBytes: 12_582_912);
 
         Assert.Equal(15_000, next.AvgBytes);
         Assert.False(next.CatchUpInProgress);
@@ -85,9 +85,24 @@ public sealed class QueryStorePlanSizeLearnTests
         var previous = new QueryStorePlanXmlState.PlanSizeEstimate(52_000, CatchUpInProgress: false);
 
         var next = QueryStorePlanXmlState.Learn(
-            previous, bytesShipped: 0, plansShipped: 5, candidateWindow: 118, budgetBytes: 12_582_912);
+            previous, bytesShipped: 0, plansShipped: 5, plansMeasured: 0, candidateWindow: 118, budgetBytes: 12_582_912);
 
         Assert.Equal(52_000, next.AvgBytes);
+    }
+
+    /// <summary>
+    /// The review catch, pinned: NULL-XML plans ship as rows (the watermark must pass unpersistable
+    /// plans) so they count for the window comparison — but averaging real bytes over a NULL-inflated
+    /// divisor would understate plan size and INFLATE the next window, the unsafe direction. A pass
+    /// of 10 rows where only 5 carried XML averages over 5.
+    /// </summary>
+    [Fact]
+    public void AMixedPassAveragesOverOnlyTheMeasuredPlans()
+    {
+        var next = QueryStorePlanXmlState.Learn(
+            default, bytesShipped: 500_000, plansShipped: 10, plansMeasured: 5, candidateWindow: 118, budgetBytes: 12_582_912);
+
+        Assert.Equal(100_000, next.AvgBytes);
     }
 
     /// <summary>

@@ -187,9 +187,16 @@ public static class QueryStorePlanXmlState
     /// a pass cut by either bound — the candidate window consumed or the byte budget reached —
     /// proves a backlog remains, so catch-up sets; an ordinary partial pass learns its average and
     /// clears catch-up. Pure so the table is pinnable; the runner owns only the dictionary.
+    ///
+    /// <para>Two counts on purpose (the review catch): <paramref name="plansShipped"/> is the RAW
+    /// row count — NULL-XML plans deliberately ship as rows so the watermark can pass unpersistable
+    /// plans, and the window/catch-up comparison wants exactly that count. But the average's divisor
+    /// is <paramref name="plansMeasured"/>, the rows that actually carried XML: dividing real bytes
+    /// by a NULL-inflated count would understate the average, which INFLATES the next window — the
+    /// unsafe direction the whole estimator errs away from.</para>
     /// </summary>
     public static PlanSizeEstimate Learn(
-        PlanSizeEstimate previous, long bytesShipped, int plansShipped, int candidateWindow, long budgetBytes)
+        PlanSizeEstimate previous, long bytesShipped, int plansShipped, int plansMeasured, int candidateWindow, long budgetBytes)
     {
         if (plansShipped <= 0)
         {
@@ -197,7 +204,7 @@ public static class QueryStorePlanXmlState
         }
 
         var catchUp = plansShipped >= candidateWindow || bytesShipped >= budgetBytes;
-        var avg = ObservedAvgPlanBytes(bytesShipped, plansShipped) ?? previous.AvgBytes;
+        var avg = ObservedAvgPlanBytes(bytesShipped, plansMeasured) ?? previous.AvgBytes;
         return new PlanSizeEstimate(avg, catchUp);
     }
 

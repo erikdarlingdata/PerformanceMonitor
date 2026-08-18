@@ -1423,14 +1423,21 @@ public sealed class DarlingCollectorRunner
 
             /* Learn from what this pass actually decompressed and shipped — BEFORE the empty-pass
                early return, because an empty pass is the one that proves the walk caught up (nvarchar
-               length * 2 is DATALENGTH exactly, no server round-trip needed). */
+               length * 2 is DATALENGTH exactly, no server round-trip needed). NULL-XML rows count for
+               the window (they shipped, the watermark passes them) but not for the average's divisor
+               (they carried no bytes to average — the review catch). */
             var shippedBytes = 0L;
+            var plansMeasured = 0;
             foreach (var plan in fetched)
             {
-                shippedBytes += plan.PlanXml is null ? 0L : (long)plan.PlanXml.Length * 2;
+                if (plan.PlanXml is not null)
+                {
+                    shippedBytes += (long)plan.PlanXml.Length * 2;
+                    plansMeasured++;
+                }
             }
             _observedPlanSize[(server.ServerId, databaseName)] =
-                QueryStorePlanXmlState.Learn(estimate, shippedBytes, fetched.Count, candidates, budget);
+                QueryStorePlanXmlState.Learn(estimate, shippedBytes, fetched.Count, plansMeasured, candidates, budget);
 
             if (fetched.Count == 0)
             {
