@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Common
     /// SKUs' tools hand the caller numerator, denominator, and ratio instead of leaving the division to be
     /// re-derived — ONE computation here, so the two cannot disagree.
     ///
-    /// <para>The denominator is measured, not theoretical: the SQL process's average CPU%% over the window
+    /// <para>The denominator is measured, not theoretical: the SQL process's average CPU% over the window
     /// (the cpu_utilization series both stores already collect) × core count (server_properties) × window
     /// seconds. When a piece is missing — no CPU samples, no properties snapshot, or the series covers too
     /// little of the window — the ratio is OMITTED, never invented (#2320's explicit degrade rule).</para>

@@ -31,6 +31,12 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
+            /* Captured BEFORE the ranking read, whose window is its own internal UtcNow — hoisting
+               shrinks the numerator/denominator window skew from the ranking query's full duration to
+               call-entry overhead (review catch; threading one instant INTO the shared ranking read's
+               signature is the only way to zero it, and sub-microsecond against an hours window does
+               not buy that churn). */
+            var nowUtc = DateTime.UtcNow;
             var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
             if (rows.Count == 0)
             {
@@ -46,7 +52,6 @@ public sealed class McpQueryTools
                ratio is omitted rather than invented when a denominator piece is missing. One nowUtc
                backs the aggregate read AND the ratio math, and the two independent reads run
                concurrently (review catches; Darling has both by construction). */
-            var nowUtc = DateTime.UtcNow;
             var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
             var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
@@ -139,6 +144,8 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
+            /* Same pre-read capture as the queries tool — the skew shrinks to call-entry overhead. */
+            var nowUtc = DateTime.UtcNow;
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
             if (rows.Count == 0)
             {
@@ -149,7 +156,6 @@ public sealed class McpQueryTools
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation, one
                nowUtc backing aggregate and ratio, same concurrent independent reads. */
-            var nowUtc = DateTime.UtcNow;
             var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
             var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);

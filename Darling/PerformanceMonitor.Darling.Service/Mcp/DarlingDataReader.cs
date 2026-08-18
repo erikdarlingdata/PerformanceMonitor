@@ -178,7 +178,7 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// The attributed-CPU denominator's pieces (#2320): sample count, coverage bounds, and average SQL
-    /// CPU%% over the window. Windowed on collection_time — the SAME bounds the top-queries/procedures
+    /// CPU% over the window. Windowed on collection_time — the SAME bounds the top-queries/procedures
     /// rankings use — so numerator and denominator share collection gaps; sample_time skew is irrelevant
     /// to an average. $1 server_id, $2/$3 window (naive UTC).
     /// </summary>

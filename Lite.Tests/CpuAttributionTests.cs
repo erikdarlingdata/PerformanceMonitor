@@ -18,7 +18,7 @@ namespace Lite.Tests;
 /// pin: the ratio is measured-or-omitted (never invented — missing samples, missing core count, or
 /// thin coverage all degrade to null + a reason), the low note fires under half, and above the
 /// process's own measured CPU the note calls the number impossible rather than presenting it —
-/// the 137%%-of-the-box claim is the whole reason the marker exists. This SAME table is pinned
+/// the 137%-of-the-box claim is the whole reason the marker exists. This SAME table is pinned
 /// identically in Darling.Tests so the two SKUs cannot drift.
 /// </summary>
 public sealed class CpuAttributionTests
@@ -26,7 +26,7 @@ public sealed class CpuAttributionTests
     private static readonly DateTime Start = new(2026, 8, 18, 0, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime End = Start.AddHours(1);
 
-    /// <summary>Full coverage, healthy ratio: 25%% of 8 cores over an hour = 7,200 CPU-seconds;
+    /// <summary>Full coverage, healthy ratio: 25% of 8 cores over an hour = 7,200 CPU-seconds;
     /// 5,000 ranked seconds is 0.694 — present, rounded to 3, no note.</summary>
     [Fact]
     public void HealthyRatio_NoNote()
@@ -41,7 +41,7 @@ public sealed class CpuAttributionTests
         Assert.Null(result.Note);
     }
 
-    /// <summary>The pre-#2290 shape this feature exists for: the ranking explains ~10%% of the box,
+    /// <summary>The pre-#2290 shape this feature exists for: the ranking explains ~10% of the box,
     /// and now something says so instead of letting the caller chase the visible tenth.</summary>
     [Fact]
     public void LowRatio_SaysNotTheWholeStory()
@@ -54,7 +54,7 @@ public sealed class CpuAttributionTests
         Assert.Contains("not the whole story", result.Note, StringComparison.Ordinal);
     }
 
-    /// <summary>The 137%% case — worker_time summing to more CPU than the process consumed is an
+    /// <summary>The 137% case — worker_time summing to more CPU than the process consumed is an
     /// impossible claim, and the note must say to distrust the numbers, not decorate them.</summary>
     [Fact]
     public void OverAttribution_IsFlaggedImpossible()
