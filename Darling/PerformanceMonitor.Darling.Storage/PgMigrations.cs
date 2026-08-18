@@ -133,6 +133,7 @@ public static class PgMigrations
         new Migration(74, "query-store-text", V74Sql),
         new Migration(75, "plan-content-retention-knob", V75Sql),
         new Migration(76, "query-store-health", V76Sql),
+        new Migration(77, "activity-driven-plan-fetch", V77Sql),
     };
 
     /// <summary>
@@ -1701,6 +1702,39 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     /// Hypertable conversion is automatic from CollectorCatalog on the next service start, the same
     /// path pvs_stats took in V47. The v_ passthrough keeps the two viewers' SQL byte-identical.
     /// </summary>
+    /// <summary>
+    /// V77 — the activity-driven plan/text fetch (#2312 Finding 2). Three small strokes for one shape
+    /// change: the fetch stops walking the target's plan catalog by watermark and instead fetches exactly
+    /// the plans/texts the cycle's collected rows reference that the store does not hold, making the store
+    /// itself the watermark.
+    ///
+    /// <para><c>digest</c> goes nullable so a plan whose XML the engine cannot persist (too large, certain
+    /// forced-failure paths) gets a map row with a NULL digest — the content-less MARKER. Without it the
+    /// missing-set probe would re-select those plans on every cycle forever; with it, "seen, and the content
+    /// will never exist" is a stored fact. Readers are unaffected: a NULL digest joins to no dimension row,
+    /// which renders exactly like the absent content it records. DROP NOT NULL is metadata-only and
+    /// idempotent, so this rung stays instant on the largest maps.</para>
+    ///
+    /// <para><c>query_store_text.query_hash</c> is the reset detector: <c>query_id</c> is only unique until
+    /// a Query Store reset renumbers it, and the retired design's answer was a daily watermark expiry that
+    /// re-walked the whole catalog. The stored hash lets the per-cycle probe see that an id now names a
+    /// DIFFERENT statement and refetch just that text. Nullable and unbackfilled: legacy rows adopt the
+    /// live hash on their first touch, which converges the fleet with zero refetches.</para>
+    ///
+    /// <para>The DELETEs retire the <c>planwm:</c>/<c>textwm:</c> watermark state rows wholesale — the
+    /// machinery that wrote them is gone, <c>collector_state</c> has no retention (it is state, not facts),
+    /// and rows nobody will ever read again should not wait for a dropped-database prune that no longer
+    /// iterates their prefixes. Bare table name resolves via the migrate session's
+    /// <c>search_path = collect, config, public</c>, like every rung since V8.</para>
+    /// </summary>
+    private const string V77Sql = @"
+ALTER TABLE collect.query_store_plan_map ALTER COLUMN digest DROP NOT NULL;
+
+ALTER TABLE collect.query_store_text ADD COLUMN IF NOT EXISTS query_hash text;
+
+DELETE FROM collector_state WHERE collector_name = 'query_store_plan_xml' AND state_key LIKE 'planwm:%';
+DELETE FROM collector_state WHERE collector_name = 'query_store_text' AND state_key LIKE 'textwm:%';";
+
     private const string V76Sql = @"
 CREATE TABLE IF NOT EXISTS collect.query_store_health (
     config_id bigint NOT NULL,

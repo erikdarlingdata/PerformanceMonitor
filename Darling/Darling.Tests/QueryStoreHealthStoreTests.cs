@@ -32,7 +32,11 @@ public sealed class QueryStoreHealthStoreTests
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(76, versions.Max());
+        /* #2312 added V77, so this rung is no longer the top — the "I am the top" claim moves to the
+           newest rung's own test (ActivityDrivenPlanFetchStoreTests) and this one keeps the invariants
+           that stay true forever: the rung is PRESENT, the ladder is ordered and dense, and the build's
+           schema version tracks the maximum. */
+        Assert.Contains(76, versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
 
@@ -48,7 +52,8 @@ public sealed class QueryStoreHealthStoreTests
     [Fact]
     public void TheProbeMapsAFullyMigratedStoreTo76()
     {
-        Assert.Equal(76, StorageVersion.SchemaVersion);
+        /* #2312: no longer the top (that claim lives in ActivityDrivenPlanFetchStoreTests) — this fact
+           keeps pinning that a store at exactly 76 maps to 76 and one at 75 maps to 75, forever. */
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         /* 51 positional sentinels then the V76 one by name — the map takes 52 parameters. Present => 76,
@@ -199,7 +204,9 @@ public sealed class QueryStoreHealthStoreTests
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
-        var args = leading.Concat(new object[] { hasQueryStoreHealth }).ToArray();
+        /* #2312 appended hasQueryStoreTextHash after this rung's parameter — pass it FALSE so these
+           facts keep exercising the V76/V75 arms rather than the newer one. */
+        var args = leading.Concat(new object[] { hasQueryStoreHealth, false }).ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;

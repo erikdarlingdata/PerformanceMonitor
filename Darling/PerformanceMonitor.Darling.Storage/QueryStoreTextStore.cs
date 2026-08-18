@@ -71,26 +71,75 @@ CREATE INDEX IF NOT EXISTS idx_query_store_text_last_seen
     /// <para><b>The conflict arm overwrites the TEXT, not just the stamp</b>, and that is load-bearing
     /// rather than defensive. <c>query_id</c> is unique within a database only until Query Store is reset:
     /// a reset renumbers from the start, so id 5 afterwards is a DIFFERENT statement than id 5 before. The
-    /// refresh horizon on the watermark is what brings us back to re-read it, and this is where the
-    /// corrected text has to land. Touching only <c>last_seen</c> would leave the old statement's text
-    /// attached to the new id forever, which reads as a plausible wrong answer rather than as missing
-    /// data.</para>
+    /// <see cref="TouchAndProbeSql"/> hash comparison is what brings us back to re-read it (#2312 — the
+    /// retired watermark's daily expiry used to, eventually), and this is where the corrected text has to
+    /// land. Touching only <c>last_seen</c> would leave the old statement's text attached to the new id
+    /// forever, which reads as a plausible wrong answer rather than as missing data.</para>
     ///
     /// <para><c>ORDER BY</c> on the conflict key because concurrent batches that touch overlapping keys in
     /// different orders deadlock (#1801) — the same reason the plan map's upsert carries one. The
     /// <c>WHERE EXCLUDED.last_seen &gt;=</c> guard keeps the stamp monotonic so an out-of-order write
-    /// cannot age a row backwards into the prune's reach.</para>
+    /// cannot age a row backwards into the prune's reach. <c>query_hash</c> takes EXCLUDED when the fetch
+    /// carried one and keeps the stored value otherwise — never replace knowledge with absence.</para>
     /// </summary>
     public const string UpsertSql = @"INSERT INTO collect.query_store_text
-    (server_id, database_name, query_id, query_sql_text, last_seen)
-SELECT server_id, database_name, query_id, query_sql_text, stamped
-FROM unnest($1::integer[], $2::text[], $3::bigint[], $4::text[], $5::timestamp[])
-     AS batch(server_id, database_name, query_id, query_sql_text, stamped)
+    (server_id, database_name, query_id, query_sql_text, query_hash, last_seen)
+SELECT server_id, database_name, query_id, query_sql_text, query_hash, stamped
+FROM unnest($1::integer[], $2::text[], $3::bigint[], $4::text[], $5::text[], $6::timestamp[])
+     AS batch(server_id, database_name, query_id, query_sql_text, query_hash, stamped)
 ORDER BY server_id, database_name, query_id
 ON CONFLICT (server_id, database_name, query_id) DO UPDATE SET
     query_sql_text = EXCLUDED.query_sql_text,
+    query_hash = COALESCE(EXCLUDED.query_hash, query_store_text.query_hash),
     last_seen = EXCLUDED.last_seen
 WHERE EXCLUDED.last_seen >= query_store_text.last_seen";
+
+    /// <summary>
+    /// The text side's liveness touch and missing-set probe (#2312), the single-table sibling of
+    /// <see cref="QueryStorePlanMap.TouchAndProbeSql"/>: refresh <c>last_seen</c> for every statement the
+    /// cycle's batch references (hourly-guarded, same write-amplification argument), adopt the batch's
+    /// <c>query_hash</c> where the stored one is NULL (legacy rows from before the column existed), and
+    /// return per batch row whether the store already holds the text and whether the stored hash still
+    /// matches the live one. <c>hash_stale</c> is the Query Store RESET detector: ids renumber, so id 5
+    /// carrying a different hash means it now names a different statement and its text must be refetched —
+    /// per-id, within one cycle, where the retired watermark design re-walked the whole catalog daily to
+    /// eventually notice.
+    /// </summary>
+    public const string TouchAndProbeSql = @"WITH touched AS (
+    SELECT t.server_id, t.database_name, t.query_id, batch.query_hash AS live_hash
+    FROM collect.query_store_text AS t
+    JOIN unnest($1::integer[], $2::text[], $3::bigint[], $4::text[])
+         AS batch(server_id, database_name, query_id, query_hash)
+      ON  batch.server_id = t.server_id
+      AND batch.database_name = t.database_name
+      AND batch.query_id = t.query_id
+    WHERE t.last_seen < $5::timestamp - interval '1 hour'
+    ORDER BY t.server_id, t.database_name, t.query_id
+),
+text_touch AS (
+    UPDATE collect.query_store_text AS t
+    SET last_seen = $5::timestamp,
+        query_hash = COALESCE(t.query_hash, x.live_hash)
+    FROM touched AS x
+    WHERE t.server_id = x.server_id
+      AND t.database_name = x.database_name
+      AND t.query_id = x.query_id
+    RETURNING t.query_id
+)
+SELECT
+    batch.server_id,
+    batch.database_name,
+    batch.query_id,
+    (t.query_id IS NOT NULL) AS resolved,
+    (t.query_id IS NOT NULL AND t.query_hash IS NOT NULL AND batch.query_hash IS NOT NULL
+        AND t.query_hash <> batch.query_hash) AS hash_stale
+FROM unnest($1::integer[], $2::text[], $3::bigint[], $4::text[])
+     AS batch(server_id, database_name, query_id, query_hash)
+LEFT JOIN collect.query_store_text AS t
+       ON  t.server_id = batch.server_id
+       AND t.database_name = batch.database_name
+       AND t.query_id = batch.query_id
+ORDER BY batch.server_id, batch.database_name, batch.query_id";
 
     /// <summary>
     /// Retires text whose facts have all aged out, bounded to roughly one chunk-width of the oldest rows

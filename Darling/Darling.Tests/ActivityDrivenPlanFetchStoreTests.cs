@@ -1,0 +1,121 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// The V77 rung (#2312 Finding 2) — the schema strokes behind the activity-driven plan/text fetch: the
+/// plan map's <c>digest</c> goes nullable (the content-less marker for plans whose XML the engine cannot
+/// persist), <c>query_store_text</c> gains <c>query_hash</c> (the Query Store reset detector), and the
+/// retired <c>planwm:</c>/<c>textwm:</c> watermark state rows are deleted wholesale. These facts pin the
+/// rung's place on the ladder, the viewer probe's newest-first arm, and the migration SQL's load-bearing
+/// strokes. The fetch behavior itself is pinned in <c>QueryStorePlanFetchTests</c> and exercised live in
+/// the gated Postgres suites.
+/// </summary>
+public sealed class ActivityDrivenPlanFetchStoreTests
+{
+    /* ---------------- the rung ---------------- */
+
+    [Fact]
+    public void TheRungIsTheTopOfADenseLadder()
+    {
+        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
+
+        Assert.Equal(77, versions.Max());
+        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
+        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
+
+        /* Dense above the one sanctioned historical hole at V45. */
+        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
+        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
+
+        Assert.Equal("activity-driven-plan-fetch", PgMigrations.Scripts.Single(s => s.Version == 77).Name);
+    }
+
+    /// <summary>The three strokes, each load-bearing and none allowed to drift out of the rung: without
+    /// the nullable digest the NULL-XML marker cannot land, without query_hash the reset detector has no
+    /// stored baseline, and without the deletes the orphaned watermark rows live forever (collector_state
+    /// has no retention, and the prune set no longer owns those prefixes).</summary>
+    [Fact]
+    public void TheRungCarriesAllThreeStrokes()
+    {
+        var sql = PgMigrations.Scripts.Single(s => s.Version == 77).Sql;
+
+        Assert.Contains("ALTER TABLE collect.query_store_plan_map ALTER COLUMN digest DROP NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER TABLE collect.query_store_text ADD COLUMN IF NOT EXISTS query_hash text", sql, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM collector_state WHERE collector_name = 'query_store_plan_xml' AND state_key LIKE 'planwm:%'", sql, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM collector_state WHERE collector_name = 'query_store_text' AND state_key LIKE 'textwm:%'", sql, StringComparison.Ordinal);
+    }
+
+    /* ---------------- the viewer probe ---------------- */
+
+    [Fact]
+    public void TheProbeMapsAFullyMigratedStoreTo77()
+    {
+        Assert.Equal(77, StorageVersion.SchemaVersion);
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
+
+        /* 52 positional sentinels then the V77 one by name — the map takes 53 parameters. Present => 77,
+           newest-first; absent => the previous arm still answers 76 rather than falling through. */
+        var all = Enumerable.Repeat(true, 52).Cast<object>().ToArray();
+
+        Assert.Equal(77, InvokeMap(all, hasQueryStoreTextHash: true));
+        Assert.Equal(76, InvokeMap(all, hasQueryStoreTextHash: false));
+    }
+
+    [Fact]
+    public void TheProbeAsksForTheColumn_AndTheThreePlacesAgree()
+    {
+        Assert.Contains(
+            "table_name = 'query_store_text' AND column_name = 'query_hash'",
+            ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
+
+        var mapParameters = typeof(ViewerDataService)
+            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .GetParameters().Length;
+
+        var viewerSource = ReadViewerSource();
+
+        /* The reader must hand over exactly one argument per map parameter: ordinals are 0-based, so the
+           highest is Count - 1, and the next one up must NOT appear. */
+        Assert.Contains($"reader.GetBoolean({mapParameters - 1})", viewerSource, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({mapParameters})", viewerSource, StringComparison.Ordinal);
+    }
+
+    /* ---------------- helpers ---------------- */
+
+    private static int InvokeMap(object[] leading, bool hasQueryStoreTextHash)
+    {
+        var method = typeof(ViewerDataService)
+            .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        var args = leading.Concat(new object[] { hasQueryStoreTextHash }).ToArray();
+        Assert.Equal(method.GetParameters().Length, args.Length);
+
+        return (int)method.Invoke(null, args)!;
+    }
+
+    private static string ReadViewerSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var dir = System.IO.Path.GetDirectoryName(thisFile)!;
+        var relative = System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
+        {
+            dir = System.IO.Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
+    }
+}

@@ -264,9 +264,10 @@ public sealed class PlanContentRetentionTests
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
-        /* #2319 appended hasQueryStoreHealth after this rung's parameter — pass it FALSE so these
-           facts keep exercising the V75/V74 arms rather than the newer one. */
-        var args = leading.Concat(new object[] { hasPlanContentRetentionKnob, false }).ToArray();
+        /* #2319 appended hasQueryStoreHealth and #2312 appended hasQueryStoreTextHash after this rung's
+           parameter — pass both FALSE so these facts keep exercising the V75/V74 arms rather than the
+           newer ones. */
+        var args = leading.Concat(new object[] { hasPlanContentRetentionKnob, false, false }).ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;

@@ -215,19 +215,18 @@ public sealed class QueryStoreStatePruneTests : IClassFixture<SharedDuckDbFixtur
     [Fact]
     public async Task Prune_RunsTheWatermarkStatementToo_EvenThoughLiteWritesNone()
     {
-        /* Lite iterates the SHARED QueryStorePerDatabaseState.PrunableKeys, which carries planwm: even
-           though Lite never writes it. That is deliberate: the day plan capture is enabled here, the prune
-           is already in place rather than being a thing somebody has to remember. Today it must simply be
-           harmless — one delete matching nothing — which is what this checks by proving a planted planwm:
-           row for a DROPPED database is retired by the same pass. */
+        /* Lite iterates the SHARED QueryStorePerDatabaseState.PrunableKeys — including prefixes Lite may
+           never write itself. That is deliberate: a prefix pruned on one SKU and orphaning on the other is
+           the drift the shared list exists to prevent, and the cost is one delete matching nothing. Proven
+           here by planting a qsowm: row for a DROPPED database and watching the same pass retire it. */
         await SeedSnapshotAsync(Newest, "Live");
-        await SeedStateAsync(ServerId, QueryStorePlanXmlState.StateCollectorName,
-            QueryStorePlanXmlState.WatermarkKeyPrefix + "Dropped", "900000:1786449600");
+        await SeedStateAsync(ServerId, QueryStoreOpenIntervalState.StateCollectorName,
+            QueryStoreOpenIntervalState.WatermarkKeyPrefix + "Dropped", "900000:1786449600");
 
         await _pruner.PruneAsync(ServerId);
 
-        Assert.Null(await ValueAsync(ServerId, QueryStorePlanXmlState.StateCollectorName,
-            QueryStorePlanXmlState.WatermarkKeyPrefix + "Dropped"));
+        Assert.Null(await ValueAsync(ServerId, QueryStoreOpenIntervalState.StateCollectorName,
+            QueryStoreOpenIntervalState.WatermarkKeyPrefix + "Dropped"));
     }
 
     /* ---------------- helpers ---------------- */
@@ -417,23 +416,23 @@ VALUES ($1, $2, $3, $4, $5)";
     }
 
     /// <summary>
-    /// Every per-database prefix is pruned, not just the backfill ones — the watermark prefix included, even
-    /// though Lite writes none today (it never sets <c>CapturePlanXml</c>). Pinned for the same reason the
-    /// on-prem twin pins it: the shared prefix list is what stops a prefix being pruned on one SKU and
-    /// orphaning on the other, and a Lite-only omission would be invisible on Darling.
+    /// Every per-database prefix is pruned, not just the backfill ones — the open-interval stamp included.
+    /// Pinned for the same reason the on-prem twin pins it: the shared prefix list is what stops a prefix
+    /// being pruned on one SKU and orphaning on the other, and a Lite-only omission would be invisible on
+    /// Darling. (#2312 retired the planwm:/textwm: families this fact previously exercised.)
     /// </summary>
     [Fact]
     public async Task ForeignPrune_CoversTheWatermarkPrefixToo()
     {
-        var foreignWatermark = QueryStorePlanXmlState.KeyFor("Sibling-A");
-        var ownWatermark = QueryStorePlanXmlState.KeyFor("Payments");
+        var foreignWatermark = QueryStoreOpenIntervalState.KeyFor("Sibling-A");
+        var ownWatermark = QueryStoreOpenIntervalState.KeyFor("Payments");
 
-        await SeedStateAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, foreignWatermark, "8140");
-        await SeedStateAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, ownWatermark, "8150");
+        await SeedStateAsync(ServerId, QueryStoreOpenIntervalState.StateCollectorName, foreignWatermark, "8140");
+        await SeedStateAsync(ServerId, QueryStoreOpenIntervalState.StateCollectorName, ownWatermark, "8150");
 
         await _pruner.PruneForeignAsync(ServerId, "Payments");
 
-        Assert.Null(await ValueAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, foreignWatermark));
-        Assert.Equal("8150", await ValueAsync(ServerId, QueryStorePlanXmlState.StateCollectorName, ownWatermark));
+        Assert.Null(await ValueAsync(ServerId, QueryStoreOpenIntervalState.StateCollectorName, foreignWatermark));
+        Assert.Equal("8150", await ValueAsync(ServerId, QueryStoreOpenIntervalState.StateCollectorName, ownWatermark));
     }
 }

@@ -19,9 +19,10 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #2188: retiring the per-database <c>collector_state</c> rows query_store leaves behind for databases the
-/// server no longer has. The #2164 plan-XML watermark writes one <c>planwm:</c> row per database and the
-/// #2022 backfill worker writes <c>done:</c> and <c>hole:</c> rows the same way, and until this nothing
-/// deleted any of them for a dropped or renamed database.
+/// server no longer has. The #2022 backfill worker writes <c>done:</c> and <c>hole:</c> rows per database
+/// and the #2312 open-interval stamp writes <c>qsowm:</c> the same way, and until this nothing deleted any
+/// of them for a dropped or renamed database. (The #2164/#2150 watermark families this prune originally
+/// existed for retired with the watermarks themselves in #2312; V77 deleted their rows wholesale.)
 ///
 /// <para><b>What actually needs pinning is the input, not the delete.</b> A delete keyed on the wrong list is
 /// the failure mode: query_store's own enumeration is filtered by ONLINE state, AG primary-ness, the
@@ -32,17 +33,16 @@ namespace Darling.Tests;
 /// <see cref="QueryStoreStatePruneLivePostgresTests"/> is where that is proven against a real store; this
 /// class holds the policy and the cross-host wiring, which no store can see.</para>
 ///
-/// <para><b>Both SKUs.</b> Lite writes no <c>planwm:</c> (it never sets
-/// <c>CollectorContext.CapturePlanXml</c>) but it DOES write <c>done:</c> and <c>hole:</c> through its own
-/// backfill worker, and it only ever deletes a hole it services or expires — so the orphan class is real on
-/// both sides and the prune is ported, not declared Darling-only.
+/// <para><b>Both SKUs.</b> Lite writes <c>done:</c> and <c>hole:</c> through its own backfill worker, and
+/// it only ever deletes a hole it services or expires — so the orphan class is real on both sides and the
+/// prune is ported, not declared Darling-only.
 /// <see cref="LiteWritesTheBackfillKeysButNeverTheWatermark"/> pins that in both directions, and the key set
 /// itself lives in the shared <see cref="QueryStorePerDatabaseState"/> so a prefix cannot end up pruned on
 /// one SKU and orphaning on the other.</para>
 /// </summary>
 public sealed class QueryStoreStatePruneTests
 {
-    private static string Planwm(string database) => QueryStorePlanXmlState.WatermarkKeyPrefix + database;
+    private static string Qsowm(string database) => QueryStoreOpenIntervalState.WatermarkKeyPrefix + database;
 
     /* ---------------- the design's premise, pinned without a store ---------------- */
 
@@ -121,13 +121,12 @@ public sealed class QueryStoreStatePruneTests
                 && type.Name.EndsWith("State", StringComparison.Ordinal))
             .ToArray();
 
-        Assert.Contains(typeof(QueryStorePlanXmlState), stateClasses);
         Assert.Contains(typeof(QueryStoreBackfillState), stateClasses);
-        /* #2150 added a third, and the discovery above found it without being told — which is the property
+        /* #2312: the open-interval stamp, found by the discovery without being told — which is the property
            this guard exists for. Named here anyway so a rename that quietly drops it out of the pattern
-           fails rather than silently shrinking the set under test. */
-        Assert.Contains(typeof(QueryStoreTextState), stateClasses);
-        /* #2312 added a fourth, same treatment. */
+           fails rather than silently shrinking the set under test. (QueryStorePlanXmlState still matches the
+           name pattern but declares no key prefixes any more — its watermark retired in #2312 — so it
+           contributes nothing to `declared`, which is exactly right.) */
         Assert.Contains(typeof(QueryStoreOpenIntervalState), stateClasses);
 
         var declared = stateClasses
@@ -160,18 +159,9 @@ public sealed class QueryStoreStatePruneTests
         /* Owner and prefix must travel together: a prefix pruned under the wrong collector_name silently
            deletes nothing, which looks exactly like "there was nothing to prune". */
         Assert.Contains(
-            (QueryStorePlanXmlState.StateCollectorName, QueryStorePlanXmlState.WatermarkKeyPrefix),
-            QueryStorePerDatabaseState.PrunableKeys);
-        Assert.Contains(
             (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix),
             QueryStorePerDatabaseState.PrunableKeys);
-        /* #2150: paired with its OWN collector name, not the plan fetch's. The two watermarks are stored
-           separately on purpose (they walk different catalogs at different rates), so borrowing the plan
-           fetch's owner here would prune nothing and look exactly like having nothing to prune. */
-        Assert.Contains(
-            (QueryStoreTextState.StateCollectorName, QueryStoreTextState.WatermarkKeyPrefix),
-            QueryStorePerDatabaseState.PrunableKeys);
-        /* #2312: the open-interval stamp, per database like the three above, under its own owner. */
+        /* #2312: the open-interval stamp, per database like the backfill pair, under its own owner. */
         Assert.Contains(
             (QueryStoreOpenIntervalState.StateCollectorName, QueryStoreOpenIntervalState.WatermarkKeyPrefix),
             QueryStorePerDatabaseState.PrunableKeys);
@@ -225,15 +215,12 @@ public sealed class QueryStoreStatePruneTests
     [Fact]
     public void LiteWritesTheBackfillKeysButNeverTheWatermark()
     {
-        /* The parity FACT, which the first cut of this change got wrong: Lite writes no planwm: (it never
-           sets CapturePlanXml) but it DOES write done: and hole: through its own backfill worker, and it
-           only ever deletes a hole it services or expires. So the orphan class is real on both SKUs and the
-           prune had to be ported, not declared Darling-only.
-
-           Pinned at source in both directions so neither half can rot: if Lite ever starts capturing plans
-           it inherits a planwm: prune that is already there (the shared PrunableKeys carries the watermark
-           on both hosts precisely so that day needs no code change), and if Lite ever stops writing the
-           backfill keys this test says so rather than leaving a prune nobody needs. */
+        /* The parity FACT: Lite writes done: and hole: through its own backfill worker, and it only ever
+           deletes a hole it services or expires. So the orphan class is real on both SKUs and the prune had
+           to be ported, not declared Darling-only. Pinned at source so if Lite ever stops writing the
+           backfill keys this test says so rather than leaving a prune nobody needs; the CapturePlanXml pin
+           below survives the watermark's retirement because the flag still gates the DARLING-only
+           activity-driven plan fetch, and Lite growing one would be a real design event. */
         var root = FindRepoRoot();
         Assert.True(root is not null, "repo root not found -- the source pin cannot run");
 
@@ -244,10 +231,9 @@ public sealed class QueryStoreStatePruneTests
 
         Assert.False(
             liteRunner.Contains("CapturePlanXml", StringComparison.Ordinal),
-            "Lite's definition runner now sets CapturePlanXml, so Lite writes planwm: rows too. The shared "
-            + "PrunableKeys already covers that prefix on both hosts, so the prune needs no change — but "
-            + "QueryStorePlanWatermarkTests.WriteBack_PlanCaptureOff_WritesNothing and this file's prose "
-            + "both describe Lite as never writing them, and that is now wrong.");
+            "Lite's definition runner now sets CapturePlanXml — the flag that gates the Darling-only "
+            + "activity-driven plan fetch (#2312). That is a real design event: Lite has no plan dimension "
+            + "or map to fetch into, so decide what the flag means there before shipping it.");
 
         foreach (var prefix in new[] { "DoneKeyPrefix", "HoleKeyPrefix" })
         {
@@ -265,43 +251,13 @@ public sealed class QueryStoreStatePruneTests
         }
     }
 
-    /// <summary>
-    /// The recreate-with-the-same-name case, which is the only shape here that could cost data rather than a
-    /// refetch: a dropped and recreated database restarts Query Store's plan_id numbering at 1, so every plan
-    /// in the NEW database sorts below the OLD database's watermark and has its XML suppressed.
-    ///
-    /// <para><b>#2183 ships no reset detection</b> — it was written, found unsound, and removed, because the
-    /// tempting test ("the highest plan_id seen this pass is below the standing watermark") is TRUE in any
-    /// ordinary window where nothing new compiled. What actually bounds this is
-    /// <see cref="QueryStorePlanXmlState.RefreshAfter"/>: the stamp dates the last FULL fetch, so a stale
-    /// watermark stops applying within a day no matter what. This test states that mechanism explicitly, so
-    /// the claim is a checked fact rather than a PR-description assertion.</para>
-    ///
-    /// <para>The prune strictly improves on that bound without replacing it — it removes the row outright
-    /// when the drop is observed between cycles — but it cannot be the guarantee, because a drop and recreate
-    /// entirely within one cycle is never observed as an absence at all.</para>
-    /// </summary>
-    [Fact]
-    public void RecreatedDatabase_IsBoundedByTheRefreshHorizon_NotByResetDetection()
-    {
-        var now = new DateTime(2026, 8, 11, 12, 0, 0, DateTimeKind.Utc);
-        var state = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            [Planwm("Recreated")] = QueryStorePlanXmlState.Format(900_000, now - QueryStorePlanXmlState.RefreshAfter),
-        };
-
-        /* At the horizon the watermark stops applying, so the recreated database's plan_ids (which start at 1
-           and would all fail a > 900000 predicate) are fetched again. */
-        Assert.Equal(0, QueryStorePlanXmlState.Resolve(state, "Recreated", now));
-
-        /* And one second inside it, the stale watermark DOES still apply — which is the exposure this bounds,
-           and the reason the prune is worth having even though it is not the guarantee. */
-        Assert.Equal(900_000, QueryStorePlanXmlState.Resolve(state, "Recreated", now - TimeSpan.FromSeconds(1)));
-
-        /* A pruned row is simply absent, and absent is the conservative full-fetch path — so a recreate that
-           happens after an observed drop inherits nothing at all. */
-        Assert.Equal(0, QueryStorePlanXmlState.Resolve(new Dictionary<string, string>(StringComparer.Ordinal), "Recreated", now));
-    }
+    /* #2312: the RecreatedDatabase_IsBoundedByTheRefreshHorizon fact that sat here retired with the
+       watermark. The recreate-with-the-same-name exposure it bounded (a recreated database restarts plan_id
+       numbering, so old state suppressed the new database's XML for up to a day) no longer exists in that
+       shape: the store-as-watermark probe sees a recreated database's plan_ids as unresolved-or-hash-stale
+       and refetches them within ONE cycle — pinned as SQL shape in QueryStorePlanFetchTests and as a live
+       round-trip in the gated Postgres suite. The prune keeps its own job either way: retiring rows for
+       databases that are gone for good. */
 
     /// <summary>
     /// Walks up from the test output directory to the repo root — the same walk-up idiom
