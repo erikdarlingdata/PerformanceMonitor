@@ -52,6 +52,19 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class StoreSelfMetrics
 {
+    /// <summary>
+    /// Per-statement command timeout for the sweep (#2317). The sizing queries call
+    /// <c>hypertable_local_size</c> across every hypertable and <c>pg_database_size</c> over the whole
+    /// store, and on the dogfood fleet (141 objects, a 100+ GB dimension) they outgrew Npgsql's default
+    /// 30 seconds ~5x/day under load — surfacing as "Exception while reading from stream" (Npgsql
+    /// cancels the statement; the server logs 'canceling statement due to user request'; the client
+    /// holds a torn stream), an ERROR that reads as a network fault and pollutes the count every health
+    /// check watches. Five minutes matches DarlingRetention's destructive-statement budget: this sweep
+    /// runs hourly on its own connection, so a slow sizing pass costs patience, not correctness — and a
+    /// sweep that cannot finish in five minutes should skip the tick (one-hour series gap, self-healing)
+    /// rather than retry into the same load.
+    /// </summary>
+    public const int SweepTimeoutSeconds = 300;
     /// <summary>How long the series is kept — 400 days, so a year-over-year forecast always has a full
     /// prior year plus headroom. Enforced by the sweep's own DELETE, not a retention policy.</summary>
     public const int RetentionDays = 400;
@@ -187,28 +200,28 @@ WHERE metric_time < $1";
 
         if (timescaleAvailable)
         {
-            using var hypertables = new NpgsqlCommand(HypertableInsertSql, connection);
+            using var hypertables = new NpgsqlCommand(HypertableInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
             hypertables.Parameters.AddWithValue(metricTime);
             written += await hypertables.ExecuteNonQueryAsync(cancellationToken);
 
-            using var jobs = new NpgsqlCommand(BackgroundJobInsertSql, connection);
+            using var jobs = new NpgsqlCommand(BackgroundJobInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
             jobs.Parameters.AddWithValue(metricTime);
             written += await jobs.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var dimensions = new NpgsqlCommand(DimensionInsertSql, connection))
+        using (var dimensions = new NpgsqlCommand(DimensionInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             dimensions.Parameters.AddWithValue(metricTime);
             written += await dimensions.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var store = new NpgsqlCommand(StoreInsertSql, connection))
+        using (var store = new NpgsqlCommand(StoreInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             store.Parameters.AddWithValue(metricTime);
             written += await store.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var retention = new NpgsqlCommand(RetentionDeleteSql, connection))
+        using (var retention = new NpgsqlCommand(RetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             retention.Parameters.AddWithValue(metricTime.AddDays(-RetentionDays));
             await retention.ExecuteNonQueryAsync(cancellationToken);

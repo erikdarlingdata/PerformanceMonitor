@@ -2929,7 +2929,20 @@ LIMIT 1", connection);
         }
         catch (Exception ex)
         {
-            _logger.LogError("Store self-metrics sweep failed: {Message}", ex.Message);
+            /* #2317: a command TIMEOUT and a genuine fault are the same Npgsql message here ("Exception
+               while reading from stream" — the #2294 lesson), and on the dogfood box that costume produced
+               ~5 fake network-fault ERRORs a day. Name each cause; both are one-hour series gaps that
+               self-heal on the next tick. */
+            if (PgBaselineProvider.IsCommandTimeout(ex))
+            {
+                _logger.LogError(
+                    "Store self-metrics sweep did not finish within its {Timeout}s command timeout — this tick's metrics are skipped and the series gains a one-hour gap (the store side logs this as 'canceling statement due to user request'). If it repeats, the store's sizing queries have outgrown the timeout: {Message}",
+                    StoreSelfMetrics.SweepTimeoutSeconds, ex.Message);
+            }
+            else
+            {
+                _logger.LogError("Store self-metrics sweep failed: {Message}", ex.Message);
+            }
         }
     }
 
