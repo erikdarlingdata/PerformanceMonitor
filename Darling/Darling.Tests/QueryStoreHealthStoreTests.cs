@@ -142,9 +142,30 @@ public sealed class QueryStoreHealthStoreTests
         Assert.Equal(30, schedule.RetentionDays);
     }
 
-    /// <summary>Every column this collector selects exists on SQL Server 2016+, so unlike
-    /// database_config there are no version gates — pinned so a gated column cannot be added without
-    /// revisiting this claim.</summary>
+    /// <summary>
+    /// The collector gates on 2016+ (review catch: sys.database_query_store_options does not exist
+    /// before v13, so an ungated pre-2016 target would error once per database per hour) — the same
+    /// condition QueryStoreCollector carries, so Lite and Darling skip identically.
+    /// </summary>
+    [Theory]
+    [InlineData(11, false)]   /* 2012 — no Query Store catalog */
+    [InlineData(12, false)]   /* 2014 — no Query Store catalog */
+    [InlineData(13, true)]    /* 2016 — Query Store ships */
+    [InlineData(16, true)]
+    [InlineData(0, true)]     /* version unknown = assume newest */
+    public void TheCollectorGatesOnQueryStoresExistence(int majorVersion, bool applies)
+        => Assert.Equal(applies, QueryStoreHealthCollector.Instance.AppliesTo(
+            new CollectorTargetInfo { SqlMajorVersion = majorVersion }));
+
+    [Fact]
+    public void AzureAlwaysApplies()
+    {
+        Assert.True(QueryStoreHealthCollector.Instance.AppliesTo(new CollectorTargetInfo { SqlMajorVersion = 11, IsAzureSqlDb = true }));
+        Assert.True(QueryStoreHealthCollector.Instance.AppliesTo(new CollectorTargetInfo { SqlMajorVersion = 11, IsAzureManagedInstance = true }));
+    }
+
+    /// <summary>WITHIN the view, every selected column exists from 2016 on — no per-column gates;
+    /// pinned so a gated column cannot be added without revisiting this claim.</summary>
     [Fact]
     public void ThePayloadIsUngatedAndOrdered()
     {

@@ -32,8 +32,9 @@ namespace PerformanceMonitor.Collectors;
 /// <para>The database list is deliberately NOT filtered to <c>is_query_store_on = 1</c>:
 /// <c>sys.database_query_store_options</c> returns exactly one row even when Query Store is off
 /// (<c>actual_state_desc = 'OFF'</c>), so every enumerated database yields one honest row and OFF is
-/// recorded as OFF — an absent row means "not collected", never "off". Every selected column exists on
-/// 2016+, so unlike <c>database_config</c> there are no version gates.</para>
+/// recorded as OFF — an absent row means "not collected", never "off". The collector itself gates on
+/// 2016+ via <see cref="AppliesTo"/> (the view does not exist before v13); WITHIN the view every
+/// selected column exists from 2016 on, so there are no per-column version gates.</para>
 ///
 /// <para>Hourly rather than the config family's on-load cadence, because unlike the scoped-config knobs
 /// (which only change when an operator changes them) <c>actual_state</c>, <c>readonly_reason</c> and
@@ -98,6 +99,15 @@ AND   d.state_desc = N'ONLINE'
 /*EXCLUSION_FILTER*/
 ORDER BY d.name
 OPTION(RECOMPILE);";
+
+    /// <summary>
+    /// Query Store shipped in SQL Server 2016 (v13); sys.database_query_store_options does not exist
+    /// before it, so without this gate a pre-2016 target errors once per database per hour (review
+    /// catch). The same condition QueryStoreCollector gates on, so Lite and Darling skip identically;
+    /// 0 = version unknown = assume newest, and both Azure flavors always have the catalog.
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 13 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
 
     public override string Name => "query_store_health";
 
