@@ -80,7 +80,8 @@ public class DuckDbSchemaTests : IDisposable
             "agent_status",
             "ag_replica_states",
             "ag_database_replica_states",
-            "pvs_stats"
+            "pvs_stats",
+            "query_store_health"
         };
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");

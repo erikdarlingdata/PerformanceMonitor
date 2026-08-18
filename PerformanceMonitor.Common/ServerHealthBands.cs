@@ -447,6 +447,7 @@ namespace PerformanceMonitor.Common
             "database_scoped_config",
             "index_object_stats",
             "plan_correction",
+            "query_store_health",
         };
 
         /// <summary>
