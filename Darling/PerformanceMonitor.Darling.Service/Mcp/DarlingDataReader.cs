@@ -161,13 +161,17 @@ internal static class DarlingDataReader
     /// CpuAttribution.Compute owns the trust decision). Windows on collection_time like every other
     /// windowed read here; the de-skewed sample_time is irrelevant to an average.
     /// </summary>
-    public static async Task<(double? AvgSqlCpuPercent, int Samples)> GetCpuWindowAverageAsync(
+    public static async Task<(double? AvgSqlCpuPercent, int Samples, double SpanHours)> GetCpuWindowAverageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
+        /* The span (last minus first sample) rides along because the coverage gate judges SPAN, not
+           count-per-minute — the collector's cadence is user-configurable, so a count expectation
+           would permanently disqualify a legitimately slowed server (the review catch). */
         const string sql = """
             SELECT
                 AVG(sqlserver_cpu_utilization)::float8,
-                COUNT(*)::int
+                COUNT(*)::int,
+                COALESCE(EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0, 0)::float8
             FROM cpu_utilization_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -180,10 +184,10 @@ internal static class DarlingDataReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return (null, 0);
+            return (null, 0, 0);
         }
 
-        return (reader.IsDBNull(0) ? null : reader.GetDouble(0), reader.GetInt32(1));
+        return (reader.IsDBNull(0) ? null : reader.GetDouble(0), reader.GetInt32(1), reader.IsDBNull(2) ? 0 : reader.GetDouble(2));
     }
 
     /// <summary>

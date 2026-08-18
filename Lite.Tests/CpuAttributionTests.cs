@@ -25,12 +25,13 @@ public sealed class CpuAttributionTests
     private const int FieldCores = 8;
     private const double FieldHours = 2.0;
     private const int CoveredSamples = 120;
+    private const double FullSpan = 2.0;
 
     [Fact]
     public void TheFieldWindowComputesTheMeasuredDenominator()
     {
         var window = CpuAttribution.Compute(
-            attributedCpuMs: 3_000_000, FieldAvgPct, CoveredSamples, FieldCores, FieldHours);
+            attributedCpuMs: 3_000_000, FieldAvgPct, CoveredSamples, FullSpan, FieldCores, FieldHours);
 
         Assert.NotNull(window);
         Assert.Equal(10_368, window.Value.MeasuredSqlCpuSeconds, precision: 0);
@@ -42,7 +43,7 @@ public sealed class CpuAttributionTests
     [Fact]
     public void ALowRatioCarriesTheRemainderNote()
     {
-        var window = CpuAttribution.Compute(3_000_000, FieldAvgPct, CoveredSamples, FieldCores, FieldHours);
+        var window = CpuAttribution.Compute(3_000_000, FieldAvgPct, CoveredSamples, FullSpan, FieldCores, FieldHours);
 
         Assert.NotNull(window!.Value.Note);
         Assert.Contains("below the ranking cut", window.Value.Note, System.StringComparison.Ordinal);
@@ -55,7 +56,7 @@ public sealed class CpuAttributionTests
     [Fact]
     public void AttributedBeyondMeasuredCarriesTheSkewNote()
     {
-        var window = CpuAttribution.Compute(14_229_000, FieldAvgPct, CoveredSamples, FieldCores, FieldHours);
+        var window = CpuAttribution.Compute(14_229_000, FieldAvgPct, CoveredSamples, FullSpan, FieldCores, FieldHours);
 
         Assert.NotNull(window);
         Assert.True(window.Value.AttributedRatio > 1.3);
@@ -66,7 +67,7 @@ public sealed class CpuAttributionTests
     [Fact]
     public void AMidRatioCarriesNoNote()
     {
-        var window = CpuAttribution.Compute(8_000_000, FieldAvgPct, CoveredSamples, FieldCores, FieldHours);
+        var window = CpuAttribution.Compute(8_000_000, FieldAvgPct, CoveredSamples, FullSpan, FieldCores, FieldHours);
 
         Assert.NotNull(window);
         Assert.Null(window.Value.Note);
@@ -80,22 +81,29 @@ public sealed class CpuAttributionTests
     [Fact]
     public void AnUnsupportableDenominatorIsOmittedNeverFabricated()
     {
-        Assert.Null(CpuAttribution.Compute(1_000, null, CoveredSamples, FieldCores, FieldHours));
-        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, 0, FieldCores, FieldHours));
-        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, CoveredSamples, null, FieldHours));
-        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, CoveredSamples, 0, FieldHours));
-        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, CoveredSamples, FieldCores, 0));
-        /* 24h window wants >= 720 one-per-minute samples at the 0.5 floor; 300 is a gappy series. */
-        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, 300, FieldCores, 24));
-        Assert.Null(CpuAttribution.Compute(1_000, 0.0, CoveredSamples, FieldCores, FieldHours));
+        Assert.Null(CpuAttribution.Compute(1_000, null, CoveredSamples, FullSpan, FieldCores, FieldHours));
+        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, 0, FullSpan, FieldCores, FieldHours));
+        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, CoveredSamples, FullSpan, null, FieldHours));
+        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, CoveredSamples, FullSpan, 0, FieldHours));
+        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, CoveredSamples, FullSpan, FieldCores, 0));
+        /* A 24h window whose samples span only 5 hours: the average extrapolates a fragment —
+           span-based on purpose, so a SLOW but steady cadence still qualifies (the review catch). */
+        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, 300, 5.0, FieldCores, 24));
+        /* Two lonely points can bracket a wide span — the sample floor rejects them. */
+        Assert.Null(CpuAttribution.Compute(1_000, FieldAvgPct, 2, FullSpan, FieldCores, FieldHours));
+        Assert.Null(CpuAttribution.Compute(1_000, 0.0, CoveredSamples, FullSpan, FieldCores, FieldHours));
     }
 
-    /// <summary>The coverage floor's boundary: exactly half of one-per-minute qualifies.</summary>
+    /// <summary>
+    /// The span floor's boundary: samples spanning exactly half the window qualify — and cadence
+    /// never enters it, so a server whose cpu_utilization schedule was slowed to 5 minutes (24
+    /// samples in 2 hours) qualifies exactly like a 1-minute one (the review catch: a
+    /// count-per-minute expectation would have disqualified it permanently).
+    /// </summary>
     [Fact]
-    public void CoverageAtTheFloorQualifies()
+    public void SpanAtTheFloorQualifies_AtAnyCadence()
     {
-        var window = CpuAttribution.Compute(1_000, FieldAvgPct, 60, FieldCores, FieldHours);
-
-        Assert.NotNull(window);
+        Assert.NotNull(CpuAttribution.Compute(1_000, FieldAvgPct, 60, FieldHours * 0.5, FieldCores, FieldHours));
+        Assert.NotNull(CpuAttribution.Compute(1_000, FieldAvgPct, 24, FullSpan, FieldCores, FieldHours));
     }
 }

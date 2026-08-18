@@ -455,8 +455,8 @@ public sealed class DarlingMcpDataTools
             var averageTask = DarlingDataReader.GetCpuWindowAverageAsync(postgres, serverId, windowStart, windowEnd);
             var coresTask = DarlingDataReader.GetLatestCpuCountAsync(postgres, serverId);
             await Task.WhenAll(averageTask, coresTask);
-            var (avgSqlCpu, samples) = averageTask.Result;
-            return CpuAttribution.Compute(attributedCpuMs, avgSqlCpu, samples, coresTask.Result, hoursBack);
+            var (avgSqlCpu, samples, spanHours) = averageTask.Result;
+            return CpuAttribution.Compute(attributedCpuMs, avgSqlCpu, samples, spanHours, coresTask.Result, hoursBack);
         }
         catch (Exception ex)
         {

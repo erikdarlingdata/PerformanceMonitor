@@ -23,8 +23,8 @@ public sealed class McpQueryTools
             var averageTask = dataService.GetCpuWindowAverageAsync(serverId, hoursBack);
             var coresTask = dataService.GetLatestCpuCountAsync(serverId);
             await Task.WhenAll(averageTask, coresTask);
-            var (avgSqlCpu, samples) = averageTask.Result;
-            return CpuAttribution.Compute(attributedCpuMs, avgSqlCpu, samples, coresTask.Result, hoursBack);
+            var (avgSqlCpu, samples, spanHours) = averageTask.Result;
+            return CpuAttribution.Compute(attributedCpuMs, avgSqlCpu, samples, spanHours, coresTask.Result, hoursBack);
         }
         catch (Exception ex)
         {

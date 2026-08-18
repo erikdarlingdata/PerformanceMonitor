@@ -21,32 +21,43 @@ namespace PerformanceMonitor.Common;
 public static class CpuAttribution
 {
     /// <summary>
-    /// The minimum fraction of one-sample-per-minute coverage the utilization series must show in
-    /// the window before the ratio is worth reporting. Both SKUs sample at least once a minute when
-    /// collection is healthy, so half that is a lenient floor — below it the denominator is a guess,
-    /// and the contract is to OMIT rather than fabricate (a missing ratio is honest; a wrong one
-    /// sends someone chasing 3x the CPU that existed).
+    /// The minimum fraction of the WINDOW the utilization samples must span before the ratio is
+    /// worth reporting. Span, deliberately not a count-per-minute expectation (the review catch):
+    /// the collector's cadence is user-configurable per server, so any assumed frequency would
+    /// permanently disqualify a legitimately slowed server. A series whose first and last samples
+    /// bracket at least half the window supports an average at ANY cadence; below that the
+    /// denominator extrapolates from a fragment, and the contract is to OMIT rather than fabricate
+    /// (a missing ratio is honest; a wrong one sends someone chasing 3x the CPU that existed).
     /// </summary>
-    public const double MinSampleCoverage = 0.5;
+    public const double MinSpanCoverage = 0.5;
+
+    /// <summary>
+    /// And a floor on the sample count itself: a span can be bracketed by two lonely points. Three
+    /// is the least that starts to look like a series.
+    /// </summary>
+    public const int MinSamples = 3;
 
     /// <summary>One computed window, ready for the wire.</summary>
     public readonly record struct CpuWindow(
         double MeasuredSqlCpuSeconds, double AttributedCpuSeconds, double AttributedRatio, string? Note);
 
     /// <summary>
-    /// Computes the attribution window, or null when the denominator cannot be trusted: no samples,
-    /// coverage under <see cref="MinSampleCoverage"/>, an unknown core count, or a degenerate
-    /// window. Null means "omit the field", never "zero".
+    /// Computes the attribution window, or null when the denominator cannot be trusted: fewer than
+    /// <see cref="MinSamples"/> samples, a sampled span under <see cref="MinSpanCoverage"/> of the
+    /// window, an unknown core count, or a degenerate window. Null means "omit the field", never
+    /// "zero". <paramref name="observedSpanHours"/> is last-sample minus first-sample, in hours —
+    /// cadence-agnostic on purpose.
     /// </summary>
     public static CpuWindow? Compute(
         double attributedCpuMs,
         double? avgSqlCpuPercent,
         int samplesInWindow,
+        double observedSpanHours,
         int? cpuCount,
         double windowHours)
     {
         if (avgSqlCpuPercent is not double avgPct
-            || samplesInWindow <= 0
+            || samplesInWindow < MinSamples
             || cpuCount is not int cores
             || cores <= 0
             || windowHours <= 0)
@@ -54,8 +65,7 @@ public static class CpuAttribution
             return null;
         }
 
-        var expectedSamples = windowHours * 60.0;
-        if (samplesInWindow < expectedSamples * MinSampleCoverage)
+        if (observedSpanHours < windowHours * MinSpanCoverage)
         {
             return null;
         }

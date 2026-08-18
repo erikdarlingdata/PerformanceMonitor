@@ -63,16 +63,18 @@ ORDER BY sample_time";
     /// GetCpuWindowAverageAsync; windows on server-local sample_time exactly like
     /// <see cref="GetCpuUtilizationAsync"/> above, because that is this store's clock for this table.
     /// </summary>
-    public async Task<(double? AvgSqlCpuPercent, int Samples)> GetCpuWindowAverageAsync(int serverId, int hoursBack)
+    public async Task<(double? AvgSqlCpuPercent, int Samples, double SpanHours)> GetCpuWindowAverageAsync(int serverId, int hoursBack)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null);
 
+        /* Span rides along for the cadence-agnostic coverage gate — mirrors Darling. */
         command.CommandText = @"
 SELECT
     AVG(sqlserver_cpu_utilization),
-    COUNT(*)
+    COUNT(*),
+    COALESCE(EXTRACT(EPOCH FROM (MAX(sample_time) - MIN(sample_time))) / 3600.0, 0)
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   sample_time >= $2
@@ -85,12 +87,13 @@ AND   sample_time <= $3";
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
         {
-            return (null, 0);
+            return (null, 0, 0);
         }
 
         var avg = reader.IsDBNull(0) ? (double?)null : reader.GetDouble(0);
         var samples = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
-        return (avg, samples);
+        var spanHours = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture);
+        return (avg, samples, spanHours);
     }
 
     /// <summary>
