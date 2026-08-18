@@ -9,14 +9,14 @@
 using PerformanceMonitor.Common;
 using Xunit;
 
-namespace Darling.Tests;
+namespace Lite.Tests;
 
 /// <summary>
-/// #2235's minor finding: min/max CPU and elapsed on the top-queries/top-procedures reads are
-/// lifetime extremes for the plan's cache residency, and a lifetime max can EXCEED the windowed
-/// total — which reads as impossible unless labeled. These pin the conditional note: it fires only
-/// on the provable case and names exactly the column(s) that prove it. This SAME table is pinned
-/// identically in Lite.Tests so the two SKUs cannot drift.
+/// Decision-table pins for the shared <see cref="QueryStatExtremes"/> (#2235) — the lifetime-extremes
+/// annotation both SKUs' get_top_queries_by_cpu / get_top_procedures_by_cpu serve. This SAME table is
+/// pinned identically in Darling.Tests so the two SKUs cannot drift: min/max CPU and elapsed are
+/// lifetime extremes for the plan's cache residency, and the note fires only on the provable case —
+/// an extreme exceeding the whole window's total.
 /// </summary>
 public sealed class QueryStatExtremesTests
 {
