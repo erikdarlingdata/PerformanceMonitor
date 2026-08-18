@@ -92,39 +92,53 @@ public static class AppLogger
         Log("WARN", source, message);
     }
 
+    /// <summary>
+    /// Warning WITH the exception's full detail (#2320 review catch) — a warning-severity event whose
+    /// diagnosis still needs the stack and inner exceptions. Same emission as Error's, at WARN.
+    /// </summary>
+    public static void Warn(string source, string message, Exception ex)
+    {
+        LogWithException("WARN", source, message, ex);
+    }
+
     public static void Error(string source, string message, Exception? ex = null)
     {
         if (ex != null)
         {
-            Log("ERROR", source, $"{message} | {ex.GetType().Name}: {ex.Message}");
-            Log("ERROR", source, $"Stack: {ex.StackTrace}");
-
-            /* Log all inner exceptions recursively */
-            var inner = ex.InnerException;
-            var depth = 1;
-            while (inner != null)
-            {
-                Log("ERROR", source, $"Inner[{depth}]: {inner.GetType().Name}: {inner.Message}");
-                Log("ERROR", source, $"Inner[{depth}] Stack: {inner.StackTrace}");
-                inner = inner.InnerException;
-                depth++;
-            }
-
-            /* For AggregateException, log all inner exceptions */
-            if (ex is AggregateException aggEx)
-            {
-                var idx = 0;
-                foreach (var innerEx in aggEx.InnerExceptions)
-                {
-                    Log("ERROR", source, $"Aggregate[{idx}]: {innerEx.GetType().Name}: {innerEx.Message}");
-                    Log("ERROR", source, $"Aggregate[{idx}] Stack: {innerEx.StackTrace}");
-                    idx++;
-                }
-            }
+            LogWithException("ERROR", source, message, ex);
         }
         else
         {
             Log("ERROR", source, message);
+        }
+    }
+
+    private static void LogWithException(string level, string source, string message, Exception ex)
+    {
+        Log(level, source, $"{message} | {ex.GetType().Name}: {ex.Message}");
+        Log(level, source, $"Stack: {ex.StackTrace}");
+
+        /* Log all inner exceptions recursively */
+        var inner = ex.InnerException;
+        var depth = 1;
+        while (inner != null)
+        {
+            Log(level, source, $"Inner[{depth}]: {inner.GetType().Name}: {inner.Message}");
+            Log(level, source, $"Inner[{depth}] Stack: {inner.StackTrace}");
+            inner = inner.InnerException;
+            depth++;
+        }
+
+        /* For AggregateException, log all inner exceptions */
+        if (ex is AggregateException aggEx)
+        {
+            var idx = 0;
+            foreach (var innerEx in aggEx.InnerExceptions)
+            {
+                Log(level, source, $"Aggregate[{idx}]: {innerEx.GetType().Name}: {innerEx.Message}");
+                Log(level, source, $"Aggregate[{idx}] Stack: {innerEx.StackTrace}");
+                idx++;
+            }
         }
     }
 

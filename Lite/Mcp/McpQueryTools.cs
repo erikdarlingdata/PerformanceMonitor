@@ -30,7 +30,7 @@ public sealed class McpQueryTools
         {
             /* Logged, not silent (the round-2 review catch): a null from a THROW is otherwise
                indistinguishable from the legitimate thin-coverage null. Mirrors Darling. */
-            AppLogger.Warn("McpQueryTools", $"cpu_window computation failed — omitting the field; if this repeats, the attribution reads have a defect: {ex.Message}");
+            AppLogger.Warn("McpQueryTools", "cpu_window computation failed — omitting the field; if this repeats, the attribution reads have a defect.", ex);
             return null;
         }
     }

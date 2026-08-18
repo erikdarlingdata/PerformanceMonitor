@@ -421,6 +421,12 @@ public sealed class DarlingWorker : BackgroundService
         _mcpState = mcpState;
         _webState = webState;
         _registryState = registryState;
+
+        /* #2320 (round-4 review catch): set HERE, not only in the MCP host — mcp.enabled is OFF by
+           default, so on a default install the web dashboard's /api/read mirror is the only caller
+           of the top-CPU tools, and a logger set only by the MCP host would leave that path's
+           degrade-to-null silent. The worker always runs. */
+        Mcp.DarlingMcpDataTools.DegradeLogger = logger;
     }
 
     private sealed class ServerLoopState
