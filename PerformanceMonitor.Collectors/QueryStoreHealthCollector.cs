@@ -201,8 +201,8 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
             .Value(row.CurrentStorageMb)          /* current_storage_size_mb BIGINT */
             .Value(row.MaxStorageMb)              /* max_storage_size_mb BIGINT */
             .Value(row.SizeBasedCleanupMode)      /* size_based_cleanup_mode VARCHAR */
-            .Value(row.StaleQueryThresholdDays)   /* stale_query_threshold_days INTEGER */
-            .Value(row.MaxPlansPerQuery)          /* max_plans_per_query INTEGER */
+            .Value(row.StaleQueryThresholdDays)   /* stale_query_threshold_days BIGINT */
+            .Value(row.MaxPlansPerQuery)          /* max_plans_per_query BIGINT */
             .Value(row.IntervalLengthMinutes);    /* interval_length_minutes BIGINT */
     }
 }
