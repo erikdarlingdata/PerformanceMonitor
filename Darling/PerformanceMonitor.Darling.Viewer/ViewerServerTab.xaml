@@ -1405,8 +1405,14 @@
                                     <DataGridTemplateColumn Header="Query Plan" Width="Auto" MinWidth="70">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
+                                                <!-- #2181/#2331: NO explicit Style. DarkButton IS a Viewer key, but it
+                                                     lives in MainWindow.xaml's window resources — a scope this
+                                                     UserControl's templates cannot see, because StaticResource resolves
+                                                     lexically at load, not through the runtime tree. Same uncatchable
+                                                     measure-time crash as Lite's #2114, hidden until the grid had rows
+                                                     to render a cell template for. Default chrome, like Lite's fix. -->
                                                 <Button Content="View" Click="ViewQueryStorePlanInline_Click"
-                                                        Style="{StaticResource DarkButton}" Padding="8,1" Margin="2"/>
+                                                        Padding="8,1" Margin="2"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
