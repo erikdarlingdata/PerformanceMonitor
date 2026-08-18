@@ -131,6 +131,7 @@ public static class PgMigrations
         new Migration(72, "query-store-plan-map", V72Sql),
         new Migration(73, "pg-statement-text", V73Sql),
         new Migration(74, "query-store-text", V74Sql),
+        new Migration(75, "plan-content-retention-knob", V75Sql),
     };
 
     /// <summary>
@@ -1708,6 +1709,23 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     /// missing text. Not a hypertable — it has a PRIMARY KEY and no time dimension — so it is pruned on
     /// <c>last_seen</c> rather than by <c>drop_chunks</c>, exactly like <c>query_store_plan_map</c>.</para>
     /// </summary>
+    /// <summary>
+    /// V75 — the plan-content retention knob (#2316). The payload dimensions' GC horizon is coupled to
+    /// the WIDEST dim-feeding fact retention (90 days) so a raised override can never orphan a reader —
+    /// which also means a store younger than that horizon has an UNBOUNDED plan dimension: measured on
+    /// the 42-server dogfood fleet, <c>query_plan_dim</c> reached 127 GB (63% of the store) in its first
+    /// 22 days, growing ~6 GB/day of parameter-sniffing recompile churn (65 distinct XMLs per plan SHAPE
+    /// per day; the worst single shape produced 57k in one day), with the coupled GC unable to delete a
+    /// single row until the horizon crossed the dim's birth date — a month AFTER the projected disk-full.
+    /// This knob decouples plan CONTENT lifetime from fact lifetime: facts keep their full retention
+    /// (metrics, hashes and text stay analyzable); stored plan XML older than this many days since last
+    /// sighting becomes unfetchable, which every reader already renders as a missing plan. Clamped on
+    /// READ like the V59 knobs ([7,365]; 0 = disabled, restoring the fact-coupled horizon alone).
+    /// </summary>
+    private const string V75Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS plan_content_retention_days integer NOT NULL DEFAULT 21;";
+
     private const string V74Sql = @"CREATE TABLE IF NOT EXISTS collect.query_store_text (
     server_id integer NOT NULL,
     database_name text NOT NULL,

@@ -74,6 +74,16 @@ public sealed class DarlingConfig
     public int QueryStoreTextBudgetMb { get; set; } = 64;
 
     /// <summary>
+    /// #2316: how many days a stored plan XML outlives its last sighting before the dimension GC may
+    /// take it — the bound the fact-coupled horizon cannot provide on a store younger than the fact
+    /// retention (measured: 127 GB of parameter-sniffing plan churn in the dim's first 22 days, with
+    /// the coupled GC unable to fire until a month after projected disk-full). Facts keep their full
+    /// retention; a plan older than this renders as a missing plan, which every reader handles.
+    /// 0 disables (fact-coupled horizon alone); enabled values clamp to [7,365] on read.
+    /// </summary>
+    public int PlanContentRetentionDays { get; set; } = 21;
+
+    /// <summary>
     /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or
     /// 'none' on read. 'gzip' (default, unchanged): plans live as gzip bytes in query_plan_gz - 14.0x
     /// measured, readable only through the apps/MCP. 'none': plans written as plain text into

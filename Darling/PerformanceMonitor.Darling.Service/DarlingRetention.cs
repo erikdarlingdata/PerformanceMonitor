@@ -138,9 +138,14 @@ public static class DarlingRetention
     /// A <see cref="PurgeSummary"/>: how many tables were touched and the coarse activity count (DELETE rows
     /// plus dropped chunks). The daily caller discards it; the on-demand <c>purge_now</c> command reports it.
     /// </returns>
+    /// <param name="planContentRetentionDays">
+    /// The V75 plan-content horizon (#2316): days a payload-dimension row outlives its last sighting
+    /// before the GC may take it, independent of the fact-coupled horizon. 0 (the default here, for
+    /// callers and tests that predate the knob) disables it — the fact-coupled horizon stands alone.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
-        Func<string, int>? retentionDaysFor = null)
+        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0)
     {
         var sw = Stopwatch.StartNew();
         var tablesPurged = 0;
@@ -367,7 +372,7 @@ public static class DarlingRetention
             }
             else
             {
-                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact);
+                var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact, planContentRetentionDays);
                 if (dimensionCutoff < utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1)))
                 {
                     /* Fixed string, same reasoning as the defer line: the greppable signature of a store
@@ -650,16 +655,33 @@ public static class DarlingRetention
     /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
     /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
     /// </summary>
-    internal static DateTime ComputeDimensionCutoff(DateTime utcNow, int widestFactRetentionDays, DateTime? oldestSurvivingDigestFact)
+    internal static DateTime ComputeDimensionCutoff(DateTime utcNow, int widestFactRetentionDays, DateTime? oldestSurvivingDigestFact, int planContentRetentionDays = 0)
     {
         var assumed = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
-        if (oldestSurvivingDigestFact is null)
+        var coupled = assumed;
+        if (oldestSurvivingDigestFact is not null)
         {
-            return assumed;
+            var measured = oldestSurvivingDigestFact.Value.AddDays(-1);
+            coupled = measured < assumed ? measured : assumed;
         }
 
-        var measured = oldestSurvivingDigestFact.Value.AddDays(-1);
-        return measured < assumed ? measured : assumed;
+        /* #2316: the dedicated plan-content horizon DELIBERATELY overrides both safeties above for
+           content past its window — that is its entire point. The coupled horizon guarantees no fact
+           ever references deleted content, which also means a store younger than the fact retention
+           has an UNBOUNDED dimension (measured: 127 GB in the dim's first 22 days, with the coupled
+           GC unable to fire until a month after projected disk-full). With the knob enabled, a fact
+           older than the window keeps its metrics, hashes and text but renders a MISSING plan — the
+           null every reader already handles — in exchange for a bounded store. The same one-day
+           margin as the measured side covers the hourly last_seen refresh guard. Taking the NEWER of
+           the two cutoffs is what makes 0 (disabled) degrade to exactly the old behavior: DateTime
+           .MinValue can never win the comparison. */
+        if (planContentRetentionDays <= 0)
+        {
+            return coupled;
+        }
+
+        var dedicated = utcNow.AddDays(-(planContentRetentionDays + 1));
+        return dedicated > coupled ? dedicated : coupled;
     }
 
     /// <summary>

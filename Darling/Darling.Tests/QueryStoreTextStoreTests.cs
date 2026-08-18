@@ -58,7 +58,11 @@ public sealed class QueryStoreTextStoreTests
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(74, versions.Max());
+        /* #2316 added V75, so this rung is no longer the top — the "I am the top" claim moves to the
+           newest rung's own test (PlanContentRetentionTests) and this one keeps the invariants that stay
+           true forever: the rung is PRESENT, the ladder is ordered and dense, and the build's schema
+           version tracks the maximum. */
+        Assert.Contains(74, versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
 
@@ -75,7 +79,8 @@ public sealed class QueryStoreTextStoreTests
     [Fact]
     public void TheProbeMapsAFullyMigratedStoreTo74()
     {
-        Assert.Equal(74, StorageVersion.SchemaVersion);
+        /* #2316: no longer the top (that claim lives in PlanContentRetentionTests) — this fact keeps
+           pinning that a store at exactly 74 maps to 74 and one at 73 maps to 73, forever. */
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         /* 49 positional sentinels then the V74 one by name — the map takes 50 parameters. Present => 74,
@@ -230,7 +235,9 @@ public sealed class QueryStoreTextStoreTests
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
-        var args = leading.Concat(new object[] { hasQueryStoreText }).ToArray();
+        /* #2316 appended hasPlanContentRetentionKnob after this rung's parameter — pass it FALSE so
+           these facts keep exercising the V74/V73 arms rather than the newer one. */
+        var args = leading.Concat(new object[] { hasQueryStoreText, false }).ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;

@@ -334,8 +334,8 @@ public sealed class StoreConfigProvider
         /* config_version starts at 0; the four desired-state seed writes below bump it via the trigger,
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
-INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, 0, $6, 'seed')
+INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, config_version, updated_at, updated_by)
+VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
@@ -351,6 +351,7 @@ ON CONFLICT (id) DO NOTHING", connection);
            "planXmlCompression": "GZIP" in darling.json into a CHECK violation during store bring-up —
            the seed is the last step of first contact, and a cosmetic casing choice must not fail it. */
         command.Parameters.AddWithValue(NormalizePlanXmlCompression(config.PlanXmlCompression));
+        command.Parameters.AddWithValue(ClampPlanContentRetentionDays(config.PlanContentRetentionDays));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -541,7 +542,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
             /* The notification row is the ONLY read here that touches secret columns — the SMTP password and
@@ -567,6 +568,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
                 CapturePlans = capturePlans,
                 QueryStoreBackfillEnabled = backfillEnabled,
                 QueryStoreTextBudgetMb = textBudgetMb,
+                PlanContentRetentionDays = planContentRetentionDays,
                 MaxConcurrentSweeps = maxSweeps,
                 PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
@@ -599,6 +601,15 @@ ON CONFLICT (server_id) DO NOTHING", connection);
 
     internal static int ClampConcurrentSweeps(int value) => Math.Clamp(value, MinConcurrentSweeps, MaxConcurrentSweepsLimit);
 
+    /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
+    /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
+    /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>
+    internal const int MinPlanContentRetentionDays = 7;
+    internal const int MaxPlanContentRetentionDays = 365;
+
+    internal static int ClampPlanContentRetentionDays(int value) =>
+        value <= 0 ? 0 : Math.Clamp(value, MinPlanContentRetentionDays, MaxPlanContentRetentionDays);
+
     /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
     /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
     /// set DB-side, and this guard covers pre-constraint rows and direct writes with the constraint
@@ -606,24 +617,26 @@ ON CONFLICT (server_id) DO NOTHING", connection);
     internal static string NormalizePlanXmlCompression(string? value) =>
         string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, config_version FROM config_service WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
-            /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, and the memory
-               knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep). */
-            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 0);
+            /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, the memory
+               knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep), and
+               plan content keeps the V75 default 21-day horizon. */
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 0);
         }
 
         return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
             ClampTextBudgetMb(reader.GetInt32(3)), ClampConcurrentSweeps(reader.GetInt32(4)),
             NormalizePlanXmlCompression(reader.GetString(5)),
             reader.GetBoolean(6), reader.GetInt32(7),
-            reader.GetBoolean(8), reader.GetInt32(9), reader.GetInt64(10));
+            reader.GetBoolean(8), reader.GetInt32(9),
+            ClampPlanContentRetentionDays(reader.GetInt32(10)), reader.GetInt64(11));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -910,6 +923,7 @@ ORDER BY name", connection);
         config.CapturePlans = view.CapturePlans;
         config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
         config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
+        config.PlanContentRetentionDays = view.PlanContentRetentionDays;
         config.MaxConcurrentSweeps = view.MaxConcurrentSweeps;
         config.PlanXmlCompression = view.PlanXmlCompression;
         config.Mcp.Enabled = view.McpEnabled;
@@ -1054,6 +1068,10 @@ public sealed class StoreConfigView
 
     /// <summary>The #2164 per-database query_store text budget in MB (config_service, V59), already clamped.</summary>
     public int QueryStoreTextBudgetMb { get; init; } = 64;
+
+    /// <summary>The V75 plan-content horizon (#2316): days a stored plan XML outlives its last sighting.
+    /// 0 = disabled (the fact-coupled dimension horizon stands alone).</summary>
+    public int PlanContentRetentionDays { get; init; } = 21;
 
     /// <summary>
     /// The #2171 plan-XML storage codec (config_service, V62), already normalized to 'gzip' or 'none'.

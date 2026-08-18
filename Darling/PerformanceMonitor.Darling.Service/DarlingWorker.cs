@@ -1404,7 +1404,8 @@ public sealed class DarlingWorker : BackgroundService
                 var overrides = _scheduleOverrides;
                 await DarlingRetention.PurgeAsync(
                     postgres, _timescaleAvailable, _logger, stoppingToken,
-                    name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides));
+                    name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
+                    config.PlanContentRetentionDays);
 
                 /* AN3: findings retention. Both apps' finding stores declare a 30-day cleanup
                    but neither app schedules it (Lite's DuckDB archive-reset bounds it
@@ -3169,7 +3170,7 @@ LIMIT 1", connection);
     /// NO collection gate: unlike snapshot_now a purge writes no collector state and races no delta baseline,
     /// and PurgeAsync is idempotent + failure-isolated per table, so it may safely overlap the daily sweep.
     /// </summary>
-    private async Task<CommandOutcome> RunPurgeNowAsync(int? customRetentionDays, CancellationToken cancellationToken)
+    private async Task<CommandOutcome> RunPurgeNowAsync(DarlingConfig config, int? customRetentionDays, CancellationToken cancellationToken)
     {
         /* Reference read of the live overrides, matching the daily purge caller (never held under a lock —
            the reload swaps the whole list atomically). */
@@ -3179,7 +3180,8 @@ LIMIT 1", connection);
             : name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides);
 
         var summary = await DarlingRetention.PurgeAsync(
-            _postgres!, _timescaleAvailable, _logger, cancellationToken, resolver);
+            _postgres!, _timescaleAvailable, _logger, cancellationToken, resolver,
+            config.PlanContentRetentionDays);
 
         _logger.LogInformation(
             "purge_now purged {Tables} table(s), {Rows} row(s)/chunk(s){Custom}",
@@ -3233,7 +3235,7 @@ LIMIT 1", connection);
             => _worker.RunAnalyzeNowAsync(_servers, _planFetcher, _notificationService, _config, serverId, cancellationToken);
 
         public Task<CommandOutcome> PurgeNowAsync(int? customRetentionDays, CancellationToken cancellationToken)
-            => _worker.RunPurgeNowAsync(customRetentionDays, cancellationToken);
+            => _worker.RunPurgeNowAsync(_config, customRetentionDays, cancellationToken);
 
         public Task<CommandOutcome> FetchPlanAsync(int serverId, PlanFetchRequest request, CancellationToken cancellationToken)
             => _worker.RunFetchPlanAsync(_servers, _planFetcher, serverId, request, cancellationToken);
