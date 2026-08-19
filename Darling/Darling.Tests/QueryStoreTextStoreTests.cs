@@ -235,7 +235,13 @@ public sealed class QueryStoreTextStoreTests
 
         /* #2316 and #2319 appended parameters after this rung's — pass them FALSE so these facts keep
            exercising the V74/V73 arms rather than the newer ones. */
-        var args = leading.Concat(new object[] { hasQueryStoreText, false, false, false }).ToArray();
+        /* Parameters appended by LATER rungs are padded FALSE, so this fact keeps exercising its own
+           arm rather than a newer one. Derived from the method's arity rather than listed by hand, so
+           a future rung does not have to edit this file -- #2357 (V78) was the fourth that would have. */
+        var args = leading.Concat(new object[] { hasQueryStoreText }).ToArray();
+        args = args
+            .Concat(Enumerable.Repeat((object)false, method.GetParameters().Length - args.Length))
+            .ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;

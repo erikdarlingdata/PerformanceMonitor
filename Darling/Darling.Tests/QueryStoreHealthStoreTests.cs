@@ -206,7 +206,13 @@ public sealed class QueryStoreHealthStoreTests
 
         /* #2312 appended hasQueryStoreTextHash after this rung's parameter — pass it FALSE so these
            facts keep exercising the V76/V75 arms rather than the newer one. */
-        var args = leading.Concat(new object[] { hasQueryStoreHealth, false }).ToArray();
+        /* Parameters appended by LATER rungs are padded FALSE, so this fact keeps exercising its own
+           arm rather than a newer one. Derived from the method's arity rather than listed by hand, so
+           a future rung does not have to edit this file -- #2357 (V78) was the fourth that would have. */
+        var args = leading.Concat(new object[] { hasQueryStoreHealth }).ToArray();
+        args = args
+            .Concat(Enumerable.Repeat((object)false, method.GetParameters().Length - args.Length))
+            .ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;
