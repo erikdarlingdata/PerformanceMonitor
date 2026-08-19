@@ -275,19 +275,19 @@ jobs:
       # spin-up and its filter-drift risk.
       - name: Run Lite tests
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --no-build --verbosity normal
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build
 
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build --verbosity normal --filter "FullyQualifiedName!~VersionDetectionTests&FullyQualifiedName!~IdempotencyTests&FullyQualifiedName!~AdversarialTests"
+        run: dotnet run --project deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build -- -class- "Installer.Tests.VersionDetectionTests" -class- "Installer.Tests.IdempotencyTests" -class- "Installer.Tests.AdversarialTests"
 
       - name: Run Dashboard tests
         if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build --verbosity normal
+        run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
       - name: Run Darling tests
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet test Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build --verbosity normal
+        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
 
       - name: Get version
         if: steps.fastpath.outputs.engaged != 'true'
@@ -712,7 +712,7 @@ jobs:
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
-        run: dotnet test Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build --verbosity normal --logger "trx;LogFileName=darling-pr.trx" --results-directory TestResults
+        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trx TestResults/darling-pr.trx
 
       - name: Stop PostgreSQL
         if: always() && steps.filter.outputs.darling == 'true'

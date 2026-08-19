@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- #2347: xunit.v3 under Microsoft.Testing.Platform builds the suite as its own executable. -->
+    <OutputType>Exe</OutputType>
     <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
          hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
          ambient token through every call. -->
@@ -13,11 +15,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" />
-    <PackageReference Include="xunit.runner.visualstudio">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
     <PackageReference Include="xunit.v3" />
   </ItemGroup>
 

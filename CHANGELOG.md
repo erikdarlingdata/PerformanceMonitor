@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **MCP tool results serialize compact instead of pretty-printed** ([#2350]) - the only consumer of a tool result is a language model, and indentation buys a model nothing. One property on the shared `McpHelpers.JsonOptions` in Common, so both SKUs move together, plus the two readers that carry their own options for the `/api/*` twins. Saving is payload-shaped - 23% of the bytes on a 15-field record array, 36% on a narrow one - and the TOKEN saving is smaller than the byte saving, because BPE tokenizers pack runs of spaces efficiently. The config files people hand-edit (`servers.json`, profiles, schedules) keep indenting, and a test pins that boundary in both directions.
+- **The test suites run under Microsoft.Testing.Platform instead of VSTest** ([#2347]) - the .NET 10 SDK dropped VSTest-mode support for MTP-based frameworks, so xunit.v3 4.0.0 could not be taken at all (blocking two Dependabot bumps). All four suites now build as their own executables and CI invokes them with `dotnet run`; `xunit.runner.visualstudio` and `Microsoft.NET.Test.Sdk` are gone entirely, since the first exists only to bridge xunit to VSTest and the second is the VSTest host. Deliberately done on the CURRENT xunit 3.2.2 so the runner migration and the version bump are separately reviewable.
 
 ### Fixed
 - **Extended-length paths no longer slip past the install-location guards** ([#2348]) - `\\?\UNC\server\share` is the long spelling of a REAL share and `\\?\C:\Users\bob` of a REAL profile, but the wholesale `\\?\` exclusion waved both through undiagnosed, because skipping a check is not the same as passing it. Both implementations now strip the prefix BEFORE classifying, so the long spelling gets the same verdict as the short one, and `\\?\C:\PerformanceMonitorDarling` - an ordinary local root written the long way - is still correctly left alone. The shared decision table and the cross-language parity test hold the service and `install-darling.ps1` to it together.
@@ -2816,6 +2817,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2319]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2319
 [#2340]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2340
 [#2344]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2344
+[#2347]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2347
 [#2348]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2348
 [#2350]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2350
 [#2353]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2353
