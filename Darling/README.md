@@ -529,6 +529,10 @@ What it changes, with peers declared:
 
 A **file-only** block (not seeded into the control plane): it describes the deployment topology of *this* box, which must not be editable from a peer's Viewer. An edit takes effect on the next service restart. There is deliberately **no cross-store connectivity** here — actual federated reads (auth between stores, latency, partial failures) are a much larger surface, and may never be worth building if disclosure alone makes the split legible.
 
+**Declaring nothing changes nothing, with one exception worth knowing about on upgrade.** The instructions, the resolution-miss message, and `list_servers`' empty-registry sentence are byte-for-byte what they were. But `list_servers`' JSON envelope carries `this_store_covers`, `peer_fleets` and `peer_note` on *every* response, declared or not — so a script comparing that tool's exact shape sees three new keys even if you never write a `peers` block. That is deliberate: an empty `peer_fleets` means *either* "this is the only store" *or* "nobody declared the siblings", and a note that only appeared when peers were declared would say nothing in precisely the case that produces the wrong conclusion.
+
+**A `peers` block that fails validation is refused whole, and nothing is disclosed** — not the valid subset. An unfinished block that asserts coverage which may be wrong is worse than no block, and the service logs each problem at Critical. The check runs inside the publish rather than only in config validation, because the MCP host loads its own config and deliberately never validates it (its fail-closed checks are host-local), so validation alone would leave the one path that actually broadcasts uncovered.
+
 ### No Schedule Knobs, by Design
 
 There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.

@@ -21,10 +21,21 @@ namespace Darling.Tests;
 /// coverage section, <c>list_servers</c>' <c>peer_fleets</c> block, and the server-resolution miss message.
 ///
 /// <para><b>The invariant that matters most is the negative one.</b> With nothing declared — every existing
-/// deployment, and the shipped sample — all four surfaces must be byte-for-byte what they were, because this
+/// deployment, and the shipped sample — the PROSE surfaces must be byte-for-byte what they were, because this
 /// feature is disclosure bolted onto paths that ~90 MCP tools and the whole web read dispatch already go
-/// through. Each surface therefore gets a paired test: what it says with peers, and that it says nothing
-/// extra without them.</para>
+/// through. Three of the four are: the MCP instructions (<see cref="DarlingMcpInstructions.Build"/> returns
+/// the same reference), the server-resolution miss (pinned by exact string equality), and
+/// <c>list_servers</c>' empty-registry sentence. Each gets a paired test: what it says with peers, and that
+/// it says nothing extra without them.</para>
+///
+/// <para><b>The one deliberate exception is <c>list_servers</c>' JSON envelope</b>, which gains
+/// <c>this_store_covers</c> / <c>peer_fleets</c> / <c>peer_note</c> on EVERY response, declared or not — so a
+/// client doing an exact-shape comparison on that tool sees three new keys on upgrade even if it never
+/// touches the <c>peers</c> config. That is the point rather than an oversight: an empty <c>peer_fleets</c>
+/// means either "this is the only store" or "nobody declared the siblings", and an agent can only be told
+/// the difference is unknowable if the note is there when the list is empty. A conditional block would say
+/// nothing in exactly the case that produces the wrong conclusion. Called out here, and in the CHANGELOG,
+/// rather than folded into the unchanged claim (raised in review on #2339).</para>
 ///
 /// <para>All of it is pure over an explicit <see cref="DarlingPeerDirectory.Snapshot"/> except the one test
 /// that exercises the ambient publish, which restores <see cref="DarlingPeerDirectory.Reset"/> in a finally.
