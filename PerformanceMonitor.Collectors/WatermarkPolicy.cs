@@ -72,4 +72,39 @@ public static class WatermarkPolicy
         var floor = now - MaxCatchup;
         return watermark.Value < floor ? floor : watermark;
     }
+
+    /// <summary>
+    /// Extra history the watermark READ may look at beyond <see cref="MaxCatchup"/> (#2344). Purely a
+    /// safety margin for clock disagreement between a monitored server and the store — the correctness
+    /// argument needs none of it, so it is generous rather than tuned.
+    /// </summary>
+    public static readonly TimeSpan ReadFloorMargin = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// The oldest <c>collection_time</c> a clamped watermark read has to consider (#2344), or null when
+    /// <paramref name="now"/> is default — callers pass this straight through to the store read as an
+    /// optional bound.
+    ///
+    /// <para><b>Why bounding the read changes no answer.</b> Every consumer of a clamped watermark ends
+    /// up at <c>max(stored, now - MaxCatchup)</c>: <see cref="ClampCatchup"/> floors anything older, and a
+    /// NULL result falls back to query_store's documented 60-minute first-run window — the same instant as
+    /// the floor. So a row older than the horizon cannot move the result whether it is found or not, and
+    /// the unbounded <c>MAX</c> that used to find it was paying to confirm a value the clamp would have
+    /// produced anyway. Measured on the 106 GB use1 store: 25,766 buffer reads plus temp spill cold, 228 ms
+    /// warm, against 29 ms bounded (five chunks excluded) — and the unbounded cost scales with STORE SIZE
+    /// and cache residency rather than with anything the monitored server is doing, so it degrades exactly
+    /// where an operator is weakest.</para>
+    ///
+    /// <para><b>Bound the PARTITIONING column, not the watermark column.</b> The hypertables partition on
+    /// <c>collection_time</c>; a predicate on the watermark column alone prunes nothing. This is safe
+    /// because a row's watermark value can never exceed its own <c>collection_time</c> — an execution
+    /// cannot be collected before it happens — so no qualifying row hides behind the bound.</para>
+    ///
+    /// <para><b>Only for readers whose value is clamped.</b> The clamp is scoped to query_store (see the
+    /// class remarks); a ring-buffer collector whose legitimate catch-up spans days must keep reading its
+    /// full history, and handing it this floor would silently truncate that. A future definition wanting
+    /// the bound has to adopt <see cref="ClampCatchup"/> first — the two travel together.</para>
+    /// </summary>
+    public static DateTime? ReadFloor(DateTime now) =>
+        now == default ? null : now - MaxCatchup - ReadFloorMargin;
 }

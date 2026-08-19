@@ -430,9 +430,16 @@ public sealed class DarlingCollectorRunner
                        specifically: a budget expiry abandons the whole pass, so the watermark does not
                        advance, the clamp is re-derived next cycle, and the hole is re-recorded (merged wider
                        with any already pending) rather than lost. */
+                        /* #2344: same bound as the enumerated arm. Safe here for the same reason and
+                           by a different route — this branch does not clamp itself, but query_store's own
+                           BuildCutoffParameters does (the #1836 double-clamp the policy documents), so the
+                           value this read returns is clamped before anything uses it. */
+                        var azureReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                            ? WatermarkPolicy.ReadFloor(collectionTime)
+                            : null;
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken);
+                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
 
                         /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
                            definition's own clamp only floors OLDER watermarks, so a tighter one
@@ -745,9 +752,17 @@ public sealed class DarlingCollectorRunner
                                DrainMsFrom can subtract it; the whole point of the split is that each number
                                names one real phase. */
                             var watermarkWatch = Stopwatch.StartNew();
+                            /* #2344: bound the read for the ONE collector whose value is clamped right
+                               below. Name-guarded rather than applied to every enumerating definition,
+                               for the reason WatermarkPolicy's remarks give: a ring-buffer source whose
+                               legitimate catch-up spans days must keep reading its whole history, and the
+                               floor would silently truncate it. The clamp and the bound travel together. */
+                            var readFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                                ? WatermarkPolicy.ReadFloor(collectionTime)
+                                : null;
                             var raw = await GetLastCollectedTimeForDatabaseAsync(
                                 server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                                definition.PerDatabaseWatermarkColumn!, item, ct);
+                                definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
                             var clamped = WatermarkPolicy.ClampCatchup(raw, collectionTime);
                             if (raw.HasValue && clamped != raw)
                             {
@@ -2076,17 +2091,35 @@ RETURNING s.state_key";
     /// value for ONE database, for definitions with a PerDatabaseWatermarkColumn (Azure SQL DB
     /// per-database XE capture, #1535). Null on first run for that database or on failure — the
     /// caller falls back to the definition's documented window.
+    ///
+    /// <para><paramref name="collectedSince"/> bounds the read on <c>collection_time</c> — the
+    /// PARTITIONING column, so the bound actually prunes chunks (#2344). Null keeps the unbounded
+    /// behaviour, which is correct for any reader whose watermark is NOT clamped; pass
+    /// <see cref="WatermarkPolicy.ReadFloor"/> only from a caller whose value is, and read that method's
+    /// remarks for why the bound provably changes no answer. Unbounded, this is a <c>MAX</c> over a
+    /// non-partitioning column with no time predicate — every chunk in retention, per database, per
+    /// cycle, at a cost that grows with the store rather than the workload.</para>
     /// </summary>
     public async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
-        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        CancellationToken cancellationToken, DateTime? collectedSince = null)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2", connection);
+            var sql = collectedSince is null
+                ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
+                : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+            using var command = new NpgsqlCommand(sql, connection);
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);
+            if (collectedSince is DateTime floor)
+            {
+                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+                   timestamptz and Postgres would convert it into the session zone on the way in. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+            }
+
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime dt)
             {

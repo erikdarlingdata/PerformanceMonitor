@@ -1237,18 +1237,35 @@ WHERE server_id = $3";
     /// (Azure SQL DB per-database XE capture): the newest already-collected value for ONE database,
     /// so each database's ring buffer dedups against its own history. Null on first run for that
     /// database or on failure — the caller falls back to the definition's documented window.
+    ///
+    /// <para><paramref name="collectedSince"/> bounds the read on <c>collection_time</c> (#2344). Null
+    /// keeps the unbounded behaviour, correct for any reader whose watermark is NOT clamped; pass
+    /// <see cref="WatermarkPolicy.ReadFloor"/> only from a caller whose value is, and read that method's
+    /// remarks for why the bound provably changes no answer. Unbounded, this is a <c>MAX</c> over the
+    /// whole of a database's history every cycle — measured at multiple seconds per database on the
+    /// Darling twin's larger store, and the same shape here. DuckDB does not partition the way the
+    /// Postgres store's hypertables do, so the win is min-max index pruning and a smaller scan rather
+    /// than chunk exclusion, but the predicate is the same and so is the argument for it.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
-        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        CancellationToken cancellationToken, DateTime? collectedSince = null)
     {
         try
         {
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
+            cmd.CommandText = collectedSince is null
+                ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
+                : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+            if (collectedSince is DateTime floor)
+            {
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floor });
+            }
+
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime dt)
                 return dt;
