@@ -99,12 +99,16 @@ public sealed class DarlingServiceInstallLocationTests
         (@"\\?\C:\PerformanceMonitorDarling", InstallLocationVerdict.None,
             "the extended-length prefix on a local path is not a UNC share"),
 
-        /* Residual, shared with the installer and pinned so it stays a known quantity: the extended-length
-           spelling of a PROFILE path is not matched, because \\?\C:\Users\... does not begin with C:\Users.
-           Both implementations have it, neither is worse than the other, and a fix belongs in both at once
-           rather than in whichever one someone edits first. */
+        /* Two residuals, shared with the installer and pinned so they stay known quantities rather than being
+           rediscovered as bugs (#2348). Neither implementation matches the EXTENDED-LENGTH spelling of a bad
+           location: \\?\C:\Users\... does not begin with C:\Users, and the \\?\ exclusion in the UNC test is
+           wholesale, so \\?\UNC\server\share - a real share - is waved through as well. A fix belongs in both
+           at once rather than in whichever one someone edits first, and these rows are what make the pair move
+           together: change one side and the cross-language parity test goes red. */
         (@"\\?\C:\Users\bob\PerformanceMonitorDarling", InstallLocationVerdict.None,
             "known shared residual: the extended-length spelling defeats the profile prefix test"),
+        (@"\\?\UNC\fileserver\share\PerformanceMonitorDarling", InstallLocationVerdict.None,
+            "known shared residual: \\\\?\\UNC\\ is a real share the wholesale \\\\?\\ exclusion misses"),
 
         /* Nothing is not somewhere. An empty path must never become a relative one resolved against whatever
            the working directory happens to be. */

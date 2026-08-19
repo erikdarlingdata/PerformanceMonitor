@@ -158,7 +158,16 @@ internal static class DarlingInstallLocation
         }
 
         /* \\?\ is the long-path prefix on a LOCAL path, not a server name. Refusing it would strand an
-           ordinary install root written the extended-length way. */
+           ordinary install root written the extended-length way.
+
+           Residual, seen and recorded rather than discovered later (#2348): the exclusion is wholesale, so
+           \\?\UNC\server\share — the extended-length spelling of a REAL share — is waved through with no
+           diagnosis, and so is its profile counterpart \\?\C:\Users\bob. install-darling.ps1's
+           Get-NetworkPathKind has both gaps identically, which is the reason they are not fixed here: a
+           carve-out on one side alone is precisely the drift this class exists to prevent, and changing the
+           installer's behavior is not this change's to make. Both are pinned as table rows in
+           DarlingServiceInstallLocationTests so the pair moves together when it moves. Cost is bounded: an
+           operator has to have typed an extended-length prefix by hand to reach either. */
         if (installDirectory.StartsWith(@"\\", StringComparison.Ordinal)
             && !installDirectory.StartsWith(@"\\?\", StringComparison.Ordinal))
         {
