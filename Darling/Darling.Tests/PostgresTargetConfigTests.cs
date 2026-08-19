@@ -203,12 +203,35 @@ public class PostgresTargetConfigTests
 
         Assert.Contains("server_version_num", sql, StringComparison.Ordinal);
         Assert.Contains("pg_is_in_recovery()", sql, StringComparison.Ordinal);
-        Assert.Contains("aurora_version", sql, StringComparison.Ordinal);
-        // Aurora detection must not hard-fail on stock PostgreSQL, so it is a pg_proc lookup.
-        Assert.Contains("pg_proc", sql, StringComparison.Ordinal);
         // No T-SQL leaked into the Postgres path.
         Assert.DoesNotContain("SERVERPROPERTY", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("@@VERSION", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// #2340: Aurora is detected by CALLING <c>aurora_version()</c>, never by looking it up in a catalog.
+    ///
+    /// <para>The catalog form this replaces — <c>count(*) FROM pg_proc WHERE proname = 'aurora_version'</c>
+    /// — was measured returning <b>0</b> on a live Aurora PostgreSQL 17.7 cluster as a <c>pg_monitor</c>
+    /// role whose <c>SELECT aurora_version()</c> returned <c>17.7.2</c>. Because
+    /// <c>PgWaitStatsCollector</c> and <c>PgStatementStatsCollector</c> both gate on <c>IsAurora</c>, that
+    /// one wrong boolean silently disabled the two most valuable PostgreSQL reads on every Aurora target.
+    /// Pinned as an ABSENCE as well as a presence, because the tempting "just add pg_proc back as a
+    /// fallback" would restore a check that is wrong precisely where it matters.</para>
+    /// </summary>
+    [Fact]
+    public void AuroraIsDetectedByCallingTheFunction_NotByACatalogLookup()
+    {
+        var probe = DarlingServerConnector.PostgresAuroraProbeQueryText;
+
+        Assert.Contains("aurora_version()", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_proc", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("count(", probe, StringComparison.OrdinalIgnoreCase);
+
+        /* Its own statement: that is what lets a stock-PostgreSQL 42883 be caught and read as "not
+           Aurora" rather than failing the whole probe. Folded back into the detection query, the
+           failure would take version and recovery detection down with it. */
+        Assert.DoesNotContain("aurora", DarlingServerConnector.PostgresDetectionQueryText, StringComparison.OrdinalIgnoreCase);
     }
 
     private static DarlingConfig ConfigWith(MonitoredServer server)

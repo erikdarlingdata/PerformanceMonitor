@@ -188,9 +188,9 @@ SELECT
            than string parsing (version() text formatting has changed across releases).
          pg_is_in_recovery()                   -> reader vs writer. On Aurora every reader endpoint is
            its own instance with its own statistics, so this is identity, not a routing hint.
-         aurora_version()                      -> present only on Aurora. Wrapped: on stock PostgreSQL
-           the function does not exist, and a missing function must read as "not Aurora" rather than
-           failing the whole probe.
+
+       The Aurora marker is NOT here. It used to be a pg_proc lookup on this query and was wrong on real
+       Aurora (#2340) — it now lives in PostgresAuroraProbeQueryText, which CALLS the function instead.
 
        No timezone offset column: unlike SQL Server's DATEDIFF-on-GETDATE idiom, Postgres timestamps
        here are read as-is and the store's convention is naive UTC either way. */
@@ -199,10 +199,60 @@ SELECT
     version() AS server_version_text,
     current_setting('server_version_num')::int / 10000 AS major_version,
     pg_is_in_recovery() AS is_in_recovery,
-    (SELECT count(*) FROM pg_proc WHERE proname = 'aurora_version') > 0 AS has_aurora_marker,
     current_setting('server_version_num')::int AS server_version_num,
     -- #2228: which database this connection actually landed in. Appended; see the comment above.
     current_database() AS connected_database";
+
+    /// <summary>
+    /// The Aurora probe (#2340), a SEPARATE statement because it decides by CALLING the marker function
+    /// rather than looking it up in a catalog — and that distinction is the whole bug it fixes.
+    ///
+    /// <para>This used to be a column on the detection query above:
+    /// <c>(SELECT count(*) FROM pg_proc WHERE proname = 'aurora_version') &gt; 0</c>. Measured against a live
+    /// Aurora PostgreSQL 17.7 cluster as a <c>pg_monitor</c>-only role: that lookup returns <b>0</b> while
+    /// <c>SELECT aurora_version()</c> returns <c>17.7.2</c>. So a genuine Aurora target read as stock
+    /// PostgreSQL, and because both <see cref="PerformanceMonitor.Collectors.PgWaitStatsCollector"/> and
+    /// <see cref="PerformanceMonitor.Collectors.PgStatementStatsCollector"/> gate on
+    /// <c>IsAurora</c>, ONE wrong boolean silently dropped the two most valuable PostgreSQL reads — with a
+    /// healthy-looking log line and a pre-flight that just printed a smaller collector count.</para>
+    ///
+    /// <para>Existence-by-catalog-lookup and callability are different questions, and the collectors care
+    /// about the second one. Its own statement because that is what lets a stock-PostgreSQL
+    /// <c>42883 undefined_function</c> be caught and read as "not Aurora" instead of failing the whole
+    /// probe — the wrapping the old column comment claimed but a catalog subquery never actually needed.</para>
+    /// </summary>
+    public const string PostgresAuroraProbeQueryText = @"SELECT aurora_version()";
+
+    /// <summary>
+    /// Whether this target is Aurora, decided by CALLING <c>aurora_version()</c> (#2340). True when the call
+    /// succeeds; false when it raises — <c>42883 undefined_function</c> is stock PostgreSQL's answer and is
+    /// the expected negative, so it is caught rather than propagated.
+    ///
+    /// <para>Any other error is also caught and read as "not Aurora", deliberately: this probe decides which
+    /// OPTIONAL collectors apply, and a target that answers the version/recovery questions but trips over
+    /// this one must still be monitored for everything else rather than failing to connect. The direction
+    /// matters and is the pre-#2340 behaviour anyway — the difference is that a real Aurora cluster now
+    /// answers true.</para>
+    ///
+    /// <para>Logged at debug on failure rather than swallowed silently, so "why is this Aurora cluster
+    /// reading as stock PostgreSQL" is answerable from the service log instead of requiring a live psql
+    /// session against the target, which is what diagnosing #2340 actually took.</para>
+    /// </summary>
+    private static async Task<bool> ProbeAuroraAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken, ILogger? logger = null)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(PostgresAuroraProbeQueryText, connection) { CommandTimeout = 15 };
+            var version = await command.ExecuteScalarAsync(cancellationToken);
+            return version is not null and not DBNull;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "aurora_version() probe did not succeed; treating the target as stock PostgreSQL");
+            return false;
+        }
+    }
 
     /// <summary>Connects, probes, and returns the runtime state for one configured server.</summary>
     public static async Task<ServerRuntime> ConnectAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
@@ -285,7 +335,7 @@ SELECT
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         int majorVersion = 0, versionNum = 0;
-        bool isInRecovery = false, isAurora = false;
+        bool isInRecovery = false;
         string versionText = "";
         string? connectedDatabase = null;
         if (await reader.ReadAsync(cancellationToken))
@@ -293,10 +343,14 @@ SELECT
             versionText = reader.IsDBNull(0) ? "" : reader.GetString(0);
             majorVersion = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
             isInRecovery = !reader.IsDBNull(2) && reader.GetBoolean(2);
-            isAurora = !reader.IsDBNull(3) && reader.GetBoolean(3);
-            versionNum = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
-            connectedDatabase = reader.IsDBNull(5) ? null : reader.GetString(5);   /* #2228 */
+            versionNum = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
+            connectedDatabase = reader.IsDBNull(4) ? null : reader.GetString(4);   /* #2228 */
         }
+
+        /* The reader must be closed before another command runs on this connection. */
+        await reader.CloseAsync();
+
+        var isAurora = await ProbeAuroraAsync(connection, cancellationToken, logger);
 
         logger?.LogInformation(
             "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora} — {VersionText}",
