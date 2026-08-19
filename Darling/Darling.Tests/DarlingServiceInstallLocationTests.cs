@@ -95,20 +95,28 @@ public sealed class DarlingServiceInstallLocationTests
         (@"C:\Tools\PerformanceMonitorDarling", InstallLocationVerdict.None, "C: is a local volume, so not a mapped drive"),
 
         /* \\?\ is the long-path prefix on a LOCAL path, not a server name. Treating it as a share would
-           strand an ordinary install root written the extended-length way. */
+           strand an ordinary install root written the extended-length way. This row is why the fix below
+           had to be a normalization rather than simply deleting the exclusion. */
         (@"\\?\C:\PerformanceMonitorDarling", InstallLocationVerdict.None,
             "the extended-length prefix on a local path is not a UNC share"),
 
-        /* Two residuals, shared with the installer and pinned so they stay known quantities rather than being
-           rediscovered as bugs (#2348). Neither implementation matches the EXTENDED-LENGTH spelling of a bad
-           location: \\?\C:\Users\... does not begin with C:\Users, and the \\?\ exclusion in the UNC test is
-           wholesale, so \\?\UNC\server\share - a real share - is waved through as well. A fix belongs in both
-           at once rather than in whichever one someone edits first, and these rows are what make the pair move
-           together: change one side and the cross-language parity test goes red. */
-        (@"\\?\C:\Users\bob\PerformanceMonitorDarling", InstallLocationVerdict.None,
-            "known shared residual: the extended-length spelling defeats the profile prefix test"),
-        (@"\\?\UNC\fileserver\share\PerformanceMonitorDarling", InstallLocationVerdict.None,
-            "known shared residual: \\\\?\\UNC\\ is a real share the wholesale \\\\?\\ exclusion misses"),
+        /* #2348, fixed: both implementations now strip the extended-length prefix BEFORE classifying, so the
+           long spelling of a bad location gets the same verdict as the short one. These were pinned as known
+           residuals with a None verdict until the pair could move together; they now assert the fix, and they
+           still hold both sides to it - change one implementation and the cross-language parity test goes red.
+
+           The lowercase and mixed-case UNC rows are not padding: Windows accepts \\?\unc\, so an
+           Ordinal match on 'UNC' would re-open exactly this hole for anyone who typed it that way. */
+        (@"\\?\C:\Users\bob\PerformanceMonitorDarling", InstallLocationVerdict.UserProfile,
+            "the extended-length spelling of a profile path is still a profile path"),
+        (@"\\?\UNC\fileserver\share\PerformanceMonitorDarling", InstallLocationVerdict.UncPath,
+            "\\\\?\\UNC\\ is the extended-length spelling of a real share"),
+        (@"\\?\unc\fileserver\share\PerformanceMonitorDarling", InstallLocationVerdict.UncPath,
+            "Windows accepts the lowercase \\\\?\\unc\\ too, so the prefix match is case-insensitive"),
+        (@"\\?\UNC\fileserver\share", InstallLocationVerdict.UncPath,
+            "the extended-length spelling of a share ROOT is a share too"),
+        (@"\\?\Z:\PerformanceMonitorDarling", InstallLocationVerdict.MappedDrive,
+            "stripping the prefix exposes the drive letter, so a mapped drive is caught in either spelling"),
 
         /* Nothing is not somewhere. An empty path must never become a relative one resolved against whatever
            the working directory happens to be. */

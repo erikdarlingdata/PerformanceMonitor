@@ -219,6 +219,12 @@ public class DarlingInstallLocationTests
     /// <summary>
     /// The network half, also executed. <c>\\?\C:\...</c> is the long-path prefix on a LOCAL path, not a
     /// server name, and treating it as a share would refuse a perfectly ordinary install root.
+    ///
+    /// <para>The probe composes <c>Convert-ExtendedLengthPath</c> ahead of <c>Get-NetworkPathKind</c> because
+    /// that is what the script itself does (<c>$classifyRoot = Convert-ExtendedLengthPath $root</c>). Calling
+    /// the kind function on a RAW path would be testing a contract the installer does not use: since #2348 it
+    /// classifies normalized paths, so it no longer carries a <c>\\?\</c> carve-out of its own and would call a
+    /// bare <c>\\?\C:\...</c> a share. Keeping the composition here is the point — the pair is the unit.</para>
     /// </summary>
     [Fact]
     public void GetNetworkPathKind_SeparatesAShareFromAnExtendedLengthLocalPath_AsShipped()
@@ -230,13 +236,21 @@ public class DarlingInstallLocationTests
             (@"C:\PerformanceMonitorDarling", "<none>"),
             (@"C:\Users\bob\Desktop\PerformanceMonitorDarling", "<none>"),
             ("", "<none>"),
+
+            /* #2348: the extended-length spelling of a REAL share is a share. Previously the wholesale \\?\
+               exclusion waved all three of these through as "<none>". */
+            (@"\\?\UNC\fileserver\share\PerformanceMonitorDarling", "UNC"),
+            (@"\\?\unc\fileserver\share\PerformanceMonitorDarling", "UNC"),
+            (@"\\?\UNC\fileserver\share", "UNC"),
         };
 
         var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Convert-ExtendedLengthPath"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-NetworkPathKind"));
         foreach (var (path, _) in cases)
         {
-            probe.AppendLine($"$k = Get-NetworkPathKind '{path}'; if ($null -eq $k) {{ '<none>' }} else {{ $k }}");
+            probe.AppendLine(
+                $"$k = Get-NetworkPathKind (Convert-ExtendedLengthPath '{path}'); if ($null -eq $k) {{ '<none>' }} else {{ $k }}");
         }
 
         var answers = RunWindowsPowerShell(probe.ToString());
@@ -245,6 +259,48 @@ public class DarlingInstallLocationTests
         for (var i = 0; i < cases.Length; i++)
         {
             Assert.Equal(cases[i].Expected, answers[i]);
+        }
+    }
+
+    /// <summary>
+    /// #2348, the normalization itself, executed as shipped. It is the one place in either implementation that
+    /// knows the <c>\\?\</c> prefix exists, so every rule downstream can be written against real paths.
+    ///
+    /// <para>The lowercase case is not padding: Windows accepts <c>\\?\unc\</c>, so an ordinal match on
+    /// <c>UNC</c> would leave a share spelled that way looking like the local path <c>unc\server\share</c> —
+    /// re-opening exactly the hole this closes, for the operator least likely to be checked on.</para>
+    /// </summary>
+    [Fact]
+    public void ConvertExtendedLengthPath_RewritesBothSpellings_AsShipped()
+    {
+        var cases = new (string Path, string Expected)[]
+        {
+            (@"\\?\UNC\fileserver\share\dir", @"\\fileserver\share\dir"),
+            (@"\\?\unc\fileserver\share\dir", @"\\fileserver\share\dir"),
+            (@"\\?\C:\PerformanceMonitorDarling", @"C:\PerformanceMonitorDarling"),
+            (@"\\?\C:\Users\bob\dir", @"C:\Users\bob\dir"),
+
+            /* Untouched: an ordinary local path, an ordinary share, and a path that merely CONTAINS the
+               characters without leading with them. */
+            (@"C:\PerformanceMonitorDarling", @"C:\PerformanceMonitorDarling"),
+            (@"\\fileserver\share\dir", @"\\fileserver\share\dir"),
+            ("", ""),
+        };
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Convert-ExtendedLengthPath"));
+        foreach (var (path, _) in cases)
+        {
+            probe.AppendLine($"$v = Convert-ExtendedLengthPath '{path}'; if ([string]::IsNullOrEmpty($v)) {{ '<empty>' }} else {{ $v }}");
+        }
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Equal(cases.Length, answers.Count);
+
+        for (var i = 0; i < cases.Length; i++)
+        {
+            var expected = cases[i].Expected.Length == 0 ? "<empty>" : cases[i].Expected;
+            Assert.Equal(expected, answers[i]);
         }
     }
 
@@ -380,16 +436,21 @@ function Get-CimInstance {
     return [pscustomobject]@{ DriveType = 3 }
 }");
 
+        probe.AppendLine(ExtractFunction(script, "Convert-ExtendedLengthPath"));
         probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
         probe.AppendLine(ExtractFunction(script, "Get-NetworkPathKind"));
 
-        /* The composition, quoted out of the shipped script. */
-        var networkLine = ExtractLine(script, "$networkKind = Get-NetworkPathKind $root");
-        var profileLine = ExtractLine(script, "$underProfile = (Test-PathIsAtOrUnder $root (Get-ProfilesDirectory))");
+        /* The composition, quoted out of the shipped script. The normalization line (#2348) is part of it:
+           both rules classify $classifyRoot, never the raw $root, and lifting only the two rule lines would
+           quietly test a composition the installer does not perform. */
+        var normalizeLine = ExtractLine(script, "$classifyRoot = Convert-ExtendedLengthPath $root");
+        var networkLine = ExtractLine(script, "$networkKind = Get-NetworkPathKind $classifyRoot");
+        var profileLine = ExtractLine(script, "$underProfile = (Test-PathIsAtOrUnder $classifyRoot (Get-ProfilesDirectory))");
 
         foreach (var (directory, _, _) in cases)
         {
             probe.AppendLine($"$root = '{directory}'");
+            probe.AppendLine(normalizeLine);
             probe.AppendLine(networkLine);
             probe.AppendLine(profileLine);
             /* The script's own precedence: the profile message is chosen first when a path is somehow both

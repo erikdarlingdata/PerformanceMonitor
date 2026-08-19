@@ -65,8 +65,8 @@ internal enum InstallLocationVerdict
 /// working service and a standing note that it is one ACL reset away from breaking, which is true.</para>
 ///
 /// <para><b>The decision table is deliberately the same one <c>install-darling.ps1</c> applies</b> — profile
-/// root from <c>ProfileList\ProfilesDirectory</c> plus <c>%USERPROFILE%</c>, UNC excluding the <c>\\?\</c>
-/// long-path prefix, and a drive letter whose type is network. Two definitions of "a location that cannot
+/// root from <c>ProfileList\ProfilesDirectory</c> plus <c>%USERPROFILE%</c>, UNC, and a drive letter whose type
+/// is network, each applied to the path with any <c>\\?\</c> extended-length prefix already stripped (#2348). Two definitions of "a location that cannot
 /// work" would drift, and the one that drifted would be the one nobody was reading. <c>DarlingInstallLocationTests</c>
 /// runs BOTH over one shared table and fails if they ever disagree. Making the C# the single source and having
 /// the script call it is the better end state and is NOT done here: it would change the installer's behavior,
@@ -152,24 +152,29 @@ internal static class DarlingInstallLocation
             return InstallLocationVerdict.None;
         }
 
+        /* #2348: strip the extended-length prefix FIRST, so every test below sees the ordinary spelling of
+           the same location. The prefix is an instruction to the path parser, never part of the identity of
+           where the install lives, so classifying its stripped form is classifying the same directory.
+
+           This replaces a wholesale `\\?\` exclusion in the UNC test below, which was correct about
+           \\?\C:\PerformanceMonitorDarling (an ordinary local root written the long way, which must not be
+           refused) and wrong about the two locations this class exists to catch: \\?\UNC\server\share is a
+           REAL share, and \\?\C:\Users\bob is a REAL profile that `C:\Users` prefix-matching misses. Skipping
+           the check is not the same as passing it, and the old exclusion conflated them.
+
+           Normalizing at the entry rather than carving out each test is what keeps this honest: there is one
+           place that knows about the prefix, and every rule downstream is written against real paths. */
+        installDirectory = StripExtendedLengthPrefix(installDirectory);
+
         if (IsAtOrUnder(installDirectory, profilesDirectory) || IsAtOrUnder(installDirectory, userProfileDirectory))
         {
             return InstallLocationVerdict.UserProfile;
         }
 
-        /* \\?\ is the long-path prefix on a LOCAL path, not a server name. Refusing it would strand an
-           ordinary install root written the extended-length way.
-
-           Residual, seen and recorded rather than discovered later (#2348): the exclusion is wholesale, so
-           \\?\UNC\server\share — the extended-length spelling of a REAL share — is waved through with no
-           diagnosis, and so is its profile counterpart \\?\C:\Users\bob. install-darling.ps1's
-           Get-NetworkPathKind has both gaps identically, which is the reason they are not fixed here: a
-           carve-out on one side alone is precisely the drift this class exists to prevent, and changing the
-           installer's behavior is not this change's to make. Both are pinned as table rows in
-           DarlingServiceInstallLocationTests so the pair moves together when it moves. Cost is bounded: an
-           operator has to have typed an extended-length prefix by hand to reach either. */
-        if (installDirectory.StartsWith(@"\\", StringComparison.Ordinal)
-            && !installDirectory.StartsWith(@"\\?\", StringComparison.Ordinal))
+        /* No `\\?\` carve-out any more: the prefix is gone by here, so an extended-length LOCAL root has
+           already become C:\... and cannot reach this test, while an extended-length SHARE has become
+           \\server\share and correctly does. */
+        if (installDirectory.StartsWith(@"\\", StringComparison.Ordinal))
         {
             return InstallLocationVerdict.UncPath;
         }
@@ -181,6 +186,44 @@ internal static class DarlingInstallLocation
         }
 
         return InstallLocationVerdict.None;
+    }
+
+    /// <summary>
+    /// Rewrites an extended-length path to its ordinary spelling (#2348), leaving anything else alone:
+    /// <c>\\?\UNC\server\share</c> becomes <c>\\server\share</c> and <c>\\?\C:\dir</c> becomes <c>C:\dir</c>.
+    ///
+    /// <para>The <c>UNC</c> form is tested FIRST because it is the longer, more specific prefix — checking
+    /// <c>\\?\</c> first would strip four characters off a share and leave the nonsense <c>UNC\server\share</c>,
+    /// which is neither a share nor a local path and would classify as neither.</para>
+    ///
+    /// <para>The <c>UNC</c> segment is matched case-insensitively because Windows accepts <c>\\?\unc\</c> too,
+    /// and a miss there would silently re-open exactly the hole this closes. The <c>\\?\</c> prefix itself has
+    /// no letters, so it is matched ordinally.</para>
+    ///
+    /// <para>This normalizes for CLASSIFICATION only. The caller keeps its own path for everything else — the
+    /// service still starts from, and every message still names, the directory as it actually is.</para>
+    /// </summary>
+    internal static string StripExtendedLengthPrefix(string path)
+    {
+        const string extendedUncPrefix = @"\\?\UNC\";
+        const string extendedPrefix = @"\\?\";
+
+        if (string.IsNullOrEmpty(path))
+        {
+            return path;
+        }
+
+        if (path.StartsWith(extendedUncPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return @"\\" + path[extendedUncPrefix.Length..];
+        }
+
+        if (path.StartsWith(extendedPrefix, StringComparison.Ordinal))
+        {
+            return path[extendedPrefix.Length..];
+        }
+
+        return path;
     }
 
     /// <summary>
