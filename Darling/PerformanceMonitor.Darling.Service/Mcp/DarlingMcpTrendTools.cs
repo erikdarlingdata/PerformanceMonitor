@@ -137,11 +137,18 @@ public sealed class DarlingMcpTrendTools
                     new { collected_counters = collected });
             }
 
+            /* sample_interval_seconds is the delta's denominator, and the only way a caller can tell a
+               fabricated zero from an idle interval: 0 means no delta was knowable (first sighting,
+               counter reset, or a gap past the policy), so delta_value = 0 with an interval of 0 must
+               NOT be read as "no activity". Derive rates as delta_value / sample_interval_seconds
+               rather than assuming a fixed cadence — fleet gaps run p50 299 s, p99 830 s, so dividing
+               by the configured 60 s is wrong by whatever the jitter was (#2233, #2234). */
             var result = points.Select(p => new
             {
                 time = p.CollectionTime.ToString("o"),
                 value = p.Value,
-                delta_value = p.DeltaValue
+                delta_value = p.DeltaValue,
+                sample_interval_seconds = p.SampleIntervalSeconds
             });
 
             return JsonSerializer.Serialize(new

@@ -152,12 +152,31 @@ public sealed class TimescaleSupportTests
     [Fact]
     public void IsCompressionJobStuck_NextStartNegativeInfinity_IsStuck()
     {
-        /* The dominant failure mode: next_start = -infinity, so the scheduler never re-fires it. Stuck
-           regardless of status/last-run — it will never run again. */
+        /* The dominant failure mode: next_start = -infinity on a job that is NOT running — the scheduler
+           abandoned it and never re-fires it. */
         Assert.True(TimescaleSupport.IsCompressionJobStuck(
             nextStartIsNegativeInfinity: true, jobStatus: "Scheduled", lastRunStartedAtUtc: null,
             scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
         Assert.Contains("-infinity", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IsCompressionJobStuck_NegativeInfinityWhileRunning_IsTheMidRunMarker_NotStuck()
+    {
+        /* Measured live on TimescaleDB 2.x: from scheduler pickup to run completion, next_start reads
+           -infinity WITH job_status = 'Running' — the engine only computes the real next start when the
+           run finishes. An unconditioned -infinity arm flagged every healthy job caught mid-run (the
+           field's transient stuck→self-healed alert noise, and the CI flake where the live test caught
+           its own re-arm-triggered run). Mid-run belongs to the elapsed-bound arm: */
+        Assert.False(TimescaleSupport.IsCompressionJobStuck(
+            nextStartIsNegativeInfinity: true, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddMinutes(-3),
+            scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out _));
+
+        /* ...which still catches a genuinely HUNG run that carries the mid-run marker. */
+        Assert.True(TimescaleSupport.IsCompressionJobStuck(
+            nextStartIsNegativeInfinity: true, jobStatus: "Running", lastRunStartedAtUtc: s_now.AddHours(-30),
+            scheduleInterval: TimeSpan.FromHours(12), nowUtc: s_now, out var reason));
+        Assert.Contains("Running", reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1519,24 +1538,43 @@ LIMIT 1", connection))
            CORRECT to flag -infinity — so asserting immediately after ApplyCompressionPolicy raced that window
            and intermittently false-failed on a slow CI runner. Deterministically settle the job into the
            healthy state the assertion is actually about: give it a real FUTURE next_start (via the same
-           alter_job the self-heal uses), then wait for the catalog to reflect a non-(-infinity) next_start. */
+           alter_job the self-heal uses), then wait for the detector itself to report it healthy.
+
+           The wait's RESULT is what the assertion below reads, and that is the whole point rather than a
+           convenience: a wait that only proves "healthy at some instant", followed by a fresh read, asserts
+           against a DIFFERENT observation than the one it validated, and the job can leave the healthy state
+           in the gap between them (the scheduler picking it up reads next_start = -infinity with status
+           Running mid-run — see leg 3). That gap is this test's third flake in the same class, after #1760
+           polled a copy of one detector arm and after the wait was introduced to close it; it survived
+           because the helper's guarantee stops at the moment it returns. Consuming the returned snapshot
+           makes settled-according-to-the-wait and settled-according-to-the-assertion the same observation
+           by construction, which is what the helper's contract claimed all along. */
         using (var arm = new NpgsqlCommand("SELECT alter_job($1::integer, next_start => now() + interval '1 hour')", connection))
         {
             arm.Parameters.Add(new NpgsqlParameter { Value = jobId });
             await arm.ExecuteNonQueryAsync(ct);
         }
-        await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
+        var healthy = await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
 
         /* The SQL really is valid against the live catalog, and this job really is in its result set.
            ReadStuckCompressionJobsAsync is failure-isolated (a broken query is swallowed and returns an EMPTY
            list), so DoesNotContain ALONE would pass just as happily against SQL that never compiled — the one
            thing this leg claims to prove. Run the production const directly, where a syntax or column error
            throws, and require the job to be present: only then does "not flagged" mean the detector looked at
-           this job and judged it healthy. */
+           this job and judged it healthy.
+
+           This one keeps its OWN read, which is safe where the health assertion is not: StuckCompressionJobsSql
+           filters on proc_name alone, so it returns every compression job whatever state it is in, and "this job
+           is in the result set" cannot race. Flagging is the C# predicate applied on top of those rows, and that
+           is the only part that moves. */
         var observed = await ReadObservedJobIdsAsync(connection, ct);
         Assert.Contains(jobId, observed);
 
-        var healthy = await TimescaleSupport.ReadStuckCompressionJobsAsync(connection, DateTime.UtcNow, null, ct);
+        /* Deliberately tautological, and kept for what it documents rather than what it can catch: `healthy` is
+           the snapshot the wait already found clean, so this cannot fail today. It states the property leg (1)
+           exists to assert, at the place a reader looks for it, and it fails loudly if the helper is ever
+           changed to return something other than the satisfying poll's own result. The load-bearing check is
+           the wait's bounded loop, which fails carrying the detector's reason string. */
         Assert.DoesNotContain(healthy, s => s.JobId == jobId);
 
         /* (2) The #1586 REGRESSION GUARD: the production re-arm runs the real alter_job against TimescaleDB and
@@ -1553,9 +1591,12 @@ LIMIT 1", connection))
            DETECTION logic is covered by the pure IsCompressionJobStuck unit tests. */
         Assert.True(await TimescaleSupport.TryRearmJobAsync(connection, jobId, null, ct));
 
-        /* (3) After a real re-arm (next_start => now()) the job is scheduled/running within bound, not stuck. */
-        var afterRearm = await TimescaleSupport.ReadStuckCompressionJobsAsync(connection, DateTime.UtcNow, null, ct);
-        Assert.DoesNotContain(afterRearm, s => s.JobId == jobId);
+        /* (3) After a real re-arm (next_start => now()) the job settles healthy. SETTLES, not "reads healthy
+           on one snapshot": next_start => now() makes the job immediately due, the scheduler picks it up, and
+           from pickup to completion job_stats reads next_start = -infinity with status Running — the mid-run
+           marker (measured live; the detector now defers that state to its elapsed-bound arm). A single
+           un-settled read raced the very run the re-arm triggered, which was this test's own flake. */
+        await WaitUntilDetectorReportsHealthyAsync(connection, jobId, ct);
     }
 
     /// <summary>
@@ -1571,8 +1612,15 @@ LIMIT 1", connection))
     /// drift, so settled-according-to-the-wait IS settled-according-to-the-assertion. Bounded, and it fails
     /// loudly carrying the detector's OWN reason string — a job that never settles is genuinely stuck and must
     /// not silently pass, and the reason names which arm held it rather than assuming <c>next_start</c>.</para>
+    ///
+    /// <para>RETURNS the flagged list from the poll that satisfied it, and callers must assert against THAT
+    /// rather than issuing a fresh read. The guarantee above holds only at the instant this returns: the
+    /// scheduler is free to pick the job up immediately afterward, and mid-run it reads
+    /// <c>next_start = -infinity</c> with status Running, which the detector flags and is right to flag. A
+    /// caller that re-queries is therefore asserting on an observation this method never validated — which is
+    /// exactly how the race came back after being closed once.</para>
     /// </summary>
-    private static async Task WaitUntilDetectorReportsHealthyAsync(
+    private static async Task<IReadOnlyList<StuckCompressionJob>> WaitUntilDetectorReportsHealthyAsync(
         NpgsqlConnection connection, long jobId, System.Threading.CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
@@ -1582,7 +1630,7 @@ LIMIT 1", connection))
             var mine = flagged.FirstOrDefault(s => s.JobId == jobId);
             if (mine is null)
             {
-                return;
+                return flagged;
             }
 
             Assert.True(DateTime.UtcNow < deadline,

@@ -13,10 +13,11 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// #1556: the 24h catch-up clamp boundaries. A stale query_store watermark (a service down for days) must
-/// not point its cutoff days into the past — that one cycle would try to pull the whole retained backlog and
-/// drive the commit-limit blowout. The clamp floors a &gt;24h-stale watermark to now-24h; a fresh watermark
-/// and a null watermark pass through untouched.
+/// #1556/#2102: the catch-up clamp boundaries. A stale query_store watermark must not point its cutoff
+/// far into the past — the per-database query's cost grows with window width, so a wide one-shot window
+/// either blows the commit limit (#1556, days-wide) or times out every cycle and wedges the database
+/// permanently (#2102, hours-wide). The clamp floors a stale watermark to now-MaxCatchup; a fresh
+/// watermark and a null watermark pass through untouched.
 /// </summary>
 public sealed class WatermarkPolicyTests
 {
@@ -32,9 +33,9 @@ public sealed class WatermarkPolicyTests
     [Fact]
     public void ClampCatchup_WithinHorizon_ReturnedUnchanged()
     {
-        /* A routine restart / brief outage: the watermark is minutes-to-hours old and never clamps. */
-        var oneHourAgo = Now.AddHours(-1);
-        Assert.Equal(oneHourAgo, WatermarkPolicy.ClampCatchup(oneHourAgo, Now));
+        /* A routine restart: the watermark is minutes old and never clamps. */
+        var tenMinutesAgo = Now.AddMinutes(-10);
+        Assert.Equal(tenMinutesAgo, WatermarkPolicy.ClampCatchup(tenMinutesAgo, Now));
 
         var justInside = Now - WatermarkPolicy.MaxCatchup + TimeSpan.FromSeconds(1);
         Assert.Equal(justInside, WatermarkPolicy.ClampCatchup(justInside, Now));
@@ -43,19 +44,21 @@ public sealed class WatermarkPolicyTests
     [Fact]
     public void ClampCatchup_ExactlyAtHorizon_NotClamped()
     {
-        /* The floor is strict (< floor clamps): a watermark exactly 24h old is at the horizon, not past it. */
+        /* The floor is strict (< floor clamps): a watermark exactly MaxCatchup old is at the horizon,
+           not past it. */
         var atHorizon = Now - WatermarkPolicy.MaxCatchup;
         Assert.Equal(atHorizon, WatermarkPolicy.ClampCatchup(atHorizon, Now));
     }
 
     [Fact]
-    public void ClampCatchup_StalerThanHorizon_FlooredToNowMinus24h()
+    public void ClampCatchup_StalerThanHorizon_FlooredToNowMinusMaxCatchup()
     {
-        /* The field incident: a multi-day-old watermark is floored to now-24h so catch-up is bounded. */
+        /* The field incidents: a stale watermark is floored to now-MaxCatchup so one cycle's window is
+           bounded; the skipped range is the backfill worker's job. */
         var floor = Now - WatermarkPolicy.MaxCatchup;
 
         Assert.Equal(floor, WatermarkPolicy.ClampCatchup(Now.AddDays(-3), Now));
-        Assert.Equal(floor, WatermarkPolicy.ClampCatchup(Now.AddHours(-30), Now));
+        Assert.Equal(floor, WatermarkPolicy.ClampCatchup(Now.AddHours(-6), Now));
 
         var justPast = Now - WatermarkPolicy.MaxCatchup - TimeSpan.FromSeconds(1);
         Assert.Equal(floor, WatermarkPolicy.ClampCatchup(justPast, Now));
@@ -70,10 +73,14 @@ public sealed class WatermarkPolicyTests
     }
 
     [Fact]
-    public void MaxCatchup_IsTwentyFourHours()
+    public void MaxCatchup_IsOneHour_AndMatchesTheBackfillSliceSpan()
     {
-        /* Drift tripwire: the horizon is a deliberate choice (routine outages never clamp; multi-day ones
-           survive with a bounded, logged hole). */
-        Assert.Equal(TimeSpan.FromHours(24), WatermarkPolicy.MaxCatchup);
+        /* Drift tripwire: one hour is the live path's one-query cost envelope — the width the fleet
+           proves every day under Query Store's 900s flush cadence. It was 24h until #2102 showed the
+           clamp sat far above the cost tipping point on big databases and never interrupted the
+           timeout spiral. The equality half is the design invariant: NO path, live or backfill, may
+           window wider than the other, or one of them re-becomes the wide-window casualty. */
+        Assert.Equal(TimeSpan.FromHours(1), WatermarkPolicy.MaxCatchup);
+        Assert.Equal(QueryStoreBackfillState.MaxSliceSpan, WatermarkPolicy.MaxCatchup);
     }
 }

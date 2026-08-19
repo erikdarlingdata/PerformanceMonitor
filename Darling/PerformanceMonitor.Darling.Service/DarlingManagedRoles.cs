@@ -114,6 +114,11 @@ public static class DarlingManagedRoles
                 "trust_server_certificate", "read_only_intent", "multi_subnet_failover",
                 "excluded_databases", "monthly_cost_usd", "capture_plans", "is_enabled",
                 "created_at", "modified_at", "alert_delivery_mode_override",
+                /* V68. Non-secret: which engine a target is, and its port, are exactly as sensitive as its
+                   host — which is already readable. The fail-closed design is why they have to be named at
+                   all: an unclassified column stays invisible to `viewer` rather than being exposed by
+                   default, so the live security gate fails until someone decides which side it is on. */
+                "engine", "port",
             },
             SecretColumns: new[] { "encrypted_password" }),
 

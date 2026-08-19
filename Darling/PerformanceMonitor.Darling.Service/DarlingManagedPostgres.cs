@@ -204,6 +204,10 @@ public sealed class DarlingManagedPostgres
     /* Process budgets. pg_ctl start/stop get -w -t 60 of their own, so the outer budget only
        has to outlive them; initdb on a cold disk can take tens of seconds. */
     private static readonly TimeSpan s_initDbTimeout = TimeSpan.FromSeconds(180);
+
+    /* #2185: `--version` prints one line and exits, so this bounds a diagnostic probe, not real work. Short
+       on purpose — it runs while a startup failure is already being reported. */
+    private static readonly TimeSpan s_versionProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan s_pgCtlTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan s_statusTimeout = TimeSpan.FromSeconds(30);
     private const int PgCtlWaitSeconds = 60;
@@ -779,8 +783,9 @@ public sealed class DarlingManagedPostgres
         try
         {
             var binDirectory = Path.Combine(_runtimeRoot, "pgsql", "bin");
+            var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
             var (exitCode, output) = await RunToolAsync(
-                Path.Combine(binDirectory, "pg_ctl.exe"),
+                pgCtl,
                 $"stop -D \"{_dataDirectory}\" -m fast -w -t {PgCtlWaitSeconds}",
                 s_pgCtlTimeout,
                 CancellationToken.None);
@@ -791,7 +796,13 @@ public sealed class DarlingManagedPostgres
             }
             else
             {
-                _logger.LogWarning("Managed Postgres stop reported exit code {ExitCode}: {Output}", exitCode, output);
+                /* {ExitCode} stays the raw int so structured sinks keep a numeric field to filter on;
+                   the decoded meaning rides its own field. */
+                _logger.LogWarning(
+                    "Managed Postgres stop reported exit code {ExitCode} ({ExitCodeMeaning}): {Output}",
+                    exitCode,
+                    DarlingToolExitCode.Describe(exitCode),
+                    DarlingToolExitCode.FormatOutput(output, exitCode));
             }
         }
         catch (Exception ex)
@@ -879,16 +890,25 @@ public sealed class DarlingManagedPostgres
         TryHardenCredentialFile(passwordFile, allowInteractiveRead: false);
         try
         {
+            var initDb = Path.Combine(binDirectory, "initdb.exe");
             var (exitCode, output) = await RunToolAsync(
-                Path.Combine(binDirectory, "initdb.exe"),
+                initDb,
                 $"-D \"{_dataDirectory}\" -U {UserName} -A scram-sha-256 --pwfile=\"{passwordFile}\" -E UTF8 --locale=C --data-checksums",
                 s_initDbTimeout,
                 cancellationToken);
 
             if (exitCode != 0)
             {
+                /* #2185: on a LOADER status, gather the evidence ourselves rather than asking the operator
+                   to run two commands and report back. That thread took four exchanges and the decisive fact
+                   — `initdb --version` working while the bootstrap died — only ever existed in the reporter's
+                   shell. Two extra process launches on a path that has already failed fatally is free. */
+                var runtimeProbe = DarlingToolExitCode.IsLoaderStatus(exitCode)
+                    ? await ProbeRuntimeBinariesAsync(binDirectory, cancellationToken)
+                    : string.Empty;
+
                 throw new InvalidOperationException(
-                    $"initdb failed (exit code {exitCode}) for {_dataDirectory}. Output:\n{output}");
+                    BuildInitDbFailureMessage(exitCode, initDb, _dataDirectory, output, runtimeProbe));
             }
         }
         finally
@@ -904,6 +924,56 @@ public sealed class DarlingManagedPostgres
         }
 
         _logger.LogInformation("Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C locale)");
+    }
+
+    /// <summary>
+    /// The first-run initdb failure, as an operator reads it (#2186). The leading clause is unchanged on
+    /// purpose — it is what the existing field reports and the issue tracker are searchable by — and
+    /// everything the raw form withheld follows it: the exit code decoded, the loader diagnosis when
+    /// Windows set that code, and an <c>Output:</c> field that says it is empty BECAUSE the process was
+    /// killed before it could write, rather than looking like data that failed to arrive.
+    /// </summary>
+    internal static string BuildInitDbFailureMessage(
+        int exitCode, string exePath, string dataDirectory, string output, string runtimeProbe = "")
+        => $"initdb failed (exit code {DarlingToolExitCode.Describe(exitCode)}) for {dataDirectory}." +
+           DarlingToolExitCode.Diagnose(exitCode, exePath) +
+           runtimeProbe +
+           $"\nOutput:\n{DarlingToolExitCode.FormatOutput(output, exitCode)}";
+
+    /// <summary>
+    /// Asks each of the two binaries for its version and reports which one could not load (#2185).
+    ///
+    /// <para><b>Never throws and never blocks meaningfully.</b> This runs on a path that has ALREADY failed
+    /// fatally, and its only job is to add a sentence to an exception that is about to be raised. A probe that
+    /// threw would replace a precise "initdb failed, here is why" with whatever the probe hit; a probe that
+    /// hung would turn a fast failure into a service that appears wedged at startup. So every fault mode —
+    /// missing file, unreadable directory, cancellation, timeout — resolves to the empty string, which
+    /// composes to the exact message the product produced before this existed.</para>
+    ///
+    /// <para><c>--version</c> is the right probe because it is the ONE invocation that loads the binary and
+    /// its full dependency chain without touching the data directory, the port, or the cluster: it is the
+    /// loader test with no side effect. A five-second budget is generous for a process that prints one line.</para>
+    /// </summary>
+    private static async Task<string> ProbeRuntimeBinariesAsync(string binDirectory, CancellationToken cancellationToken)
+    {
+        try
+        {
+            /* The order matters for the reader, not the logic: initdb is what failed, postgres is the
+               hypothesis. Both are probed even when the first one loads, because "both loaded" is itself a
+               finding — it rules out a permanently missing dependency and redirects to the event log. */
+            var (initDbCode, _) = await RunToolAsync(
+                Path.Combine(binDirectory, "initdb.exe"), "--version", s_versionProbeTimeout, cancellationToken);
+            var (postgresCode, _) = await RunToolAsync(
+                Path.Combine(binDirectory, "postgres.exe"), "--version", s_versionProbeTimeout, cancellationToken);
+
+            return DarlingToolExitCode.DescribeRuntimeProbe(initDbCode, postgresCode);
+        }
+        catch (Exception)
+        {
+            /* Deliberately unfiltered. See the summary: the caller is composing a fatal message and there is
+               no fault here worth surfacing over the failure that is already being reported. */
+            return string.Empty;
+        }
     }
 
     /// <summary>
@@ -1094,7 +1164,7 @@ public sealed class DarlingManagedPostgres
     {
         var dataMajor = DarlingStoreUpgrade.ParseDataDirectoryMajor(
             await File.ReadAllTextAsync(Path.Combine(_dataDirectory, "PG_VERSION"), cancellationToken));
-        var bundledMajor = await ReadRuntimeMajorAsync(binDirectory, cancellationToken);
+        var (bundledMajor, probeExitCode) = await ReadRuntimeMajorAsync(binDirectory, cancellationToken);
 
         if (DarlingStoreUpgrade.MustRefuseUnidentifiableRuntime(dataMajor, bundledMajor))
         {
@@ -1105,12 +1175,15 @@ public sealed class DarlingManagedPostgres
                is the strongest possible evidence they must not be used, not a reason to wave them through.
                Refusing here costs nothing that proceeding would have saved — the start was going to fail
                regardless — and it converts a cryptic Win32 status code into a message naming the rescued
-               runtime to restore. */
+               runtime to restore. #2186 finished the thought: the refusal used to assert that the binaries
+               did not run without ever saying HOW it knew, so the one piece of evidence it held — the probe's
+               own exit code — died in a local variable. It is now quoted, decoded, and diagnosed. */
             throw new InvalidOperationException(
-                $"The store's data directory {_dataDirectory} is PostgreSQL {dataMajor}, but the runtime at {binDirectory} could not be identified — its binaries did not run. " +
+                $"The store's data directory {_dataDirectory} is PostgreSQL {dataMajor}, but the runtime at {binDirectory} could not be identified — pg_ctl --version exited {DarlingToolExitCode.Describe(probeExitCode)} instead of reporting a version. " +
                 "A runtime that cannot report its own version cannot start this store either, so the service is stopping here rather than failing deeper with a Win32 error code. " +
                 $"This usually means the wrong package was deployed. Restore the previous runtime from {PreviousRuntimeHint()} over {Path.GetDirectoryName(binDirectory)}, or redeploy a package whose PostgreSQL major is {dataMajor} or newer, then restart the service. " +
-                "The data directory has not been touched.");
+                "The data directory has not been touched." +
+                DarlingToolExitCode.Diagnose(probeExitCode, Path.Combine(binDirectory, "pg_ctl.exe")));
         }
 
         if (dataMajor is null || bundledMajor is null)
@@ -1172,7 +1245,7 @@ public sealed class DarlingManagedPostgres
             /* The revert put the PREVIOUS runtime back behind the same bin path, so the identity read
                above now describes binaries that are no longer there. Re-read it, or the post-start
                completion would try to move the extension to a version this runtime does not ship. */
-            _bundledMajor = await ReadRuntimeMajorAsync(binDirectory, cancellationToken) ?? 0;
+            _bundledMajor = (await ReadRuntimeMajorAsync(binDirectory, cancellationToken)).Major ?? 0;
             _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
         }
     }
@@ -1181,12 +1254,14 @@ public sealed class DarlingManagedPostgres
         => Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(_runtimeRoot), "pgsql");
 
     /// <summary>The bundled runtime's PostgreSQL major, from the binaries themselves rather than from a
-    /// manifest that could disagree with what is on disk.</summary>
-    private static async Task<int?> ReadRuntimeMajorAsync(string binDirectory, CancellationToken cancellationToken)
+    /// manifest that could disagree with what is on disk. The probe's exit code rides out alongside it
+    /// (#2186): when the answer is "unidentifiable", that code is the ONLY evidence of why, and the
+    /// refusal that consumes it used to have to assert the reason instead of showing it.</summary>
+    private static async Task<(int? Major, int ExitCode)> ReadRuntimeMajorAsync(string binDirectory, CancellationToken cancellationToken)
     {
         var (exitCode, output) = await RunToolAsync(
             Path.Combine(binDirectory, "pg_ctl.exe"), "--version", s_statusTimeout, cancellationToken);
-        return exitCode == 0 ? DarlingStoreUpgrade.ParsePostgresMajor(output) : null;
+        return (exitCode == 0 ? DarlingStoreUpgrade.ParsePostgresMajor(output) : null, exitCode);
     }
 
     /// <summary>
@@ -1218,8 +1293,9 @@ public sealed class DarlingManagedPostgres
     /// <summary>pg_ctl status: 0 = a postmaster is running on this data directory, 3 = not running, 4 = bad/inaccessible data directory.</summary>
     private async Task<bool> IsRunningAsync(string binDirectory, CancellationToken cancellationToken)
     {
+        var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
         var (exitCode, output) = await RunToolAsync(
-            Path.Combine(binDirectory, "pg_ctl.exe"),
+            pgCtl,
             $"status -D \"{_dataDirectory}\"",
             s_statusTimeout,
             cancellationToken);
@@ -1228,9 +1304,23 @@ public sealed class DarlingManagedPostgres
         {
             0 => true,
             3 => false,
-            _ => throw new InvalidOperationException(
-                $"pg_ctl status reported exit code {exitCode} for {_dataDirectory} — the data directory is not usable. Output:\n{output}"),
+            _ => throw new InvalidOperationException(BuildStatusFailureMessage(exitCode, pgCtl, _dataDirectory, output)),
         };
+    }
+
+    /// <summary>
+    /// The pg_ctl status failure (#2186). The data-directory verdict is CONDITIONAL: pg_ctl's own codes
+    /// (4 = bad or inaccessible data directory) do say the directory is unusable, but a Windows status
+    /// says only that pg_ctl never ran, and blaming the data directory for that sends an operator to
+    /// delete a perfectly good store over a missing DLL.
+    /// </summary>
+    internal static string BuildStatusFailureMessage(int exitCode, string exePath, string dataDirectory, string output)
+    {
+        var diagnosis = DarlingToolExitCode.Diagnose(exitCode, exePath);
+        return $"pg_ctl status reported exit code {DarlingToolExitCode.Describe(exitCode)} for {dataDirectory}" +
+               (diagnosis.Length == 0 ? " — the data directory is not usable." : ".") +
+               diagnosis +
+               $"\nOutput:\n{DarlingToolExitCode.FormatOutput(output, exitCode)}";
     }
 
     /// <summary>
@@ -1263,8 +1353,9 @@ public sealed class DarlingManagedPostgres
            server is down (this method only runs when nothing is listening), so nothing holds the file. */
         CapLegacyServerLog(_serverLogPath, LegacyServerLogCapBytes, _logger);
 
+        var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
         var exitCode = await RunDetachingToolAsync(
-            Path.Combine(binDirectory, "pg_ctl.exe"),
+            pgCtl,
             $"-D \"{_dataDirectory}\" -o \"{runtimeOptions}\" -l \"{_serverLogPath}\" -w -t {PgCtlWaitSeconds} start",
             s_pgCtlTimeout,
             cancellationToken);
@@ -1272,12 +1363,23 @@ public sealed class DarlingManagedPostgres
         if (exitCode != 0)
         {
             throw new InvalidOperationException(
-                $"pg_ctl start failed (exit code {exitCode}) for {_dataDirectory}.\n" +
-                $"Server log tail:\n{ReadServerLogTail()}");
+                BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail()));
         }
 
         _logger.LogInformation("Managed Postgres started");
     }
+
+    /// <summary>
+    /// The pg_ctl start failure (#2186). Its <c>Server log tail</c> has the same trap the initdb message's
+    /// <c>Output</c> had: a loader status means pg_ctl died before it could start a postmaster, so the tail
+    /// reads "(no server log written)" — accurate, and completely misleading about where to look. The
+    /// diagnosis says which situation this is before the tail invites an operator to read a log that was
+    /// never going to exist.
+    /// </summary>
+    internal static string BuildStartFailureMessage(int exitCode, string exePath, string dataDirectory, string serverLogTail)
+        => $"pg_ctl start failed (exit code {DarlingToolExitCode.Describe(exitCode)}) for {dataDirectory}." +
+           DarlingToolExitCode.Diagnose(exitCode, exePath) +
+           $"\nServer log tail:\n{serverLogTail}";
 
     /// <summary>The one-time cap on the legacy pre-rotation <c>pg.log</c> (#1652): past this size it is
     /// rolled to <c>pg.log.old</c> (replacing any previous roll) before the next start. Two files, bounded
@@ -1731,6 +1833,8 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     internal void EnsureServerCertificate(IPAddress listenIp, string certPath, string keyPath)
     {
+        var rootPath = RootCertificatePathFor(certPath);
+
         if (File.Exists(certPath) && File.Exists(keyPath))
         {
             try
@@ -1741,6 +1845,25 @@ public sealed class DarlingManagedPostgres
                     /* Present + loads + the SAN covers this listen IP -> reuse (delete-to-rotate). Re-harden
                        the key every start (self-healing), same discipline as the credential files. */
                     TryHardenCredentialFile(keyPath, allowInteractiveRead: false);
+
+                    /* #2117: a cert pair WITHOUT root.crt beside it is the legacy single self-signed
+                       end-entity shape, whose critical CA=false Basic Constraints Windows' chain engine
+                       refuses as its own trust anchor under Npgsql's Root Certificate custom-root trust —
+                       verify-full with the printed cert fails on exactly the machines viewers run on.
+                       Deliberately NOT auto-rotated: operators who worked around it via the OS trust
+                       store have a WORKING setup a silent regeneration would break. Advise instead. */
+                    if (!File.Exists(rootPath))
+                    {
+                        _logger.LogWarning(
+                            "The store TLS cert at {Cert} is the legacy single self-signed shape — remote viewers using " +
+                            "SSL Mode=VerifyFull with Root Certificate fail certificate-chain validation on Windows " +
+                            "(#2117). To rotate to the fixed chain shape: stop the service, delete {Cert} and {Key}, " +
+                            "start the service, then re-run --print-viewer-connection and redistribute the new root " +
+                            "certificate to viewer machines. Viewers that imported the old cert into the OS trust " +
+                            "store keep working until you rotate.",
+                            certPath, certPath, keyPath);
+                    }
+
                     return;
                 }
 
@@ -1755,35 +1878,28 @@ public sealed class DarlingManagedPostgres
                     certPath, ex.Message);
             }
 
-            /* Fall through to regenerate — overwrites both files (the service account owns them). */
+            /* Fall through to regenerate — overwrites the files (the service account owns them). */
         }
 
-        using var rsa = RSA.Create(2048);
-        var request = new CertificateRequest(
-            $"CN={Environment.MachineName}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        /* #2117: a real two-cert chain — throwaway local CA signs the leaf, the CA key is discarded
+           inside Create(), postgres serves leaf+CA, and root.crt is what the operator distributes.
+           See StoreTlsCertificates for why the old single self-signed shape failed verify-full. */
+        var generated = StoreTlsCertificates.Create(Environment.MachineName, listenIp, ServerCertValidityYears);
 
-        var sanBuilder = new SubjectAlternativeNameBuilder();
-        sanBuilder.AddIpAddress(listenIp);
-        sanBuilder.AddDnsName(Environment.MachineName);
-        request.CertificateExtensions.Add(sanBuilder.Build());
-        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
-        request.CertificateExtensions.Add(
-            new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
-        request.CertificateExtensions.Add(
-            new X509EnhancedKeyUsageExtension(new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") /* serverAuth */ }, false));
-
-        var notBefore = DateTimeOffset.UtcNow.AddDays(-1);
-        var notAfter = notBefore.AddYears(ServerCertValidityYears);
-        using var certificate = request.CreateSelfSigned(notBefore, notAfter);
-
-        File.WriteAllText(certPath, certificate.ExportCertificatePem());
-        File.WriteAllText(keyPath, rsa.ExportPkcs8PrivateKeyPem());
+        File.WriteAllText(certPath, generated.ServerCertChainPem);
+        File.WriteAllText(keyPath, generated.ServerKeyPem);
+        File.WriteAllText(rootPath, generated.RootCertPem);
         TryHardenCredentialFile(keyPath, allowInteractiveRead: false);
 
         _logger.LogInformation(
-            "Generated a self-signed store TLS cert (CN/DNS SAN {Host}, IP SAN {Ip}, ~{Years}yr) at {Cert}",
-            Environment.MachineName, listenIp, ServerCertValidityYears, certPath);
+            "Generated the store TLS chain (CN/DNS SAN {Host}, IP SAN {Ip}, ~{Years}yr): leaf+CA at {Cert}, distributable root at {Root}",
+            Environment.MachineName, listenIp, ServerCertValidityYears, certPath, rootPath);
     }
+
+    /// <summary>The distributable root's path — always beside the served cert (#2117). Public-key
+    /// material only, so it is deliberately not hardened like the key.</summary>
+    internal static string RootCertificatePathFor(string certPath)
+        => Path.Combine(Path.GetDirectoryName(certPath) ?? ".", "root.crt");
 
     /// <summary>
     /// Whether <paramref name="certificate"/> carries an iPAddress SAN equal to <paramref name="listenIp"/>
@@ -2001,16 +2117,20 @@ public sealed class DarlingManagedPostgres
             if (changed)
             {
                 await File.WriteAllTextAsync(hbaPath, updated, cancellationToken);
+                var reloadPgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
                 var (reloadCode, reloadOutput) = await RunToolAsync(
-                    Path.Combine(binDirectory, "pg_ctl.exe"),
+                    reloadPgCtl,
                     $"reload -D \"{_dataDirectory}\"",
                     s_statusTimeout,
                     cancellationToken);
                 if (reloadCode != 0)
                 {
                     _logger.LogCritical(
-                        "pg_ctl reload failed (exit {ExitCode}) after updating pg_hba.conf — the network access change may not be live: {Output}",
-                        reloadCode, reloadOutput);
+                        "pg_ctl reload failed (exit {ExitCode}, {ExitCodeMeaning}) after updating pg_hba.conf — the network access change may not be live: {Output}{Diagnosis}",
+                        reloadCode,
+                        DarlingToolExitCode.Describe(reloadCode),
+                        DarlingToolExitCode.FormatOutput(reloadOutput, reloadCode),
+                        DarlingToolExitCode.Diagnose(reloadCode, reloadPgCtl));
                 }
             }
 
@@ -2351,7 +2471,6 @@ public sealed class DarlingManagedPostgres
         }
     }
 
-    /// <summary>
     /// <summary>
     /// Applies the optional per-invocation environment and working directory shared by both process
     /// runners. Values are ADDED to the inherited environment rather than replacing it — a PG tool still

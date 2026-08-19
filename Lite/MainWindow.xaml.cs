@@ -258,8 +258,20 @@ public partial class MainWindow : Window
             AlertsHistoryContent.MuteRuleService = _muteRuleService;
             AlertsHistoryContent.AlertsDismissed += OnAlertHistoryDismissed;
 
-            // Initialize job history tab
-            JobHistoryContent.Initialize(_dataService);
+            /* Initialize job history tab. The display-name snapshot resolves each row's stored
+               server_id back to the operator's alias (#2126's Lite half) — the config layer owns
+               display names in Lite (the stored servers.display_name column is unpopulated), so the
+               mapping is built from the live server list on every refresh, Overview-style. */
+            JobHistoryContent.Initialize(_dataService, () =>
+            {
+                var map = new Dictionary<int, string>();
+                foreach (var s in _serverManager.GetAllServers())
+                {
+                    map[RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s))] =
+                        s.DisplayNameWithIntent;
+                }
+                return map;
+            });
 
             // Availability Groups (#991): self-loading, and its tab stays hidden until a load finds AG rows.
             AvailabilityGroupsContent.Initialize(_dataService);

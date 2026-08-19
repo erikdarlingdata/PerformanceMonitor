@@ -51,7 +51,7 @@ public static class PgTableTuning
     /// COVERING composer indexes (INCLUDE the aggregate columns the Procedures / Queries / Query Store measures
     /// SUM/AVG, for an Index Only Scan), three <c>(server_id, handle/hash/id, collection_time DESC)</c> lookup
     /// indexes for the single-row analyze_*_plan reads (no INCLUDE — one heap fetch is cheap), then the per-table
-    /// autovacuum-insert override on exactly the three growing tables. Bare collect-qualified names; every
+    /// autovacuum-insert override on exactly the four growing tables. Bare collect-qualified names; every
     /// identifier is a compile-time constant, never user input, so interpolation is not a concern.
     /// </summary>
     public static IReadOnlyList<string> Statements { get; } = new[]
@@ -69,6 +69,12 @@ public static class PgTableTuning
         "ALTER TABLE collect.procedure_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
         "ALTER TABLE collect.query_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
         "ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
+        /* pg_statement_stats is query_stats' per-minute PostgreSQL twin — same shape, same cadence, same
+           pure-insert hypertable chunks — so the identical reasoning applies: the stock 0.2 scale factor
+           leaves the day's hot chunk stale before the TimescaleDB rollover and the Index Only Scan degrades
+           to heap fetches. It was simply missed when the PostgreSQL collectors landed, since this list is
+           hand-maintained rather than derived from the catalog. */
+        "ALTER TABLE collect.pg_statement_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)",
     };
 
     /// <summary>

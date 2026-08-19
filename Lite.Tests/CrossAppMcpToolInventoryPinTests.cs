@@ -55,6 +55,25 @@ public sealed class CrossAppMcpToolInventoryPinTests
     // system_health parser tools). A NEW Darling-only tool must be either ported to Lite or added here.
     private static readonly HashSet<string> KnownLiteMissingMcpTools = new(StringComparer.Ordinal)
     {
+        /* The eight PostgreSQL reads. Darling-ONLY by architecture, not "not ported yet", so these are the
+           same kind of entry as get_store_metrics rather than a to-do: Lite has no PostgreSQL target and
+           cannot acquire one (the engine gate never dispatches a PostgreSQL definition there), and Lite does
+           not even create the tables — DuckDbSchemaGenerator.StoredCollectors filters them out, so there is
+           nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
+           them from here; the ratchet only shrinks. */
+        "get_pg_wait_stats",
+        "get_pg_top_queries",
+        "get_pg_wraparound_risk",
+        "get_pg_xmin_horizon",
+        "get_pg_replication_slots",
+        "get_pg_autovacuum_health",
+        "get_pg_io_stats",
+        /* get_pg_blocking is the one whose NAME collides with a Lite tool that already exists — Lite has
+           get_blocking over blocked_process_report. They are not twins and must not be conflated: Lite's
+           reads an engine-recorded event with a graph, this reads periodic samples of an edge list. Porting
+           this to Lite would require a PostgreSQL target Lite cannot have, so it belongs here with the rest. */
+        "get_pg_blocking",
+
         /* #2068: the store self-metrics read (get_store_metrics) over collect.store_metrics — the central
            Postgres store measuring ITSELF (hypertable sizes/compression, payload dims, whole-store growth)
            for capacity forecasting. Darling-ONLY by architecture, not a "not ported yet" item: Lite is a
@@ -168,6 +187,32 @@ public sealed class CrossAppMcpToolInventoryPinTests
             "  Ported a listed tool to Lite? Remove it from KnownLiteMissingMcpTools (the ratchet only shrinks).\n" +
             $"  Present in Darling but NOT in the allow-list: [{Format(darlingOnly.Except(KnownLiteMissingMcpTools))}]\n" +
             $"  Listed but no longer Darling-only:            [{Format(KnownLiteMissingMcpTools.Except(darlingOnly))}]");
+    }
+
+    /// <summary>
+    /// The Darling MCP instructions' tool census must match the real inventory. It is prose an LLM plans
+    /// against, and nothing pinned it — which is exactly how it sat at "ninety tools" while the server
+    /// exposed one hundred (ten tools landed without the sentence moving, the PostgreSQL reads among
+    /// them). The census now uses digits so this pin can parse it; a new tool on either side fails here
+    /// until the sentence is updated.
+    /// </summary>
+    [Fact]
+    public void DarlingInstructionsCensus_MatchesTheScannedInventory()
+    {
+        var lite = ExtractToolNames(LiteMcpDir);
+        var darling = ExtractToolNames(DarlingMcpDir);
+        var shared = lite.Count(t => darling.Contains(t));
+
+        var instructions = ParitySource.ReadFile(DarlingMcpDir + "/DarlingMcpInstructions.cs");
+        var census = Regex.Match(
+            instructions,
+            @"This server exposes (\d+) tools\. (\d+) are the same names .*?The remaining (\d+) are unique to Darling",
+            RegexOptions.Singleline);
+        Assert.True(census.Success, "The census sentence ('This server exposes N tools. M are the same names ... The remaining K are unique to Darling') was not found in DarlingMcpInstructions.cs — keep it parseable so this pin can hold it to the real inventory.");
+
+        Assert.Equal(darling.Count, int.Parse(census.Groups[1].Value));
+        Assert.Equal(shared, int.Parse(census.Groups[2].Value));
+        Assert.Equal(darling.Count - shared, int.Parse(census.Groups[3].Value));
     }
 
     private static string Format(IEnumerable<string> names) =>

@@ -107,7 +107,8 @@ public sealed class PayloadDimensionLiveTests
         string serverName,
         DateTime collectionTime,
         IReadOnlyList<QueryStatsCollector.Row> rows,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool compressPlanContent = true)
     {
         var definition = QueryStatsCollector.Instance;
         var context = new CollectorContext
@@ -150,13 +151,141 @@ public sealed class PayloadDimensionLiveTests
                 await importer.CompleteAsync(cancellationToken);
             }
 
-            await PayloadDimensionWriter.FlushAsync(connection, transaction, dimensions, stored, cancellationToken);
+            await PayloadDimensionWriter.FlushAsync(connection, transaction, dimensions, stored, cancellationToken, compressPlanContent);
             return transaction;
         }
         catch
         {
             await transaction.DisposeAsync();
             throw;
+        }
+    }
+
+    /// <summary>
+    /// #2171: plan_xml_compression = 'none' - the dim writer stores PLAIN TEXT in query_plan_xml and
+    /// leaves query_plan_gz NULL, so a direct-SQL consumer reads the plan bare, and the resolving
+    /// view (text-first) returns it unchanged. The digest is codec-independent, so a later gzip-mode
+    /// batch carrying the SAME plan is a conflict no-op: the text row STAYS text - flipping the knob
+    /// never rewrites existing content in either direction.
+    /// </summary>
+    [Fact]
+    public async Task WritePath_PlanXmlCompressionNone_StoresText_AndAGzipBatchLater_LeavesItText()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var (serverId, serverName) = NewServer();
+        var queryText = $"SELECT 'pm2171-{serverName}' AS marker;";
+        var planXml = $"<ShowPlanXML server=\"{serverName}\"><StmtSimple/></ShowPlanXML>";
+        var planDigest = PayloadDimensions.Digest(planXml);
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await WriteQueryStatsBatchAsync(
+                connection, serverId, serverName, DateTime.UtcNow,
+                new[] { NewRow("0x2171A", queryText, planXml) }, ct, compressPlanContent: false);
+
+            await using (var check = new NpgsqlCommand(
+                "SELECT query_plan_xml, query_plan_gz FROM query_plan_dim WHERE digest = $1", connection))
+            {
+                check.Parameters.AddWithValue(planDigest);
+                await using var reader = await check.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct), "the plan dim row must exist");
+                Assert.Equal(planXml, reader.GetString(0));
+                Assert.True(reader.IsDBNull(1), "'none' mode must leave query_plan_gz NULL - that is the whole contract");
+            }
+
+            /* A gzip-mode batch with the SAME plan (hours later, past the last_seen guard) must not
+               convert the row - the conflict arm only refreshes last_seen. */
+            await WriteQueryStatsBatchAsync(
+                connection, serverId, serverName, DateTime.UtcNow.AddHours(2),
+                new[] { NewRow("0x2171B", queryText, planXml) }, ct, compressPlanContent: true);
+
+            await using (var still = new NpgsqlCommand(
+                "SELECT query_plan_xml IS NOT NULL, query_plan_gz IS NULL FROM query_plan_dim WHERE digest = $1", connection))
+            {
+                still.Parameters.AddWithValue(planDigest);
+                await using var reader = await still.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.True(reader.GetBoolean(0), "the text content must survive a later gzip-mode batch");
+                Assert.True(reader.GetBoolean(1), "the gz column must stay NULL - mode flips never rewrite existing rows");
+            }
+
+            /* And the reader contract holds with no new arm: the resolving view returns the plan. */
+            await using (var resolved = new NpgsqlCommand(
+                "SELECT query_plan_xml FROM v_query_stats WHERE server_id = $1 AND query_hash = '0x2171A'", connection))
+            {
+                resolved.Parameters.AddWithValue(serverId);
+                Assert.Equal(planXml, (string?)await resolved.ExecuteScalarAsync(ct));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteServerRowsAsync(cleanup, serverId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #2171: the recompression verb's guard - a store set to plan_xml_compression = 'none' refuses
+    /// recompression (the live writer keeps producing text; converting would fight it forever), and
+    /// 'gzip' proceeds. Tested at the extracted seam against a real migrated store so the SQL and the
+    /// V62 column are exercised, not mocked.
+    /// </summary>
+    [Fact]
+    public async Task RecompressGuard_RefusesOnNone_ProceedsOnGzip()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* A migrated-but-never-served store has no config_service row — the SERVICE seeds it, not
+               the migrations (measured here: the bare UPDATE hit zero rows). Materialize it the way
+               the sibling MCP tests do; every column defaults. */
+            await using (var seed = new NpgsqlCommand(
+                "INSERT INTO config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING", connection))
+            {
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var setNone = new NpgsqlCommand(
+                "UPDATE config_service SET plan_xml_compression = 'none' WHERE id = 1", connection))
+            {
+                await setNone.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.True(await DarlingCliCommands.StoreIsSetToPlainTextPlansAsync(connection, ct),
+                "a store set to 'none' must be recognized - the verb refusing is the whole guard");
+
+            await using (var setGzip = new NpgsqlCommand(
+                "UPDATE config_service SET plan_xml_compression = 'gzip' WHERE id = 1", connection))
+            {
+                await setGzip.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.False(await DarlingCliCommands.StoreIsSetToPlainTextPlansAsync(connection, ct),
+                "the default mode must not trip the guard - recompression is the supported path there");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* The setting is store-global state shared with sibling tests - always restore the default. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, static async (cleanup, cleanupCt) =>
+            {
+                await using var restore = new NpgsqlCommand(
+                    "UPDATE config_service SET plan_xml_compression = 'gzip' WHERE id = 1", cleanup);
+                await restore.ExecuteNonQueryAsync(cleanupCt);
+            });
         }
     }
 
@@ -167,10 +296,11 @@ public sealed class PayloadDimensionLiveTests
         string serverName,
         DateTime collectionTime,
         IReadOnlyList<QueryStatsCollector.Row> rows,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool compressPlanContent = true)
     {
         await using var transaction = await WriteQueryStatsBatchUncommittedAsync(
-            connection, serverId, serverName, collectionTime, rows, cancellationToken);
+            connection, serverId, serverName, collectionTime, rows, cancellationToken, compressPlanContent);
         await transaction.CommitAsync(cancellationToken);
     }
 

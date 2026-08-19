@@ -149,7 +149,7 @@ public class WebhookAlertService
 
             if (_settings.GenericWebhookEnabled && !string.IsNullOrWhiteSpace(_settings.GenericWebhookUrl))
             {
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, context);
+                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context);
             }
 
             if (_settings.PagerDutyEnabled && !string.IsNullOrWhiteSpace(_settings.PagerDutyRoutingKey))
@@ -229,7 +229,11 @@ public class WebhookAlertService
             if (!TryParseHeaders(headersJson, out var headers, out var headerError))
                 return headerError;
 
-            var payload = BuildGenericPayload("Test Notification", "", "Webhook configuration verified", "", branding, isTest: true, bodyTemplate: bodyTemplate);
+            /* Same stand-in context as Save-time validation, for the same reason: the Test button must
+               exercise the raw tokens with quote-bearing structure or a mis-quoted one test-sends clean. */
+            var payload = BuildGenericPayload(
+                "Test Notification", "", "Webhook configuration verified", "", branding,
+                isTest: true, bodyTemplate: bodyTemplate, context: ValidationStandInContext());
 
             if (!IsWellFormedJson(payload, out var bodyError))
                 return bodyError;
@@ -332,6 +336,12 @@ public class WebhookAlertService
             facts.Add(new { name = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
 
+        /* #2108: each Fields-carrying detail item becomes its OWN section further down, so a
+           multi-incident alert reads as labeled, self-contained units instead of one flat fact
+           list where a victim's fields and its fingerprint's fields drift apart. Advice prose and
+           remediation-T-SQL items stay folded into the lead section's facts — they are commentary
+           on the whole alert, not incidents. */
+        var itemSections = new List<object>();
         if (context?.Details != null)
         {
             foreach (var detail in context.Details)
@@ -358,10 +368,18 @@ public class WebhookAlertService
                     continue;
                 }
 
+                var itemFacts = new List<object>();
                 foreach (var (label, value) in detail.Fields)
                 {
-                    facts.Add(new { name = label, value });
+                    itemFacts.Add(new { name = label, value });
                 }
+
+                itemSections.Add(new
+                {
+                    activityTitle = detail.Heading,
+                    facts = itemFacts,
+                    markdown = true
+                });
             }
         }
 
@@ -379,6 +397,7 @@ public class WebhookAlertService
                 markdown = true
             }
         };
+        sections.AddRange(itemSections);
 
         if (!isTest && branding.SnoozeHint is not null)
         {
@@ -561,6 +580,7 @@ public class WebhookAlertService
         string serverName,
         string currentValue,
         string thresholdValue,
+        string serverId,
         AlertContext? context)
     {
         try
@@ -576,7 +596,7 @@ public class WebhookAlertService
 
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate);
+                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -631,6 +651,20 @@ public class WebhookAlertService
     /// The escaping goes through <see cref="JsonSerializer"/> (see <see cref="EscapeForJson"/>) — NOT
     /// <c>JsonEncodedText.Encode</c>, which throws on the lone surrogates SQL Server names can carry — and the
     /// two surrounding quotes are stripped to leave exactly the escaped INNER text a token inside a literal needs.
+    /// <para>
+    /// #2302: the three automation tokens are the exception, and two of them deliberately BYPASS the
+    /// escaping. <c>{{context_json}}</c> / <c>{{incidents_json}}</c> are raw JSON VALUES substituted
+    /// unquoted (<c>"context": {{context_json}}</c>) — escaping them would turn structure back into the
+    /// flattened string the token exists to replace. Their shape is the SAME
+    /// <see cref="AlertContextSerializer"/> projection persisted as the alert-history ContextJson, so a
+    /// consumer parses one shape whether it reads the webhook or the history row — except that code-block
+    /// bodies and remediation payloads are redacted first (<see cref="RedactForWebhook"/>): the copy-paste
+    /// T-SQL follows the same never-on-a-webhook rule as every other channel here. <c>{{dedup_key}}</c> is
+    /// an ordinary escaped string carrying the same key the PagerDuty channel derives — including its
+    /// stable metric+server fallback when an alert has no incident — so tickets correlate across channels.
+    /// A template that quotes a raw token anyway produces malformed JSON and is caught by the caller's
+    /// well-formedness check, surfacing as a config error rather than a silent bad post.
+    /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
         string metricName,
@@ -640,7 +674,8 @@ public class WebhookAlertService
         AlertBranding branding,
         bool isTest = false,
         AlertContext? context = null,
-        string? bodyTemplate = null)
+        string? bodyTemplate = null,
+        string serverId = "")
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -648,6 +683,14 @@ public class WebhookAlertService
         var contextText = isTest
             ? $"Webhook configuration is working correctly. Sent by {branding.EditionName}."
             : RenderContextForTemplate(context, branding);
+
+        /* Keyed on the numeric serverId the fan-out passes — the same identity the LIVE PagerDuty path
+           feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert. The
+           serverName arm is THIS channel's own fallback for callers with no id (the settings-window test
+           send); it is not a guarantee PagerDuty's path shares, so a caller wanting cross-channel
+           correlation must pass the id. */
+        var dedupKey = DerivePagerDutyDedupKey(
+            string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context);
 
         var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -658,6 +701,13 @@ public class WebhookAlertService
             ["severity"] = EscapeForJson(isTest ? "TEST" : badgeText),
             ["context"] = EscapeForJson(contextText),
             ["timestamp"] = EscapeForJson(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)),
+            /* Raw JSON values — never EscapeForJson (see the doc comment). "{}" / "[]" rather than empty
+               so a template's `"context": {{context_json}}` stays well-formed on a context-less alert.
+               Serialized from a REDACTED copy: the copy-paste remediation T-SQL never leaves the process
+               on any webhook channel, and a raw token is not an exception to that rule. */
+            ["context_json"] = context is null ? "{}" : AlertContextSerializer.Serialize(RedactForWebhook(context)),
+            ["incidents_json"] = AlertContextSerializer.SerializeIncidents(context),
+            ["dedup_key"] = EscapeForJson(dedupKey),
         };
 
         /* Single pass: a MatchEvaluator's output is NOT re-scanned, so a value that itself contains the
@@ -667,8 +717,10 @@ public class WebhookAlertService
         return s_genericPlaceholders.Replace(template, m => values[m.Groups[1].Value]);
     }
 
+    /* context_json before context: alternation is ordered, and while the closing \}\} would force a
+       backtrack to the right answer anyway, longest-first means correctness never leans on it. */
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
-        new(@"\{\{(metric|server|value|threshold|severity|context|timestamp)\}\}",
+        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|context|timestamp)\}\}",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
@@ -709,6 +761,49 @@ public class WebhookAlertService
     }
 
     /// <summary>
+    /// The webhook posture applied to structure (#2302 review catch): every channel in this file replaces
+    /// copy-paste remediation T-SQL with <see cref="TsqlWebhookHint"/> before anything leaves the process —
+    /// Teams, Slack, PagerDuty's custom_details, and this channel's own <c>{{context}}</c> flattening — and
+    /// a raw-JSON token is not an exception. Code-block items keep their heading and the flag (so a consumer
+    /// can see a remediation EXISTS) but carry the hint as their body and no <c>Remediation</c> payload; the
+    /// typed payload is likewise stripped from every item defensively. Returns a COPY — the same context
+    /// instance flows on to the other channels, and mutating it here would redact their email too.
+    /// </summary>
+    private static AlertContext RedactForWebhook(AlertContext context)
+    {
+        var redacted = new AlertContext { Incidents = context.Incidents };
+        foreach (var detail in context.Details)
+        {
+            if (detail.IsCodeBlock)
+            {
+                redacted.Details.Add(new AlertDetailItem
+                {
+                    Heading = detail.Heading,
+                    Body = TsqlWebhookHint,
+                    IsCodeBlock = true
+                });
+                continue;
+            }
+
+            if (detail.Remediation is null)
+            {
+                redacted.Details.Add(detail);
+                continue;
+            }
+
+            redacted.Details.Add(new AlertDetailItem
+            {
+                Heading = detail.Heading,
+                Fields = detail.Fields,
+                Body = detail.Body,
+                IsCodeBlock = false
+            });
+        }
+
+        return redacted;
+    }
+
+    /// <summary>
     /// Escapes a value for interpolation INSIDE a JSON string literal — the escaped inner text, without the
     /// surrounding quotes. HTML-sensitive and non-ASCII characters escape to <c>\uXXXX</c>; over-escaping is
     /// still valid JSON and keeps the payload ASCII-safe.
@@ -744,13 +839,41 @@ public class WebhookAlertService
         }
 
         /* Render with placeholder-shaped stand-ins: substitution is what can break the JSON, so validating
-           the raw template would miss a token sitting outside a string literal. */
+           the raw template would miss a token sitting outside a string literal. The stand-in CONTEXT is
+           what makes the raw tokens honest here (#2310 review catch): with a null context they render to
+           the quote-free `{}` / `[]`, so a mis-quoted raw token — `"context": "{{context_json}}"` —
+           validates clean and only breaks on the first real alert that carries structure. */
         var rendered = BuildGenericPayload(
             "Test Notification", "Test Server", "0", "0",
-            new AlertBranding("Performance Monitor", null), isTest: true, bodyTemplate: bodyTemplate);
+            new AlertBranding("Performance Monitor", null), isTest: true, bodyTemplate: bodyTemplate,
+            context: ValidationStandInContext());
 
         return IsWellFormedJson(rendered, out var bodyError) ? null : bodyError;
     }
+
+    /// <summary>
+    /// The stand-in context Save-time validation and the settings Test send render the raw tokens with.
+    /// Its serialization is guaranteed to contain double quotes (every JSON property name carries them),
+    /// so quoting a raw token in a template breaks <see cref="IsWellFormedJson"/> at Save/Test — where
+    /// the operator can see and fix it — instead of validating clean against the trivial <c>{}</c> and
+    /// failing silently into the log on the first deadlock alert with real structure. One incident, so
+    /// <c>{{incidents_json}}</c> is exercised the same way.
+    /// </summary>
+    internal static AlertContext ValidationStandInContext() => new()
+    {
+        Details =
+        {
+            new AlertDetailItem
+            {
+                Heading = "Validation",
+                Fields = { ("Check", "stand-in \"quoted\" value") }
+            }
+        },
+        Incidents = new List<AlertIncident>
+        {
+            new("0000000000000000", new List<string> { "validation.dbo.stand_in" })
+        }
+    };
 
     /// <summary>
     /// True when the text is the built-in default body template (newline-insensitive), or empty. The settings

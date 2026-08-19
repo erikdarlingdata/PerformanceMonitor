@@ -36,7 +36,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `list_servers` | Lists all monitored SQL Server instances with status and last collection time | none |
-        | `get_collection_health` | Shows collector health: running, failing, or stale | `server_name` |
+        | `get_collection_health` | Shows collector health: running, failing, or stale, plus the sweep_pressure verdict (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) | `server_name` |
         | `get_server_summary` | Quick health overview: CPU %, memory, blocking/deadlock counts | `server_name` |
         | `get_daily_summary` | Daily composite health band + wait/query/deadlock/blocking/CPU/memory/alert rollup for one day | `server_name`, `summary_date` (yyyy-MM-dd, default today) |
 
@@ -68,8 +68,8 @@ internal static class McpInstructions
         ### Query Performance Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash. `max_dop` is a lifetime-max for the cached plan, not current parallelism - confirm with `analyze_query_plan` | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop` |
-        | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time | `server_name`, `hours_back`, `top`, `database_name` |
+        | `get_top_queries_by_cpu` | Expensive queries from plan cache with DOP, spills, query_hash. `max_dop` is a lifetime-max for the cached plan, not current parallelism - confirm with `analyze_query_plan`. `cpu_attribution.attributed_cpu_ratio` says how much of the box's measured CPU the returned rows explain | `server_name`, `hours_back`, `top`, `database_name`, `parallel_only`, `min_dop` |
+        | `get_top_procedures_by_cpu` | Expensive stored procedures by CPU time, with the same `cpu_attribution` disclosure | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store (persistent) | `server_name`, `hours_back`, `top`, `database_name` |
         | `get_query_trend` | Time-series for a specific query by query_hash | `query_hash` (required), `database_name` (required), `server_name`, `hours_back` |
         | `get_query_duration_trend` | Average query duration over time (detect degradation) | `server_name`, `hours_back` |
@@ -137,6 +137,7 @@ internal static class McpInstructions
         | `get_server_config` | sp_configure settings with configured and in-use values | `server_name` |
         | `get_database_config` | Database-level settings: RCSI, recovery model, auto-shrink, Query Store, etc. | `server_name`, `database_name` |
         | `get_database_scoped_config` | Database-scoped configuration (MAXDOP, legacy CE, parameter sniffing) | `server_name`, `database_name` |
+        | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds | `server_name`, `database_name` |
         | `get_trace_flags` | Active trace flags with global/session scope | `server_name` |
         | `get_server_config_changes` | sp_configure change history (diff of on-connect snapshots) | `server_name`, `hours_back` (default 168) |
         | `get_database_config_changes` | sys.databases change history (recovery model, RCSI, compat level, etc.) | `server_name`, `hours_back` (default 168) |
@@ -189,11 +190,11 @@ internal static class McpInstructions
         ### Diagnostic Analysis Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `analyze_server` | Runs the inference engine: scores facts, traverses relationship graph, returns evidence-backed findings with severity and recommended next tools. A remediable finding also carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), with a two-sided risk-disclosure header on destructive changes; advisory only, never executed | `server_name`, `hours_back` (default 4) |
+        | `analyze_server` | Runs the inference engine: scores facts, traverses relationship graph, returns evidence-backed findings with severity and recommended next tools. A remediable finding also carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), with a two-sided risk-disclosure header on destructive changes; advisory only, never executed. Force-plan findings additionally carry `structured_remediation`: the verdict as machine-readable fields (eligible + named blockers), evidence, and split force/unforce/verify SQL | `server_name`, `hours_back` (default 4) |
         | `get_analysis_facts` | Exposes raw scored facts from the collect+score pipeline — every observation the engine sees with base severity, amplifiers, and metadata | `server_name`, `hours_back` (default 4), `source` (filter), `min_severity` |
         | `compare_analysis` | Compares two time periods (e.g., peak vs off-peak, before vs after a change) showing severity deltas for each fact | `server_name`, `hours_back` (default 4), `baseline_hours_back` (default 28) |
         | `audit_config` | Edition-aware configuration audit: evaluates CTFP, MAXDOP, max memory, and max worker threads against best practices | `server_name` |
-        | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs, deduplicated to one entry per diagnostic chain (`story_path_hash` + `incident_id`): the latest occurrence plus `occurrences`/`first_seen`/`last_seen`/`peak_severity` spanning the window; each remediable finding carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the persisted action, advisory only and never executed | `server_name`, `hours_back` (default 24) |
+        | `get_analysis_findings` | Retrieves persisted findings from previous analysis runs, deduplicated to one entry per diagnostic chain (`story_path_hash` + `incident_id`): the latest occurrence plus `occurrences`/`first_seen`/`last_seen`/`peak_severity` spanning the window; each remediable finding carries `remediation_command` — the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the persisted action, advisory only and never executed; force-plan findings additionally carry `structured_remediation` (verdict + evidence + split artifacts, machine-readable) | `server_name`, `hours_back` (default 24) |
         | `mute_analysis_finding` | Mutes a finding pattern by story_path_hash so it won't appear in future runs | `story_path_hash` (required), `server_name`, `reason` |
 
         ## Recommended Workflow
@@ -212,7 +213,7 @@ internal static class McpInstructions
         6. **Compare**: Use `compare_analysis` to see if problems are new (compare last 4 hours vs yesterday same time)
         7. **Config**: Use `audit_config` for edition-aware configuration recommendations
         8. **Active queries**: Use `get_active_queries` to see what was running at a specific time — critical for correlating CPU spikes, blocking events, or deadlocks with actual queries
-        9. **Configuration**: Use `get_server_config`, `get_database_config`, or `get_database_scoped_config` to check server and database settings
+        9. **Configuration**: Use `get_server_config`, `get_database_config`, or `get_database_scoped_config` to check server and database settings; `get_query_store_health` shows whether Query Store is actually working per database (the silent failure is desired READ_WRITE with actual READ_ONLY)
         10. **Query investigation**: After finding a problematic query via `get_top_queries_by_cpu`, use `get_query_trend` with its `query_hash` to see performance history
         11. **Plan analysis**: Use `analyze_query_plan` with the `query_hash` from step 10 to get detailed plan analysis with warnings, missing indexes, and optimization recommendations
 

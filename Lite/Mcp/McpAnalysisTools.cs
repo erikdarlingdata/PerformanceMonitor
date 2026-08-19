@@ -11,7 +11,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpAnalysisTools
 {
-    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed.")]
+    [McpServerTool(Name = "analyze_server"), Description("Runs the diagnostic inference engine against a server's collected data. Scores wait stats, blocking, memory, config, and other facts, then traverses a relationship graph to build evidence-backed stories about what's wrong and why. Anomaly detection compares the analysis window against 30-day time-bucketed baselines (hour-of-day x day-of-week) to identify deviations that are unusual for this specific time slot, not just unusual overall. Returns structured findings with severity scores, evidence chains, baseline context for anomalies, and recommended next tools to call. A remediable finding also carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose.")]
     public static async Task<string> AnalyzeServer(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -100,6 +100,11 @@ public sealed class McpAnalysisTools
                         // finding has no remediable action. PRODUCE ONLY — advisory text; the read-only
                         // MCP never executes it.
                         remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation),
+                        // #2138: the machine-first projection — verdict (eligible/blockers, the future
+                        // bot's policy gate), evidence, and split force/unforce/verify artifacts as
+                        // named fields, so an agent never regexes the comment prose above. Null for
+                        // non-force-plan remediations. ADVISORY like everything else here.
+                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation),
                         // B3 Phase 3 (§6): two-sided risk DISCLOSURE for a destructive
                         // remediation, read-only (Lite has no Apply path; its RCSI fields
                         // are null/0 so the inaction side shows the weak-case baseline).
@@ -500,7 +505,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed).")]
+    [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed).")]
     public static async Task<string> GetAnalysisFindings(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -616,7 +621,9 @@ public sealed class McpAnalysisTools
                         // persisted action via the shared renderer (all seven shapes + the two-sided
                         // risk-disclosure comment header on the destructive ones). Null when the finding
                         // has no remediable action. PRODUCE ONLY — the read-only MCP never executes it.
-                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation)
+                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation),
+                        // #2138: the machine-first projection — see analyze_server's twin field.
+                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation)
                     };
                 })
             }, McpHelpers.JsonOptions);

@@ -37,6 +37,11 @@ public partial class FinOpsTab : UserControl
 
     private readonly Dictionary<DataGrid, IDataGridFilterManager> _filterManagers = new();
 
+    /* #2306: suppresses ServerSelector_SelectionChanged while RefreshServerList reselects the SAME
+       logical server through a new instance — without it, any Manage Servers edit would clear filters
+       for a server switch that never happened. Darling's FinOps tab carries the same flag. */
+    private bool _populatingServers;
+
     private DataGridFilterManager<DatabaseResourceUsageRow>? _dbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _storageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _dbSizesFilterMgr;
@@ -83,18 +88,33 @@ public partial class FinOpsTab : UserControl
 
         var previousSelection = ServerSelector.SelectedItem as ServerConnection;
         var servers = _serverManager.GetAllServers();
-        ServerSelector.ItemsSource = servers;
 
-        if (previousSelection != null)
+        if (previousSelection != null
+            && servers.FirstOrDefault(s => s.Id == previousSelection.Id) is { } match)
         {
-            var match = servers.FirstOrDefault(s => s.Id == previousSelection.Id);
-            if (match != null)
+            /* #2306 review catch (Darling's _populatingServers, ported): the same logical server
+               reselected through a NEW instance (ServerManager replaces edited entries, and
+               ComboBox compares by reference) still raises SelectionChanged. Without the guard, a
+               tag or favorite edit in Manage Servers would wipe active column filters for a server
+               switch that never happened. Nothing changed for this tab, so the handler — clear,
+               drill reset, reload — is suppressed entirely. */
+            _populatingServers = true;
+            try
             {
+                ServerSelector.ItemsSource = servers;
                 ServerSelector.SelectedItem = match;
-                return;
             }
+            finally
+            {
+                _populatingServers = false;
+            }
+
+            return;
         }
 
+        /* The previous selection is gone (or never existed): the selection genuinely moves, so the
+           assignments below fire the handler on purpose — a real switch clears filters and reloads. */
+        ServerSelector.ItemsSource = servers;
         if (servers.Count > 0)
             ServerSelector.SelectedIndex = 0;
     }
@@ -370,9 +390,13 @@ public partial class FinOpsTab : UserControl
         {
             "RIGHT_SIZED" => $"CPU is moderately loaded (avg {data.AvgCpuPct:N1}%, p95 {data.P95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bpPct:N0}% of physical RAM). No action needed.",
             "OVER_PROVISIONED" => $"CPU is lightly loaded (avg {data.AvgCpuPct:N1}%, max {data.MaxCpuPct}%) and buffer pool uses only {bpPct:N0}% of physical RAM. This server may have more resources than it needs.",
-            "UNDER_PROVISIONED" => data.P95CpuPct > 85
-                ? $"CPU p95 is {data.P95CpuPct:N1}% (threshold: 85%). This server may need more CPU capacity."
-                : $"Buffer pool uses {bpPct:N0}% of physical RAM and memory ratio is {data.MemoryRatio:N2} (threshold: 0.95). Memory pressure is high.",
+            /* The reason comes from the same place as the verdict. This branch used to read
+               "P95CpuPct > 85 ? CPU : memory ratio is {x} (threshold: 0.95)", so a server flagged for grant
+               pressure or worker saturation would have been explained as a memory ratio that no longer
+               decides anything, citing a threshold the code does not check (#2246). */
+            "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
+                data.P95CpuPct, data.MaxGrantWaiters, data.GrantTimeouts, data.ForcedGrants,
+                data.MaxWorkersCount, data.CurrentWorkersCount),
             _ => ""
         };
 
@@ -805,7 +829,19 @@ public partial class FinOpsTab : UserControl
 
     private async void ServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_populatingServers) return; // same-server list repopulation, not a switch — see RefreshServerList
+
         ResetStorageDrill(); // a new server invalidates any open object/index drill
+
+        /* #2306: column filters belong to the previous server too — same mechanism as Darling's FinOps
+           tab: a filter set against server A silently zeroes server B's grid while the count indicators
+           (computed from the unfiltered list) stay full, and Refresh cannot clear it. Cleared via the
+           map every FinOps manager registers into, so a new grid inherits this without a second edit. */
+        foreach (var manager in _filterManagers.Values)
+        {
+            manager.ClearFilters();
+        }
+
         await LoadPerServerDataAsync();
     }
 

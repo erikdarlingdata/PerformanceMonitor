@@ -231,6 +231,17 @@ public sealed class DarlingAnalysisPipelineTests
 
         var tables = CollectorCatalog.All.Select(s => s.TargetTable).ToHashSet(StringComparer.Ordinal);
 
+        /* Keyed SIDE tables are a third legal category, and deliberately not in either set above: they
+           are not collector tables (nothing collects INTO them per sweep; a bespoke upsert path writes
+           them, and they are pruned on last_seen rather than by drop_chunks) and they are not V4
+           passthrough views. #2150's query_store_text is the first one a drill-down reads, because
+           statement text moved out of the fact row and has to be resolved back. Sourced from the store
+           class's own TableName rather than spelled here, so a rename cannot leave this guard asserting
+           against a table that no longer exists. */
+        var sideTables = new[] { QueryStoreTextStore.TableName }
+            .Select(t => t.Contains('.', StringComparison.Ordinal) ? t.Split('.')[^1] : t)
+            .ToHashSet(StringComparer.Ordinal);
+
         foreach (var sql in PgDrillDownCollector.AllSql)
         {
             /* Scan the SQL the SERVER sees, not the comments explaining it. Two things in the raw text
@@ -257,8 +268,9 @@ public sealed class DarlingAnalysisPipelineTests
             {
                 var target = m.Groups[1].Value;
                 Assert.True(
-                    views.Contains(target) || tables.Contains(target) || ctes.Contains(target),
-                    $"FROM/JOIN target '{target}' resolves to no V4 view, collector table, or CTE in:\n{sql}");
+                    views.Contains(target) || tables.Contains(target) || ctes.Contains(target)
+                        || sideTables.Contains(target),
+                    $"FROM/JOIN target '{target}' resolves to no V4 view, collector table, keyed side table, or CTE in:\n{sql}");
             }
         }
     }
@@ -297,6 +309,11 @@ public sealed class DarlingAnalysisPipelineTests
         Assert.True(analysis.NotificationsEnabled);
         Assert.Equal(1.5, analysis.NotifySeverity);
         Assert.Equal(TimeSpan.FromSeconds(120), DarlingWorker.AnalysisTimeout);
+        /* #2299: the shutdown grace a stopping sweep grants its in-flight analysis pass. Must stay WELL
+           inside the worker's 15s shutdown drain budget and the host's 30s ShutdownTimeout — the await
+           runs inside a drained sweep body, so a grace near either ceiling would turn a clean stop into
+           a force-kill. */
+        Assert.Equal(TimeSpan.FromSeconds(5), DarlingWorker.AnalysisShutdownGrace);
     }
 
     [Fact]

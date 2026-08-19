@@ -120,9 +120,12 @@ public sealed class ViewerControlPlaneMigration
             var storeService = await dataService.GetServiceConfigAsync(cancellationToken);
             if (storeService is not null && ShouldImportMcp(storeService, _appSettings))
             {
+                /* #2167: carry the store's current backfill flag through unchanged — this migration imports
+                   MCP/web settings and must never flip an operator's backfill switch as a side effect. */
                 await dataService.UpdateServiceFlagsAsync(
                     storeService.CapturePlans, _appSettings.McpEnabled, _appSettings.McpPort,
-                    _appSettings.WebEnabled, _appSettings.WebPort, cancellationToken);
+                    _appSettings.WebEnabled, _appSettings.WebPort, storeService.QueryStoreBackfillEnabled,
+                    storeService.QueryStoreTextBudgetMb, storeService.MaxConcurrentSweeps, cancellationToken);
                 imported++;
             }
         }

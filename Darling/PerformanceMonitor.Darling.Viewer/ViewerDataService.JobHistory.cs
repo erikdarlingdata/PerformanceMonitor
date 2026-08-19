@@ -28,7 +28,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed class ViewerJobHistoryRow
 {
     public int ServerId { get; init; }
+
+    /// <summary>The operator's display alias when one is registered, the raw collected name otherwise
+    /// (#2126 — the Server column and filter combo show the same names every other tab does).</summary>
     public string ServerName { get; init; } = "";
+
     public long InstanceId { get; init; }
     public string JobId { get; init; } = "";
     public string JobName { get; init; } = "";
@@ -94,7 +98,9 @@ public sealed partial class ViewerDataService
     /// Long-runtime is computed reader-side via a per-job window function (a step_id 0 outcome exceeding 2x
     /// its job's average successful-outcome duration, floored at 60s), and each row carries its job's last
     /// successful outcome run. With no <paramref name="serverId"/> it aggregates ALL servers (the tab
-    /// default); with one it scopes to that server (the Server filter combo).
+    /// default); with one it scopes to that server (the Server filter combo). server_name resolves through
+    /// the <c>servers</c> registry to the operator's display alias when one exists (#2126), so the tab
+    /// speaks the same names as the rest of the viewer.
     /// </para>
     /// </summary>
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
@@ -115,7 +121,7 @@ WITH svr AS (
 base AS (
     SELECT
         jh.server_id,
-        jh.server_name,
+        COALESCE(reg.display_name, jh.server_name) AS server_name,
         jh.instance_id,
         jh.job_id,
         jh.job_name,
@@ -136,6 +142,7 @@ base AS (
             OVER (PARTITION BY jh.server_id, jh.job_id) AS last_success_run_utc
     FROM job_history AS jh
     LEFT JOIN svr ON svr.server_id = jh.server_id
+    LEFT JOIN servers AS reg ON reg.server_id = jh.server_id
     WHERE jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) >= $1
     {serverFilter}
 )
@@ -232,7 +239,7 @@ WITH svr AS (
 latest AS (
     SELECT
         a.server_id,
-        a.server_name,
+        COALESCE(reg.display_name, a.server_name) AS server_name,
         a.agent_running,
         a.agent_status_desc,
         a.agent_startup_desc,
@@ -240,6 +247,7 @@ latest AS (
         ROW_NUMBER() OVER (PARTITION BY a.server_id ORDER BY a.collection_time DESC) AS rn
     FROM agent_status AS a
     LEFT JOIN svr ON svr.server_id = a.server_id
+    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
     {serverFilter}
 )
 SELECT

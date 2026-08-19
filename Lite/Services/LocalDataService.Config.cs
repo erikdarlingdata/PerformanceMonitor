@@ -115,6 +115,48 @@ ORDER BY database_name";
         return items;
     }
 
+
+    /// <summary>
+    /// Gets the latest per-database Query Store health snapshot (#2319 — the Query Store grid).
+    /// </summary>
+    public async Task<List<QueryStoreHealthRow>> GetLatestQueryStoreHealthAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        command.CommandText = @"
+SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes
+FROM v_query_store_health
+WHERE server_id = $1
+AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)" + dbClause + @"
+ORDER BY database_name";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        var items = new List<QueryStoreHealthRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new QueryStoreHealthRow
+            {
+                DatabaseName = reader.GetString(0),
+                ActualState = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                DesiredState = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                ReadonlyReason = reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3)),
+                CurrentStorageMb = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+                MaxStorageMb = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                SizeBasedCleanupMode = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                StaleQueryThresholdDays = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
+                MaxPlansPerQuery = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
+                IntervalLengthMinutes = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
+            });
+        }
+
+        return items;
+    }
+
     /// <summary>
     /// Gets the latest database-scoped configuration snapshot.
     /// </summary>
@@ -245,6 +287,41 @@ public class DatabaseConfigRow
     public string AdrDisplay => IsAcceleratedDatabaseRecoveryOn ? "Yes" : "No";
     public string MemoryOptimizedDisplay => IsMemoryOptimizedEnabled ? "Yes" : "No";
     public string OptimizedLockingDisplay => IsOptimizedLockingOn ? "Yes" : "No";
+}
+
+
+/// <summary>
+/// One database's Query Store health row (#2319) — the latest collected
+/// sys.database_query_store_options snapshot. <see cref="StateDisplay"/> folds the classic silent
+/// failure into one glanceable cell: actual and desired agreeing shows one state; disagreeing shows
+/// both, because desired READ_WRITE with actual READ_ONLY is precisely the condition this collector
+/// exists to surface. <see cref="ReadonlyReasonDisplay"/> decodes the bitmask values an operator
+/// actually meets; unknown bits fall back to the raw number rather than guessing.
+/// </summary>
+public class QueryStoreHealthRow
+{
+    public string DatabaseName { get; set; } = "";
+    public string ActualState { get; set; } = "";
+    public string DesiredState { get; set; } = "";
+    public int ReadonlyReason { get; set; }
+    public long CurrentStorageMb { get; set; }
+    public long MaxStorageMb { get; set; }
+    public string SizeBasedCleanupMode { get; set; } = "";
+    public long StaleQueryThresholdDays { get; set; }
+    public long MaxPlansPerQuery { get; set; }
+    public long IntervalLengthMinutes { get; set; }
+
+    public string StateDisplay =>
+        string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
+            ? ActualState
+            : $"{ActualState} (wanted {DesiredState})";
+
+    /// <summary>Percent of the storage cap in use; blank when the cap is 0 (unlimited/unknown).</summary>
+    public string PercentOfCapDisplay =>
+        MaxStorageMb > 0 ? $"{100.0 * CurrentStorageMb / MaxStorageMb:F0}%" : "";
+
+    /// <summary>The shared bit-by-bit decode — one label table for every surface that shows this value.</summary>
+    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.Decode(ReadonlyReason);
 }
 
 public class DatabaseScopedConfigRow

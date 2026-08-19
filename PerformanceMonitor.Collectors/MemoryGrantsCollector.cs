@@ -120,8 +120,8 @@ OPTION(RECOMPILE);";
     {
         /* Composite delta key and group names are the parity contract — do not change casually. */
         var deltaKey = $"{row.PoolId}_{row.ResourceSemaphoreId}";
-        var deltaTimeouts = context.Deltas.CalculateDelta(context.ServerId, "memory_grants_timeouts", deltaKey, row.TimeoutErrorCount, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaForced = context.Deltas.CalculateDelta(context.ServerId, "memory_grants_forced", deltaKey, row.ForcedGrantCount, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaTimeouts = context.Deltas.CalculateDelta(context.ServerId, "memory_grants_timeouts", deltaKey, row.TimeoutErrorCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaForced = context.Deltas.CalculateDelta(context.ServerId, "memory_grants_forced", deltaKey, row.ForcedGrantCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.ResourceSemaphoreId)   /* resource_semaphore_id (appended as SHORT, matching the original) */

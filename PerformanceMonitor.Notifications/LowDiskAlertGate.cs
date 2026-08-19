@@ -53,7 +53,13 @@ public static class LowDiskAlertGate
     /// by Lite and Dashboard so the two apps grade low-disk identically.
     /// </summary>
     public static bool IsCriticallyLow(double freePercent, double freeGb) =>
-        freePercent <= CriticalFreePercent || freeGb <= CriticalFreeGb;
+        IsCriticallyLow(freePercent, freeGb, CriticalFreePercent, CriticalFreeGb);
+
+    /// <summary>#2107: the configurable form — both apps pass their settings' critical floors; the
+    /// parameterless overload keeps the shipped constants for callers with no settings in reach
+    /// (and for the tests pinning the defaults).</summary>
+    public static bool IsCriticallyLow(double freePercent, double freeGb, double criticalFreePercent, double criticalFreeGb) =>
+        freePercent <= criticalFreePercent || freeGb <= criticalFreeGb;
 
     /// <summary>
     /// Returns true when a low-disk alert should fire this cycle.

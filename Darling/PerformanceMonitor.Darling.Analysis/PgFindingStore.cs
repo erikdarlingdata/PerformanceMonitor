@@ -166,7 +166,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
             var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId);
 
             foreach (var story in stories)
@@ -208,7 +208,7 @@ VALUES ($1, $2, $3, $4, $5, $6)";
                 });
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgFindingStore] FilterMutedFindingsAsync failed: {Message}", ex.Message);
         }
@@ -239,14 +239,14 @@ VALUES ($1, $2, $3, $4, $5, $6)";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             foreach (var finding in findings)
             {
                 await InsertFindingAsync(connection, finding);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgFindingStore] InsertFindingsAsync failed: {Message}", ex.Message);
         }

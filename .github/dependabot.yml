@@ -13,11 +13,18 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 10
-    # One grouped PR for all NuGet bumps, to keep review noise down.
+    # One grouped PR for routine NuGet bumps, to keep review noise down. Majors are
+    # deliberately NOT in the group (Studio's convention): a breaking change arrives as
+    # its own PR instead of buried in a routine batch. With central package management
+    # (Directory.Packages.props) each bump is one line, so grouped PRs can no longer
+    # ship the #2100 class of multi-project version misalignment.
     groups:
-      nuget:
+      nuget-patch-and-minor:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
   # GitHub Actions used by the workflows in .github/workflows.
   - package-ecosystem: "github-actions"
     directory: "/"

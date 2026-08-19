@@ -171,7 +171,25 @@ public sealed class DarlingMcpAlertTools
             exclude_cdc = s.LongRunningQueryExcludeCdc
         },
         tempdb_space = new { enabled = s.TempDbSpaceEnabled, threshold_percent = s.TempDbSpaceThresholdPercent },
-        low_disk = new { enabled = s.LowDiskEnabled, threshold_percent = s.LowDiskThresholdPercent, threshold_gb = s.LowDiskThresholdGb },
+        low_disk = new
+        {
+            enabled = s.LowDiskEnabled,
+            threshold_percent = s.LowDiskThresholdPercent,
+            threshold_gb = s.LowDiskThresholdGb,
+            /* #2107: the CRITICAL severity tier's floors (#1136) — previously compile-time. */
+            critical_free_percent = s.DiskCriticalFreePercent,
+            critical_free_gb = s.DiskCriticalFreeGb
+        },
+        /* #2107: the monitor's own self-alerts (store volume, collection health) — previously
+           compile-time constants. */
+        self_alerts = new
+        {
+            disk_free_warn_percent = s.SelfDiskFreeWarnPercent,
+            collection_stale_minutes = s.CollectionStaleMinutes,
+            collection_failure_threshold = s.CollectionFailureThreshold,
+            /* #2136: the Store Job Over Cadence warning percent (Critical is fixed at 100). */
+            store_job_cadence_warn_percent = s.StoreJobCadenceWarnPercent
+        },
         pvs = new { enabled = s.PvsEnabled, threshold_percent = s.PvsThresholdPercent, floor_gb = s.PvsFloorGb },
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
@@ -184,7 +202,9 @@ public sealed class DarlingMcpAlertTools
             enabled = s.AnalysisEnabled,
             interval_minutes = s.AnalysisIntervalMinutes,
             notifications_enabled = s.AnalysisNotificationsEnabled,
-            notify_severity = s.AnalysisNotifySeverity
+            notify_severity = s.AnalysisNotifySeverity,
+            /* #2107: was a hardcoded 360 in Darling while Lite passed a configured value through. */
+            notify_cooldown_minutes = s.AnalysisNotifyCooldownMinutes
         }
     };
 
@@ -617,7 +637,27 @@ public sealed class DarlingMcpAlertTools
                             case "enabled": AddBool("low_disk_enabled", n, "low_disk.enabled"); break;
                             case "threshold_percent": AddInt("low_disk_threshold_percent", n, "low_disk.threshold_percent", 0, 100); break;
                             case "threshold_gb": AddInt("low_disk_threshold_gb", n, "low_disk.threshold_gb", 0, int.MaxValue); break;
+                            /* #2107: the CRITICAL tier floors, clamped like the warning thresholds. */
+                            case "critical_free_percent": AddInt("disk_critical_free_percent", n, "low_disk.critical_free_percent", 0, 100); break;
+                            case "critical_free_gb": AddInt("disk_critical_free_gb", n, "low_disk.critical_free_gb", 0, int.MaxValue); break;
                             default: error = $"Unknown field 'low_disk.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "self_alerts":
+                    /* #2107: the monitor's own store-volume and collection-health thresholds. The
+                       clamps match DarlingAlertSettings' read-side clamps, so a value stored here is
+                       the value the sweep uses. */
+                    Group(prop.Value, "self_alerts", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "disk_free_warn_percent": AddInt("self_disk_free_warn_percent", n, "self_alerts.disk_free_warn_percent", 0, 100); break;
+                            case "collection_stale_minutes": AddInt("collection_stale_minutes", n, "self_alerts.collection_stale_minutes", 5, 1440); break;
+                            case "collection_failure_threshold": AddInt("collection_failure_threshold", n, "self_alerts.collection_failure_threshold", 1, 1000); break;
+                            case "store_job_cadence_warn_percent": AddInt("store_job_cadence_warn_percent", n, "self_alerts.store_job_cadence_warn_percent", 5, 100); break;
+                            default: error = $"Unknown field 'self_alerts.{k}'."; break;
                         }
                     });
                     break;
@@ -691,6 +731,8 @@ public sealed class DarlingMcpAlertTools
                             case "interval_minutes": AddInt("analysis_interval_minutes", n, "analysis.interval_minutes", 5, 360); break;
                             case "notifications_enabled": AddBool("analysis_notifications_enabled", n, "analysis.notifications_enabled"); break;
                             case "notify_severity": AddDouble("analysis_notify_severity", n, "analysis.notify_severity", 0.0, 2.0); break;
+                            /* #2107: the clamp matches the shared engine's documented [30, 10080]. */
+                            case "notify_cooldown_minutes": AddInt("analysis_notify_cooldown_minutes", n, "analysis.notify_cooldown_minutes", 30, 10080); break;
                             default: error = $"Unknown field 'analysis.{k}'."; break;
                         }
                     });

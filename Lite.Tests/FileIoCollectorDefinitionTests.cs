@@ -115,7 +115,7 @@ public sealed class FileIoCollectorDefinitionTests
 
         Assert.Equal(8, deltas.Calls.Count);
         Assert.All(deltas.Calls, c => Assert.Equal("SO|SO_data", c.Key));
-        Assert.All(deltas.Calls, c => Assert.Equal(300, c.MaxGap));
+        Assert.All(deltas.Calls, c => Assert.Equal(CollectorDeltaCalculator.DefaultMaxGapSeconds, c.MaxGap));
         Assert.Equal(
             new[]
             {

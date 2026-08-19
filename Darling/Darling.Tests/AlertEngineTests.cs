@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
@@ -46,6 +48,7 @@ public sealed class AlertEngineTests
         public bool FailedJobEnabled { get; set; }
         public bool PvsEnabled { get; set; }
         public bool DatabaseStateEnabled { get; set; }
+        public bool ForcePlanFailureEnabled { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         /* #1839: 0 = off, the shipped default — a test must opt in for the wait gate to run at all. */
@@ -62,6 +65,12 @@ public sealed class AlertEngineTests
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
+        /* #2107: the previously-hardcoded knobs, at their shipped defaults. */
+        public int DiskCriticalFreePercent { get; set; } = 3;
+        public int DiskCriticalFreeGb { get; set; } = 2;
+        public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int CollectionStaleMinutes { get; set; } = 30;
+        public int CollectionFailureThreshold { get; set; } = 10;
         /* #1984: DarlingConfig defaults (40% / 1 GB); enable stays the class's opt-in OFF. */
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;
@@ -152,6 +161,18 @@ public sealed class AlertEngineTests
             DatabaseStateFetches++;
             return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
         }
+
+        /* #2157: plantable rows + a fetch counter, mirroring the database-state seam above so the
+           forced-plan alert's tests can assert both what fired and that the read happened. */
+        public List<ForcePlanFailureInfo> ForcePlanFailures { get; } = new();
+
+        public int ForcePlanFetches { get; private set; }
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default)
+        {
+            ForcePlanFetches++;
+            return Task.FromResult(new List<ForcePlanFailureInfo>(ForcePlanFailures));
+        }
     }
 
     private sealed class FakeStateStore : IAlertStateStore
@@ -178,6 +199,57 @@ public sealed class AlertEngineTests
         {
             FailedJobWatermarks[serverKey] = watermark;
             SavedFailedJob.Add((serverKey, watermark));
+            return Task.CompletedTask;
+        }
+
+        /* #2216: real per-fingerprint occurrence state, so the engine tests can assert what the accumulator
+           wrote AND seed a prior incident to accumulate against. */
+        public Dictionary<(string Key, string Metric), Dictionary<string, IncidentOccurrenceState>> Occurrences { get; } = new();
+        public List<(string Key, string Metric, int Count)> SavedOccurrences { get; } = new();
+
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) =>
+            Task.FromResult<IReadOnlyDictionary<string, IncidentOccurrenceState>>(
+                Occurrences.TryGetValue((serverKey, metricName), out var states)
+                    ? states
+                    : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
+
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
+        {
+            /* Replace-the-set, exactly like both real stores: whatever arrives IS the metric's state, so an
+               empty map clears it. A fake that merged instead would hide the falling-edge bug class. */
+            Occurrences[(serverKey, metricName)] = new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
+            foreach (var entry in states)
+            {
+                Occurrences[(serverKey, metricName)][entry.Key] = entry.Value;
+            }
+            SavedOccurrences.Add((serverKey, metricName, states.Count));
+            return Task.CompletedTask;
+        }
+
+        /* #2166 */
+        public List<(string Server, string Db, string State)> DatabaseStateAlerted { get; } = new();
+
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
+        {
+            DatabaseStateAlerted.Add((serverKey, databaseName, effectiveState));
+            Memory[databaseName] = effectiveState;
+            return Task.CompletedTask;
+        }
+
+        public List<(string Server, string Db)> DatabaseStateCleared { get; } = new();
+
+        /// <summary>
+        /// What the store would HOLD, not merely which calls arrived. The engine's edge trigger is a
+        /// round trip — write on fire, read back through the adapter next cycle — and a stub that only
+        /// counts calls cannot fail when one direction of that trip is missing. A test can feed this
+        /// back in as LastAlertedState to exercise the real composition.
+        /// </summary>
+        public Dictionary<string, string> Memory { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+        {
+            DatabaseStateCleared.Add((serverKey, databaseName));
+            Memory.Remove(databaseName);
             return Task.CompletedTask;
         }
     }
@@ -735,6 +807,151 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task Deadlock_TotalOccurrences_AccumulateAcrossThrottledDeliveries()
+    {
+        /* #2216 end to end. Delivery one carries one deadlock; two more happen before the next eligible
+           delivery. The window gauge reads 3 and the monotonic total reads 3 — the number a consumer that
+           missed the middle of the incident needs, and the number the gauge alone cannot give it (a reading
+           of 3 could equally mean "three new" or "one new, two aged out"). */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        var firstIncident = Assert.Single(first.Context!.Incidents!);
+        Assert.Equal(1, firstIncident.OccurrenceCount);
+        Assert.Equal(1L, firstIncident.TotalOccurrences);
+        Assert.Equal(h.Now, firstIncident.IncidentStartedUtc);
+
+        /* Same fingerprint (identical graphs), so this is the same incident continuing. */
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        var openedAt = h.Now;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var second = h.Deliverer.Outcomes[1];
+        var secondIncident = Assert.Single(second.Context!.Incidents!);
+        Assert.Equal(3, secondIncident.OccurrenceCount);
+        Assert.Equal(3L, secondIncident.TotalOccurrences);
+
+        /* The start time did NOT move — that is how the consumer tells a continuation from a new incident
+           that happens to read 3. */
+        Assert.Equal(openedAt, secondIncident.IncidentStartedUtc);
+
+        var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
+        Assert.Equal(3L, persisted[secondIncident.DedupKey].TotalOccurrences);
+    }
+
+    [Fact]
+    public async Task Deadlock_OccurrencesAreObservedOnSweepsThatDeliverNothing()
+    {
+        /* PR #2221's review: with the accumulation inside the Fire branch, no sweep between two deliveries
+           observed anything, so an event the window retired during the cooldown cancelled an arrival and the
+           arrival was never counted. The observation now runs on every sweep that fetched rows. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Two more deadlocks INSIDE the cooldown — no delivery, but the count must still be observed. */
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Now = h.Now.AddMinutes(1);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);   /* the cooldown suppressed the delivery */
+
+        var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
+        Assert.Equal(3L, Assert.Single(persisted).Value.TotalOccurrences);
+    }
+
+    [Fact]
+    public async Task Deadlock_OccurrenceStateSeededFromStore_ContinuesTheIncidentAcrossARestart()
+    {
+        /* The reason the counter is persisted at all: a total that reset on every service restart would be a
+           second gauge wearing a total's name. A fresh engine (new in-memory state, as after a restart)
+           seeded from the store must keep counting the incident it finds there. */
+        var discovery = new Harness();
+        discovery.Settings.DeadlockEnabled = true;
+        discovery.Adapter.Deadlocks.Add(DeadlockRow());
+        await discovery.Build().EvaluateServerAsync(Harness.Snapshot());
+        var dedupKey = Assert.Single(Assert.Single(discovery.Deliverer.Outcomes).Context!.Incidents!).DedupKey;
+
+        var restarted = new Harness();
+        restarted.Settings.DeadlockEnabled = true;
+        var openedAt = restarted.Now.AddMinutes(-20);
+        restarted.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)] =
+            new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal)
+            {
+                [dedupKey] = new(
+                    TotalOccurrences: 9,
+                    ObservedWindowCount: 2,
+                    IncidentStartedUtc: openedAt,
+                    LastObservedUtc: restarted.Now.AddMinutes(-5)),
+            };
+
+        restarted.Adapter.Deadlocks.Add(DeadlockRow());
+        restarted.Adapter.Deadlocks.Add(DeadlockRow());
+        restarted.Adapter.Deadlocks.Add(DeadlockRow());
+        await restarted.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var incident = Assert.Single(Assert.Single(restarted.Deliverer.Outcomes).Context!.Incidents!);
+
+        /* 9 already counted, the window rose from 2 to 3, so one new occurrence: 10. */
+        Assert.Equal(10L, incident.TotalOccurrences);
+        Assert.Equal(openedAt, incident.IncidentStartedUtc);
+    }
+
+    [Fact]
+    public async Task Deadlock_FallingEdge_ClearsTheOccurrenceState()
+    {
+        /* When the condition clears, the incident is over and its counters go with it — otherwise the next
+           incident on the same fingerprint reads as a continuation of this one, reporting an undercount
+           under a start time that points at an incident the user already saw resolve. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.NotEmpty(h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+
+        h.Adapter.Deadlocks.Clear();
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Deadlocks Detected");
+        Assert.Empty(h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task Blocking_TotalOccurrences_RideOnTheBlockingIncidentsToo()
+    {
+        /* Both count gates go through the same accumulator — the blocking half is not an afterthought, it is
+           the other half of the reported feature. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        var incident = Assert.Single(fired.Context!.Incidents!);
+        Assert.Equal(1L, incident.TotalOccurrences);
+        Assert.Equal(h.Now, incident.IncidentStartedUtc);
+        Assert.Contains((Key, AlertEngine.BlockingWatermarkMetric, 1), h.StateStore.SavedOccurrences);
+    }
+
+    [Fact]
     public async Task Deadlock_WhollyExcludedDatabaseGraphs_DontCount()
     {
         /* Lite AlertEngine.cs:198-205 + AlertContextBuilders.IsDeadlockExcluded — a deadlock
@@ -1156,6 +1373,9 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
     }
 
     [Fact]
@@ -1175,6 +1395,405 @@ public sealed class AlertEngineTests
     }
 
     /* ---------------- database state (baseline deviation) ---------------- */
+
+    [Fact]
+    public async Task ForcePlanFailure_Disabled_DoesNotFetch()
+    {
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = false;
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 3, TotalFailures = 3 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        /* The gate must skip the READ, not just the fire — a disabled alert should cost nothing. */
+        Assert.Equal(0, h.Adapter.ForcePlanFetches);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_FiresPerPlan_CarryingReasonForcingTypeAndDelta()
+    {
+        /* Two plans in the SAME database are two independent conditions — if the alert keyed per server or
+           per database, the second would be swallowed by the first's cooldown and an operator would never
+           learn about it. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 4, TotalFailures = 9 });
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 33, PlanId = 44, ForcingType = "AUTO", FailureReason = "NO_PLAN", FailureDelta = 1, TotalFailures = 1 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.Equal("Forced Plan Failing", o.MetricName));
+        /* Warning for every rise — no Critical tier exists yet, on purpose (ForcePlanTokens). */
+        Assert.All(h.Deliverer.Outcomes, o => Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Warning, o.Severity));
+
+        var manual = h.Deliverer.Outcomes.Single(o => o.CurrentValue.Contains("plan 22"));
+        Assert.Contains("NO INDEX", manual.DetailText, StringComparison.Ordinal);
+        Assert.Contains("MANUAL", manual.DetailText, StringComparison.Ordinal);
+        /* The delta, not the total, is what says 'happening now'. */
+        Assert.Contains("4", manual.DetailText, StringComparison.Ordinal);
+
+        var auto = h.Deliverer.Outcomes.Single(o => o.CurrentValue.Contains("plan 44"));
+        Assert.Contains("AUTO", auto.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_CooldownSuppressesSecondFire_ThenResolvesWhenTheCounterStops()
+    {
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 2, TotalFailures = 2 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Still failing next sweep, inside the cooldown — one alert, not two. */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The adapter stops returning it: the counter stopped rising. That covers unforced, reproducible
+           again, and query-no-longer-running alike — hence 'no longer failing' rather than 'fixed'. */
+        h.Adapter.ForcePlanFailures.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == "Forced Plan Failing");
+        /* The recovery text is read by a human in a toast, an email and a history row, so it must name
+           the plan the way the firing message did — NOT the internal key. The first version of this
+           test only asserted the message contained "22", which the leaked key 'forceplan:Sales:11:22'
+           satisfied, so it passed while operators would have seen gibberish (review catch). */
+        Assert.DoesNotContain(ForcePlanTokens.KeyPrefix, resolution.Message, StringComparison.Ordinal);
+        Assert.Contains("Sales", resolution.Message, StringComparison.Ordinal);
+        Assert.Contains("query 11", resolution.Message, StringComparison.Ordinal);
+        Assert.Contains("plan 22", resolution.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_ExcludedDatabase_IsNeverAlerted()
+    {
+        /* Parity with every other database-scoped family: the shared exclusion list wins, case-insensitively.
+           A monitored-but-excluded database must not produce alerts an operator cannot mute per-database. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add("sAlEs");
+        h.Adapter.ForcePlanFailures.Add(new ForcePlanFailureInfo { DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "MANUAL", FailureReason = "NO_INDEX", FailureDelta = 5, TotalFailures = 5 });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_AlreadyAnnounced_StaysQuiet()
+    {
+        /* #2166: the reporter's case — a database parked OFFLINE for a month generated hundreds of
+           identical alerts. With the state already recorded as announced, a fresh evaluation must be
+           SILENT even though the deviation is still present and no cooldown is in play. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_FirstObservation_FiresAndRecordsIt()
+    {
+        /* The transition still alerts — edge-triggered, not silenced — and the state is recorded so the
+           NEXT evaluation is the quiet one. Recording is what makes the silence survive a restart. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == "OFFLINE");
+    }
+
+    [Fact]
+    public async Task DatabaseState_IntegrityState_StillRepeats_EvenWhenAlreadyAnnounced()
+    {
+        /* Nobody parks a database in SUSPECT, so continued repetition IS the signal there. An already-
+           announced integrity state must keep firing on the cooldown — if this ever goes quiet, a real
+           corruption stops nagging, which is the failure mode worth protecting against. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_ChosenState_ChangingToADifferentState_FiresAgain()
+    {
+        /* The composition property the reporter identified: going quiet for a parked state must NOT mean
+           going blind. A database announced as OFFLINE that turns SUSPECT is a different state, so it
+           alerts — and at Critical, not inheriting the quiet treatment of the state it left. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_TransitionToADifferentState_IsNotSuppressedByThePriorStatesCooldown()
+    {
+        /* The safety property, tested where it actually breaks. Both evaluations happen inside one cooldown
+           window (they run back to back, so no wall-clock time passes), which is exactly the case the old
+           per-database cooldown key swallowed: OFFLINE fires and stamps the database's only clock, then the
+           flip to SUSPECT finds that clock still running and goes silent — permanently, now that a chosen
+           state no longer re-fires every cooldown. SUSPECT is the state this alert must never lose. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Same database, still deviating, but a DIFFERENT state — and the memory now says OFFLINE, which is
+           what makes alreadyAnnounced false while the OFFLINE cooldown is still warm. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "OFFLINE" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task DatabaseState_MutedFire_DoesNotRecordItAsAnnounced_SoUnmutingStillNotifies()
+    {
+        /* A mute must be reversible. The four edge-triggered states gate ALL future firing on the announced
+           memory, so stamping it under a mute made the mute permanent: mute a parked database, remove the
+           mute, and the alert never came back for as long as the state held. Muting suppresses delivery, not
+           the engine's honesty about whether anyone was actually told. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Muted = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var muted = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(muted.Muted, "the fire itself must still be marked muted");
+        Assert.DoesNotContain(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive");
+        Assert.False(h.StateStore.Memory.ContainsKey("Archive"),
+            "a muted fire must not record the state as announced — nobody was told");
+
+        /* Mute removed, cooldown elapsed, same state still deviating. The adapter reports what the store
+           holds, which is still nothing — so this must notify for real. */
+        h.Muted = false;
+        h.Now = h.Now.AddDays(1);
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo
+        {
+            DatabaseName = "Archive",
+            StateDesc = "OFFLINE",
+            ExpectedState = "ONLINE",
+            LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var remembered) ? remembered : "",
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var announced = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(announced.Muted, "unmuting must produce a real, deliverable alert");
+        Assert.Contains(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive" && r.State == "OFFLINE");
+    }
+
+    [Fact]
+    public async Task DatabaseState_RecoveryDoesNotClearACooldown_ForADatabaseWhoseNameContainsTheOldDelimiter()
+    {
+        /* SQL Server permits '|' in a database name, so while the cooldown key was a delimited STRING,
+           recovering "Foo" prefix-matched and wiped "Foo|Bar"'s clock as well. Keying by tuple removes the
+           bug class rather than documenting it.
+
+           Observable via an integrity state: SUSPECT is not edge-suppressed (RepeatsAreNoise is false), so
+           its cooldown is the ONLY thing keeping it quiet on the second evaluation. If the recovery sweep
+           wrongly cleared it, "Foo|Bar" fires again here. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo|Bar", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* Foo returns to expected and drops out; Foo|Bar is untouched and still SUSPECT. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Foo|Bar", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.DoesNotContain(h.StateStore.DatabaseStateCleared, r => r.Db == "Foo|Bar");
+    }
+
+    [Fact]
+    public async Task DatabaseState_SameState_StillRateLimitsItself_WithinOneCooldown()
+    {
+        /* The other side of keying by state: it must not have turned the cooldown off. An integrity state
+           repeats deliberately (RepeatsAreNoise is false for SUSPECT), so the only thing standing between it
+           and an alert per evaluation is its own cooldown — which must still hold inside one window. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "ONLINE", LastAlertedState = "SUSPECT" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Deliverer.Outcomes.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task DatabaseState_RepeatEpisode_OfTheSameState_FiresAgainAfterRecovery()
+    {
+        /* The falling-edge property, driven as a full round trip through the store's MEMORY rather than
+           through call counting — the decoupling that let the first cut of #2166 ship with a permanent
+           memory. Park, recover, park again in the SAME state: the repeat soft-delete workflow this alert
+           exists for. If recovery does not clear what firing recorded, evaluation 3 reads OFFLINE ==
+           OFFLINE, judges itself already-announced, and the second parking is swallowed for good. */
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        var engine = h.Build();
+
+        /* Episode 1: parked. No memory yet, so it announces and records. */
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Archive", StateDesc = "OFFLINE", ExpectedState = "ONLINE", LastAlertedState = "" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("OFFLINE", h.StateStore.Memory["Archive"]);
+
+        /* Recovery: back to expected, so it stops deviating and drops out of the adapter's results. */
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.StateStore.DatabaseStateCleared, r => r.Db == "Archive");
+        Assert.False(h.StateStore.Memory.ContainsKey("Archive"),
+            "recovery must forget the announced state, or the edge can never trigger a second time");
+
+        /* Episode 2: parked again, same state. The adapter reports whatever the store now holds — which is
+           the whole point — so this fires only if the clear above actually happened. */
+        h.Deliverer.Outcomes.Clear();
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo
+        {
+            DatabaseName = "Archive",
+            StateDesc = "OFFLINE",
+            ExpectedState = "ONLINE",
+            LastAlertedState = h.StateStore.Memory.TryGetValue("Archive", out var remembered) ? remembered : "",
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public void DatabaseState_AlertedStamp_IsAnUpdate_NeverAnInsert()
+    {
+        /* A row is only absent when the database was first observed in an integrity state, which the seed
+           logic deliberately refuses to baseline. An INSERT here must supply expected_state (NOT NULL) and
+           the only value on hand is the state being alerted ON — so inserting would baseline a SUSPECT
+           database as "expected SUSPECT", stop it deviating, report it RECOVERED while still corrupt, and
+           silence it permanently. Strictly worse than the repetition being fixed, so it is pinned. */
+        var source = ReadStateStoreSource();
+        var method = source[source.IndexOf("public async Task SaveDatabaseStateAlertedAsync", StringComparison.Ordinal)..];
+        var body = method[..method.IndexOf("public async Task ClearDatabaseStateAlertedAsync", StringComparison.Ordinal)];
+
+        Assert.Contains("UPDATE config.database_state_expected", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSERT INTO config.database_state_expected", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON CONFLICT", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DatabaseState_TheNeverBaselinedList_IsWiderThanTheCriticalOne()
+    {
+        /* #2189. Two lists that look interchangeable and are not, which is exactly why they are worth
+           pinning: one answers "bad enough to page about with no baseline to compare against", the other
+           "must never be LEARNED as this database's normal". A transient state belongs only in the second.
+
+           Collapsing them either way is a shipped bug. Widen the critical list and every restore in progress
+           pages. Narrow the never-baselined list and a database observed mid-restore learns RESTORING as
+           expected, then alerts forever for being ONLINE — the reported bug, 636 fires in 24 hours. */
+        Assert.Contains(DatabaseStateTokens.Suspect, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+        Assert.Contains(DatabaseStateTokens.RecoveryPending, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+        Assert.Contains(DatabaseStateTokens.Emergency, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+
+        /* A pending database in a transient state must stay SILENT, so these must not reach the critical arm. */
+        Assert.DoesNotContain(DatabaseStateTokens.Restoring, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+        Assert.DoesNotContain(DatabaseStateTokens.Recovering, DatabaseStateTokens.CriticalSqlList, StringComparison.Ordinal);
+
+        Assert.StartsWith(DatabaseStateTokens.CriticalSqlList, DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+        Assert.Contains($"'{DatabaseStateTokens.Restoring}'", DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+        Assert.Contains($"'{DatabaseStateTokens.Recovering}'", DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+
+        /* STANDBY is synthetic and stable by construction — the whole reason it exists is to give a
+           log-shipping secondary one steady token instead of the RESTORING flicker underneath it. Refusing to
+           learn it would leave every standby secondary permanently pending for no benefit. */
+        Assert.DoesNotContain(DatabaseStateTokens.Standby, DatabaseStateTokens.NeverBaselinedSqlList, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DatabaseState_BothDarlingSeedSites_ShareTheOneStateList()
+    {
+        /* The viewer's editor seeds and heals baselines with its own copy of this SQL because that project
+           cannot reference the service's. Two hand-kept copies of "what must never be learned" is the drift
+           that lets the editor write a baseline the alert refuses to — silently, and only for operators who
+           happen to open the editor mid-restore. Both sites interpolate the shared constant instead, and
+           BOTH statements use it: the seed to refuse those states, the heal to un-write them (#2189). A copy
+           that widened only one of the two would be the subtler half of the same bug. */
+        var viewer = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.DatabaseStates.cs"));
+        var service = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertReadAdapter.cs"));
+
+        foreach (var source in new[] { viewer, service })
+        {
+            Assert.Contains("NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
+            Assert.Contains("expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})", source, StringComparison.Ordinal);
+            Assert.DoesNotContain($"NOT IN ('{DatabaseStateTokens.Suspect}'", source, StringComparison.Ordinal);
+
+            /* The heal must never be reachable for a state somebody DECLARED, in either copy. */
+            Assert.Contains("is_user_override = false", source, StringComparison.Ordinal);
+        }
+    }
+
+    private static string ReadStateStoreSource() =>
+        ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs"));
+
+    /// <summary>Reads a repo-relative source file, walking up from this test file to find the repo root.</summary>
+    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(dir!, relative));
+    }
 
     [Fact]
     public async Task DatabaseState_Disabled_DoesNotFetch()

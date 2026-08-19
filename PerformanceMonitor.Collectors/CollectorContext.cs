@@ -126,6 +126,41 @@ public sealed class CollectorContext
     public bool CapturePlanXml { get; init; }
 
     /// <summary>
+    /// When true, the query_store payload leaves <c>query_sql_text</c> NULL and the host is responsible
+    /// for resolving statement text through <see cref="QueryStoreCollector.BuildTextFetchQuery"/> instead
+    /// (#2150). Default false, which keeps the text inline exactly as it ships today.
+    ///
+    /// <para><b>Why the text has to leave that projection.</b> The payload selects it inside a
+    /// <c>TOP ... WITH TIES ... ORDER BY last_execution_time</c>, and a Top-N Sort carries every output
+    /// column through the sort while reading ALL of its input before emitting a row — so choosing the rows
+    /// to ship materialized <c>nvarchar(max)</c> text for the entire qualifying set. Measured on a
+    /// purpose-built Azure SQL DB store with #2210's plan XML already gone, the ONE column being the only
+    /// difference: time-to-first-row 4.67s against 0.45s at 1,505 rows, 5.02s against 0.57s at 4,037.
+    /// Neither knob bounds it — <c>TOP (500)</c> measured the same as <c>TOP (50000)</c>, and wall time was
+    /// flat from a 4 MB to a 256 MB client budget, because the server finishes before the client sees a
+    /// byte.</para>
+    ///
+    /// <para><b>Why this is a flag and not simply removed</b>, which is the part worth being careful about:
+    /// Lite stores that text inline in DuckDB and its grid reads it from there, so nulling the column
+    /// unconditionally would blind Lite. Gated, the emitted column keeps its ORDINAL either way — same
+    /// shape, one value — which is the pattern the version-gated columns in this collector already use, and
+    /// it means a host that has not built text storage keeps working unchanged.</para>
+    /// </summary>
+    public bool FetchQueryTextSeparately { get; init; }
+
+    /// <summary>
+    /// Whether this cycle's query_store payload includes the OPEN Query Store interval (#2312). Default
+    /// true — today's behavior for every caller that never touches it. When false, the interval
+    /// pre-filter adds <c>i.end_time &lt;= SYSUTCDATETIME()</c>, shipping only CLOSED intervals — which
+    /// are immutable and therefore final on first collection, while the open interval's cumulative
+    /// snapshot is the whole re-read bill on a big primary (40–110 s per run measured). Set PER ITEM by
+    /// the hosts' per-database watermark delegates from
+    /// <see cref="QueryStoreOpenIntervalState.ShouldIncludeOpenInterval"/>, like <see cref="Watermark"/>;
+    /// mutable (not init) for exactly that reason. Only the query_store payload reads it.
+    /// </summary>
+    public bool IncludeOpenInterval { get; set; } = true;
+
+    /// <summary>
     /// When true (the default — today's behavior), the default_trace_events collector records
     /// Object:Created/Altered/Deleted schema-change (DDL) events; when false its
     /// <c>@include_object_ddl</c> gate drops that entire slice while leaving every other curated
@@ -144,6 +179,23 @@ public sealed class CollectorContext
     /// definition's curated default list applies.
     /// </summary>
     public IReadOnlyList<string>? PerfmonCounterOverride { get; init; }
+
+    /// <summary>
+    /// Host override for the per-item text byte budget (#2164), in BYTES. Null keeps the definition's
+    /// own <see cref="ICollectorDefinition{TRow}.PerItemTextByteBudget"/> — which is what Lite passes,
+    /// so its behavior is unchanged. Darling supplies this from the store's operator knob.
+    ///
+    /// <para>Why a knob at all: the budget's job is bounding memory, and the compile-time 64 MB was
+    /// sized for a same-region client. Over a cross-region link the same 64 MB is a MINUTE of the
+    /// monitored server holding one query open draining to the client (ASYNC_NETWORK_IO), which is
+    /// tenant-visible on small hardware — the 2026-08-10 field case. A smaller budget costs catch-up
+    /// latency, never data, because #1960's boundary-group completion makes every cut resumable.</para>
+    ///
+    /// <para>Composes multiplicatively with the host's fleet sweep width — peak transient is
+    /// approximately (concurrent sweeps) × (this budget) — which is why both are operator knobs on
+    /// the same store rung and why their UI hints name each other (#2170).</para>
+    /// </summary>
+    public int? TextByteBudgetOverride { get; init; }
 
     /// <summary>
     /// Result of the definition's enumeration probe (see
@@ -166,6 +218,60 @@ public sealed class CollectorContext
     /// from <c>ReadAsync</c> (#1836). False in the common case — only budgeted collectors touch it.
     /// </summary>
     public bool PerItemTextBudgetExceeded { get; set; }
+
+    /// <summary>
+    /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),
+    /// set by the host around the open. Splits a batch's server time into the part the client cannot
+    /// influence and the part it can:
+    ///
+    /// <para>For a multi-statement batch like query_store's staged shape, ADO.NET returns the reader only
+    /// when the first ROWSET is available — so this number spans every preceding non-rowset statement (the
+    /// <c>SELECT … INTO #pm_qs_slice</c> aggregate) plus the final select's time-to-first-row. The
+    /// remaining time, drain, is row streaming the client's byte budget and read loop actually govern.</para>
+    ///
+    /// <para>Why it exists: cutting the byte budget 64 MB → 12 MB on a production server moved bytes 5x and
+    /// the batch clock ~0%, which said the dominant term is upstream of shipping — but the single blended
+    /// <c>sql:</c> number could not prove WHICH statement, so any next fix would have been a guess. Zero
+    /// when the host does not measure it (Lite today), so a zero must never be read as "instant".</para>
+    /// </summary>
+    public long PerItemOpenMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the item's watermark refresh took (#2164), set by the host when it runs one. This is NOT
+    /// server think-time or streaming — for query_store it is a STORE read (and on the catch-up/adaptive
+    /// path a store write too), yet the driver's <c>sql:</c> stopwatch starts before it. Measured so it can
+    /// be subtracted rather than silently inflating drain, which would corrupt the one number this
+    /// instrumentation exists to make trustworthy. Zero when the host runs no per-item watermark.
+    /// </summary>
+    public long PerItemWatermarkMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the item's separate plan-XML fetch took (#2312 investigation), set by the host that
+    /// runs one (Darling; Lite has no separate fetch and leaves it zero). The fetch is INSIDE the driver's
+    /// per-item <c>sql:</c> stopwatch but is neither open nor drain — it is its own query against
+    /// <c>sys.query_store_plan</c>, and on a database with a huge Query Store catalog it can dominate the
+    /// whole item (ayr-01: a 0-row closed-only cycle still cost 298s, and the blended number could not say
+    /// where). Measured so drain stops absorbing it, exactly the #2164 argument one seam further down.
+    /// </summary>
+    public long PerItemPlanFetchMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the item's separate statement-text fetch took (#2150's fetch, split out for the #2312
+    /// investigation) — same contract as <see cref="PerItemPlanFetchMs"/>: inside <c>sql:</c>, not drain,
+    /// zero when the host runs no separate fetch.
+    /// </summary>
+    public long PerItemTextFetchMs { get; set; }
+
+    /// <summary>
+    /// The item's row-STREAMING time: the driver's blended per-item total minus the phases that are not
+    /// streaming (<see cref="PerItemWatermarkMs"/>, <see cref="PerItemOpenMs"/>,
+    /// <see cref="PerItemPlanFetchMs"/>, <see cref="PerItemTextFetchMs"/>). Lives here rather than at
+    /// the log site so the subtraction has exactly one definition and a test can pin the shipped arithmetic
+    /// instead of a copy of it. Clamped at zero: the phases are measured on separate stopwatches, so tiny
+    /// skew must never surface as negative drain.
+    /// </summary>
+    public long DrainMsFrom(long itemSqlMs) =>
+        Math.Max(0, itemSqlMs - PerItemOpenMs - PerItemWatermarkMs - PerItemPlanFetchMs - PerItemTextFetchMs);
 
     /// <summary>
     /// Cumulative text bytes the budgeted read actually materialized for the item just read (#1960),

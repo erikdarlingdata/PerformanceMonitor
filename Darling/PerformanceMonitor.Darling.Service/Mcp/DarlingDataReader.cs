@@ -94,7 +94,12 @@ internal static class DarlingDataReader
         long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs, string QueryText,
         /* #2012: distinct statement texts merged into this group; with stage 2's host-object split this
            flags the remaining ad-hoc literal blends (proc-hosted groups converge to 1). */
-        long DistinctTexts);
+        long DistinctTexts,
+        /* #2235: how many DISTINCT query_hash values this row rolled up. Always 1 in the default
+           per-hash grouping — it is only interesting under host-object rollup, where it IS the finding:
+           a proc whose dynamic SQL fragments across 21 hashes reports 21 here, which is the number that
+           explains why top-N-by-hash could never surface it. */
+        long DistinctQueryHashes = 1);
 
     /// <summary>One (database, schema, object) group's summed procedure-stats deltas over the window.</summary>
     public sealed record TopProcedureRow(
@@ -167,6 +172,46 @@ internal static class DarlingDataReader
         }
 
         return samples;
+    }
+
+    public sealed record CpuWindowAggregate(int SampleCount, DateTime? FirstSample, DateTime? LastSample, double? AvgSqlCpuPercent);
+
+    /// <summary>
+    /// The attributed-CPU denominator's pieces (#2320): sample count, coverage bounds, and average SQL
+    /// CPU% over the window. Windowed on collection_time — the SAME bounds the top-queries/procedures
+    /// rankings use — so numerator and denominator share collection gaps; sample_time skew is irrelevant
+    /// to an average. $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string CpuWindowAggregateSql = """
+        SELECT
+            COUNT(*),
+            MIN(collection_time),
+            MAX(collection_time),
+            AVG(sqlserver_cpu_utilization)::double precision
+        FROM cpu_utilization_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        """;
+
+    public static async Task<CpuWindowAggregate> GetCpuWindowAggregateAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CpuWindowAggregateSql);
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new CpuWindowAggregate(0, null, null, null);
+        }
+
+        return new CpuWindowAggregate(
+            reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture),
+            reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+            reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+            reader.IsDBNull(3) ? null : reader.GetDouble(3));
     }
 
     /* ─────────────────────────── wait stats ─────────────────────────── */
@@ -605,11 +650,125 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary>
+    /// The same top-queries read, rolled up so proc-hosted dynamic SQL ranks as its PARENT (#2235).
+    ///
+    /// <para><b>The defect this answers.</b> <c>query_hash</c> is a shape hash, so dynamic SQL built with
+    /// per-value literals fragments one logical statement across as many hashes as there are literal sets —
+    /// measured at 21 for one <c>API.GetInventoryWithLabsV5</c> statement. Ranking by hash therefore
+    /// STRUCTURALLY cannot surface it: two of its fragments together were 58-65% of the instance's
+    /// worker_time in every window sampled, while the hash itself never entered the 168-hour top 20. The
+    /// ranking looked healthy and explained roughly a tenth of the box.</para>
+    ///
+    /// <para><b>Why this is a sibling const rather than a parameter.</b> Postgres cannot parameterize
+    /// <c>GROUP BY</c>, and every read here is a public const precisely so the suite can pin its dialect and
+    /// columns without a live store. Building the clause by string concatenation would trade both of those
+    /// for one saved copy.</para>
+    ///
+    /// <para><b>Ad-hoc rows keep their per-hash grouping, and that is load-bearing.</b> A bare
+    /// <c>GROUP BY host_object_name</c> would pool EVERY unrelated ad-hoc statement in a database into one
+    /// meaningless row, because ad-hoc rows carry <c>host_object_name = NULL</c> — turning the fix into a
+    /// worse attribution bug than the one it fixes. The <c>CASE</c> in the grouping key keys ad-hoc rows on
+    /// their own <c>query_hash</c> (identical to the default read) and collapses only rows that actually name
+    /// a host object.</para>
+    ///
+    /// <para>The per-hash grouping (#2012 stage 2) stays the DEFAULT. Two procedures sharing a hash genuinely
+    /// are different work, which is why that split exists; this is an additional lens, not a replacement.
+    /// <c>query_hash</c> in a rolled-up row is one member of the group, exactly as <c>query_text</c> already
+    /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
+    /// </summary>
+    public const string TopQueriesByHostObjectSql = """
+        WITH ranked AS (
+            SELECT
+                database_name,
+                MAX(query_hash) AS query_hash,
+                host_object_name,
+                CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
+                CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
+                CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
+                CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
+                CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
+                CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
+                CAST(SUM(delta_rows) AS bigint) AS total_rows,
+                CAST(SUM(delta_spills) AS bigint) AS total_spills,
+                MIN(min_dop) AS min_dop,
+                MAX(max_dop) AS max_dop,
+                MIN(min_worker_time) AS min_worker_time,
+                MAX(max_worker_time) AS max_worker_time,
+                MIN(min_elapsed_time) AS min_elapsed_time,
+                MAX(max_elapsed_time) AS max_elapsed_time,
+                MAX(query_plan_hash) AS query_plan_hash,
+                MAX(sql_handle) AS sql_handle,
+                MAX(plan_handle) AS plan_handle,
+                COUNT(DISTINCT query_text_digest) AS distinct_texts,
+                /* #2235: the fragment count IS the finding — 21 here is why a per-hash ranking missed it. */
+                COUNT(DISTINCT query_hash) AS distinct_query_hashes
+            FROM query_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+            /* #2235: proc-hosted rows collapse to one row per (database, host object) — every literal
+               fragment of one statement lands together. Ad-hoc rows (host_object_name NULL) fall to the
+               CASE and stay keyed on their OWN query_hash, so they group exactly as the default read does;
+               without that arm every unrelated ad-hoc statement in a database would pool into one row. */
+            GROUP BY database_name, host_object_name,
+                     CASE WHEN host_object_name IS NULL THEN query_hash END
+            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
+            ORDER BY SUM(delta_elapsed_time) DESC
+            LIMIT $4 + 5
+        )
+        SELECT
+            r.database_name,
+            r.query_hash,
+            r.host_object_name,
+            r.query_plan_hash,
+            r.sql_handle,
+            r.plan_handle,
+            r.total_executions,
+            r.total_cpu_us,
+            r.total_elapsed_us,
+            r.total_reads,
+            r.total_writes,
+            r.total_physical_reads,
+            r.total_rows,
+            r.total_spills,
+            r.min_dop,
+            r.max_dop,
+            r.min_worker_time,
+            r.max_worker_time,
+            r.min_elapsed_time,
+            r.max_elapsed_time,
+            t.query_text,
+            r.distinct_texts,
+            r.distinct_query_hashes
+        FROM ranked AS r
+        LEFT JOIN LATERAL (
+            SELECT query_text
+            FROM v_query_stats
+            WHERE server_id = $1
+            AND   database_name = r.database_name
+            /* Mirrors the grouping: for a rolled-up proc any of its fragments' texts is a valid
+               representative, but an ad-hoc row must still match its own hash or the text could come from
+               an unrelated statement. */
+            AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
+            AND   (r.host_object_name IS NOT NULL OR query_hash = r.query_hash)
+            AND   query_text IS NOT NULL
+            ORDER BY collection_time DESC
+            LIMIT 1
+        ) AS t ON TRUE
+        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+        ORDER BY r.total_elapsed_us DESC
+        LIMIT $4
+        """;
+
     public static async Task<List<TopQueryRow>> GetTopQueriesByCpuAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        bool rollUpByHostObject = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<TopQueryRow>();
-        await using var command = postgres.CreateCommand(TopQueriesSql);
+        /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
+        await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
@@ -638,7 +797,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
                 reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
                 reader.IsDBNull(20) ? "" : reader.GetString(20),
-                reader.IsDBNull(21) ? 0 : reader.GetInt64(21)));
+                reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
+                reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt64(22) : 1));
         }
 
         return rows;
@@ -798,15 +958,31 @@ internal static class DarlingDataReader
             t.query_text,
             r.replica_role
         FROM ranked AS r
+        /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
+           both keep reading one t.query_text. First arm is collect.query_store_text (one row per
+           query_id, where the collector lands text once the separate fetch is on); second arm is the
+           newest inline query_text, which is where text lived before the cutover and is what keeps
+           existing history readable. */
         LEFT JOIN LATERAL (
-            SELECT query_text
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   query_id = r.query_id
-            AND   database_name = r.database_name
-            AND   query_text IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
+            SELECT COALESCE(
+                       (
+                           SELECT x.query_sql_text
+                           FROM query_store_text AS x
+                           WHERE x.server_id = $1
+                           AND   x.database_name = r.database_name
+                           AND   x.query_id = r.query_id
+                       ),
+                       (
+                           SELECT s.query_text
+                           FROM query_store_stats AS s
+                           WHERE s.server_id = $1
+                           AND   s.query_id = r.query_id
+                           AND   s.database_name = r.database_name
+                           AND   s.query_text IS NOT NULL
+                           ORDER BY s.collection_time DESC
+                           LIMIT 1
+                       )
+                   ) AS query_text
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
         ORDER BY r.total_executions * r.avg_duration_ms DESC
@@ -1149,8 +1325,10 @@ internal sealed class CollectorHealth
 
     /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
     /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
-    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity.</summary>
-    private int FrequencyMinutes =>
+    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity.
+    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average
+    /// duration by this same cadence, so both readers of it share one resolution.</summary>
+    internal int FrequencyMinutes =>
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(

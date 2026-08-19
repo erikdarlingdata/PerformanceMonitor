@@ -18,7 +18,8 @@ namespace PerformanceMonitor.Collectors;
 /// TempDB space usage from tempdb.sys.dm_db_file_space_usage plus the top tempdb-consuming
 /// session (two result sets → one row). Extracted verbatim from Lite's
 /// RemoteCollectorService.TempDb.cs. Always yields exactly one row — zeros when the result
-/// sets are empty — matching the original collector's behavior.
+/// sets are empty — matching the original collector's behavior. Not applicable to Azure SQL
+/// Database; see <see cref="AppliesTo"/>.
 /// </summary>
 public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCollector.Row>
 {
@@ -44,7 +45,29 @@ public sealed class TempDbStatsCollector : CollectorDefinitionBase<TempDbStatsCo
 
     public override string? WatermarkColumn => null;
 
-    public override bool AppliesTo(CollectorTargetInfo target) => true;
+    /// <summary>
+    /// Skips Azure SQL Database, which cannot serve this query at all.
+    ///
+    /// <para>The first result set reads <c>tempdb.sys.dm_db_file_space_usage</c> — a THREE-part
+    /// reference out of the connected database — and on Azure SQL DB that requires
+    /// <c>VIEW DATABASE PERFORMANCE STATE</c> <i>in tempdb</i>. A non-administrative login cannot hold
+    /// it there (tempdb permissions are not persistable on Azure SQL DB, and in an elastic pool the
+    /// database is not even the permission boundary), so every cycle failed with error 262 —
+    /// "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'" — reported from the
+    /// field at 11x consecutive, which is exactly the collection-health pollution the msdb gate on the
+    /// Agent collectors exists to prevent.</para>
+    ///
+    /// <para>Azure Managed Instance keeps collecting: it has a real tempdb and full DMV access, so the
+    /// gate is <c>IsAzureSqlDb</c> specifically, not "anything Azure" — the same distinction
+    /// <see cref="ServerConfigCollector"/> and <see cref="TraceFlagsCollector"/> draw.</para>
+    ///
+    /// <para>The second result set (<c>sys.dm_db_session_space_usage</c>, two-part and in-database)
+    /// WOULD work on Azure SQL DB. Recovering that half needs an Azure-specific query variant rather
+    /// than a gate, so it is deliberately out of scope here: the immediate defect is a collector that
+    /// can only ever fail, and half a row would be a different contract than the one row this
+    /// collector promises.</para>
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
 
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 

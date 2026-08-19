@@ -221,7 +221,36 @@ public partial class AddServerDialog : Window
         {
             StatusText.Text = "";
         }
+        /* #2279: SQL auth means a password, and a password is stored as a DPAPI LocalMachine blob that ONLY the
+           machine writing it can decrypt. The service is what has to decrypt it, so a credential saved from a
+           viewer on another PC can never be used and the server fails to connect on every sweep afterwards —
+           the #2255 report. Said as soon as the mode is picked, in the same place and the same way the Azure
+           arm above says its piece, so it lands before the password is typed rather than after the save.
+
+           WARNED, not refused: a non-loopback store does not prove this viewer is remote (a BYO store on
+           another host with the service local reads the same), and refusing would block a legitimate first-run
+           Add. Silent for a loopback store, which is the managed single-box deploy and the overwhelmingly
+           common case — a hint that fires for everyone is a hint nobody reads. */
+        else if (SqlAuthRadio.IsChecked == true && _dataService is { StoreIsOnThisMachine: false })
+        {
+            StatusText.Text = SqlCredentialMachineBoundHint;
+        }
+        else if (StatusText.Text == SqlCredentialMachineBoundHint)
+        {
+            StatusText.Text = "";
+        }
     }
+
+    /// <summary>
+    /// The #2279 hint. A const so <see cref="AuthMode_Changed"/> can clear exactly its own message when the mode
+    /// changes away — the same self-clearing discipline the Azure arm uses, which is what stops a stale hint
+    /// sitting under an unrelated mode.
+    /// </summary>
+    private const string SqlCredentialMachineBoundHint =
+        "This viewer's store is not on this machine. A SQL-auth password is encrypted for THIS machine only, " +
+        "so if the Darling service runs elsewhere it will not be able to decrypt it and the server will fail " +
+        "to connect. Add it from a viewer on the service's host, run --add-server there, or use an env:/file: " +
+        "reference instead.";
 
     private string GetSelectedEncryptMode() => EncryptModeComboBox.SelectedIndex switch
     {
@@ -348,7 +377,13 @@ public partial class AddServerDialog : Window
 
         return new MonitoredServerRow
         {
-            ServerId = ViewerDataService.ComputeServerId(host, database, readOnlyIntent),
+            /* #2158: an EDIT keeps the row's identity; only an Add derives one. Changing a server's address
+               does not make it a different server — it is the same monitored instance — and every collect.*
+               row is keyed by this id, so re-deriving it abandons the whole of that server's history. The old
+               shape wrote a row under the new hash and deleted the old one, which left the REGISTRY tidy and
+               the history orphaned with nothing pointing at it: the failure looked like a server that had
+               never been monitored. Derivation now runs only where there is no history to lose. */
+            ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent),
             Name = displayName,
             Host = host,
             Database = database,
@@ -397,24 +432,28 @@ public partial class AddServerDialog : Window
                 return;
             }
 
-            /* Refuse to silently overwrite a DIFFERENT existing server that shares this identity — the upsert's
-               ON CONFLICT DO UPDATE would clobber its excluded databases / capture override. Covers Add and an
-               edit that re-points host/database/read-only-intent onto another server's identity. */
-            if (_originalServerId != row.ServerId
-                && await _dataService.GetMonitoredServerAsync(row.ServerId) is not null)
+            /* Refuse to point this definition at an address another server already monitors: on Add the
+               upsert's ON CONFLICT DO UPDATE would clobber that row's excluded databases / capture override,
+               and on Edit it would leave two registrations collecting the same real instance under two
+               identities — #2228's shape, arrived at from the registry side.
+
+               #2158: checked against the ADDRESS rather than against a derived id. Now that an edit preserves
+               its identity, a row's server_id no longer has to equal the hash of its own address, so the old
+               id-based lookup would miss exactly the row it exists to protect. Comparing ids afterwards is
+               what excludes "collided with myself" — an edit that leaves the address alone, or that only
+               renames or re-credentials the server. */
+            var occupant = await _dataService.GetMonitoredServerByAddressAsync(row.Host, row.Database, row.ReadOnlyIntent);
+            if (occupant is not null && occupant.ServerId != row.ServerId)
             {
                 StatusText.Text = "A server with this address (and database / read-only intent) is already monitored. Edit it from Manage Servers instead.";
                 SaveButton.IsEnabled = true;
                 return;
             }
 
-            /* Write the NEW row first, THEN drop the old identity on an edit that moved it — if the delete
-               fails we leave a recoverable duplicate rather than losing the definition entirely. */
+            /* One row, one identity, in place — no delete. The upsert's ON CONFLICT (server_id) arm rewrites
+               the address on the row that already owns this id, so the server's collected history stays
+               attached to it. */
             await _dataService.UpsertMonitoredServerAsync(row);
-            if (_originalServerId is int original && original != row.ServerId)
-            {
-                await _dataService.DeleteMonitoredServerAsync(original);
-            }
 
             /* Favorites are viewer-local (the service never reads them) — keyed by the server address. */
             _serverStore.SetFavorite(row.Host, FavoriteCheckBox.IsChecked == true);

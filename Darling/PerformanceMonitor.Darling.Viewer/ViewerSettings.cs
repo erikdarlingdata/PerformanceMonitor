@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -136,6 +137,18 @@ public sealed class ViewerSettings
     private const string AdminCredentialFileName = "pg-admin-credential.dpapi";
     private const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
     private const string ManagedSearchPath = "collect,config,public";
+
+    /* #2197: the same sliver rule again, for the files that answer "has a bootstrap already been TRIED
+       against this store?" — the store's own credential (written immediately before initdb), the mcp role
+       credential, and pg_ctl's server log. Pinned against the service's constants by ViewerDataServiceTests. */
+    private const string StoreCredentialFileName = "pg-credential.dpapi";
+    private const string McpCredentialFileName = "pg-mcp-credential.dpapi";
+    private const string ServerLogFileName = "pg.log";
+
+    /* The role credentials, provisioned AFTER the cluster is up: weaker evidence than the store's own
+       credential above, but any of them proves the bootstrap got past initdb. */
+    private static readonly string[] s_roleCredentialFileNames =
+        [AdminCredentialFileName, ViewerCredentialFileName, McpCredentialFileName];
 
     /// <summary>
     /// The string handed to Npgsql: <see cref="ConfiguredConnectionString"/> with a relative
@@ -298,11 +311,24 @@ public sealed class ViewerSettings
         var credentialPath = string.IsNullOrEmpty(parent) ? null : Path.Combine(parent, credentialFileName);
         if (credentialPath is null || !File.Exists(credentialPath))
         {
-            throw new InvalidDataException(
+            /* #2197: absence alone does not say WHICH of the two this is, and the two want opposite advice.
+               The CLI half of this message (DarlingStoreBootstrapEvidence) sent a field report to darling.json
+               by assuming "first run" — the main window shows this string, so it must not do the same. */
+            var subject =
                 "darling.json uses the managed Postgres (postgres.managed = true), but the credential file for the " +
-                $"'{role}' role ({credentialPath ?? "beside " + dataDirectory}) does not exist yet. Start the " +
-                "PerformanceMonitor Darling service once — its first run initializes the bundled Postgres and " +
-                "provisions the least-privilege roles and their credentials.");
+                $"'{role}' role ({credentialPath ?? "beside " + dataDirectory})";
+            var evidence = FindBootstrapEvidence(dataDirectory, parent);
+
+            throw new InvalidDataException(evidence is null
+                ? $"{subject} does not exist yet. Start the PerformanceMonitor Darling service once — its first run " +
+                  "initializes the bundled Postgres and provisions the least-privilege roles and their credentials. " +
+                  "If you have ALREADY started it, its first run never got this far and starting it again will not " +
+                  $"either — the reason is in the service log ({ServiceLogPath()}), not in darling.json."
+                : $"{subject} does not exist, and this is NOT a first run: {evidence}. The service has already run " +
+                  "against this store and its bootstrap stopped before it got this far, so starting it again is not " +
+                  $"the fix. Read the newest service log ({ServiceLogPath()}) and work the FIRST error in it — a " +
+                  "bundled Postgres tool that Windows killed is decoded there in words rather than left as a bare " +
+                  "exit code. Nothing in darling.json produces this.");
         }
 
         var protectedBytes = Convert.FromBase64String(File.ReadAllText(credentialPath).Trim());
@@ -328,6 +354,72 @@ public sealed class ViewerSettings
             MaxPoolSize = 10,
         };
         return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// The service's own log, named rather than referred to, and named as a SHAPE rather than today's file:
+    /// the run that failed may have been days ago. <c>%ProgramData%</c>, not the viewer's own
+    /// <c>%APPDATA%</c> log — a managed derivation is by definition loopback, so the service that wrote it
+    /// is on this machine. Mirrors the service's DarlingFileLoggerProvider.DefaultLogDirectory.
+    /// </summary>
+    private static string ServiceLogPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "PerformanceMonitorDarling",
+        "logs",
+        "darling-service_yyyyMMdd.log");
+
+    /// <summary>
+    /// What on disk proves a bootstrap was ATTEMPTED against THIS store, as the phrase the message quotes —
+    /// null when nothing does. The viewer half of the service's DarlingStoreBootstrapEvidence, and the same
+    /// rule: every path read here sits under or beside <c>postgres.dataDirectory</c>, so it can only describe
+    /// the store being asked about, and nothing is ever inferred from a machine-global signal.
+    /// </summary>
+    private static string? FindBootstrapEvidence(string dataDirectory, string? storeFolder)
+    {
+        try
+        {
+            if (File.Exists(Path.Combine(dataDirectory, "PG_VERSION")))
+            {
+                return $"the cluster in {dataDirectory} is already initialized";
+            }
+
+            if (!string.IsNullOrEmpty(storeFolder))
+            {
+                var serverLog = Path.Combine(storeFolder, ServerLogFileName);
+                if (File.Exists(serverLog))
+                {
+                    return $"the store's server log {serverLog} is already there";
+                }
+
+                var storeCredential = Path.Combine(storeFolder, StoreCredentialFileName);
+                if (File.Exists(storeCredential))
+                {
+                    return $"{storeCredential} is already there, and the service writes that one immediately before it runs initdb";
+                }
+
+                foreach (var roleCredential in s_roleCredentialFileNames)
+                {
+                    var path = Path.Combine(storeFolder, roleCredential);
+                    if (File.Exists(path))
+                    {
+                        return $"{path} is already there";
+                    }
+                }
+            }
+
+            if (Directory.Exists(dataDirectory) && Directory.EnumerateFileSystemEntries(dataDirectory).Any())
+            {
+                return $"{dataDirectory} already holds a partly-built cluster";
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            /* A diagnostic must never become a second exception — least of all this one, which is thrown
+               from a parse the main window renders. An unreadable store costs the sharper branch, not the
+               message. */
+        }
+
+        return null;
     }
 
     private sealed class ConfigDto

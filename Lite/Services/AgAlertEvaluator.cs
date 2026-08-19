@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -22,12 +23,16 @@ namespace PerformanceMonitorLite.Services;
 /// <param name="ThresholdValue">The alert's "expected" column.</param>
 /// <param name="DetailText">The operator-facing explanation.</param>
 /// <param name="IsResolution">True for the reconnect notice, which renders green rather than as a page.</param>
+/// <param name="Context">Discrete facts for database-scoped alerts (#2109) — null for the replica-grain
+/// alerts and resolutions, which carry no database. Trailing optional so existing construction sites
+/// (and the tests that pin them) stay untouched.</param>
 public readonly record struct AgAlert(
     string MetricName,
     string CurrentValue,
     string ThresholdValue,
     string DetailText,
-    bool IsResolution);
+    bool IsResolution,
+    AlertContext? Context = null);
 
 /// <summary>
 /// Lite's Availability Group alert state machine (#1696) — the twin of Darling's
@@ -187,7 +192,10 @@ public sealed class AgAlertEvaluator
                         "primary cannot truncate its transaction log, so the primary's log grows until its disk " +
                         "fills — this is a primary-side outage risk, not just a secondary-side one. Fix the " +
                         $"underlying cause, then resume it with ALTER DATABASE [{database.DatabaseName}] SET HADR RESUME.",
-                        IsResolution: false));
+                        IsResolution: false,
+                        Context: AgAlertContexts.ForDatabase(
+                            database.DatabaseName, database.AgName, database.ReplicaServerName,
+                            ("Suspend Reason", suspendReason))));
                 }
                 else if (decision == AgSuspensionDecision.Resumed)
                 {
@@ -224,7 +232,9 @@ public sealed class AgAlertEvaluator
                         "for what they measure: the lag seconds are how STALE the secondary's last hardened log is, " +
                         "not how much data is queued behind it, so on a quiet group a large value can simply mean " +
                         "nothing has been written recently.",
-                        IsResolution: false));
+                        IsResolution: false,
+                        Context: AgAlertContexts.ForDatabase(
+                            database.DatabaseName, database.AgName, database.ReplicaServerName)));
                 }
             }
         }

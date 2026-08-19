@@ -67,15 +67,22 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// pivot or the carved secret columns. It also gets its own <see cref="DarlingAnalysisService"/>. Store
 /// migration + role provisioning are the WORKER's job; the <c>mcp</c>-role credential is written AFTER
 /// migration (later than the owner's), so the first-boot poll budget tolerates the delay. The plan fetcher
-/// resolves a finding's serverId to a live connection string built from darling.json (DPAPI resolution
-/// lazy per fetch; any resolution/connection failure degrades the fetch to null inside
-/// <see cref="PgPlanFetcher"/>). On a brand-new store, tool calls before the first migration/connect
+/// resolves a finding's serverId to a live connection string from the worker-published registry
+/// (<see cref="MonitoredServerRegistryState"/>, #2298 — darling.json only before the worker's first
+/// publish; DPAPI resolution lazy per fetch; any resolution/connection failure degrades the fetch to null
+/// inside <see cref="PgPlanFetcher"/>). On a brand-new store, tool calls before the first migration/connect
 /// simply return their error/miss envelopes.</para>
 /// </summary>
 public sealed class DarlingMcpHostService : BackgroundService
 {
     private readonly ILogger<DarlingMcpHostService> _logger;
     private readonly McpRuntimeState _state;
+
+    /* #2298: the worker-published monitored-server registry the plan-fetch resolver reads per fetch —
+       this host never re-reads config_monitored_servers itself (the mcp role's encrypted_password
+       SELECT-carve fails that whole read by design). */
+    private readonly MonitoredServerRegistryState _registryState;
+
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
@@ -87,10 +94,11 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// failure logs on a calm cadence instead of every poll tick.</summary>
     internal static readonly TimeSpan FailedStartBackoff = TimeSpan.FromSeconds(30);
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state)
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState)
     {
         _logger = logger;
         _state = state;
+        _registryState = registryState;
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort)
@@ -358,19 +366,52 @@ public sealed class DarlingMcpHostService : BackgroundService
             var postgres = NpgsqlDataSource.Create(storeConnectionString);
             _appDataSource = postgres;
 
-            /* serverId → connection string from config (first entry wins on a duplicate storage
-               name, mirroring the worker's FirstOrDefault over runtimes). Resolution is lazy so
-               DPAPI decrypt runs only when a plan fetch actually needs the connection. */
-            var serversById = new Dictionary<int, MonitoredServer>();
+            /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
+               Resolution is lazy so DPAPI decrypt runs only when a plan fetch actually needs the
+               connection; first entry wins on a duplicate storage name, mirroring the worker's
+               FirstOrDefault over runtimes.
+
+               The server set comes from the WORKER's published registry (#2298), not a read of our own.
+               This host used to re-read config_monitored_servers over its mcp-role connection, and that
+               read selects encrypted_password — a column the section-6 secret ACL deliberately
+               SELECT-carves from mcp (DarlingManagedRoles: mcp can WRITE a credential blob but never READ
+               one back). The 42501 failed the whole config view read, so live plan fetch silently fell
+               back to darling.json — on a seeded box, exactly the set of servers the file does not know
+               about (#2254/#2256). The worker already loads the same rows over its privileged connection
+               (it must, or it could not collect), so the process already holds everything this host was
+               failing to re-read; a second, deliberately-restricted read of it was the defect. The mcp
+               DATABASE role keeps its carve untouched — this state feeds only the in-process resolver,
+               and no MCP tool exposes it, so a token-holder still cannot obtain a stored credential.
+
+               Resolution reads the live snapshot PER FETCH rather than copying it once at host start:
+               before the worker's first publish it falls back to darling.json (this host's documented
+               store-down posture), and it heals on the next resolve after the publish — which also means
+               a server added later through add_servers or the Viewer reaches this resolver on the
+               worker's next reload, with no MCP restart. */
+            var fileFallbackById = new Dictionary<int, MonitoredServer>();
             foreach (var server in config.Servers)
             {
-                serversById.TryAdd(ServerIdHelper.GetDeterministicHashCode(server.StorageName), server);
+                fileFallbackById.TryAdd(server.ServerId, server);
+            }
+
+            /* Review note on #2298: the old permanent-failure WARN is gone with the failing read, but the
+               transient pre-publish window deserves a breadcrumb — once per inner-server (re)start (the
+               supervisor's Start and port-rebind Restart both come through here), at Debug, because it is
+               self-healing by design and a per-fetch log would just be noise. */
+            if (_registryState.Read() is null)
+            {
+                _logger.LogDebug(
+                    "MCP starting before the worker's first registry publish — live plan fetch resolves from darling.json until it arrives (self-healing; store-registered servers reach the resolver on the worker's next reload).");
             }
 
             var planFetcher = new PgPlanFetcher(
-                serverId => serversById.TryGetValue(serverId, out var server)
-                    ? DarlingServerConnector.ResolveConnectionString(server, _logger)
-                    : null,
+                serverId =>
+                {
+                    var byId = _registryState.Read()?.ById ?? fileFallbackById;
+                    return byId.TryGetValue(serverId, out var server)
+                        ? DarlingServerConnector.ResolveConnectionString(server, _logger)
+                        : null;
+                },
                 _logger);
 
             var builder = WebApplication.CreateBuilder();
@@ -472,6 +513,41 @@ public sealed class DarlingMcpHostService : BackgroundService
                    is served; Darling's delta collectors store no sample_interval_seconds, so per-second rates are
                    derived from the LAG interval. */
                 .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
+                /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
+                   pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
+                   one: PostgreSQL's waits are a two-level type/event taxonomy with no signal-wait
+                   concept, reported in microseconds, so the two engines cannot share a result shape
+                   without lying about a unit or emitting mostly-null columns. */
+                .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
+                /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
+                   pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
+                   peak memory, neither of which the SQL Server tools have an equivalent for. */
+                .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
+                /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
+                   PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
+                .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()
+                /* get_pg_xmin_horizon — why vacuum reclaims nothing, attributed to one of four causes
+                   that are indistinguishable by symptom and need different fixes. */
+                .WithGeminiCompatibleTools<DarlingMcpPgXminTools>()
+                /* get_pg_replication_slots — the other half of the abandoned-slot story. The xmin tool
+                   reports a slot pinning the horizon; this one reports the WAL it is retaining, which is
+                   unbounded by default and fills the volume regardless of what vacuum is doing. */
+                .WithGeminiCompatibleTools<DarlingMcpPgSlotTools>()
+                /* get_pg_autovacuum_health — which tables autovacuum is not keeping up with, ranked by
+                   how far past each table's OWN threshold it is. The ratio is the whole tool: a
+                   dead-tuple count is not comparable between a 50-million-row table and a 10,000-row
+                   one, and the threshold is what makes it so. */
+                .WithGeminiCompatibleTools<DarlingMcpPgAutovacuumTools>()
+                /* get_pg_io_stats — I/O attributed to who/what/why rather than to a file. The context
+                   dimension has no SQL Server counterpart and is what separates a buffer-pool miss that
+                   more memory would fix from a ring-buffered sequential scan that it would not. */
+                .WithGeminiCompatibleTools<DarlingMcpPgIoTools>()
+                /* get_pg_blocking — who is blocked by whom, assembled from the stored edge list into chains
+                   with the ROOT attributed. The one PostgreSQL read whose caveat has to travel WITH the
+                   answer: SQL Server's blocked-process report is engine-recorded, this is periodically
+                   sampled, so "no blocking" here means "none was sampled" and the tool reports its own
+                   capture count so that distinction cannot be lost. */
+                .WithGeminiCompatibleTools<DarlingMcpPgBlockingTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

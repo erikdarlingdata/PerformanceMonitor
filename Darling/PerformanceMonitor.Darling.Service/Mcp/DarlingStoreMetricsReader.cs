@@ -38,7 +38,11 @@ SELECT DISTINCT ON (object_kind, object_name)
     compressed_after_bytes,
     chunk_count,
     row_count,
-    enabled_server_count
+    enabled_server_count,
+    last_run_duration_ms,
+    schedule_interval_ms,
+    total_runs,
+    total_failures
 FROM collect.store_metrics
 ORDER BY object_kind, object_name, metric_time DESC";
 
@@ -55,12 +59,17 @@ SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
     compressed_after_bytes,
     chunk_count,
     row_count,
-    enabled_server_count
+    enabled_server_count,
+    last_run_duration_ms,
+    schedule_interval_ms,
+    total_runs,
+    total_failures
 FROM collect.store_metrics
 WHERE metric_time >= $1
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
 
-    /// <summary>One object's newest self-metrics row.</summary>
+    /// <summary>One object's newest self-metrics row. The four job fields (#2136, V56) are non-null only
+    /// on <c>background_job</c> rows — every other kind leaves them NULL, as the sweep writes them.</summary>
     public sealed record StoreMetricRow(
         string ObjectKind,
         string ObjectName,
@@ -70,9 +79,14 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
         long? CompressedAfterBytes,
         int? ChunkCount,
         long? RowCount,
-        int? EnabledServerCount);
+        int? EnabledServerCount,
+        long? LastRunDurationMs = null,
+        long? ScheduleIntervalMs = null,
+        long? TotalRuns = null,
+        long? TotalFailures = null);
 
-    /// <summary>One object's settled point for one day (the day's last sample).</summary>
+    /// <summary>One object's settled point for one day (the day's last sample). Job fields as on
+    /// <see cref="StoreMetricRow"/>.</summary>
     public sealed record StoreMetricDailyPoint(
         string ObjectKind,
         string ObjectName,
@@ -82,7 +96,11 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
         long? CompressedAfterBytes,
         int? ChunkCount,
         long? RowCount,
-        int? EnabledServerCount);
+        int? EnabledServerCount,
+        long? LastRunDurationMs = null,
+        long? ScheduleIntervalMs = null,
+        long? TotalRuns = null,
+        long? TotalFailures = null);
 
     /// <summary>One day's whole-store growth: the byte delta from the previous day's settled point, and
     /// that delta divided by the day's enabled-server count — the number onboarding N servers multiplies.
@@ -108,7 +126,11 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
                 reader.IsDBNull(5) ? null : reader.GetInt64(5),
                 reader.IsDBNull(6) ? null : reader.GetInt32(6),
                 reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                reader.IsDBNull(11) ? null : reader.GetInt64(11),
+                reader.IsDBNull(12) ? null : reader.GetInt64(12)));
         }
 
         return rows;
@@ -133,7 +155,11 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time D
                 reader.IsDBNull(5) ? null : reader.GetInt64(5),
                 reader.IsDBNull(6) ? null : reader.GetInt32(6),
                 reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                reader.IsDBNull(11) ? null : reader.GetInt64(11),
+                reader.IsDBNull(12) ? null : reader.GetInt64(12)));
         }
 
         return rows;

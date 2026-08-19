@@ -27,6 +27,38 @@ public static class DeadlockObjectExtractor
         { "objectlock", "pagelock", "keylock", "ridlock", "rowgrouplock" };
 
     /// <summary>
+    /// Returns the distinct database names across the graph's processes (<c>currentdbname</c>), or an
+    /// empty list when the XML is blank, unparseable, or carries none. Never throws. The same attribute
+    /// the excluded-database filter reads — this is the discrete "Database" fact's source (#2109), kept
+    /// separate from the object-name fingerprint parse because a graph can name objects in databases no
+    /// process was running in (cross-database deadlocks), and the fact answers "where did this happen",
+    /// not "what was locked".
+    /// </summary>
+    public static IReadOnlyList<string> DatabasesFromGraphXml(string? graphXml)
+    {
+        if (string.IsNullOrWhiteSpace(graphXml))
+            return Array.Empty<string>();
+
+        try
+        {
+            var doc = XElement.Parse(graphXml);
+            var names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var process in doc.Descendants("process"))
+            {
+                var db = process.Attribute("currentdbname")?.Value;
+                if (!string.IsNullOrWhiteSpace(db))
+                    names.Add(db.Trim());
+            }
+
+            return names.Count == 0 ? Array.Empty<string>() : names.ToList();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
     /// Returns the distinct object names across all lock resources in the graph, or an empty list when
     /// the XML is blank, unparseable, or carries no named objects. Never throws.
     /// </summary>

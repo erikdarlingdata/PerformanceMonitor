@@ -108,15 +108,20 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     [Fact]
     public void Golden_CoversExactlyTheCatalogCollectorTables()
     {
-        var catalogTables = CollectorCatalog.All.Select(c => c.TargetTable).OrderBy(t => t, StringComparer.Ordinal);
+        /* The oracle describes the tables LITE stores, which is the SQL Server subset of the shared
+           engine-mixed catalog — Lite has no PostgreSQL target and creates no table for those definitions. */
+        var catalogTables = DuckDbSchemaGenerator.StoredCollectors
+            .Select(c => c.TargetTable).OrderBy(t => t, StringComparer.Ordinal);
         var goldenTables = GoldenCollectorSchema.Tables.Keys.OrderBy(t => t, StringComparer.Ordinal);
 
-        /* The frozen oracle must describe exactly the 41 catalog collector tables — no more, no fewer. */
+        /* The frozen oracle must describe exactly those tables — no more, no fewer. 41 stays a literal here
+           BECAUSE it is the frozen historical shape: if a SQL Server collector is added, this is supposed to
+           fail until the oracle is extended by hand. That is the whole point of an oracle. */
         Assert.Equal(catalogTables, goldenTables);
-        Assert.Equal(41, GoldenCollectorSchema.Tables.Count);
+        Assert.Equal(42, GoldenCollectorSchema.Tables.Count);
 
         /* Only server_config and database_config lack an index (matches DuckDbSchemaGenerator.CreateIndex). */
-        var goldenIndexless = CollectorCatalog.All
+        var goldenIndexless = DuckDbSchemaGenerator.StoredCollectors
             .Select(c => c.TargetTable)
             .Where(t => !GoldenCollectorSchema.Indexes.ContainsKey(t))
             .OrderBy(t => t, StringComparer.Ordinal)
@@ -172,7 +177,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         using var conn = new DuckDBConnection($"Data Source={_dbPath}");
         conn.Open();
 
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in DuckDbSchemaGenerator.StoredCollectors)
         {
             var table = schema.TargetTable;
 
@@ -226,7 +231,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     {
         var failures = new List<string>();
 
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in DuckDbSchemaGenerator.StoredCollectors)
         {
             var table = schema.TargetTable;
             var generated = DuckDbSchemaGenerator.CreateIndex(schema);
@@ -254,7 +259,7 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         using var conn = new DuckDBConnection($"Data Source={_dbPath}");
         conn.Open();
 
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in DuckDbSchemaGenerator.StoredCollectors)
         {
             using (var t = conn.CreateCommand())
             {
@@ -275,8 +280,12 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         using var count = conn.CreateCommand();
         count.CommandText =
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN (" +
-            string.Join(",", CollectorCatalog.All.Select(c => $"'{c.TargetTable}'")) + ")";
-        Assert.Equal(41, Convert.ToInt32(count.ExecuteScalar()));
+            string.Join(",", DuckDbSchemaGenerator.StoredCollectors.Select(c => $"'{c.TargetTable}'")) + ")";
+        /* The generated schema executes into DuckDB and must produce exactly the tables Lite stores.
+           Derived rather than pinned at 41: the golden below stays a frozen literal on purpose (it is the
+           historical shape), but this side tracks the generator, so adding a SQL Server collector updates it
+           and adding a PostgreSQL one correctly does not. */
+        Assert.Equal(DuckDbSchemaGenerator.StoredCollectors.Count(), Convert.ToInt32(count.ExecuteScalar()));
     }
 
     private static string BuildTableDiff(string table, List<ColumnInfo> golden, List<ColumnInfo> generated)

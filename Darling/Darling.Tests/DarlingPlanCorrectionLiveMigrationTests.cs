@@ -93,12 +93,13 @@ public sealed class DarlingPlanCorrectionLiveMigrationTests
 
         var applied = await PgMigrations.MigrateAsync(connection, cancellationToken);
 
-        /* Exactly the eight scripts above 44 ran — V46, V47, V48 (#1984), V49 (#1986 database-state alert),
+        /* Exactly the scripts above 44 ran — V46, V47, V48 (#1984), V49 (#1986 database-state alert),
            V50 (#2008 2a server-tag colour), V51 (#2012 stage 2 query-stats host object), V52 (#2060
-           persisted finding drill-down), and V53 (#2068 store self-metrics). If the applier had stumbled
-           over the permanent V45 gap it would either re-run everything above 1 or nothing at all, and both
-           show up right here. */
-        Assert.Equal(9, applied);
+           persisted finding drill-down), V53 (#2068 store self-metrics), V54 (#2069 plan-dim gzip), and
+           V55 (#2107 self-alert knobs). If the applier had stumbled over the permanent V45 gap it would
+           either re-run everything above 1 or nothing at all, and both show up right here. Version-agnostic
+           on purpose: the ladder-top pin lives in ScaffoldTests, and this count just tracks it. */
+        Assert.Equal(PgMigrations.Scripts.Count(m => m.Version > 44), applied);
         Assert.Equal(StorageVersion.SchemaVersion, await CurrentVersionAsync(connection, cancellationToken));
 
         var fromMigration = await ReadColumnsAsync(connection, cancellationToken);

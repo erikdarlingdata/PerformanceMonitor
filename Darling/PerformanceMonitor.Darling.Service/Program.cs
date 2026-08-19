@@ -211,6 +211,21 @@ if (args.Length > 0 && DarlingCliCommands.IsDisableWebVerb(args[0]))
     return await DarlingCliCommands.DisableWebAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --add-server / --add-servers (#2256) — register monitored server(s) in the store from a JSON
+   array on STDIN. The store is authoritative after the first seed, so darling.json edits are ignored, and the
+   web surface deliberately excludes the write tools; a headless host (the field report ran Windows Server 2012,
+   which cannot run the Viewer) had no supported path at all. Goes through the same AddServers path the MCP tool
+   uses, so validation, dedupe, the connection probe, password encryption and the server_id computation are
+   shared rather than reimplemented. NO Windows guard here on purpose: the verb needs Windows only for a MANAGED
+   store credential (DPAPI), which it checks itself, so a Linux host with bring-your-own Postgres can use it.
+   Reads stdin rather than argv so a password never lands in the process list or shell history. */
+if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
+{
+    var addServerConfigPath = args.Length > 1 ? args[1] : null;
+    return await DarlingCliCommands.AddServerAsync(
+        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --backfill-rollups (#1759 Phase 2) — materialize the query-acceleration rollups back over
    pre-existing history so the #1680 arming gate can release the held raw retention policies by itself. An
    OPERATOR verb, deliberately not a startup step: the gate is all-or-nothing, so a store with a year of raw
@@ -337,6 +352,11 @@ if (OperatingSystem.IsWindows())
    every reload; each host's supervisor observes and starts/stops/rebinds without a service restart. */
 builder.Services.AddSingleton<McpRuntimeState>();
 builder.Services.AddSingleton<WebRuntimeState>();
+
+/* #2298: the worker-published monitored-server registry the MCP host's plan-fetch resolver reads,
+   replacing its own mcp-role re-read of rows whose encrypted_password column that role is
+   deliberately denied. */
+builder.Services.AddSingleton<MonitoredServerRegistryState>();
 
 builder.Services.AddHostedService<DarlingWorker>();
 

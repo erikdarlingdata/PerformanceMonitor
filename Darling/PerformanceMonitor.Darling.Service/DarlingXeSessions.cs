@@ -35,6 +35,15 @@ public static class DarlingXeSessions
 {
     public static async Task EnsureAllAsync(ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, CancellationToken cancellationToken)
     {
+        /* Same self-gate as ReconcileLongQueryCompletionsAsync, same reason: this method constructs a
+           SqlConnection from the engine-ambiguous connection string, so it enforces its own precondition
+           rather than trusting the caller's gate (DarlingWorker's connect path) to be the only entry
+           forever. XE does not exist on PostgreSQL. */
+        if (server.Target.Engine != PerformanceMonitor.Collectors.CollectorTargetEngine.SqlServer)
+        {
+            return;
+        }
+
         if (server.Target.IsAzureSqlDb)
         {
             await EnsureDatabaseScopedAsync(server, runner, logger, cancellationToken);
@@ -533,6 +542,15 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE 
     /// </summary>
     public static async Task ReconcileLongQueryCompletionsAsync(ServerRuntime server, DarlingCollectorRunner runner, bool enabled, ILogger? logger, CancellationToken cancellationToken)
     {
+        /* Belt to the worker's braces: the caller gates on engine (a PostgreSQL target has no XE to
+           reconcile), but this method constructs a SqlConnection from the engine-ambiguous connection
+           string below, so it enforces its own precondition rather than trusting every present and future
+           caller — the exact trust that put "Keyword not supported: 'host'" in the sweep log once a minute. */
+        if (server.Target.Engine != PerformanceMonitor.Collectors.CollectorTargetEngine.SqlServer)
+        {
+            return;
+        }
+
         if (server.Target.IsAzureSqlDb)
         {
             await ReconcileLongQueryCompletionsAzureAsync(server, runner, enabled, logger, cancellationToken);

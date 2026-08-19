@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Media;
@@ -204,6 +205,84 @@ public sealed class ViewerSettingsTests
 
         var ex = Assert.Throws<InvalidDataException>(() => ViewerSettings.Parse(json));
         Assert.Contains("service", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Start the PerformanceMonitor Darling service once", ex.Message, StringComparison.Ordinal);
+        /* #2197: even the first-run voice carries the one sentence for the operator who HAS already
+           started it — this string is what the main window shows, so it cannot be a dead end either. */
+        Assert.Contains("ALREADY started it", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2197, the viewer half of the CLI's DarlingStoreBootstrapEvidence. This message is rendered by the
+    /// main window, so it reaches the same operator with the same absence — and before this it gave the
+    /// same first-run advice to a store whose bootstrap had already failed.
+    /// </summary>
+    [Fact]
+    public void Parse_ManagedMode_MissingCredentialAfterAFailedBootstrap_PointsAtTheServiceLogInstead()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-viewer-failedboot-");
+        try
+        {
+            /* The #2185 shape: the service wrote the store's own credential immediately before initdb, and
+               initdb died — so the admin role credential the viewer wants was never provisioned. */
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(Path.Combine(root.FullName, "store"));
+            var storeCredential = PerformanceMonitor.Darling.Service.DarlingManagedPostgres.CredentialPathFor(dataDirectory);
+            File.WriteAllText(storeCredential, "not-a-real-credential");
+
+            var json = $$"""{ "postgres": { "managed": true, "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}} } }""";
+            var ex = Assert.Throws<InvalidDataException>(() => ViewerSettings.Parse(json));
+
+            Assert.DoesNotContain("Start the PerformanceMonitor Darling service once", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("NOT a first run", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(storeCredential, ex.Message, StringComparison.Ordinal);
+            Assert.Contains("darling-service_yyyyMMdd.log", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("Nothing in darling.json produces this", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The viewer does not reference the Service project, so the file names it probes for bootstrap evidence
+    /// are DUPLICATED under the file's sliver rule — the same rule the DPAPI entropy and the role/credential
+    /// names already live under. Pin them, or a rename on the service side silently turns the viewer's
+    /// sharper branch off and nothing fails.
+    /// </summary>
+    [Fact]
+    public void ManagedDerivation_BootstrapEvidenceFileNames_MatchTheServiceConstants()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-viewer-sliver-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            var storeFolder = Path.Combine(root.FullName, "store");
+            Directory.CreateDirectory(storeFolder);
+
+            /* Each service-side name, one at a time, must be the one the viewer's probe recognises. */
+            foreach (var evidenceFile in new[]
+                     {
+                         PerformanceMonitor.Darling.Service.DarlingManagedPostgres.CredentialFileName,
+                         PerformanceMonitor.Darling.Service.DarlingManagedPostgres.McpCredentialFileName,
+                         PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ServerLogFileName,
+                     })
+            {
+                var path = Path.Combine(storeFolder, evidenceFile);
+                File.WriteAllText(path, "x");
+
+                var json = $$"""{ "postgres": { "managed": true, "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}} } }""";
+                var ex = Assert.Throws<InvalidDataException>(() => ViewerSettings.Parse(json));
+                Assert.Contains("NOT a first run", ex.Message, StringComparison.Ordinal);
+                Assert.Contains(path, ex.Message, StringComparison.Ordinal);
+
+                File.Delete(path);
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     [Fact]
@@ -543,10 +622,68 @@ public sealed class ViewerSchemaVersionGateTests
         /* Pin: a fully-migrated store (all sentinels present) must map to exactly the required version. If a
            future migration bumps StorageVersion, this fails until a matching sentinel + map arm is added —
            the guard against the probe silently under-reporting a newer store as skewed, which would make
-           the connect-time gate refuse to open the viewer against a perfectly healthy store. */
-        Assert.Equal(
-            ViewerDataService.RequiredStoreSchemaVersion,
-            ViewerDataService.MapProbedSchemaVersion(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true));
+           the connect-time gate refuse to open the viewer against a perfectly healthy store.
+
+           Built by REFLECTION so the call's arity tracks the signature: the literal-true form silently
+           defaults every newly added sentinel parameter to false, maps one version low, and fails this test
+           on every probe extension — it broke on the V61 bump and again on the V61+V62 merge. All-true IS
+           the contract here (a fully-migrated store has every sentinel), so the arity is the only thing the
+           literals ever expressed. */
+        var map = typeof(ViewerDataService).GetMethod(
+            nameof(ViewerDataService.MapProbedSchemaVersion),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var allTrue = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        Assert.Equal(ViewerDataService.RequiredStoreSchemaVersion, (int)map.Invoke(null, allTrue)!);
+
+        /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes
+           was that one ordinal is legitimately a compound (two EXISTS OR-ed), so counting the token EXISTS
+           lies — it reads one high. That is true of token counting and not of the seam: counting top-level
+           select items by PAREN DEPTH is immune to the compound, because the nested EXISTS sit inside
+           parentheses. StoreSchemaProbe_ColumnCount_MatchesTheMapArity below does that, so the seam is now
+           pinned at build time rather than only on a real store. */
+    }
+
+    /// <summary>
+    /// The probe SQL's column count must equal <see cref="ViewerDataService.MapProbedSchemaVersion"/>'s
+    /// parameter count, because <c>GetStoreSchemaVersionAsync</c> reads them positionally.
+    ///
+    /// <para><b>Nothing else catches this.</b> Add a sentinel to the SQL and forget the parameter and the
+    /// last column is silently ignored — a fully-migrated store reports one rung short and the viewer refuses
+    /// a healthy store. Add the parameter and forget the SQL column and
+    /// <c>reader.GetBoolean(n)</c> throws IndexOutOfRange at connect time. Both are runtime-only against a
+    /// live store, both are invisible to every other test here (the arity test above builds its arguments
+    /// from the signature, so it agrees with itself either way), and the second one is the same class of
+    /// ordinal-drift defect that a live-target review had to find by hand.</para>
+    ///
+    /// <para>Top-level select items are counted by paren depth rather than by counting the string
+    /// <c>EXISTS</c>: the V22/V23 composite column contains two nested <c>EXISTS</c> of its own, so a naive
+    /// substring count reads one HIGHER than the select list actually is. Paren depth is immune, because the
+    /// nested pair sits inside parentheses — which is why this can be pinned at build time at all.</para>
+    /// </summary>
+    [Fact]
+    public void StoreSchemaProbe_ColumnCount_MatchesTheMapArity()
+    {
+        var sql = ViewerDataService.StoreSchemaProbeSql;
+        var selectAt = sql.IndexOf("SELECT", StringComparison.Ordinal);
+        Assert.True(selectAt >= 0, "the probe must be a SELECT");
+
+        var depth = 0;
+        var columns = 1;
+        foreach (var c in sql.AsSpan(selectAt + "SELECT".Length))
+        {
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',' && depth == 0) columns++;
+        }
+
+        var parameters = typeof(ViewerDataService)
+            .GetMethod(
+                nameof(ViewerDataService.MapProbedSchemaVersion),
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Public)!
+            .GetParameters().Length;
+
+        Assert.Equal(parameters, columns);
     }
 }
 
@@ -592,6 +729,29 @@ public sealed class ViewerStoreUnreachableTests
         Assert.Contains("Darling service", ex.Message, StringComparison.Ordinal);
         Assert.Contains("darling.json", ex.Message, StringComparison.Ordinal);
         Assert.Equal("connection refused", ex.InnerException?.Message);
+
+        /* #2117 finding 2: the message itself carries the underlying error's first line — the swallowed
+           detail cost a field operator hours, and the fixed prose alone reads identically for a TLS chain
+           rejection, a wrong password, a pg_hba refusal, and a dead host. */
+        Assert.Contains("Underlying error: connection refused", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The surfaced first line is trimmed of the CR a CRLF-raised exception leaves behind (Windows is
+    /// exactly where this fix is aimed), and only the FIRST line is taken — a multi-line inner message
+    /// must not flood the one-line status surface.
+    /// </summary>
+    [Fact]
+    public void ViewerStoreUnreachableException_SurfacesTheFirstLineOnly_WithNoTrailingCarriageReturn()
+    {
+        var ex = new ViewerStoreUnreachableException(new InvalidOperationException("boom\r\nmore detail\r\neven more"));
+
+        Assert.Contains("Underlying error: boom", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("boom\r", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("more detail", ex.Message, StringComparison.Ordinal);
+
+        /* And a null inner message degrades to the explicit placeholder, never a crash. */
+        Assert.Contains("Underlying error: (none)", new ViewerStoreUnreachableException(null!).Message, StringComparison.Ordinal);
     }
 
     [Fact]

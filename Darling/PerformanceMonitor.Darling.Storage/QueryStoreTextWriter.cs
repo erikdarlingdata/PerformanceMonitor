@@ -1,0 +1,101 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+
+namespace PerformanceMonitor.Darling.Storage;
+
+/// <summary>One statement's text as the fetch returned it.</summary>
+public readonly record struct FetchedQueryText(long QueryId, string? QueryText);
+
+/// <summary>
+/// Lands what the query-text fetch returned into <see cref="QueryStoreTextStore"/> (#2150).
+///
+/// <para>Much simpler than <see cref="QueryStorePlanWriter"/>, and the difference is the whole point of
+/// keying this store the way it is keyed: there is no content dimension to write first, so there is no
+/// torn-write ordering to reason about, no digest, and no transaction — a single upsert either lands or it
+/// does not.</para>
+/// </summary>
+public static class QueryStoreTextWriter
+{
+    /// <summary>
+    /// Lands a fetch's statement text for one database, returning the <c>query_id</c>s that stored, in the
+    /// order supplied — which is what the caller feeds to
+    /// <see cref="PerformanceMonitor.Collectors.QueryStoreTextState.AdvanceWatermark"/>. The watermark must
+    /// reflect what LANDED rather than what was selected, or a torn pass advances past text that never
+    /// arrived.
+    ///
+    /// <para>Rows with null text are stored as null rather than skipped. Query Store does not produce them
+    /// in practice, so this is about not having a special case to get wrong: a null in this store means "we
+    /// fetched and there was nothing", the readers already <c>COALESCE</c> onto the fact row's own column,
+    /// and the watermark advances either way — stalling on a statement whose text will never exist is the
+    /// failure the budget predicate had to be fixed for twice on the plan side.</para>
+    /// </summary>
+    public static async Task<IReadOnlyList<long>> WriteAsync(
+        NpgsqlConnection connection,
+        int serverId,
+        string databaseName,
+        IReadOnlyList<FetchedQueryText> texts,
+        DateTime collectionTimeUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        if (texts is null)
+        {
+            throw new ArgumentNullException(nameof(texts));
+        }
+
+        var landed = new List<long>(texts.Count);
+        if (texts.Count == 0)
+        {
+            return landed;
+        }
+
+        var serverIds = new int[texts.Count];
+        var databases = new string[texts.Count];
+        var queryIds = new long[texts.Count];
+        var bodies = new string?[texts.Count];
+        var stamps = new DateTime[texts.Count];
+
+        /* Naive() on the stamp, not the raw UTC value: last_seen is a ::timestamp parameter, and Npgsql
+           infers timestamptz from a Kind=Utc value and lets Postgres convert it into the session zone on the
+           way in (#1969). A last_seen written at the wrong hour ages rows out ahead of the facts that
+           reference them, and does it silently. */
+        var stamp = QueryStorePlanMap.Naive(collectionTimeUtc);
+
+        for (var i = 0; i < texts.Count; i++)
+        {
+            var text = texts[i];
+            landed.Add(text.QueryId);
+
+            serverIds[i] = serverId;
+            databases[i] = databaseName;
+            queryIds[i] = text.QueryId;
+            bodies[i] = text.QueryText;
+            stamps[i] = stamp;
+        }
+
+        using var upsert = new NpgsqlCommand(QueryStoreTextStore.UpsertSql, connection);
+        upsert.Parameters.AddWithValue(serverIds);
+        upsert.Parameters.AddWithValue(databases);
+        upsert.Parameters.AddWithValue(queryIds);
+        upsert.Parameters.AddWithValue(bodies);
+        upsert.Parameters.AddWithValue(stamps);
+        await upsert.ExecuteNonQueryAsync(cancellationToken);
+
+        return landed;
+    }
+}

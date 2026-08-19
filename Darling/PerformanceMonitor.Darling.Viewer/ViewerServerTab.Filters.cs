@@ -34,6 +34,7 @@ public partial class ViewerServerTab : UserControl
     private DataGridFilterManager<ServerConfigRow>? _serverConfigFilterMgr;
     private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
+    private DataGridFilterManager<QueryStoreHealthRow>? _queryStoreHealthFilterMgr;
     private DataGridFilterManager<AutomaticTuningRow>? _automaticTuningFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<RunningJobRow>? _runningJobsFilterMgr;
@@ -59,6 +60,7 @@ public partial class ViewerServerTab : UserControl
         _serverConfigFilterMgr = new DataGridFilterManager<ServerConfigRow>(ServerConfigGrid);
         _databaseConfigFilterMgr = new DataGridFilterManager<DatabaseConfigRow>(DatabaseConfigGrid);
         _dbScopedConfigFilterMgr = new DataGridFilterManager<DatabaseScopedConfigRow>(DatabaseScopedConfigGrid);
+        _queryStoreHealthFilterMgr = new DataGridFilterManager<QueryStoreHealthRow>(QueryStoreHealthGrid);
         _automaticTuningFilterMgr = new DataGridFilterManager<AutomaticTuningRow>(AutomaticTuningGrid);
         _traceFlagsFilterMgr = new DataGridFilterManager<TraceFlagRow>(TraceFlagsGrid);
         _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
@@ -80,6 +82,7 @@ public partial class ViewerServerTab : UserControl
         _filterManagers[ServerConfigGrid] = _serverConfigFilterMgr;
         _filterManagers[DatabaseConfigGrid] = _databaseConfigFilterMgr;
         _filterManagers[DatabaseScopedConfigGrid] = _dbScopedConfigFilterMgr;
+        _filterManagers[QueryStoreHealthGrid] = _queryStoreHealthFilterMgr;
         _filterManagers[AutomaticTuningGrid] = _automaticTuningFilterMgr;
         _filterManagers[TraceFlagsGrid] = _traceFlagsFilterMgr;
         _filterManagers[RunningJobsGrid] = _runningJobsFilterMgr;
@@ -111,14 +114,16 @@ public partial class ViewerServerTab : UserControl
         var serverConfigTask = _dataService.GetLatestServerConfigAsync(_server.ServerId);
         var databaseConfigTask = _dataService.GetLatestDatabaseConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
         var databaseScopedConfigTask = _dataService.GetLatestDatabaseScopedConfigAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
+        var queryStoreHealthTask = _dataService.GetLatestQueryStoreHealthAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
         var automaticTuningTask = _dataService.GetLatestAutomaticTuningAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
         var traceFlagsTask = _dataService.GetLatestTraceFlagsAsync(_server.ServerId);
 
-        await Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, automaticTuningTask, traceFlagsTask);
+        await Task.WhenAll(serverConfigTask, databaseConfigTask, databaseScopedConfigTask, queryStoreHealthTask, automaticTuningTask, traceFlagsTask);
 
         _serverConfigFilterMgr!.UpdateData(serverConfigTask.Result);
         _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
         _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+        _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
         _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
         _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
     }

@@ -272,6 +272,16 @@ public partial class ServerTab : UserControl
                 FromDatePicker.SelectedDate = DateTime.Today.AddDays(-1);
                 ToDatePicker.SelectedDate = DateTime.Today;
             }
+
+            if (!isCustom)
+            {
+                /* #2154: a DatePicker's calendar dropdown is a POPUP, which lives outside the visual
+                   tree's visibility — collapsing the picker does not close an already-open dropdown,
+                   so backing out of Custom Range without picking a date left an orphaned floating
+                   calendar on screen. Close them explicitly alongside the collapse. */
+                FromDatePicker.IsDropDownOpen = false;
+                ToDatePicker.IsDropDownOpen = false;
+            }
         }
 
         if (!isCustom)

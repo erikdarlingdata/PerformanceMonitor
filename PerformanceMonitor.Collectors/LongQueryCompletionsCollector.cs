@@ -137,8 +137,10 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     /* Server- vs database-scoped ring-buffer source is the only engine difference; the event/action
        shred is shared. The session only captures the three long-completion events, so the read shreds
        everything in the ring buffer newer than the watermark — the duration predicate lives in the
-       session DDL (BuildCreateSessionSql), not here. Customizable text columns (statement / batch_text
-       / object_name) are turned on in the DDL's SET clause, so they are present in the payload here. */
+       session DDL (BuildCreateSessionSql), not here. The customizable text columns (statement /
+       batch_text) are turned on in the DDL's SET clause; object_name is rpc_completed's own default
+       data field (#2129 — SETting a collect_object_name there fails the CREATE), so all three are
+       present in the payload here. */
     private const string ShredSelect = @"
 SELECT
     event_time = evt.value('(@timestamp)[1]', 'datetime2'),
@@ -341,7 +343,8 @@ OPTION(RECOMPILE);
     /// MEMORY_PARTITION_MODE = NONE for a single readable ring buffer / AWS RDS compatibility, mirroring
     /// the deadlock session). The <paramref name="thresholdMicroseconds"/> duration predicate is applied
     /// to the two COMPLETED events only; <c>attention</c> is captured unfiltered (see the class doc). The
-    /// customizable text/object columns are turned on via SET so they are actually collected.
+    /// customizable TEXT columns (statement / batch_text) are turned on via SET so they are actually
+    /// collected; object_name needs no SET — it is one of rpc_completed's default data fields (#2129).
     /// </summary>
     public static string BuildCreateSessionSql(bool databaseScoped, long thresholdMicroseconds)
     {
@@ -351,14 +354,18 @@ OPTION(RECOMPILE);
            AWS RDS compatible). Azure database-scoped sessions do not accept MEMORY_PARTITION_MODE. */
         var partitionMode = databaseScoped ? "" : "\n    MEMORY_PARTITION_MODE = NONE,";
 
+        /* #2129: rpc_completed SETs only collect_statement. object_name is one of that event's
+           DEFAULT data fields — the collect_object_name customizable attribute belongs to
+           sp_statement_completed, and SETting it here made the CREATE fail on every server. The
+           note lives in C# on purpose: the DDL string ships to every monitored server, and the
+           test pin asserts the bogus attribute appears NOWHERE in it, comment included. */
         return $@"
 CREATE EVENT SESSION [{XeSessionName}]
 ON {scope}
 ADD EVENT sqlserver.rpc_completed
 (
     SET
-        collect_statement = 1,
-        collect_object_name = 1
+        collect_statement = 1
     ACTION
     ({actions}
     )

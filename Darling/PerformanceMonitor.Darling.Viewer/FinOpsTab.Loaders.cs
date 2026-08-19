@@ -299,9 +299,13 @@ public partial class FinOpsTab
         {
             "RIGHT_SIZED" => $"CPU is moderately loaded (avg {data.AvgCpuPct:N1}%, p95 {data.P95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bpPct:N0}% of physical RAM). No action needed.",
             "OVER_PROVISIONED" => $"CPU is lightly loaded (avg {data.AvgCpuPct:N1}%, max {data.MaxCpuPct}%) and buffer pool uses only {bpPct:N0}% of physical RAM. This server may have more resources than it needs.",
-            "UNDER_PROVISIONED" => data.P95CpuPct > 85
-                ? $"CPU p95 is {data.P95CpuPct:N1}% (threshold: 85%). This server may need more CPU capacity."
-                : $"Buffer pool uses {bpPct:N0}% of physical RAM and memory ratio is {data.MemoryRatio:N2} (threshold: 0.95). Memory pressure is high.",
+            /* The reason comes from the same place as the verdict. This branch used to read
+               "P95CpuPct > 85 ? CPU : memory ratio is {x} (threshold: 0.95)", so a server flagged for grant
+               pressure or worker saturation would have been explained as a memory ratio that no longer
+               decides anything, citing a threshold the code does not check (#2246). */
+            "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
+                data.P95CpuPct, data.MaxGrantWaiters, data.GrantTimeouts, data.ForcedGrants,
+                data.MaxWorkersCount, data.CurrentWorkersCount),
             _ => ""
         };
 

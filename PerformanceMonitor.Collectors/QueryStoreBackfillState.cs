@@ -37,6 +37,85 @@ public static class QueryStoreBackfillState
     /// <summary>State key prefix for a recorded clamp hole (value: <see cref="EncodeHole"/>).</summary>
     public const string HoleKeyPrefix = "hole:";
 
+    /// <summary>
+    /// The widest window a single backfill slice may hand the per-database query (#2102) — matched
+    /// to <see cref="WatermarkPolicy.MaxCatchup"/> so NO path, live or backfill, ever windows wider
+    /// than the steady state the fleet proves. The backfill query aggregates and sorts its whole
+    /// window before the byte budget can bound anything (the same row-cap-is-not-a-cost-cap flaw
+    /// that wedged the live path), so an unchunked wide hole on a big database re-times-out forever
+    /// instead of draining.
+    /// </summary>
+    public static readonly TimeSpan MaxSliceSpan = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How recently the live path may have failed a server's query_store collection before the
+    /// backfill worker yields that server's slice (#2111). Two poll cycles: a failure inside the
+    /// current or previous cycle means the live path is struggling NOW, and a backfill slice
+    /// scanning the same QS internal tables on a MAXDOP-1 replica is exactly the contention that
+    /// keeps it struggling. The class doc's contract — "backfill can be slow forever without
+    /// delaying collection" — is what this enforces; holes wait, live recovers, backfill resumes.
+    /// </summary>
+    public static readonly TimeSpan YieldToLiveWindow = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// True when the backfill worker should skip a server's slice this tick because its live
+    /// query_store collection failed within <see cref="YieldToLiveWindow"/> (#2111). Server-grain
+    /// on purpose: the contention is server-wide, and any database's live failure vouches for the
+    /// whole replica being contended. A pure function so the placement is pinnable in isolation,
+    /// like its siblings above.
+    /// </summary>
+    public static bool ShouldYieldToLive(DateTime? lastLiveFailureUtc, DateTime nowUtc)
+        => lastLiveFailureUtc is DateTime failure && nowUtc - failure < YieldToLiveWindow;
+
+    /// <summary>
+    /// The narrowest window the adaptive shrink may reach (#2111 reserve, promoted on field
+    /// evidence): a member whose 1h window exceeds the command timeout halves per consecutive
+    /// failure toward this floor — 15 minutes fits inside a 60s read on every store the fleet has
+    /// shown us, and anything narrower than a flush interval would mostly return empty.
+    /// </summary>
+    public static readonly TimeSpan MinAdaptiveSpan = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// The window a member gets after <paramref name="consecutiveFailures"/> straight failures:
+    /// the full span halved per failure, floored at <see cref="MinAdaptiveSpan"/> (the exponent is
+    /// capped so the shift math cannot wrap). Success resets the counter at the call sites, so a
+    /// recovered member is back at full span on its next cycle. Pure and pinned like its siblings —
+    /// the live clamp and the backfill slicing share it, so the two paths cannot drift on how fast
+    /// they back off.
+    /// </summary>
+    public static TimeSpan AdaptiveSpan(TimeSpan fullSpan, int consecutiveFailures)
+    {
+        if (consecutiveFailures <= 0)
+        {
+            return fullSpan;
+        }
+
+        var halvings = Math.Min(consecutiveFailures, 6);
+        var shrunk = TimeSpan.FromTicks(fullSpan.Ticks >> halvings);
+        return shrunk < MinAdaptiveSpan ? MinAdaptiveSpan : shrunk;
+    }
+
+    /// <summary>
+    /// Bounds one newest-first slice to the top <see cref="MaxSliceSpan"/> of the remaining range:
+    /// returns the floor the slice should actually query, which is the requested floor once the
+    /// remainder is narrow enough. A pure function so the placement is pinnable in isolation, like
+    /// <see cref="WatermarkPolicy.ClampCatchup"/>. The caller distinguishes "chunk exhausted"
+    /// (result &gt; <paramref name="floorUtc"/>: an empty slice means only this CHUNK is quiet —
+    /// shrink the ceiling and keep walking) from "range exhausted" (result ==
+    /// <paramref name="floorUtc"/>: an empty slice is terminal, exactly the pre-chunking semantics).
+    /// </summary>
+    public static DateTime BoundSliceFloor(DateTime floorUtc, DateTime ceilingUtc)
+        => BoundSliceFloor(floorUtc, ceilingUtc, MaxSliceSpan);
+
+    /// <summary>The adaptive form (#2111 promoted): the caller passes
+    /// <see cref="AdaptiveSpan"/>'s result so a server whose slices keep timing out digs in
+    /// progressively narrower chunks until one fits its command timeout.</summary>
+    public static DateTime BoundSliceFloor(DateTime floorUtc, DateTime ceilingUtc, TimeSpan span)
+    {
+        var chunkFloor = ceilingUtc - span;
+        return chunkFloor > floorUtc ? chunkFloor : floorUtc;
+    }
+
     /// <summary>Encodes a hole range as <c>from|to</c> in round-trip format — deliberately not
     /// JSON, so the state row stays greppable and the codec dependency-free.</summary>
     public static string EncodeHole(DateTime fromUtc, DateTime toUtc)

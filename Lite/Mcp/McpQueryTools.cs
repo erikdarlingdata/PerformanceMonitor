@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. Also returns cpu_attribution: the returned rows' summed CPU-seconds against the SQL process's measured CPU-seconds for the window (avg cpu_utilization % x core count x window) - attributed_cpu_ratio says how much of the box the ranking explains; when the CPU series or core count is missing, or covers too little of the window, the ratio is omitted rather than invented.")]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -31,15 +31,37 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
+            /* Captured BEFORE the ranking read, whose window is its own internal UtcNow — hoisting
+               shrinks the numerator/denominator window skew from the ranking query's full duration to
+               call-entry overhead (review catch; threading one instant INTO the shared ranking read's
+               signature is the only way to zero it, and sub-microsecond against an hours window does
+               not buy that churn). */
+            var nowUtc = DateTime.UtcNow;
             var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
             if (rows.Count == 0)
             {
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
-            IEnumerable<QueryStatsRow> filtered = rows;
-            if (parallel_only || min_dop > 1)
-                filtered = filtered.Where(r => r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2));
+            var filtered = rows
+                .Where(r => !(parallel_only || min_dop > 1) || (r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2)))
+                .ToList();
+
+            /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
+               the caller-visible ranking (post top-N, post filters), denominator is measured, and the
+               ratio is omitted rather than invented when a denominator piece is missing. One nowUtc
+               backs the aggregate read AND the ratio math, and the two independent reads run
+               concurrently (review catches; Darling has both by construction). */
+            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
+            var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
+            var attribution = CpuAttribution.Compute(
+                filtered.Sum(r => r.TotalCpuMs) / 1000.0,
+                nowUtc.AddHours(-hours_back), nowUtc,
+                cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
+                properties?.CpuCount ?? 0);
 
             var result = filtered.Select(r => new
             {
@@ -57,6 +79,10 @@ public sealed class McpQueryTools
                 max_cpu_ms = r.MaxCpuMs,
                 min_elapsed_ms = r.MinElapsedMs,
                 max_elapsed_ms = r.MaxElapsedMs,
+                /* #2235: min/max are lifetime extremes (see QueryStatExtremes) — flagged only on
+                   the provable case, an extreme exceeding the whole window's total. */
+                extremes_note = QueryStatExtremes.LifetimeExtremeNote(
+                    r.TotalCpuMs, r.MaxCpuMs, r.TotalElapsedMs, r.MaxElapsedMs),
                 min_dop = r.MinDop,
                 max_dop = r.MaxDop,
                 is_parallel = r.MaxDop > 1,
@@ -82,6 +108,13 @@ public sealed class McpQueryTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                cpu_attribution = new
+                {
+                    ranked_cpu_seconds = attribution.RankedCpuSeconds,
+                    sql_cpu_seconds_in_window = attribution.SqlCpuSecondsInWindow,
+                    attributed_cpu_ratio = attribution.AttributedCpuRatio,
+                    note = attribution.Note
+                },
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -91,7 +124,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time. Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears.")]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time. Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. Also returns cpu_attribution: the returned rows' summed CPU-seconds against the SQL process's measured CPU-seconds for the window (avg cpu_utilization % x core count x window) - attributed_cpu_ratio says how much of the box the ranking explains; when the CPU series or core count is missing, or covers too little of the window, the ratio is omitted rather than invented.")]
     public static async Task<string> GetTopProceduresByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -111,6 +144,8 @@ public sealed class McpQueryTools
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
 
+            /* Same pre-read capture as the queries tool — the skew shrinks to call-entry overhead. */
+            var nowUtc = DateTime.UtcNow;
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name });
             if (rows.Count == 0)
             {
@@ -118,6 +153,19 @@ public sealed class McpQueryTools
                     "unavailable",
                     "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
             }
+
+            /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation, one
+               nowUtc backing aggregate and ratio, same concurrent independent reads. */
+            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
+            var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
+            var attribution = CpuAttribution.Compute(
+                rows.Sum(r => r.TotalCpuMs) / 1000.0,
+                nowUtc.AddHours(-hours_back), nowUtc,
+                cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
+                properties?.CpuCount ?? 0);
 
             var result = rows.Select(r => new
             {
@@ -135,6 +183,9 @@ public sealed class McpQueryTools
                 max_cpu_ms = r.MaxCpuMs,
                 min_elapsed_ms = r.MinElapsedMs,
                 max_elapsed_ms = r.MaxElapsedMs,
+                /* #2235: same lifetime-extremes flag as the queries tool. Mirrors Darling. */
+                extremes_note = QueryStatExtremes.LifetimeExtremeNote(
+                    r.TotalCpuMs, r.MaxCpuMs, r.TotalElapsedMs, r.MaxElapsedMs),
                 avg_reads = r.AvgReads,
                 total_logical_reads = r.TotalLogicalReads,
                 total_logical_writes = r.TotalLogicalWrites,
@@ -146,6 +197,13 @@ public sealed class McpQueryTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                cpu_attribution = new
+                {
+                    ranked_cpu_seconds = attribution.RankedCpuSeconds,
+                    sql_cpu_seconds_in_window = attribution.SqlCpuSecondsInWindow,
+                    attributed_cpu_ratio = attribution.AttributedCpuRatio,
+                    note = attribution.Note
+                },
                 procedures = result
             }, McpHelpers.JsonOptions);
         }

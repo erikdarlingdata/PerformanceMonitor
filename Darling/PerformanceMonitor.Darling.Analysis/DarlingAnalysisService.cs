@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -115,7 +116,8 @@ public sealed class DarlingAnalysisService
     /// Default time range is the last 4 hours. Host-UTC window (Lite's clock semantics —
     /// Darling's collectors stamp rows with the service host's UTC clock).
     /// </summary>
-    public async Task<List<AnalysisFinding>> AnalyzeAsync(int serverId, string serverName, int hoursBack = 4)
+    public async Task<List<AnalysisFinding>> AnalyzeAsync(
+        int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -125,7 +127,8 @@ public sealed class DarlingAnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
-            TimeRangeEnd = timeRangeEnd
+            TimeRangeEnd = timeRangeEnd,
+            CancellationToken = cancellationToken
         };
 
         return await AnalyzeAsync(context);
@@ -146,7 +149,7 @@ public sealed class DarlingAnalysisService
         {
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
-            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId);
+            var dataSpanHours = await GetTotalDataSpanHoursAsync(context.ServerId, context.CancellationToken);
             if (dataSpanHours < MinimumDataHours)
             {
                 var needed = MinimumDataHours >= 24
@@ -168,6 +171,14 @@ public sealed class DarlingAnalysisService
                 return [];
             }
 
+            /* #2299: abandon BETWEEN the expensive store stages when the host is stopping. The
+               fact collector's per-query catches are deliberately silent, so a stop mid-collect
+               cannot unwind from inside it — these boundary checks are what turn the token into
+               an exit. The post-enrichment tail (action build + insert) carries no check: by
+               then the expensive work is done, and finishing preserves it when the store is
+               still up, while a store already gone classifies quietly. */
+            context.CancellationToken.ThrowIfCancellationRequested();
+
             // 1. Collect facts from the Postgres store
             var facts = await _collector.CollectFactsAsync(context);
 
@@ -176,6 +187,8 @@ public sealed class DarlingAnalysisService
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
             }
+
+            context.CancellationToken.ThrowIfCancellationRequested();
 
             // 1.5. Detect anomalies (compare analysis window against baseline)
             var anomalies = await _anomalyDetector.DetectAnomaliesAsync(context);
@@ -256,6 +269,17 @@ public sealed class DarlingAnalysisService
                 context.ServerName, findings.Count, findings.Count > 0 ? findings.Max(f => f.Severity) : 0);
 
             return findings;
+        }
+        catch (Exception ex) when (AnalysisShutdown.IsShutdownAbandon(ex, context.CancellationToken))
+        {
+            /* #2299: the ONE line a stop is allowed to cost. The component catches let shutdown
+               residue propagate instead of logging it per-metric, so seven ERRORs collapse to
+               this Information — and it states the loss honestly: whatever this pass would have
+               written is gone, and the next scheduled pass recomputes it from the store. */
+            _logger?.LogInformation(
+                "[DarlingAnalysisService] Analysis abandoned at shutdown for {Server} — this pass's findings are lost by design; the next pass recomputes them ({Detail})",
+                context.ServerName, ex.Message);
+            return [];
         }
         catch (Exception ex)
         {
@@ -395,23 +419,26 @@ WHERE server_id = $1";
     /// the analysis window. A server with 100 hours of total history can safely
     /// be analyzed over a 4-hour window without dilution.
     /// </summary>
-    private async Task<double> GetTotalDataSpanHoursAsync(int serverId)
+    private async Task<double> GetTotalDataSpanHoursAsync(int serverId, CancellationToken cancellationToken)
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(TotalDataSpanSql, connection);
             cmd.Parameters.AddWithValue(serverId);
 
-            var result = await cmd.ExecuteScalarAsync();
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result == null || result is DBNull)
                 return 0;
 
             return Convert.ToDouble(result);
         }
-        catch
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
         {
+            /* Probe failure reads as "no data yet" — EXCEPT shutdown residue, which must not be
+               allowed to masquerade as a 0-hour history (#2299): it propagates to the pass's
+               shutdown catch instead of producing a bogus insufficient-data skip. */
             return 0;
         }
     }

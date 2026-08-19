@@ -75,6 +75,14 @@ public interface IAlertEngineSettings
     bool PvsEnabled { get; }
     bool DatabaseStateEnabled { get; }
 
+    /// <summary>
+    /// The forced-plan-failure alert (#2157). Default ON in both apps: it fires only on a counter that ROSE
+    /// since the previous collection, so a quiet fleet is silent by construction rather than by threshold —
+    /// which is what makes it safe to enable without asking. Deliberately NOT a store column yet; if
+    /// operators need per-deployment control it becomes one, with the full migration ladder that implies.
+    /// </summary>
+    bool ForcePlanFailureEnabled { get; }
+
     /* Thresholds. */
 
     /// <summary>Fire when the selected CPU metric (see <see cref="CpuAlertMode"/>) is at/above this %.</summary>
@@ -134,6 +142,33 @@ public interface IAlertEngineSettings
 
     /// <summary>Fire when a volume's free space is below this many GB (0 disables the GB dimension).</summary>
     int LowDiskThresholdGb { get; }
+
+    /// <summary>
+    /// The low-disk CRITICAL severity tier's percent floor (#1136/#2107): free space at/below this
+    /// % grades the Volume Free Space alert CRITICAL instead of WARNING. Was a compile-time 3.0 in
+    /// <c>LowDiskAlertGate</c>; both apps now pass their configured value.
+    /// </summary>
+    int DiskCriticalFreePercent { get; }
+
+    /// <summary>The critical tier's GB floor — at/below this many GB free is CRITICAL on any
+    /// volume, OR-ed with the percent floor exactly as before (#1136/#2107).</summary>
+    int DiskCriticalFreeGb { get; }
+
+    /// <summary>
+    /// The store/self-monitoring warning percent (#2107, Darling's self-alerts): the monitor's own
+    /// store volume warns below this % free. Lite has no headless store volume to self-monitor and
+    /// returns the shipped default — on the engine surface anyway so the two apps' settings
+    /// objects stay one shape (the PVS-knob precedent).
+    /// </summary>
+    int SelfDiskFreeWarnPercent { get; }
+
+    /// <summary>How long collection may go quiet before Collection Stopped / Agent Not Running
+    /// fire (#2107; was a compile-time 30 minutes). Lite returns the default.</summary>
+    int CollectionStaleMinutes { get; }
+
+    /// <summary>The Collection Stopped fast path — this many consecutive failures with zero
+    /// successes fires without waiting out the staleness window (#2107). Lite returns the default.</summary>
+    int CollectionFailureThreshold { get; }
 
     /// <summary>
     /// Fire when an ADR database's persistent version store reaches this % of the database's data

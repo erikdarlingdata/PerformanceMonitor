@@ -22,6 +22,16 @@ public interface ICollectorSchemaInfo
     /// <summary>Collector name as used in schedules and collection logs (e.g. "wait_stats").</summary>
     string Name { get; }
 
+    /// <summary>
+    /// The engine whose dialect this definition's query text is written in. Defaults to
+    /// <see cref="CollectorTargetEngine.SqlServer"/> — a default interface implementation rather
+    /// than a required member, so the existing definitions and the test doubles that implement this
+    /// interface directly need no change. A definition is only dispatched at a target whose
+    /// <see cref="CollectorTargetInfo.Engine"/> matches; see
+    /// <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>.
+    /// </summary>
+    CollectorTargetEngine TargetEngine => CollectorTargetEngine.SqlServer;
+
     /// <summary>Destination table; hosts prepend their standard prefix columns when writing.</summary>
     string TargetTable { get; }
 

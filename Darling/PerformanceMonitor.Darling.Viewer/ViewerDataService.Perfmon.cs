@@ -17,14 +17,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// One point on a selected perfmon counter's trend line: the raw counter value and the per-interval
-/// delta, both summed across the counter's instances at each collection_time. Copied from Lite's
+/// delta, both summed across the counter's instances at each collection_time, plus the wall-clock
+/// seconds that delta covers — MAX, not SUM, because the interval is one measured sweep gap repeated
+/// per instance rather than a per-instance quantity (#2234; Transactions/sec carries a median of 12
+/// instance rows). The picker does not derive a rate today, so the field rides along unplotted so that
+/// whoever adds one has a real denominator instead of a fabricated cadence. Copied from Lite's
 /// <c>PerfmonTrendPoint</c> (LocalDataService.Perfmon.cs). The picker plots <see cref="DeltaValue"/>;
 /// <see cref="Value"/> rides along for parity with Lite's row shape.
 /// </summary>
 public sealed record PerfmonTrendPoint(
     DateTime CollectionTime,
     long Value,
-    long DeltaValue);
+    long DeltaValue,
+    long SampleIntervalSeconds);
 
 public sealed partial class ViewerDataService
 {
@@ -63,7 +68,8 @@ public sealed partial class ViewerDataService
                 counter_name,
                 collection_time,
                 CAST(SUM(cntr_value) AS bigint) AS cntr_value,
-                CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value
+                CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
+                CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds
             FROM v_perfmon_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -143,7 +149,8 @@ public sealed partial class ViewerDataService
             list.Add(new PerfmonTrendPoint(
                 reader.GetDateTime(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
         }
 
         return result;

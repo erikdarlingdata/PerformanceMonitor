@@ -57,7 +57,10 @@ public sealed partial class ViewerDataService
         "notify_connection_down_at_startup, connection_refire_minutes, " +
         "notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb, " +
         "ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, " +
-        "pvs_enabled, pvs_threshold_percent, pvs_floor_gb, database_state_enabled";
+        "pvs_enabled, pvs_threshold_percent, pvs_floor_gb, database_state_enabled, " +
+        "self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold, " +
+        "disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes, " +
+        "store_job_cadence_warn_percent";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -71,7 +74,7 @@ public sealed partial class ViewerDataService
 INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
-        $44, $45, $46, $47,
+        $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -121,6 +124,13 @@ ON CONFLICT (id) DO UPDATE SET
     pvs_threshold_percent = EXCLUDED.pvs_threshold_percent,
     pvs_floor_gb = EXCLUDED.pvs_floor_gb,
     database_state_enabled = EXCLUDED.database_state_enabled,
+    self_disk_free_warn_percent = EXCLUDED.self_disk_free_warn_percent,
+    collection_stale_minutes = EXCLUDED.collection_stale_minutes,
+    collection_failure_threshold = EXCLUDED.collection_failure_threshold,
+    disk_critical_free_percent = EXCLUDED.disk_critical_free_percent,
+    disk_critical_free_gb = EXCLUDED.disk_critical_free_gb,
+    analysis_notify_cooldown_minutes = EXCLUDED.analysis_notify_cooldown_minutes,
+    store_job_cadence_warn_percent = EXCLUDED.store_job_cadence_warn_percent,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -197,6 +207,13 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PvsThresholdPercent });             // $45 (#1984, V48)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PvsFloorGb });                      // $46 (#1984, V48)
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.DatabaseStateEnabled });            // $47 (database-state alert, V49)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.SelfDiskFreeWarnPercent });          // $48 (#2107, V55)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.CollectionStaleMinutes });           // $49 (#2107, V55)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.CollectionFailureThreshold });       // $50 (#2107, V55)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.DiskCriticalFreePercent });          // $51 (#2107, V55)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.DiskCriticalFreeGb });               // $52 (#2107, V55)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.AnalysisNotifyCooldownMinutes });    // $53 (#2107, V55)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.StoreJobCadenceWarnPercent });      // $54 (#2136, V57)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -254,6 +271,14 @@ ON CONFLICT (id) DO UPDATE SET
         PvsFloorGb = reader.GetInt32(45),
         /* database-state alert master switch appended (V49) at ordinal 46. */
         DatabaseStateEnabled = reader.GetBoolean(46),
+        /* #2107 threshold knobs appended (V55) at ordinals 47–52. */
+        SelfDiskFreeWarnPercent = reader.GetInt32(47),
+        CollectionStaleMinutes = reader.GetInt32(48),
+        CollectionFailureThreshold = reader.GetInt32(49),
+        DiskCriticalFreePercent = reader.GetInt32(50),
+        DiskCriticalFreeGb = reader.GetInt32(51),
+        AnalysisNotifyCooldownMinutes = reader.GetInt32(52),
+        StoreJobCadenceWarnPercent = reader.GetInt32(53),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -304,6 +329,15 @@ public sealed class AlertSettingsRow
 
     /// <summary>Master switch for the baseline-deviation database-state alert (V40 DDL default true).</summary>
     public bool DatabaseStateEnabled { get; set; } = true;
+
+    /* #2107 (V55): the previously-hardcoded thresholds; defaults are the constants they replaced. */
+    public int SelfDiskFreeWarnPercent { get; set; } = 10;
+    public int CollectionStaleMinutes { get; set; } = 30;
+    public int CollectionFailureThreshold { get; set; } = 10;
+    public int DiskCriticalFreePercent { get; set; } = 3;
+    public int DiskCriticalFreeGb { get; set; } = 2;
+    public int AnalysisNotifyCooldownMinutes { get; set; } = 360;
+    public int StoreJobCadenceWarnPercent { get; set; } = 25;
 
     public bool CpuEnabled { get; set; } = true;
     public int CpuThresholdPercent { get; set; } = 80;
@@ -394,6 +428,12 @@ public sealed class AlertSettingsRow
             && AgRedoQueueAlertKb == other.AgRedoQueueAlertKb
             && AgDisconnectRefireMinutes == other.AgDisconnectRefireMinutes
             && DatabaseStateEnabled == other.DatabaseStateEnabled
+            && SelfDiskFreeWarnPercent == other.SelfDiskFreeWarnPercent
+            && CollectionStaleMinutes == other.CollectionStaleMinutes
+            && CollectionFailureThreshold == other.CollectionFailureThreshold
+            && DiskCriticalFreePercent == other.DiskCriticalFreePercent
+            && DiskCriticalFreeGb == other.DiskCriticalFreeGb
+            && AnalysisNotifyCooldownMinutes == other.AnalysisNotifyCooldownMinutes
             && CpuEnabled == other.CpuEnabled
             && CpuThresholdPercent == other.CpuThresholdPercent
             && string.Equals(CpuMode, other.CpuMode, StringComparison.OrdinalIgnoreCase)

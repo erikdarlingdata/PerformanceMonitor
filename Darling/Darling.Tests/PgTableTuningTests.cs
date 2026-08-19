@@ -42,12 +42,16 @@ public sealed class PgTableTuningTests
         Assert.Equal(7, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* +1: the #1981 handle index */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
-        /* Per-table autovacuum-insert override on exactly the three growing tables (NOT a global GUC change). */
+        /* Per-table autovacuum-insert override on exactly the FOUR high-rate insert tables (NOT a global GUC
+           change). pg_statement_stats joined them: it is query_stats' per-minute PostgreSQL twin, same shape
+           and cadence and the same pure-insert hypertable chunks, so the stock 0.2 scale factor leaves the
+           day's hot chunk stale before the TimescaleDB rollover exactly as it did for the other three. */
         Assert.Contains("ALTER TABLE collect.procedure_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE collect.query_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE collect.query_store_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER TABLE collect.pg_statement_stats SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_insert_threshold = 10000)", sql, StringComparison.Ordinal);
 
-        Assert.Equal(10, PgTableTuning.Statements.Count);   /* +1: the #1981 query_stats handle index */
+        Assert.Equal(11, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats */
     }
 
     private static int CountOccurrences(string haystack, string needle)

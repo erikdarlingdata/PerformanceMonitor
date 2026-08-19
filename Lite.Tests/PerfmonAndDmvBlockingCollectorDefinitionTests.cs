@@ -65,9 +65,11 @@ public sealed class PerfmonStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task WritePayload_PinsDeltaContract_AndConstantInterval()
+    public async Task WritePayload_PinsDeltaContract_AndTheMeasuredInterval()
     {
-        var deltas = new RecordingCollectorDeltaCalculator();
+        /* A distinctive interval, deliberately neither 0 nor the 60 this collector used to hard-code,
+           so the payload assertion below can only pass if the MEASURED value is what gets written. */
+        var deltas = new RecordingCollectorDeltaCalculator { ReportedInterval = 137 };
         var context = CollectorTestContext.Make(deltas);
         using var reader = new FakeCollectorDataReader(
             new object[] { "SQLServer:SQL Statistics", "Batch Requests/sec", "", 987654L });
@@ -76,9 +78,9 @@ public sealed class PerfmonStatsCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         PerfmonStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(new object?[] { "SQLServer:SQL Statistics", "Batch Requests/sec", "", 987654L, 9876540L, 60 }, writer.Values);
+        Assert.Equal(new object?[] { "SQLServer:SQL Statistics", "Batch Requests/sec", "", 987654L, 9876540L, 137 }, writer.Values);
         var call = Assert.Single(deltas.Calls);
-        Assert.Equal(("perfmon", "SQLServer:SQL Statistics|Batch Requests/sec|", 987654L, context.CollectionTime, 300), call);
+        Assert.Equal(("perfmon", "SQLServer:SQL Statistics|Batch Requests/sec|", 987654L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), call);
     }
 }
 

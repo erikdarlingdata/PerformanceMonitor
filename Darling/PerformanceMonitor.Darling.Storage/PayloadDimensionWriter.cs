@@ -41,7 +41,8 @@ public static class PayloadDimensionWriter
         NpgsqlTransaction transaction,
         PayloadDimensionBatch batch,
         DateTime collectionTime,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool compressPlanContent = true)
     {
         if (connection is null)
         {
@@ -71,10 +72,14 @@ public static class PayloadDimensionWriter
 
             /* #2069: the plan dim stores gzip bytes (measured 14.0x vs lz4-TOAST's 8.9x on live
                content). Compressed HERE — one seam — with the digest untouched: it was computed
-               over the uncompressed text upstream, so content identity is format-stable. */
-            var compress = string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal);
+               over the uncompressed text upstream, so content identity is format-stable.
+               #2171: plan_xml_compression = 'none' turns the seam off — the plan dim takes the same
+               text path as every other dim, and lz4 TOAST carries the compression so direct-SQL
+               consumers can read query_plan_xml bare. The digest is identical either way. */
+            var compress = compressPlanContent
+                && string.Equals(dimTable, PayloadDimensions.CompressedContentDimTable, StringComparison.Ordinal);
 
-            await using var command = new NpgsqlCommand(PayloadDimensions.UpsertSql(dimTable), connection, transaction);
+            await using var command = new NpgsqlCommand(PayloadDimensions.UpsertSql(dimTable, compress), connection, transaction);
             command.Parameters.Add(new NpgsqlParameter
             {
                 NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,

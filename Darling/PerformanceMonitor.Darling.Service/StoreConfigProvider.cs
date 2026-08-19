@@ -109,6 +109,14 @@ public sealed class StoreConfigProvider
             {
                 await SeedMonitoredServersAsync(connection, config, now, cancellationToken);
             }
+            else
+            {
+                /* #2254: the seed is skipped, so any server added to darling.json AFTER the first start is
+                   silently ignored — and --test-connection reads the FILE, so it validates those servers
+                   happily while the service never monitors them. Say so once per start instead of leaving the
+                   operator to discover it. */
+                await WarnAboutFileOnlyServersAsync(connection, config, cancellationToken);
+            }
 
             /* LAST — its presence marks the seed complete (the reload gate keys on config_version). */
             if (await CountAsync(connection, "config_service", cancellationToken) == 0)
@@ -124,6 +132,196 @@ public sealed class StoreConfigProvider
         }
     }
 
+    /// <summary>
+    /// #2254: names the servers present in darling.json that the store does not have, once per start.
+    ///
+    /// <para>The seed runs only while <c>config_monitored_servers</c> is empty, so a server added to the file
+    /// after the first successful start is a permanent no-op. What made that expensive in the field is that
+    /// <c>--test-connection</c> reads the FILE and validated the new server as PASS, so the operator had two
+    /// outputs that were each correct about different things and no way to see the disagreement: config edit,
+    /// service restart, support round trip.</para>
+    ///
+    /// <para>Compared on <b>server_id OR name</b> (#2158). It used to be id alone, on the grounds that the id
+    /// is what the collectors key on — correct while every row's id equalled the hash of its own address, and
+    /// wrong the moment an edit began PRESERVING a row's identity so a re-addressed server keeps its history.
+    /// After such an edit the file's derived id matches nothing, and an id-only comparison would report a
+    /// server that IS monitored as absent, then advise re-adding it — wrong advice, on every start, about the
+    /// one server the operator had just fixed. The name arm covers that; a genuinely removed server is gone
+    /// from the store under both keys, so the Viewer-Remove case still reports exactly as before.</para>
+    /// </summary>
+    private async Task WarnAboutFileOnlyServersAsync(
+        NpgsqlConnection connection, DarlingConfig config, CancellationToken ct)
+    {
+        var storeIds = new HashSet<int>();
+        var storeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var command = new NpgsqlCommand("SELECT server_id, name FROM config_monitored_servers", connection))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                storeIds.Add(reader.GetInt32(0));
+                if (!reader.IsDBNull(1))
+                {
+                    storeNames.Add(reader.GetString(1));
+                }
+            }
+        }
+
+        var fileOnly = ServersOnlyInFile(config.Servers, storeIds, storeNames);
+        if (fileOnly.Count == 0)
+        {
+            return;
+        }
+
+        /* #2258: the OBSERVED registry is the tombstone, and it already exists. collect.servers gets a row
+           upserted on every successful connect, and the Viewer's Remove deletes only from
+           config_monitored_servers (the DESIRED config) — so a row surviving there means "this server really
+           was monitored once", which is exactly the fact that separates the two causes. Nothing purges it
+           either: it is a registry, not a time series, so retention leaves it alone. */
+        var everMonitored = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var observed = new NpgsqlCommand("SELECT display_name, server_name FROM collect.servers", connection))
+        await using (var reader = await observed.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    everMonitored.Add(reader.GetString(0));
+                }
+
+                if (!reader.IsDBNull(1))
+                {
+                    everMonitored.Add(reader.GetString(1));
+                }
+            }
+        }
+
+        var (neverRegistered, deliberatelyRemoved) = SplitByEverMonitored(fileOnly, everMonitored);
+
+        /* Cause 1 — in the file, never monitored. This is the field report (#2252): the operator edited the
+           file expecting it to be picked up, and it silently was not. A WARNING, because it is the case where
+           something the operator wants is not happening and only they can fix it. */
+        if (neverRegistered.Count > 0)
+        {
+            _logger?.LogWarning(
+                "darling.json lists {Count} server(s) that are NOT monitored and never have been: {Servers}. "
+                + "The store is authoritative after the first seed, so adding a server to the file does not "
+                + "register it and a restart cannot change that — add them with the Viewer's Add Server dialog "
+                + "or the MCP add_servers tool. Note --test-connection reads darling.json, so it will keep "
+                + "reporting them as PASS while they collect nothing.",
+                neverRegistered.Count,
+                string.Join(", ", neverRegistered));
+        }
+
+        /* Cause 2 — monitored once, then removed, and the file was left alone. A CORRECT state, so this is
+           Information and says so plainly rather than advising anything. It is not silent because the file
+           still names them and --test-connection will still call them PASS, which is worth one line at
+           startup; but it no longer tells the operator to re-add a server they deliberately dropped. */
+        if (deliberatelyRemoved.Count > 0)
+        {
+            _logger?.LogInformation(
+                "darling.json still lists {Count} server(s) that were monitored and have since been removed: "
+                + "{Servers}. That is expected — the Viewer's Remove deletes the registration and never edits "
+                + "the file. Delete them from darling.json to silence this line; their collected history is "
+                + "kept either way.",
+                deliberatelyRemoved.Count,
+                string.Join(", ", deliberatelyRemoved));
+        }
+    }
+
+    /// <summary>
+    /// Splits the file-only servers into "never monitored" and "monitored once, since removed" (#2258), using the
+    /// observed registry as the evidence.
+    ///
+    /// <para><b>Why this needs no tombstone table.</b> #2258 proposed one — a <c>config_removed_servers</c> table
+    /// or an <c>is_removed</c> flag, plus a rung. But the fact it wanted is already recorded:
+    /// <c>collect.servers</c> holds a row per server the service has successfully connected to, the Viewer's
+    /// Remove deletes only from <c>config_monitored_servers</c>, and nothing purges the observed registry. So
+    /// "was this ever really monitored" is answerable today, for free, without a schema change and without a
+    /// second piece of state that could disagree with the first.</para>
+    ///
+    /// <para>An <c>is_removed</c> flag was the option worth rejecting explicitly: <c>is_enabled = FALSE</c>
+    /// already means "registered but paused", so a second flag on the same row makes
+    /// <c>(is_enabled, is_removed)</c> a four-state space where two combinations are meaningless, and every
+    /// existing reader of that table would have to learn the new flag or silently start including removed
+    /// servers. That is the same seam failure that #2280 had to fix in the dedupe gate — a widened concept that
+    /// old call sites never learned about.</para>
+    ///
+    /// <para><b>The limits, stated because they bound what the log may claim.</b> A server registered but never
+    /// successfully connected to has no observed row, so it reports as never-monitored — which is the right
+    /// answer to the operator's actual question ("is this being monitored?"), even though it is the wrong answer
+    /// to "was it ever registered?". And a store rebuilt from scratch has no observed rows at all, so everything
+    /// reads as never-monitored until it connects once; that degrades to a warning rather than to silence, which
+    /// is the safe direction for a fresh store where the file genuinely is the intent.</para>
+    ///
+    /// <para>Matched on either name for the reason <see cref="ServersOnlyInFile"/> gives: the observed registry
+    /// carries both the storage name and the display name, and identity drift predating #2158 means the id is
+    /// the less reliable key of the three. A miss here warns rather than going quiet, so the failure direction
+    /// is the harmless one.</para>
+    /// </summary>
+    internal static (IReadOnlyList<string> NeverRegistered, IReadOnlyList<string> DeliberatelyRemoved)
+        SplitByEverMonitored(IEnumerable<string> fileOnlyNames, ISet<string> everMonitoredNames)
+    {
+        var never = new List<string>();
+        var removed = new List<string>();
+
+        foreach (var name in fileOnlyNames ?? Enumerable.Empty<string>())
+        {
+            if (everMonitoredNames is not null && everMonitoredNames.Contains(name))
+            {
+                removed.Add(name);
+            }
+            else
+            {
+                never.Add(name);
+            }
+        }
+
+        return (never, removed);
+    }
+
+    /// <summary>
+    /// The file entries whose <c>server_id</c> is absent from the store, by display name. Pure so the
+    /// comparison is testable without a store — the log line above is the only part that needs one.
+    /// </summary>
+    internal static IReadOnlyList<string> ServersOnlyInFile(
+        IEnumerable<MonitoredServer> fileServers, ISet<int> storeServerIds, ISet<string>? storeNames = null)
+    {
+        var missing = new List<string>();
+        if (fileServers is null)
+        {
+            return missing;
+        }
+
+        foreach (var server in fileServers)
+        {
+            /* A file entry has no StoredServerId, so ServerId here IS the derivation: "would the id this file
+               entry describes be in the store". That was the whole test until #2158 made an edit preserve its
+               identity — a re-addressed server keeps its own id so its history stays attached, which means the
+               file's derived id no longer matches it and the id arm alone now reports a monitored server as
+               absent. The NAME arm answers the question the log actually asks, "is this file entry represented
+               in the store at all", and it is the operator-facing key: the display name is what they typed and
+               what the Viewer shows, and an edit does not change it.
+
+               Deliberately either-or rather than name-only. Two different file entries can share a display
+               name (nothing enforces uniqueness), so name-only would hide a genuinely unmonitored server
+               behind a same-named sibling; and the id arm still resolves the common case exactly. */
+            if (storeServerIds.Contains(server.ServerId))
+            {
+                continue;
+            }
+
+            if (storeNames is not null && storeNames.Contains(server.DisplayName))
+            {
+                continue;
+            }
+
+            missing.Add(server.DisplayName);
+        }
+
+        return missing;
+    }
+
     private static async Task<long> CountAsync(NpgsqlConnection connection, string table, CancellationToken ct)
     {
         /* table is a compile-time constant name, never user input — interpolation is safe. */
@@ -136,8 +334,8 @@ public sealed class StoreConfigProvider
         /* config_version starts at 0; the four desired-state seed writes below bump it via the trigger,
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
-INSERT INTO config_service (id, paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $2, $3, $4, $5, 0, $6, 'seed')
+INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, config_version, updated_at, updated_by)
+VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
@@ -145,6 +343,15 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.Web.Enabled);
         command.Parameters.AddWithValue(config.Web.Port);
         command.Parameters.AddWithValue(now);
+        command.Parameters.AddWithValue(config.QueryStoreBackfillEnabled);
+        command.Parameters.AddWithValue(config.QueryStoreTextBudgetMb);
+        command.Parameters.AddWithValue(config.MaxConcurrentSweeps);
+        /* Normalized at the WRITE too, not just the read: the V62 CHECK is case-sensitive by design
+           (it mirrors this normalizer's output), so seeding the raw file value would turn
+           "planXmlCompression": "GZIP" in darling.json into a CHECK violation during store bring-up —
+           the seed is the last step of first contact, and a cosmetic casing choice must not fail it. */
+        command.Parameters.AddWithValue(NormalizePlanXmlCompression(config.PlanXmlCompression));
+        command.Parameters.AddWithValue(ClampPlanContentRetentionDays(config.PlanContentRetentionDays));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -167,10 +374,13 @@ INSERT INTO config_alert_settings (
     notify_connection_down_at_startup, connection_refire_minutes,
     notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
     ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
-    pvs_floor_gb, modified_at, database_state_enabled)
+    pvs_floor_gb, modified_at, database_state_enabled,
+    self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
+    disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
+    store_job_cadence_warn_percent)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -229,6 +439,14 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(now);
         /* V49 database-state alert master switch (appended last, matching the ALTER's physical order). */
         command.Parameters.AddWithValue(a.DatabaseStateEnabled);
+        /* V55 #2107: the previously-hardcoded threshold knobs, appended in the ALTER's order. */
+        command.Parameters.AddWithValue(a.SelfDiskFreeWarnPercent);
+        command.Parameters.AddWithValue(a.CollectionStaleMinutes);
+        command.Parameters.AddWithValue(a.CollectionFailureThreshold);
+        command.Parameters.AddWithValue(a.DiskCriticalFreePercent);
+        command.Parameters.AddWithValue(a.DiskCriticalFreeGb);
+        command.Parameters.AddWithValue(a.AnalysisNotifyCooldownMinutes);
+        command.Parameters.AddWithValue(a.StoreJobCadenceWarnPercent);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -268,10 +486,13 @@ ON CONFLICT (id) DO NOTHING", connection);
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-    monthly_cost_usd, capture_plans, alert_delivery_mode_override, is_enabled, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, TRUE, $15, $15)
+    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection);
-            command.Parameters.AddWithValue(ServerIdHelper.GetDeterministicHashCode(server.StorageName));
+            /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
+               and this is where it is minted and made permanent. When new rows stop being hash-keyed
+               (#2218), this is the write that changes; every READ already goes through the stored value. */
+            command.Parameters.AddWithValue(server.ServerId);
             command.Parameters.AddWithValue(server.DisplayName);
             command.Parameters.AddWithValue(server.Host);
             AddNullableText(command, server.Database);
@@ -289,6 +510,14 @@ ON CONFLICT (server_id) DO NOTHING", connection);
             /* Per-server delivery override (#1236): the enum name or NULL = "inherit the global". */
             AddNullableText(command, server.AlertDeliveryModeOverride?.ToString());
             command.Parameters.AddWithValue(now);
+            /* V68: the engine, persisted as the raw darling.json string rather than the parsed enum, so the
+               store round-trips exactly what the operator wrote — including an alias like "aurora" — and the
+               single parse in MonitoredServer.TargetEngine stays the only place that interprets it. */
+            command.Parameters.AddWithValue(server.Engine);
+            /* V68: the port, PostgreSQL-only (0 = the driver's default). Persisted for the same reason as the
+               engine — a non-default port dropped here would connect to 5432 and fail with an error naming
+               the right host. */
+            command.Parameters.AddWithValue(server.Port);
             await command.ExecuteNonQueryAsync(ct);
         }
     }
@@ -301,7 +530,8 @@ ON CONFLICT (server_id) DO NOTHING", connection);
     /// SQL-auth servers whose store row carries no DPAPI blob (never persisted; matched by <c>server_id</c>).
     /// Returns null when the store is unreachable, so the caller keeps the current live config.
     /// </summary>
-    public async Task<StoreConfigView?> LoadViewAsync(DarlingConfig bootstrap, CancellationToken cancellationToken)
+    public async Task<StoreConfigView?> LoadViewAsync(
+        DarlingConfig bootstrap, CancellationToken cancellationToken)
     {
         if (bootstrap is null)
         {
@@ -312,9 +542,22 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, mcpEnabled, mcpPort, webEnabled, webPort, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
+
+            /* The notification row is the ONLY read here that touches secret columns — the SMTP password and
+               username, and the Teams/Slack/generic/PagerDuty bearer URLs. DarlingManagedRoles deliberately
+               revokes table-wide SELECT on config_notification from BOTH viewer and mcp and re-grants only
+               the non-secret columns, so a caller connecting as one of those roles and asking for the full
+               row gets 42501 for the whole table — and because every section here shares one try/catch, one
+               denied column would cost the WHOLE view (that is how #2293 lost the MCP host its registry).
+               That is precisely why no restricted-role caller reads this view any more: the MCP host used to
+               (skipping this row via an includeNotification parameter, #2293) until #2298 removed its config
+               read entirely — the worker publishes the server registry to it instead. Every remaining caller
+               is the worker or a test on the privileged connection, so the row is read unconditionally and
+               the skip parameter is gone with its last caller. */
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
+
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
             var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
 
@@ -323,6 +566,11 @@ ON CONFLICT (server_id) DO NOTHING", connection);
                 ConfigVersion = configVersion,
                 Paused = paused,
                 CapturePlans = capturePlans,
+                QueryStoreBackfillEnabled = backfillEnabled,
+                QueryStoreTextBudgetMb = textBudgetMb,
+                PlanContentRetentionDays = planContentRetentionDays,
+                MaxConcurrentSweeps = maxSweeps,
+                PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
                 McpPort = mcpPort,
                 WebEnabled = webEnabled,
@@ -342,20 +590,53 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         }
     }
 
-    private static async Task<(bool Paused, bool CapturePlans, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, long ConfigVersion)>
+    /// <summary>The V59 collector-memory knob clamps (#2164/#2170) — a bad stored value degrades to a sane
+    /// one rather than failing the config load, matching the alert knobs' posture.</summary>
+    internal const int MinTextBudgetMb = 4;
+    internal const int MaxTextBudgetMb = 256;
+    internal const int MinConcurrentSweeps = 1;
+    internal const int MaxConcurrentSweepsLimit = 16;
+
+    internal static int ClampTextBudgetMb(int value) => Math.Clamp(value, MinTextBudgetMb, MaxTextBudgetMb);
+
+    internal static int ClampConcurrentSweeps(int value) => Math.Clamp(value, MinConcurrentSweeps, MaxConcurrentSweepsLimit);
+
+    /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
+    /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
+    /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>
+    internal const int MinPlanContentRetentionDays = 7;
+    internal const int MaxPlanContentRetentionDays = 365;
+
+    internal static int ClampPlanContentRetentionDays(int value) =>
+        value <= 0 ? 0 : Math.Clamp(value, MinPlanContentRetentionDays, MaxPlanContentRetentionDays);
+
+    /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
+    /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
+    /// set DB-side, and this guard covers pre-constraint rows and direct writes with the constraint
+    /// dropped.</summary>
+    internal static string NormalizePlanXmlCompression(string? value) =>
+        string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
+
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, config_version FROM config_service WHERE id = 1", connection);
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, config_version FROM config_service WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
-            /* Row missing (unseeded) — treat as defaults; capture stays on (Darling's SKU default). */
-            return (false, true, false, 5152, false, 5153, 0);
+            /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, the memory
+               knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep), and
+               plan content keeps the V75 default 21-day horizon. */
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 0);
         }
 
-        return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetInt32(3),
-            reader.GetBoolean(4), reader.GetInt32(5), reader.GetInt64(6));
+        return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
+            ClampTextBudgetMb(reader.GetInt32(3)), ClampConcurrentSweeps(reader.GetInt32(4)),
+            NormalizePlanXmlCompression(reader.GetString(5)),
+            reader.GetBoolean(6), reader.GetInt32(7),
+            reader.GetBoolean(8), reader.GetInt32(9),
+            ClampPlanContentRetentionDays(reader.GetInt32(10)), reader.GetInt64(11));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -374,7 +655,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        notify_connection_down_at_startup, connection_refire_minutes,
        notify_ag_health, ag_lag_alert_seconds, ag_redo_queue_alert_kb,
        ag_disconnect_refire_minutes, blocking_wait_seconds_threshold, pvs_enabled, pvs_threshold_percent,
-       pvs_floor_gb, database_state_enabled
+       pvs_floor_gb, database_state_enabled,
+       self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
+       disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
+       store_job_cadence_warn_percent
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -447,6 +731,19 @@ FROM config_alert_settings WHERE id = 1", connection);
             /* database-state alert master switch appended (V49) at ordinal 46; NOT NULL DEFAULT true so a
                pre-V49 row can't reach here without the column present. */
             DatabaseStateEnabled = reader.GetBoolean(46),
+            /* #2107 threshold knobs appended (V55) at ordinals 47–52; NOT NULL DEFAULTs are the
+               constants they replace, so a pre-V55 row can't reach here without the columns present
+               and the wholesale ApplyToConfig replacement never resets a knob. */
+            SelfDiskFreeWarnPercent = reader.GetInt32(47),
+            CollectionStaleMinutes = reader.GetInt32(48),
+            CollectionFailureThreshold = reader.GetInt32(49),
+            DiskCriticalFreePercent = reader.GetInt32(50),
+            DiskCriticalFreeGb = reader.GetInt32(51),
+            AnalysisNotifyCooldownMinutes = reader.GetInt32(52),
+            /* #2136 cadence-warn knob appended (V57) at ordinal 53; NOT NULL DEFAULT 25, and the same
+               reachability rule as every appended knob above: ApplyToConfig replaces config.Alerts
+               wholesale, so a column missing here would silently reset the knob on every worker start. */
+            StoreJobCadenceWarnPercent = reader.GetInt32(53),
         };
         var analysis = new AnalysisConfig
         {
@@ -504,9 +801,14 @@ FROM config_notification WHERE id = 1", connection);
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct)
     {
         var servers = new List<MonitoredServer>();
+        /* server_id is LAST rather than first (#2218): every ordinal in BuildServerFromRow is positional, so
+           appending is the only addition that cannot silently re-map an existing column onto the wrong
+           property. It was absent entirely before this — the registry's own PRIMARY KEY was read past, and
+           twelve downstream sites re-derived it from the mutable columns instead. */
         using var command = new NpgsqlCommand(@"
 SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate,
-       read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override
+       read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
+       engine, port, server_id
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -546,6 +848,16 @@ ORDER BY name", connection);
             MonthlyCostUsd = reader.GetDecimal(11),
             /* #1236: the per-server delivery override (null = inherit the global), available at delivery time. */
             AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(12) ? null : reader.GetString(12)),
+            /* V68. Without this the registry — which is authoritative once seeded — silently downgraded every
+               PostgreSQL target to the "sqlserver" property default, and the service opened a SqlConnection to
+               port 5432. NOT NULL DEFAULT in both columns means the DBNull guards are belt-and-braces for a
+               store mid-migration, not an expected path. */
+            Engine = reader.IsDBNull(13) ? "sqlserver" : reader.GetString(13),
+            Port = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
+            /* #2218: the row's OWN primary key, which this read used to discard. NOT NULL in the table, so
+               the DBNull guard is for a store mid-migration rather than an expected path — and a null there
+               falls back to the derivation, which is exactly what it did before this column was read at all. */
+            StoredServerId = reader.IsDBNull(15) ? null : reader.GetInt32(15),
         };
 
         if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))
@@ -609,6 +921,11 @@ ORDER BY name", connection);
         config.Smtp = view.Smtp;
         config.Webhooks = view.Webhooks;
         config.CapturePlans = view.CapturePlans;
+        config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
+        config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
+        config.PlanContentRetentionDays = view.PlanContentRetentionDays;
+        config.MaxConcurrentSweeps = view.MaxConcurrentSweeps;
+        config.PlanXmlCompression = view.PlanXmlCompression;
         config.Mcp.Enabled = view.McpEnabled;
         config.Mcp.Port = view.McpPort;
         config.Web.Enabled = view.WebEnabled;
@@ -745,6 +1062,30 @@ public sealed class StoreConfigView
     public bool Paused { get; init; }
 
     public bool CapturePlans { get; init; }
+
+    /// <summary>The #2167 backfill off switch (config_service, V58) — worker reads it live each backfill cycle.</summary>
+    public bool QueryStoreBackfillEnabled { get; init; } = true;
+
+    /// <summary>The #2164 per-database query_store text budget in MB (config_service, V59), already clamped.</summary>
+    public int QueryStoreTextBudgetMb { get; init; } = 64;
+
+    /// <summary>The V75 plan-content horizon (#2316): days a stored plan XML outlives its last sighting.
+    /// 0 = disabled (the fact-coupled dimension horizon stands alone).</summary>
+    public int PlanContentRetentionDays { get; init; } = 21;
+
+    /// <summary>
+    /// The #2171 plan-XML storage codec (config_service, V62), already normalized to 'gzip' or 'none'.
+    /// 'gzip' (the default, unchanged behavior): the plan dim stores gzip bytes in query_plan_gz,
+    /// 14.0x measured, and only the apps/MCP can read plans back. 'none': plain text into
+    /// query_plan_xml - lz4 TOAST compresses at ~8.9x and any direct-SQL consumer (Grafana, report
+    /// tooling) reads the column bare, no extension, no UDF. Existing rows are untouched either way;
+    /// the readers' text-first-else-gz resolution covers every mix of eras and modes.
+    /// </summary>
+    public string PlanXmlCompression { get; init; } = "gzip";
+
+    /// <summary>The #2170 fleet sweep width (config_service, V59), already clamped.</summary>
+    public int MaxConcurrentSweeps { get; init; } = 4;
+
     public bool McpEnabled { get; init; }
     public int McpPort { get; init; }
     public bool WebEnabled { get; init; }

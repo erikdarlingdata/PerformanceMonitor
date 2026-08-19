@@ -30,6 +30,7 @@ namespace PerformanceMonitorLite.Controls;
 public partial class JobHistoryTab : UserControl
 {
     private LocalDataService? _dataService;
+    private Func<IReadOnlyDictionary<int, string>>? _displayNames;
     private DataGridFilterManager<JobHistoryRow>? _filterManager;
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
@@ -43,10 +44,17 @@ public partial class JobHistoryTab : UserControl
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
 
-    /// <summary>Initializes the control with required dependencies.</summary>
-    public void Initialize(LocalDataService dataService)
+    /// <summary>
+    /// Initializes the control with required dependencies. <paramref name="displayNames"/> snapshots
+    /// server_id → operator display name from the CONFIG layer (#2126's Lite half): Lite's display-name
+    /// concept lives on <c>ServerConnection</c>, not in DuckDB (the stored <c>servers.display_name</c>
+    /// column is unpopulated), so the shell supplies the mapping the same way the Overview tab passes
+    /// <c>DisplayNameWithIntent</c> into <c>GetServerSummaryAsync</c>.
+    /// </summary>
+    public void Initialize(LocalDataService dataService, Func<IReadOnlyDictionary<int, string>>? displayNames = null)
     {
         _dataService = dataService;
+        _displayNames = displayNames;
         _filterManager = new DataGridFilterManager<JobHistoryRow>(JobHistoryDataGrid);
         _staleDataTimer.Start();
     }
@@ -67,6 +75,20 @@ public partial class JobHistoryTab : UserControl
             int? serverId = GetSelectedServerId();
 
             var all = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryAsync(hoursBack, 2000, serverId));
+
+            /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
+               config layer knows one, so the Server column and filter speak the same names as every
+               other tab. A server no longer in config keeps its raw name (the durable-record case). */
+            if (_displayNames?.Invoke() is { Count: > 0 } names)
+            {
+                foreach (var row in all)
+                {
+                    if (names.TryGetValue(row.ServerId, out var alias) && !string.IsNullOrEmpty(alias))
+                    {
+                        row.ServerName = alias;
+                    }
+                }
+            }
 
             /* Populate the Server / Category combos from the full (pre status/category) result, then apply
                Status + Category client-side — those must NOT go into the reader's window (they'd skew the

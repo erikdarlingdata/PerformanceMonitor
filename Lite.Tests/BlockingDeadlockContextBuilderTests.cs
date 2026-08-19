@@ -192,47 +192,103 @@ public class BlockingDeadlockContextBuilderTests
     }
 
     [Fact]
-    public void BuildDeadlockContext_RendersVictim_WithParsedProcessSummary_AndAttachment()
+    public void BuildDeadlockContext_FingerprintedDeadlock_IsOneSelfContainedItem()
     {
         var context = AlertContextBuilders.BuildDeadlockContext(
             Server, new List<DeadlockAlertRow> { Deadlock() }, NoExclusions);
 
         Assert.NotNull(context);
-        /* 1 victim item + 1 appended incident item. */
-        Assert.Equal(2, context!.Details.Count);
-        Assert.Equal("Deadlock Victim", context.Details[0].Heading);
+        /* #2108: a fingerprinted deadlock renders as ONE self-contained item — its Database
+           (#2109), forensic fields, and dedup metadata together — no separate victim item whose
+           association with the fingerprint a multi-incident card would lose. */
+        var item = Assert.Single(context!.Details);
+        Assert.Equal("Deadlock", item.Heading);
+        var expected = AlertFingerprint.ForObjects(Server, AlertFingerprint.Deadlock, new[] { "StackOverflow.dbo.Users" });
         Assert.Equal(
             new List<(string, string)>
             {
+                ("Database", "StackOverflow"),
                 ("Victim SQL", "UPDATE Users SET Reputation = 1"),
-                ("Processes", "SPID 55 (victim) vs SPID 60")
+                ("Processes", "SPID 55 (victim) vs SPID 60"),
+                ("Dedup Key", expected!.DedupKey),
+                ("Involved Objects", "StackOverflow.dbo.Users")
             },
-            context.Details[0].Fields);
+            item.Fields);
 
         Assert.Equal(DeadlockGraph, context.AttachmentXml);
         Assert.Equal("deadlock_graph.xml", context.AttachmentFileName);
 
         /* #1140: involved-object fingerprint from the graph's resource list. */
         var incident = Assert.Single(context.Incidents!);
-        var expected = AlertFingerprint.ForObjects(Server, AlertFingerprint.Deadlock, new[] { "StackOverflow.dbo.Users" });
-        Assert.Equal(expected!.DedupKey, incident.DedupKey);
+        Assert.Equal(expected.DedupKey, incident.DedupKey);
     }
 
     [Fact]
-    public void BuildDeadlockContext_ShowsThreeVictims_ButFingerprintsAllDeadlocks()
+    public void BuildDeadlockContext_RecurrencesCollapse_ToOneItemWithTheCount()
     {
-        /* 4 deadlocks over the same object set: 3 rendered (cap), ONE incident carrying the
-           occurrence count across ALL of them — the pre-extraction #1140 semantics. */
+        /* 4 deadlocks over the same object set: ONE self-contained incident item carrying the
+           occurrence count across ALL of them — the #1140 collapse, now without the three raw
+           victim repeats beside it (#2108). */
         var rows = new List<DeadlockAlertRow> { Deadlock(), Deadlock(), Deadlock(), Deadlock() };
 
         var context = AlertContextBuilders.BuildDeadlockContext(Server, rows, NoExclusions);
 
         Assert.NotNull(context);
-        /* 3 victim items + 1 incident item. */
-        Assert.Equal(4, context!.Details.Count);
-        Assert.Equal("Deadlock Victim", context.Details[2].Heading);
+        var item = Assert.Single(context!.Details);
+        Assert.Equal("Deadlock", item.Heading);
+        Assert.Contains(("Occurrences", "4"), item.Fields);
         var incident = Assert.Single(context.Incidents!);
         Assert.Equal(4, incident.OccurrenceCount);
+    }
+
+    [Fact]
+    public void BuildDeadlockContext_DistinctFingerprints_EachSelfContained_AndIndexed()
+    {
+        /* #2108's core: two different deadlocks on one alert must read as two labeled units, each
+           carrying its OWN victim + database + dedup metadata — the victim→fingerprint association
+           the flat list lost. */
+        var otherGraph = DeadlockGraph
+            .Replace("StackOverflow.dbo.Users", "OtherDb.dbo.T1")
+            .Replace(@"currentdbname=""StackOverflow""", @"currentdbname=""OtherDb""");
+        var rows = new List<DeadlockAlertRow>
+        {
+            Deadlock(),
+            Deadlock(xml: otherGraph, victimSql: "UPDATE T1 SET x = 1")
+        };
+
+        var context = AlertContextBuilders.BuildDeadlockContext(Server, rows, NoExclusions);
+
+        Assert.NotNull(context);
+        Assert.Equal(2, context!.Details.Count);
+        Assert.Equal("Deadlock 1 of 2", context.Details[0].Heading);
+        Assert.Equal("Deadlock 2 of 2", context.Details[1].Heading);
+        Assert.Contains(("Database", "StackOverflow"), context.Details[0].Fields);
+        Assert.Contains(("Victim SQL", "UPDATE Users SET Reputation = 1"), context.Details[0].Fields);
+        Assert.Contains(("Database", "OtherDb"), context.Details[1].Fields);
+        Assert.Contains(("Victim SQL", "UPDATE T1 SET x = 1"), context.Details[1].Fields);
+        Assert.Equal(2, context.Incidents!.Count);
+    }
+
+    [Fact]
+    public void BuildDeadlockContext_UnfingerprintableDeadlock_KeepsTheStandaloneVictimItem()
+    {
+        /* A graph with no parseable lock objects has no fingerprint identity — under incident-only
+           rendering it would vanish, so it keeps the classic victim item (#1140's "the builder
+           still displays them", scoped to exactly these). */
+        var noObjects = DeadlockGraph.Replace(
+            @"<keylock objectname=""StackOverflow.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock>",
+            "");
+
+        var context = AlertContextBuilders.BuildDeadlockContext(
+            Server, new List<DeadlockAlertRow> { Deadlock(xml: noObjects) }, NoExclusions);
+
+        Assert.NotNull(context);
+        var item = Assert.Single(context!.Details);
+        Assert.Equal("Deadlock Victim", item.Heading);
+        /* #2109: the Database fact comes from the processes' currentdbname, so even the
+           unfingerprintable form names where it happened. */
+        Assert.Contains(("Database", "StackOverflow"), item.Fields);
+        Assert.Null(context.Incidents);
     }
 
     [Fact]

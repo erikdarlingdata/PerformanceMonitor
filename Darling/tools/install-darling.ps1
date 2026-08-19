@@ -10,6 +10,11 @@ C:\PerformanceMonitorDarling). What it does, in order:
 
   1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
      and stops so you can edit it — the service is not installed with an unedited sample).
+  1b. REFUSES an install directory the service account can never read: anywhere under a user profile
+     (C:\Users\...), or a UNC / mapped-drive path. The service runs as an unprivileged virtual account
+     that is neither you nor an administrator, and a profile folder grants nothing to it, so the
+     service installs cleanly and then dies at the bundled PostgreSQL's first step (#2185, #2187).
+     Extract to a machine-scoped local path such as C:\PerformanceMonitorDarling instead.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
      (continue-or-abort prompt on failure; -SkipPreflight to skip).
   3. Registers the Windows Event Log source 'PerformanceMonitor Darling' (requires elevation —
@@ -61,6 +66,88 @@ $samplePath = Join-Path $root 'darling.sample.json'
 
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
 
+# True when $candidate IS $parent or sits underneath it.
+#
+# The separator is appended before the prefix test on purpose: a bare StartsWith reads C:\UsersData as
+# living under C:\Users and would refuse a perfectly good install directory. A false refusal is a worse
+# failure than the one this check exists to catch - it strands someone whose install would have worked -
+# so the boundary is the one thing here worth being exact about. Equality counts as under: an install
+# root sitting AT the profile root is exactly as unreadable as one below it.
+function Test-PathIsAtOrUnder([string]$candidate, [string]$parent) {
+    if ([string]::IsNullOrWhiteSpace($candidate) -or [string]::IsNullOrWhiteSpace($parent)) { return $false }
+
+    try {
+        # Normalizes separators, resolves . and .., and makes the comparison independent of how the path
+        # was typed. Anything GetFullPath rejects is not a path we can reason about, so it is not matched.
+        $c = [IO.Path]::GetFullPath($candidate).TrimEnd('\')
+        $p = [IO.Path]::GetFullPath($parent).TrimEnd('\')
+    }
+    catch {
+        return $false
+    }
+
+    if ($c.Equals($p, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $c.StartsWith($p + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+# The machine's profile root, read from where Windows actually keeps it rather than assumed to be
+# C:\Users. ProfilesDirectory is relocatable, and a hardcoded literal would quietly stop matching on
+# precisely the box that moved it - the one box where a missed check costs the most.
+function Get-ProfilesDirectory {
+    try {
+        $configured = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -Name 'ProfilesDirectory' -ErrorAction Stop).ProfilesDirectory
+        $expanded = [Environment]::ExpandEnvironmentVariables($configured)
+        if (-not [string]::IsNullOrWhiteSpace($expanded)) { return $expanded }
+    }
+    catch {
+        # An unreadable ProfileList is not a reason to skip the check - fall back to the default location.
+    }
+
+    return (Join-Path $env:SystemDrive 'Users')
+}
+
+# 'UNC', 'mapped drive', or $null. Named separately from the profile case because the reason differs:
+# a virtual service account reaches the network as the COMPUTER account rather than as the operator who
+# typed the path, and a mapped drive letter belongs to one logon session, which a service never shares.
+function Get-NetworkPathKind([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+
+    # \\?\ is the long-path prefix on a LOCAL path, not a server name - excluded so an extended-length
+    # local path is not mistaken for a share.
+    if ($path.StartsWith('\\', [StringComparison]::Ordinal) -and -not $path.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        return 'UNC'
+    }
+
+    $qualifier = $null
+    try { $qualifier = Split-Path -Qualifier $path -ErrorAction Stop } catch { }
+    if (-not $qualifier) { return $null }
+
+    try {
+        $drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$qualifier'" -ErrorAction Stop
+        # DriveType 4 = network drive.
+        if ($drive -and $drive.DriveType -eq 4) { return 'mapped drive' }
+        # A DEFINITE answer is trusted, including "local" - so the fallback below is not consulted and
+        # cannot second-guess WMI on a box where WMI works. DriveType 0 is "unknown", which is NOT an
+        # answer: 0 is falsy here, so an unknown row falls through to the probe below instead of being
+        # read as "local". That matters because a partial WMI response is likeliest on exactly the
+        # restricted images this fallback exists for (review catch on #2248).
+        if ($drive -and $drive.DriveType) { return $null }
+    }
+    catch {
+        # WMI unavailable (locked-down or Server Core images). Fall through to the probe below rather
+        # than answering "not network", which is the fail-open in #2201.
+    }
+
+    # No answer from WMI. DisplayRoot is populated ONLY for a drive letter mapped to a share, and comes
+    # from .NET rather than WMI, so it survives a restricted image. That keeps the rule this function has
+    # always followed - unknown is not network, and a refusal needs evidence - while no longer MISSING the
+    # one case the guard exists to catch. Unknown still returns $null two lines down.
+    $psDrive = Get-PSDrive -Name $qualifier.TrimEnd(':') -ErrorAction SilentlyContinue
+    if ($psDrive -and -not [string]::IsNullOrWhiteSpace($psDrive.DisplayRoot)) { return 'mapped drive' }
+
+    return $null
+}
+
 # -- 1. Environment checks ------------------------------------------------------------------------
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -69,6 +156,108 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 
 if (-not (Test-Path $serviceExe)) {
     Fail "PerformanceMonitor.Darling.Service.exe not found beside this script. Extract the full Darling zip and run install-darling.ps1 from the extracted folder."
+}
+
+# -- 1b. Refuse an install root the service account can never read (#2187) -------------------------
+# Reported as #2185: a zip extracted to C:\Users\<someone>\Desktop\PerformanceMonitorDarling-3.2.0\ -
+# a completely reasonable thing to do with a download - installed without a complaint and then failed,
+# and nothing in the product said why.
+#
+# The mechanism is the deliberate account choice made at step 4. The service runs as the virtual account
+# 'NT SERVICE\<serviceName>' and NEVER as LocalSystem, because the bundled PostgreSQL refuses to run with
+# administrative privileges. That account is therefore not the installing user, not SYSTEM, and not
+# Administrators - and a user profile grants access to approximately those three and nobody else. Measured
+# on a clean Windows 11 box, a directory created under a profile inherits exactly:
+#     NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)   BUILTIN\Administrators:(I)(OI)(CI)(F)   <user>:(I)(OI)(CI)(F)
+# with no BUILTIN\Users, no Authenticated Users, and no CREATOR OWNER - so the account cannot read the
+# program files it was pointed at, and cannot even read back what it writes there itself. The documented
+# location inherits BUILTIN\Users:(I)(OI)(CI)(RX) from the volume root instead, which every service
+# account is a member of, which is why C:\PerformanceMonitorDarling works and this does not.
+#
+# Step 4b is not a substitute: its ACL work is scoped to darling.json and its .bak-* copies, so pg-runtime
+# keeps whatever the profile gave it. Fixing the tree's ACLs instead of refusing was considered and
+# rejected in #2187 - it means the product starts silently ACLing directories inside somebody's profile.
+#
+# The residual, seen and accepted rather than discovered later: C:\Users\Public sits under the profile root
+# and is refused, but an install there would actually WORK - it grants NT AUTHORITY\SERVICE:(OI)(CI)(IO)(M,DC),
+# which every service account holds. It is deliberately not carved out. Nobody installs a Windows service
+# into the shared documents profile, a carve-out would amount to documenting it as a reasonable place to
+# install, and the refusal is not a dead end - it names C:\PerformanceMonitorDarling. One rule, no
+# exceptions, and the one location it costs is one nobody wants.
+#
+# This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
+# nothing and leaves nothing behind.
+$existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$networkKind = Get-NetworkPathKind $root
+# $env:USERPROFILE as well as the machine's profile root: a profile redirected outside ProfilesDirectory
+# is still a profile, and it is the profile whose owner is most likely to be running this script.
+$underProfile = (Test-PathIsAtOrUnder $root (Get-ProfilesDirectory)) -or (Test-PathIsAtOrUnder $root $env:USERPROFILE)
+
+if ($underProfile -or $networkKind) {
+    if ($underProfile) {
+        $why = @"
+This folder is under a user profile:
+
+  $root
+
+The service runs as the unprivileged virtual account 'NT SERVICE\$serviceName' - never LocalSystem,
+because the bundled PostgreSQL refuses to run with administrative privileges. That account is not you,
+not SYSTEM, and not Administrators, and a user profile grants access to about those three and nobody
+else. So the service installs cleanly and then cannot read its own program files: the bundled
+PostgreSQL's initdb.exe dies at exit code -1073741515 (0xC0000135, STATUS_DLL_NOT_FOUND) before it can
+write a word of output, because the DLLs sitting beside it are unreadable (#2185).
+"@
+    }
+    else {
+        $why = @"
+This folder is on a network location ($networkKind):
+
+  $root
+
+The service runs as the unprivileged virtual account 'NT SERVICE\$serviceName' - never LocalSystem,
+because the bundled PostgreSQL refuses to run with administrative privileges. That account reaches the
+network as the COMPUTER account rather than as you, so a share that opens for you is not open for it;
+and a mapped drive letter belongs to YOUR logon session, which a service does not share and cannot see
+at all. Either way the service installs cleanly and then cannot read its own program files.
+"@
+    }
+
+    $fix = @"
+Move the extracted folder to a machine-scoped local path and run this script again from there:
+
+  C:\PerformanceMonitorDarling
+
+That is the documented location, and a folder created there inherits read + execute for BUILTIN\Users,
+which the service's virtual account is a member of. Your darling.json can move with it.
+"@
+
+    if (-not $existing) {
+        Fail @"
+$why
+
+$fix
+
+Nothing was installed or changed.
+"@
+    }
+
+    # An UPGRADE is a question rather than a refusal, and only here. This script's upgrade path exists to
+    # preserve installs operators have customized - it deliberately touches only binPath so a re-homed
+    # logon account survives (#1802, #1823) - and #2187's rejected option 2 (grant the service account
+    # read + execute on the tree) is exactly the thing an operator may already have done by hand here.
+    # Refusing outright would strand a deployment that works. The diagnosis is identical and unmissable;
+    # only the verdict is theirs. A fresh install in the same folder is still refused outright above.
+    Write-Host ''
+    Write-Host 'WARNING: a FRESH install would be refused in this location.' -ForegroundColor Red
+    Write-Host $why -ForegroundColor Red
+    Write-Host ''
+    Write-Host $fix -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host "Service '$serviceName' already exists, so this is an upgrade, and this folder may have been made" -ForegroundColor Yellow
+    Write-Host 'to work by hand (granting the service account read + execute on the tree). That is the only reason' -ForegroundColor Yellow
+    Write-Host 'this is a question. If it has NOT been, the service will stop working the moment it restarts.' -ForegroundColor Yellow
+    $answer = Read-Host 'Point the service at this folder anyway? [y/N]'
+    if ($answer -notmatch '^[Yy]') { exit 4 }
 }
 
 if (-not (Test-Path $configPath)) {
@@ -109,7 +298,9 @@ catch [System.InvalidOperationException] {
 }
 
 # -- 4. Create or upgrade the service -------------------------------------------------------------
-$existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+# $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
+# bad install location is a refusal or a question. Nothing between there and here creates or removes the
+# service, so it is the same answer.
 if ($existing) {
     Write-Host "Service already exists - upgrading its binPath in place (config, store data, and credentials untouched)."
     if ($existing.Status -ne 'Stopped') {

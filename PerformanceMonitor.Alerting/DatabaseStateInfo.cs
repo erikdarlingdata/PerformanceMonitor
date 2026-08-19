@@ -30,4 +30,16 @@ public sealed class DatabaseStateInfo
     /// (e.g. "ONLINE → OFFLINE").
     /// </summary>
     public string ExpectedState { get; set; } = "";
+
+    /// <summary>
+    /// The effective state this database was LAST alerted about (#2166), or empty when it has never been
+    /// alerted. Persisted per (server, database) so it survives a service restart — without that, an
+    /// edge-triggered alert would re-fire every deliberately-parked database on every restart, which is
+    /// worse than the cooldown-repeat it replaces.
+    ///
+    /// <para>The engine compares this against <see cref="StateDesc"/> for the states where repetition is
+    /// noise rather than signal (a chosen OFFLINE, a flickering RESTORING). The integrity states are
+    /// never chosen, so they keep re-firing on the cooldown and ignore this field.</para>
+    /// </summary>
+    public string LastAlertedState { get; set; } = "";
 }

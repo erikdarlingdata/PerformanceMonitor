@@ -2800,13 +2800,24 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
     /// <summary>
     /// The pure stuck-compression-job decision (#1581). A compression policy job is STUCK when either:
     /// <list type="bullet">
-    /// <item>its <c>next_start</c> is <c>-infinity</c> — the scheduler will NEVER re-fire it (the dead-job
-    /// bug that let uncompressed data grow without bound until the disk filled), or</item>
+    /// <item>its <c>next_start</c> is <c>-infinity</c> while the job is NOT currently running — the scheduler
+    /// abandoned it and will NEVER re-fire it (the dead-job bug that let uncompressed data grow without bound
+    /// until the disk filled), or</item>
     /// <item>it has been in the <c>Running</c> state since a <c>last_run_started_at</c> older than
     /// <see cref="StuckRunningBound"/> — a run that began long ago and never finished (a hung run).</item>
     /// </list>
     /// A job with neither condition is healthy and is NOT flagged. No I/O, so it pins directly with a
     /// controllable clock. Scoping to compression jobs happens in the query — this decides only "stuck".
+    ///
+    /// <para><b><c>-infinity</c> is ALSO the engine's mid-run marker</b>, measured live on TimescaleDB
+    /// 2.x (pg17): from the moment the scheduler picks up a due job until its run completes,
+    /// <c>job_stats.next_start</c> reads <c>-infinity</c> with <c>job_status = 'Running'</c>, and the real
+    /// next start is only computed at completion. So <c>-infinity</c> alone cannot mean "dead" — an
+    /// unconditioned first arm flagged every healthy job the check happened to catch mid-run, alerted it as
+    /// stuck, and "self-healed" it with a pointless re-arm (the field's transient stuck→self-healed noise;
+    /// the CI flake was the live test catching its own re-arm-triggered run). A running job is therefore
+    /// left to the second arm, whose elapsed bound is what actually distinguishes a hung run from a
+    /// healthy one.</para>
     ///
     /// <para>A <paramref name="lastRunStartedAtUtc"/> of <see cref="DateTime.MinValue"/> counts as NEVER RAN,
     /// not as "started in year 1" (#1760). <see cref="StuckCompressionJobsSql"/> already NULLIFs TimescaleDB's
@@ -2822,13 +2833,15 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
         DateTime nowUtc,
         out string reason)
     {
-        if (nextStartIsNegativeInfinity)
+        var isRunning = string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase);
+
+        if (nextStartIsNegativeInfinity && !isRunning)
         {
             reason = "next_start is -infinity — the scheduler will never run it again";
             return true;
         }
 
-        if (string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase)
+        if (isRunning
             && lastRunStartedAtUtc is DateTime startedUtc
             && startedUtc != DateTime.MinValue)
         {
@@ -2931,6 +2944,55 @@ WHERE j.proc_name LIKE '%compression%'
         }
 
         return stuck;
+    }
+
+    /// <summary>
+    /// Every background job's last-run duration against its own schedule interval (#2136) — the readings
+    /// the Store Job Over Cadence self-alert judges. <c>job_stats</c> for the same reason the #1778
+    /// observability path uses it (maintained unconditionally; the per-execution history table is empty
+    /// unless job-execution logging is on). Only a SUCCESSFUL last run judges: a failed run's duration is
+    /// not a cadence signal, and job failures are their own condition (<c>total_failures</c> rides the
+    /// V56 telemetry). Tolerant like <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a
+    /// hiccup yields no readings, never an exception.
+    /// </summary>
+    public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        const string sql = @"
+SELECT
+    j.job_id,
+    j.proc_name || coalesce(' ' || j.hypertable_name, ''),
+    (EXTRACT(EPOCH FROM js.last_run_duration) * 1000)::bigint,
+    (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint
+FROM timescaledb_information.job_stats AS js
+JOIN timescaledb_information.jobs AS j USING (job_id)
+WHERE js.last_run_status = 'Success'";
+
+        var readings = new List<StoreJobCadenceReading>();
+        try
+        {
+            using var command = new NpgsqlCommand(sql, connection);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                readings.Add(new StoreJobCadenceReading(
+                    Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Store-job cadence check: could not read job stats: {Message}", ex.Message);
+        }
+
+        return readings;
     }
 
     /* ---------------- compression-run observability (#1778) ---------------- */
@@ -3111,6 +3173,14 @@ WHERE j.proc_name LIKE '%compression%'
 /// may be null on an odd catalog), and the human-readable reason the pure predicate produced.
 /// </summary>
 public sealed record StuckCompressionJob(long JobId, string? HypertableName, string Reason);
+
+/// <summary>
+/// One background job's cadence reading (#2136): the last SUCCESSFUL run's duration against the job's own
+/// schedule interval, from <see cref="TimescaleSupport.ReadJobCadenceReadingsAsync"/>. <see cref="JobName"/>
+/// is <c>proc_name</c> plus the hypertable/CAGG it serves — the V56 telemetry's naming, minus the
+/// <c>[job_id]</c> suffix (the id rides separately as the alert key).
+/// </summary>
+public sealed record StoreJobCadenceReading(long JobId, string JobName, long? LastRunDurationMs, long ScheduleIntervalMs);
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how

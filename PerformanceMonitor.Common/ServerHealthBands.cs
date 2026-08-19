@@ -447,6 +447,7 @@ namespace PerformanceMonitor.Common
             "database_scoped_config",
             "index_object_stats",
             "plan_correction",
+            "query_store_health",
         };
 
         /// <summary>
@@ -619,4 +620,77 @@ namespace PerformanceMonitor.Common
                 : string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs)", lastNote, totalRuns);
         }
     }
+
+    /// <summary>
+    /// Sweep-pressure verdict for get_collection_health (#2296): does the collection body's own execution
+    /// demand fit inside its fastest cadence?
+    ///
+    /// <para><b>Why this number and not delivered-gap statistics:</b> at fleet scale the delivered cadence
+    /// stretches for a benign reason — bounded sweep concurrency queues bodies, and the fleet-wide median
+    /// gap runs a multiple of the configured minute — so measuring gaps flags every server and drowns the
+    /// two that matter. What isolates a SATURATED server is the arithmetic behind its own watchdog line
+    /// ("collection body has not completed after Ns of EXECUTION — skipping relaunch"): the collectors'
+    /// summed average durations, amortized by cadence, exceed the sweep budget itself. Queueing cannot
+    /// inflate this number, because it is built from the collectors' own execution times.</para>
+    ///
+    /// <para><b>The consequence it names:</b> a body that cannot fit its cadence finishes after the next
+    /// due time, every relaunch is skipped, and the server collects at a multiple of its configured
+    /// interval — while every collector, from its own point of view, is HEALTHY. That is precisely why
+    /// this signal exists: before it, half-rate collection was only visible by reading service-log
+    /// warnings (#2296 measured two servers at ~50 skip-warnings/hour with 40 of 40 collectors green).</para>
+    ///
+    /// <para>Pure and static like <see cref="CollectorHealthClassifier"/>: the caller resolves each
+    /// collector's cadence (from the shared schedule defaults, matching the banding's parity choice) and
+    /// only the DECISION lives here, pinned by the same table in both suites.</para>
+    /// </summary>
+    public static class SweepPressureClassifier
+    {
+        /* The verdict strings, same switch-friendly shape as the banding's. */
+        public const string Ok = "OK";
+        public const string AtRisk = "AT_RISK";
+        public const string Saturated = "SATURATED";
+
+        /// <summary>
+        /// AT_RISK at 75% of budget: the amortized average leaves no headroom for variance — the slow
+        /// collectors on a busy hour are what push a 75% body over its cadence intermittently, which is
+        /// how saturation looks before it is constant. Chosen against the #2296 measurements: the two
+        /// saturated servers computed ~101%, the in-region fleet sits far below.
+        /// </summary>
+        public const double AtRiskBusyPercent = 75.0;
+
+        /// <summary>SATURATED at 100%: the body mathematically cannot fit its cadence, so every cycle skips.</summary>
+        public const double SaturatedBusyPercent = 100.0;
+
+        /// <summary>
+        /// Amortized execution demand and its verdict. Each scheduled collector contributes its average
+        /// duration divided by its cadence in minutes — milliseconds of work demanded per minute of wall
+        /// time for a body that runs collectors serially. A non-recurring collector
+        /// (<paramref name="collectors"/> entry with frequency &lt;= 0: on-load, unknown) contributes
+        /// nothing — it does not compete for the sweep. Percent is against the 60,000 ms one minute
+        /// holds; the fastest shipped cadence is one minute, which is what makes the minute the budget.
+        /// </summary>
+        public static SweepPressure Compute(IEnumerable<(string CollectorName, double AvgDurationMs, int FrequencyMinutes)> collectors)
+        {
+            double busyMsPerMinute = 0;
+            foreach (var (_, avgDurationMs, frequencyMinutes) in collectors)
+            {
+                if (frequencyMinutes <= 0 || avgDurationMs <= 0)
+                {
+                    continue;
+                }
+
+                busyMsPerMinute += avgDurationMs / frequencyMinutes;
+            }
+
+            var busyPercent = busyMsPerMinute / 60_000.0 * 100.0;
+            var verdict = busyPercent >= SaturatedBusyPercent ? Saturated
+                : busyPercent >= AtRiskBusyPercent ? AtRisk
+                : Ok;
+
+            return new SweepPressure(busyMsPerMinute, busyPercent, verdict);
+        }
+    }
+
+    /// <summary>One server's sweep-pressure answer, as a single value so a caller cannot drop the verdict from its numbers.</summary>
+    public sealed record SweepPressure(double BusyMsPerMinute, double BusyPercent, string Verdict);
 }

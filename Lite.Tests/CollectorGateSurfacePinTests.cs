@@ -61,6 +61,26 @@ public sealed class CollectorGateSurfacePinTests
         Assert.True(ServerConfigCollector.Instance.AppliesTo(Unknown));
     }
 
+    /// <summary>
+    /// #2150 field report: this fired 11x consecutive on an Azure SQL DB elastic pool with error 262,
+    /// "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'". The query reads
+    /// <c>tempdb.sys.dm_db_file_space_usage</c> three-part, which a non-administrative login on Azure
+    /// SQL DB cannot be granted, so the collector could only ever fail there.
+    /// <para>Managed Instance must KEEP collecting — it has a real tempdb — which is why this asserts
+    /// both directions rather than just the skip.</para>
+    /// </summary>
+    [Fact]
+    public void TempDbStats_AppliesTo_SkipsOnlyAzureSqlDb()
+    {
+        Assert.False(TempDbStatsCollector.Instance.AppliesTo(AzureSqlDb));  /* error 262 in tempdb */
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(AzureMi));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(AwsRds));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2016));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(OnPrem2014));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(TempDbStatsCollector.Instance.AppliesTo(Unknown));
+    }
+
     [Fact]
     public void TraceFlags_AppliesTo_SkipsOnlyAzureSqlDb()
     {
@@ -127,17 +147,30 @@ public sealed class CollectorGateSurfacePinTests
     [Fact]
     public void CatalogByNameGate_AgreesWithDefinitionAppliesTo_ForEveryCollectorAndTarget()
     {
-        /* The parity crux: Lite consults CollectorCatalog.AppliesTo(name, target) pre-dispatch; Darling's
-           runner calls definition.AppliesTo(target). If those ever disagreed the two SKUs would gate
-           differently — exactly the drift this collapse removes. Pin that they are identical for every
-           catalog collector across every target dimension. */
+        /* The parity crux: Lite consults CollectorCatalog.AppliesTo(NAME, target) pre-dispatch, Darling's
+           runner calls CollectorCatalog.AppliesTo(DEFINITION, target). If those ever disagreed the two SKUs
+           would gate differently — exactly the drift this collapse removes.
+        
+           Both COMPOSED forms, deliberately. This used to compare the raw definition.AppliesTo(target)
+           against the by-name form, which was equivalent only while every collector was SQL Server: the
+           composed overload also requires definition.TargetEngine == target.Engine, so a PostgreSQL
+           definition whose own AppliesTo returns true unconditionally (the slots collector) legitimately
+           disagrees with its raw gate when handed a SQL Server target. Comparing raw-to-composed would force
+           either a wrong assertion or a filtered loop; comparing composed-to-composed is the claim that
+           actually matters and holds for every collector against every target. */
         foreach (var definition in CollectorCatalog.All)
         {
             foreach (var target in AllTargets)
             {
-                Assert.Equal(
-                    definition.AppliesTo(target),
-                    CollectorCatalog.AppliesTo(definition.Name, target));
+                /* The expectation is SPELLED OUT rather than delegated to the other overload. Comparing
+                   AppliesTo(definition, t) against AppliesTo(name, t) is nearly circular — the by-name
+                   overload just looks the name up and calls the by-definition one, so only a corrupt
+                   name->definition map could fail it, and a bug in the composed rule itself would pass.
+                   Stating the rule independently means BOTH the lookup and the composition are pinned. */
+                var expected = definition.TargetEngine == target.Engine && definition.AppliesTo(target);
+
+                Assert.Equal(expected, CollectorCatalog.AppliesTo(definition, target));
+                Assert.Equal(expected, CollectorCatalog.AppliesTo(definition.Name, target));
             }
         }
     }

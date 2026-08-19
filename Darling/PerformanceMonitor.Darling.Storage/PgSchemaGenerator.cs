@@ -190,6 +190,7 @@ public static class PgSchemaGenerator
         SessionSummaryStatsCollector.Instance,
         SystemHealthEventsCollector.Instance,
         PvsStatsCollector.Instance,
+        QueryStoreHealthCollector.Instance,
     };
 
     /// <summary>

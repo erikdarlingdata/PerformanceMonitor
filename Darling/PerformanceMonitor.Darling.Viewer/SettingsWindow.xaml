@@ -82,6 +82,28 @@
                 </Grid>
                 <CheckBox x:Name="CapturePlansCheckBox" Content="Capture execution plans (all servers)" Margin="0,12,0,0"
                           Foreground="{DynamicResource ForegroundBrush}"/>
+                <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Query Store history backfill (all servers)" Margin="0,12,0,0"
+                          Foreground="{DynamicResource ForegroundBrush}"/>
+                <Grid Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="70"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="70"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Query Store text budget (MB):" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="QueryStoreTextBudgetMbTextBox" Grid.Column="1" Margin="8,0,16,0"/>
+                    <TextBlock Grid.Column="2" Text="Concurrent server sweeps:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="MaxConcurrentSweepsTextBox" Grid.Column="3" Margin="8,0,0,0"/>
+                </Grid>
+                <TextBlock Text="Collector memory bounds. The text budget caps how much query and plan text one database ships per collection pass (4-256, default 64); a smaller budget means shorter statements on the monitored server and slower history catch-up, never lost data — lower it when the fleet is a network hop away. Sweeps is how many servers collect at once (1-16, default 4); raise it when a large fleet queues behind collection on a host with headroom. Peak memory is roughly the two multiplied."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           TextWrapping="Wrap" Margin="0,4,0,0"/>
+                <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up — for example after restoring a large database onto a monitored server — live collection is unaffected; re-enabling resumes where it left off."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           TextWrapping="Wrap" Margin="24,2,0,0"/>
                 <TextBlock Text="Store query and Query Store execution-plan XML across the fleet. Disable to shave storage on a very large fleet; a per-server override lives on each server's dialog."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="0,4,0,0" TextWrapping="Wrap"/>
@@ -373,6 +395,39 @@
                     <TextBlock Text="GB free (Azure SQL DB excluded)" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
+                <!-- #2107: the CRITICAL severity tier's floors (#1136) — previously compile-time. -->
+                <StackPanel Orientation="Horizontal" Margin="40,4,0,0">
+                    <TextBlock Text="grade CRITICAL at" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertDiskCriticalPercentBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% or" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertDiskCriticalGbBox" Width="45" Text="2" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="GB free" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <!-- #2107: the monitor's own self-alerts — store volume + collection health. -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Monitor self-alerts: store volume under" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertSelfDiskWarnPercentBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% free; collection quiet" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertCollectionStaleMinutesBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="min or" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertCollectionFailureThresholdBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="straight failures" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <!-- #2136: the store's own background jobs — warn when a run reaches this percent of its cadence. -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Store background job runs longer than" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertStoreJobCadenceWarnPercentBox" Width="45" Text="25" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="% of its schedule interval (critical at 100%)" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertPvsCheckBox" Content="Version store (PVS) over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
@@ -487,6 +542,14 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AnalysisNotifySeverityBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
                     <TextBlock Text="(0.0 - 2.0)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
+                <!-- #2107: was a hardcoded 360 while Lite always honored a configured value. -->
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Re-notify an unchanged finding after" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AnalysisNotifyCooldownBox" Width="55" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes (30 - 10080)" VerticalAlignment="Center" Margin="4,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
@@ -741,6 +804,10 @@
                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                     <Run Text="Placeholders (each is JSON-escaped when substituted): "/>
                     <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{timestamp}}"/>
+                </TextBlock>
+                <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                    <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
+                    <Run FontFamily="Consolas" Text="{}{{context_json}} {{incidents_json}} {{dedup_key}}"/>
                 </TextBlock>
                 <TextBlock Margin="20,6,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                     <Run FontWeight="SemiBold" Text="Example — re-run a GitHub Actions workflow when an alert fires:"/>

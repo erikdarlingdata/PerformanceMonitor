@@ -11,6 +11,7 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
@@ -905,5 +906,148 @@ public sealed class DarlingManagedPostgresTests
                 Thread.Sleep(500);
             }
         }
+    }
+
+    /* ============ #2186: the bootstrap's failure messages, in the operator's words ============
+       These pin the SHIPPED strings, not the decoder — DarlingToolExitCodeTests owns the decode.
+       The distinction is the whole point: #1738 was a correct check that nothing invoked, and a
+       correct decoder no message calls would be the same defect wearing a new hat. */
+
+    private const int StatusDllNotFound = unchecked((int)0xC0000135);
+    private const string FieldBinDirectory = @"C:\PerformanceMonitorDarling\pg-runtime\pgsql\bin";
+    private const string FieldDataDirectory = @"C:\ProgramData\PerformanceMonitorDarling\pg";
+
+    /// <summary>
+    /// The reported failure, rebuilt from the field's own numbers: exit -1073741515 and an empty capture.
+    /// Every clause the report was missing has to be present, and the clause it HAD has to survive — field
+    /// reports and the issue tracker are searchable by "initdb failed (exit code", so the fix must not
+    /// rename the thing operators paste into search.
+    /// </summary>
+    [Fact]
+    public void InitDbFailureMessage_TurnsTheFieldReportIntoADiagnosis()
+    {
+        var message = DarlingManagedPostgres.BuildInitDbFailureMessage(
+            -1073741515, Path.Combine(FieldBinDirectory, "initdb.exe"), FieldDataDirectory, string.Empty);
+
+        Assert.StartsWith("initdb failed (exit code -1073741515", message, StringComparison.Ordinal);
+        Assert.Contains(FieldDataDirectory, message, StringComparison.Ordinal);
+
+        /* What the number means, and that Windows rather than PostgreSQL set it. */
+        Assert.Contains("0xC0000135", message, StringComparison.Ordinal);
+        Assert.Contains("STATUS_DLL_NOT_FOUND", message, StringComparison.Ordinal);
+
+        /* The empty field is stated as expected. The report's "Output:" trailing a blank line is what made
+           the whole thing read as missing data. */
+        Assert.Contains("Output:", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Output:\n\n", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Output:\n(none)", message, StringComparison.Ordinal);
+        Assert.Contains("expected", message, StringComparison.OrdinalIgnoreCase);
+
+        /* Both causes, and the directory the DLLs are supposed to be in. */
+        Assert.Contains(FieldBinDirectory, message, StringComparison.Ordinal);
+        Assert.Contains("vcruntime140_1.dll", message, StringComparison.Ordinal);
+        Assert.Contains("NT SERVICE", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>An ordinary initdb failure is left to speak for itself: its own stderr is the diagnosis,
+    /// and it must not be pushed below a screen of loader boilerplate that does not apply.</summary>
+    [Fact]
+    public void InitDbFailureMessage_LeavesARealInitDbErrorAlone()
+    {
+        const string stderr = "initdb: error: directory \"C:\\pg\" exists but is not empty";
+
+        var message = DarlingManagedPostgres.BuildInitDbFailureMessage(
+            1, Path.Combine(FieldBinDirectory, "initdb.exe"), FieldDataDirectory, stderr);
+
+        Assert.Equal($"initdb failed (exit code 1) for {FieldDataDirectory}.\nOutput:\n{stderr}", message);
+    }
+
+    /// <summary>
+    /// pg_ctl status's own exit 4 really does mean the data directory is unusable, and the message keeps
+    /// saying so. A Windows status means pg_ctl never ran — keeping the verdict there would point an
+    /// operator at deleting a healthy store to fix a missing DLL.
+    /// </summary>
+    [Fact]
+    public void StatusFailureMessage_BlamesTheDataDirectoryOnlyWhenPgCtlActuallySaidSo()
+    {
+        var pgCtl = Path.Combine(FieldBinDirectory, "pg_ctl.exe");
+
+        var pgCtlVerdict = DarlingManagedPostgres.BuildStatusFailureMessage(4, pgCtl, FieldDataDirectory, "pg_ctl: could not open ...");
+        Assert.Contains("the data directory is not usable", pgCtlVerdict, StringComparison.Ordinal);
+
+        var loaderFailure = DarlingManagedPostgres.BuildStatusFailureMessage(StatusDllNotFound, pgCtl, FieldDataDirectory, string.Empty);
+        Assert.DoesNotContain("the data directory is not usable", loaderFailure, StringComparison.Ordinal);
+        Assert.Contains("STATUS_DLL_NOT_FOUND", loaderFailure, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The start failure's log tail has the initdb message's trap in another costume: on a loader status
+    /// pg_ctl never started a postmaster, so "(no server log written)" is true and useless. The diagnosis
+    /// has to arrive BEFORE the tail invites an operator to go read a log that was never going to exist.
+    /// </summary>
+    [Fact]
+    public void StartFailureMessage_DiagnosesBeforeItPointsAtAnEmptyServerLog()
+    {
+        var message = DarlingManagedPostgres.BuildStartFailureMessage(
+            StatusDllNotFound, Path.Combine(FieldBinDirectory, "pg_ctl.exe"), FieldDataDirectory, "(no server log written)");
+
+        var diagnosis = message.IndexOf("STATUS_DLL_NOT_FOUND", StringComparison.Ordinal);
+        var tail = message.IndexOf("Server log tail:", StringComparison.Ordinal);
+
+        Assert.True(diagnosis >= 0, "the start failure must decode a Windows status");
+        Assert.True(tail > diagnosis, "the loader diagnosis has to precede the server-log tail it explains");
+    }
+
+    /// <summary>
+    /// The wiring, pinned at the source: three correct builders that no throw site calls would leave the
+    /// shipped message exactly as it was reported. Behavioral coverage cannot reach these — reproducing
+    /// them needs a bundled Postgres that dies in the Windows loader, which is not something a CI runner
+    /// can be asked to arrange.
+    /// </summary>
+    [Fact]
+    public void TheBootstrapThrowSitesActuallyUseTheseMessages()
+    {
+        var source = ReadManagedPostgresSource();
+
+        Assert.Contains("BuildInitDbFailureMessage(exitCode, initDb, _dataDirectory, output, runtimeProbe));", source, StringComparison.Ordinal);
+        Assert.Contains("throw new InvalidOperationException(BuildStatusFailureMessage(exitCode, pgCtl, _dataDirectory, output)),", source, StringComparison.Ordinal);
+        Assert.Contains("BuildStartFailureMessage(exitCode, pgCtl, _dataDirectory, ReadServerLogTail())", source, StringComparison.Ordinal);
+
+        /* And that no bootstrap failure went back to interpolating the bare code. */
+        Assert.DoesNotContain("exit code {exitCode}", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2185: the runtime probe is GATED on a loader status, pinned at the source because the gate is the
+    /// whole design and behavioral coverage cannot reach it.
+    ///
+    /// <para>Two things would go wrong ungated. Every ordinary initdb failure — a non-empty data directory,
+    /// a bad locale, a permissions refusal — would launch two extra processes and then append a paragraph
+    /// about DLL loading to an error that has nothing to do with loading, which is worse than silence
+    /// because it sends the operator down the wrong path. And the probe only MEANS anything against a
+    /// loader status: "both binaries load fine" is a useful finding when Windows just refused to load one,
+    /// and noise otherwise.</para>
+    /// </summary>
+    [Fact]
+    public void TheRuntimeProbeOnlyRunsForALoaderStatus()
+    {
+        var source = ReadManagedPostgresSource();
+
+        Assert.Contains("DarlingToolExitCode.IsLoaderStatus(exitCode)", source, StringComparison.Ordinal);
+        Assert.Contains("? await ProbeRuntimeBinariesAsync(binDirectory, cancellationToken)", source, StringComparison.Ordinal);
+        Assert.Contains(": string.Empty;", source, StringComparison.Ordinal);
+    }
+
+    private static string ReadManagedPostgresSource([CallerFilePath] string thisFile = "")
+    {
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");
+        var dir = Path.GetDirectoryName(thisFile);
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.False(dir is null, "could not locate the repo root from the test source path");
+        return File.ReadAllText(Path.Combine(dir!, relative));
     }
 }

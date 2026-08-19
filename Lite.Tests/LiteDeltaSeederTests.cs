@@ -162,7 +162,7 @@ public sealed class LiteDeltaSeederTests : IClassFixture<SharedDuckDbFixture>, I
     /// <summary>
     /// The memory-grant baselines carry their collection_time, so the gap policy can reject a stale
     /// one. Seeded with a null timestamp (as they were before #1772) the policy cannot fire at all,
-    /// and the row below — inside the 15-minute read window but well outside the 300-second gap —
+    /// and the row below — inside the 15-minute read window but well outside the gap passed below —
     /// produces a fabricated spike of 40 instead of 0 on the first cycle after a restart.
     /// </summary>
     [Fact]

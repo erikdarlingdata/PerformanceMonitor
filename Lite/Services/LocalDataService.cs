@@ -76,7 +76,7 @@ public partial class LocalDataService
     /// <summary>
     /// Safely converts a DuckDB value to double, handling BigInteger from SUM aggregations.
     /// </summary>
-    protected static double ToDouble(object value)
+    private static double ToDouble(object value)
     {
         if (value is BigInteger bi)
             return (double)bi;
@@ -86,7 +86,7 @@ public partial class LocalDataService
     /// <summary>
     /// Safely converts a DuckDB value to long, handling BigInteger from SUM/COUNT aggregations.
     /// </summary>
-    protected static long ToInt64(object value)
+    private static long ToInt64(object value)
     {
         if (value is BigInteger bi)
             return (long)bi;
@@ -98,7 +98,7 @@ public partial class LocalDataService
     /// Returns UTC time for collection_time queries (most tables store collection_time in UTC).
     /// When fromDate/toDate are provided, they should already be in UTC.
     /// </summary>
-    protected static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         if (fromDate.HasValue && toDate.HasValue)
         {
@@ -115,7 +115,7 @@ public partial class LocalDataService
     /// <summary>
     /// Gets the time range in server local time (for tables like cpu_utilization_stats.sample_time).
     /// </summary>
-    protected static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         var serverNow = DateTime.UtcNow.AddMinutes(ServerTimeHelper.UtcOffsetMinutes);
 
@@ -132,7 +132,7 @@ public partial class LocalDataService
     /// Starts query timing for performance logging. Use with 'using' statement.
     /// Only logs queries that exceed the slow query threshold (default 500ms).
     /// </summary>
-    protected static Helpers.QueryExecutionContext TimeQuery(string context, string sql)
+    private static Helpers.QueryExecutionContext TimeQuery(string context, string sql)
     {
         return Helpers.QueryLogger.StartQuery(context, sql, source: "DuckDB");
     }

@@ -149,4 +149,31 @@ public class IncidentGroupingTests
         Assert.Empty(DeadlockObjectExtractor.FromGraphXml("not xml <<<"));
         Assert.Empty(DeadlockObjectExtractor.FromGraphXml("<deadlock><process-list/></deadlock>"));
     }
+
+    [Fact]
+    public void DeadlockObjectExtractor_PullsDatabasesFromProcessCurrentDbName()
+    {
+        /* #2109: the Database fact's source — the processes' currentdbname, distinct + sorted,
+           case-insensitively deduped. A cross-database deadlock lists every database a process ran
+           in, which is the "where did this happen" answer, not the lock list's "what was locked". */
+        const string xml = @"<deadlock>
+  <process-list>
+    <process id='p1' currentdbname='SalesDB'/>
+    <process id='p2' currentdbname='salesdb'/>
+    <process id='p3' currentdbname='Archive'/>
+  </process-list>
+  <resource-list/>
+</deadlock>";
+
+        var databases = DeadlockObjectExtractor.DatabasesFromGraphXml(xml);
+        Assert.Equal(new[] { "Archive", "SalesDB" }, databases); // distinct (case-insensitive) + sorted
+    }
+
+    [Fact]
+    public void DeadlockObjectExtractor_Databases_MalformedOrDatabaseless_ReturnsEmpty()
+    {
+        Assert.Empty(DeadlockObjectExtractor.DatabasesFromGraphXml(null));
+        Assert.Empty(DeadlockObjectExtractor.DatabasesFromGraphXml("not xml <<<"));
+        Assert.Empty(DeadlockObjectExtractor.DatabasesFromGraphXml("<deadlock><process-list><process id='p1'/></process-list></deadlock>"));
+    }
 }

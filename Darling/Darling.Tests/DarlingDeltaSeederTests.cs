@@ -173,7 +173,7 @@ public sealed class DarlingDeltaSeederTests
             await DeleteTestRowsAsync(connection, TestContext.Current.CancellationToken);
 
             /* Two rows for the same wait type: an older baseline and the latest one, both recent
-               enough to stay inside the wait-stats 300-second gap policy. */
+               enough to stay inside the 300 s gap this call passes explicitly. */
             var olderTime = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-2), DateTimeKind.Unspecified);
             var latestTime = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified);
             await InsertWaitStatsRowAsync(connection, olderTime, waitingTasks: 10, waitTimeMs: 2000, signalWaitTimeMs: 500);

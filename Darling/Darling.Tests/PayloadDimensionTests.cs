@@ -456,6 +456,22 @@ public sealed class PayloadDimensionTests
             "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable));
 
+        /* #2171: compressContent false routes the plan dim through the TEXT branch - query_plan_xml
+           written, query_plan_gz untouched (stays NULL on new rows) - which is plan_xml_compression =
+           'none'. Same statement shape, same conflict semantics, text payload array. */
+        Assert.Equal(
+            "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen)\n" +
+            "SELECT u.digest, u.payload, $3\n" +
+            "FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
+            "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: false));
+
+        /* Explicit true is byte-identical to the default - the parameter cannot drift the gzip shape. */
+        Assert.Equal(
+            PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable),
+            PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: true));
+
         Assert.Throws<ArgumentOutOfRangeException>(() => PayloadDimensions.UpsertSql("not_a_dim"));
     }
 

@@ -371,7 +371,7 @@ public partial class MainWindow : Window
                 alert.CurrentValue,
                 alert.ThresholdValue,
                 serverId,
-                context: null,
+                context: alert.Context,
                 muted: isMuted,
                 detailText: alert.DetailText);
         }

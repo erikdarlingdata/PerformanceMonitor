@@ -16,7 +16,7 @@
   <ItemGroup>
     <!-- The plan fetcher connects to the MONITORED SQL Server (same client the Service uses);
          Npgsql and Logging.Abstractions flow transitively from the Storage/Notifications references. -->
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
   </ItemGroup>
 
   <ItemGroup>
@@ -33,6 +33,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Darling.Tests" />
+    <!-- #2317: the worker's self-metrics catch names a timeout as a timeout via PgBaselineProvider's
+         IsCommandTimeout — one definition of the structural predicate, not a copy that drifts. -->
+    <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
     <!-- The viewer's blocking read path reuses PgBlockingPairRowQuery (the shared source-agnostic
          chain reconstructor's Postgres row shaper) directly, mirroring how Lite/Dashboard consume
          the shared blocking internals. -->

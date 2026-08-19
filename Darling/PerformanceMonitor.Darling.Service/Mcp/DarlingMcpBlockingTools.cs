@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -47,9 +48,10 @@ public sealed class DarlingMcpBlockingTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 30.")] int limit = 30)
+        [Description("Maximum rows. Default 30.")] int limit = 30,
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateHoursBack(hours_back);
@@ -65,7 +67,29 @@ public sealed class DarlingMcpBlockingTools
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No blocking events found in the specified time range.");
 
-            var result = rows.Take(limit).Select(r => new
+            /* #2159: fingerprint the WHOLE window, then filter, then cap. Capping first would let `limit`
+               discard the very incident the key names — the caller asked for one specific incident, not for
+               the newest `limit` rows that happen to include it. */
+            var examined = rows.Count;
+            var keys = DarlingIncidentFingerprint.BlockingKeys(
+                resolved.FingerprintName,
+                rows.Select(r => new BlockingIncidentGrouper.BlockedEvent(
+                    r.DatabaseName, r.ContentiousObject, r.BlockedSqlText, r.BlockingSqlText,
+                    r.WaitTimeMs, r.LockMode)).ToList());
+
+            if (!DarlingIncidentFingerprint.NoFilter(dedup_key))
+            {
+                var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
+                var kept = rows.Where((_, i) => keys[i] == wanted).ToList();
+                if (kept.Count == 0)
+                    return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
+                        "blocking events", dedup_key!, resolved.FingerprintName, examined));
+
+                keys = kept.Select(r => wanted).Cast<string?>().ToList();
+                rows = kept;
+            }
+
+            var result = rows.Take(limit).Select((r, i) => new
             {
                 event_time = r.EventTime?.ToString("o"),
                 source = r.Source,
@@ -102,13 +126,15 @@ public sealed class DarlingMcpBlockingTools
                 blocking_last_batch_completed = r.BlockingLastBatchCompleted?.ToString("o"),
                 blocked_priority = r.BlockedPriority,
                 blocking_priority = r.BlockingPriority,
-                has_report_xml = r.HasReportXml
+                has_report_xml = r.HasReportXml,
+                dedup_key = keys[i]
             });
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                dedup_key = DarlingIncidentFingerprint.NoFilter(dedup_key) ? null : DarlingIncidentFingerprint.NormalizeKey(dedup_key),
                 total_events = rows.Count,
                 events = result
             }, McpHelpers.JsonOptions);
@@ -124,9 +150,10 @@ public sealed class DarlingMcpBlockingTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 20.")] int limit = 20)
+        [Description("Maximum rows. Default 20.")] int limit = 20,
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateHoursBack(hours_back);
@@ -142,20 +169,39 @@ public sealed class DarlingMcpBlockingTools
             if (rows.Count == 0)
                 return McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
 
-            var result = rows.Take(limit).Select(r => new
+            /* #2159: see get_blocking — fingerprint the window, filter, then cap. */
+            var examined = rows.Count;
+            var keys = DarlingIncidentFingerprint.DeadlockKeys(
+                resolved.FingerprintName, rows.Select(r => r.DeadlockGraphXml));
+
+            if (!DarlingIncidentFingerprint.NoFilter(dedup_key))
+            {
+                var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
+                var kept = rows.Where((_, i) => keys[i] == wanted).ToList();
+                if (kept.Count == 0)
+                    return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
+                        "deadlocks", dedup_key!, resolved.FingerprintName, examined));
+
+                keys = kept.Select(r => wanted).Cast<string?>().ToList();
+                rows = kept;
+            }
+
+            var result = rows.Take(limit).Select((r, i) => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 victim_process_id = r.VictimProcessId,
                 victim_sql_text = McpHelpers.Truncate(r.VictimSqlText, 2000),
                 process_summary = r.ProcessSummary,
-                has_deadlock_xml = r.HasDeadlockXml
+                has_deadlock_xml = r.HasDeadlockXml,
+                dedup_key = keys[i]
             });
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                dedup_key = DarlingIncidentFingerprint.NoFilter(dedup_key) ? null : DarlingIncidentFingerprint.NormalizeKey(dedup_key),
                 total_deadlocks = rows.Count,
                 deadlocks = result
             }, McpHelpers.JsonOptions);
@@ -171,9 +217,10 @@ public sealed class DarlingMcpBlockingTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum deadlocks to return. Default 5.")] int limit = 5)
+        [Description("Maximum deadlocks to return. Default 5.")] int limit = 5,
+        [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateHoursBack(hours_back);
@@ -186,15 +233,38 @@ public sealed class DarlingMcpBlockingTools
             var now = DateTime.UtcNow;
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now);
-            var withXml = rows.Where(r => r.HasDeadlockXml).Take(limit).ToList();
-            if (withXml.Count == 0)
+
+            /* #2159: the XML filter runs BEFORE the cap and before the fingerprint, because a row without a
+               graph has no objects to fingerprint — it could never match a key, and including it would only
+               consume one of the `limit` slots the caller wanted spent on real graphs. */
+            var candidates = rows.Where(r => r.HasDeadlockXml).ToList();
+            if (candidates.Count == 0)
                 return McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
 
-            var result = withXml.Select(r => new
+            var examined = candidates.Count;
+            var keys = DarlingIncidentFingerprint.DeadlockKeys(
+                resolved.FingerprintName, candidates.Select(r => r.DeadlockGraphXml));
+
+            if (!DarlingIncidentFingerprint.NoFilter(dedup_key))
+            {
+                var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
+                var kept = candidates.Where((_, i) => keys[i] == wanted).ToList();
+                if (kept.Count == 0)
+                    return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
+                        "deadlocks with a graph", dedup_key!, resolved.FingerprintName, examined));
+
+                keys = kept.Select(r => wanted).Cast<string?>().ToList();
+                candidates = kept;
+            }
+
+            var withXml = candidates.Take(limit).ToList();
+
+            var result = withXml.Select((r, i) => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 victim_process_id = r.VictimProcessId,
+                dedup_key = keys[i],
                 deadlock_graph_xml = r.DeadlockGraphXml
             });
 
@@ -202,6 +272,7 @@ public sealed class DarlingMcpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                dedup_key = DarlingIncidentFingerprint.NoFilter(dedup_key) ? null : DarlingIncidentFingerprint.NormalizeKey(dedup_key),
                 deadlocks = result
             }, McpHelpers.JsonOptions);
         }

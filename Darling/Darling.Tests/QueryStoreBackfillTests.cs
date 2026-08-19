@@ -79,6 +79,81 @@ public sealed class QueryStoreBackfillTests
     }
 
     [Fact]
+    public void BoundSliceFloor_CapsWideRanges_AndPassesNarrowOnesThrough()
+    {
+        /* #2102: a slice queries at most the top MaxSliceSpan of its remaining range — the byte
+           budget bounds what ships, not what the query aggregates and sorts, so an unchunked wide
+           window on a big database re-times-out every tick and the range never drains. The caller
+           reads the verdict from the result: floor moved = chunk (an empty slice shrinks the
+           ceiling and keeps walking); floor unmoved = the whole remainder was asked (an empty
+           slice is terminal, the pre-chunking semantics). */
+        var ceiling = new DateTime(2026, 8, 7, 12, 0, 0, DateTimeKind.Utc);
+
+        var wideFloor = ceiling.AddHours(-23);
+        Assert.Equal(ceiling - QueryStoreBackfillState.MaxSliceSpan, QueryStoreBackfillState.BoundSliceFloor(wideFloor, ceiling));
+
+        var narrowFloor = ceiling.AddMinutes(-25);
+        Assert.Equal(narrowFloor, QueryStoreBackfillState.BoundSliceFloor(narrowFloor, ceiling));
+
+        /* Exactly MaxSliceSpan wide is narrow enough — one slice takes it whole, so its empty
+           verdict stays terminal rather than saving a zero-width hole. */
+        var exactFloor = ceiling - QueryStoreBackfillState.MaxSliceSpan;
+        Assert.Equal(exactFloor, QueryStoreBackfillState.BoundSliceFloor(exactFloor, ceiling));
+    }
+
+    [Fact]
+    public void AdaptiveSpan_HalvesPerFailure_FloorsAtFifteenMinutes_AndResetsAtZero()
+    {
+        /* #2111 promoted from reserve on field evidence: a member whose 1h window intermittently
+           exceeds the command timeout stayed stuck for hours (Redstone, 3+ hours flat overnight) —
+           halving toward a floor gives it a window that fits, and the skipped range rides the same
+           hole records the clamp writes. Zero failures = full width, success resets the counter at
+           every call site, and the exponent cap keeps the shift math from wrapping. */
+        var full = QueryStoreBackfillState.MaxSliceSpan;
+
+        Assert.Equal(full, QueryStoreBackfillState.AdaptiveSpan(full, 0));
+        Assert.Equal(TimeSpan.FromMinutes(30), QueryStoreBackfillState.AdaptiveSpan(full, 1));
+        Assert.Equal(TimeSpan.FromMinutes(15), QueryStoreBackfillState.AdaptiveSpan(full, 2));
+        Assert.Equal(QueryStoreBackfillState.MinAdaptiveSpan, QueryStoreBackfillState.AdaptiveSpan(full, 3));
+        Assert.Equal(QueryStoreBackfillState.MinAdaptiveSpan, QueryStoreBackfillState.AdaptiveSpan(full, 100));
+
+        Assert.Equal(TimeSpan.FromMinutes(15), QueryStoreBackfillState.MinAdaptiveSpan);
+    }
+
+    [Fact]
+    public void BoundSliceFloor_AdaptiveForm_CapsToThePassedSpan()
+    {
+        var ceiling = new DateTime(2026, 8, 8, 12, 0, 0, DateTimeKind.Utc);
+        var wideFloor = ceiling.AddHours(-23);
+
+        Assert.Equal(
+            ceiling - TimeSpan.FromMinutes(15),
+            QueryStoreBackfillState.BoundSliceFloor(wideFloor, ceiling, TimeSpan.FromMinutes(15)));
+
+        /* The parameterless form stays the full-span behavior. */
+        Assert.Equal(
+            ceiling - QueryStoreBackfillState.MaxSliceSpan,
+            QueryStoreBackfillState.BoundSliceFloor(wideFloor, ceiling));
+    }
+
+    [Fact]
+    public void ShouldYieldToLive_YieldsInsideTheWindow_RunsOutsideIt_AndNeverOnNull()
+    {
+        /* #2111: a live query_store failure inside the window means the replica is contended NOW —
+           the slice yields. At or beyond the window (or never failed), backfill runs. The window is
+           two poll cycles: current-or-previous-cycle failures count, older ones are history. */
+        var now = new DateTime(2026, 8, 7, 17, 0, 0, DateTimeKind.Utc);
+
+        Assert.False(QueryStoreBackfillState.ShouldYieldToLive(null, now));
+        Assert.True(QueryStoreBackfillState.ShouldYieldToLive(now.AddMinutes(-1), now));
+        Assert.True(QueryStoreBackfillState.ShouldYieldToLive(now - QueryStoreBackfillState.YieldToLiveWindow + TimeSpan.FromSeconds(1), now));
+        Assert.False(QueryStoreBackfillState.ShouldYieldToLive(now - QueryStoreBackfillState.YieldToLiveWindow, now));
+        Assert.False(QueryStoreBackfillState.ShouldYieldToLive(now.AddHours(-2), now));
+
+        Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreBackfillState.YieldToLiveWindow);
+    }
+
+    [Fact]
     public void StateIdentity_IsTheWorkersOwn_NotTheDefinitions()
     {
         /* The worker owns its collector_state rows under its OWN name, so the query_store

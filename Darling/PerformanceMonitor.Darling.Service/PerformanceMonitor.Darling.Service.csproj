@@ -5,9 +5,13 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <RootNamespace>PerformanceMonitor.Darling.Service</RootNamespace>
     <AssemblyName>PerformanceMonitor.Darling.Service</AssemblyName>
-    <Version>3.4.0</Version>
-    <AssemblyVersion>3.3.0.0</AssemblyVersion>
-    <FileVersion>3.3.0.0</FileVersion>
+    <Version>3.5.0</Version>
+    <!-- #2113: <Version> is the ONE hand-set version. AssemblyVersion / FileVersion /
+         InformationalVersion derive from it at build time - the 3.4.0 release bumped only
+         <Version> and shipped binaries still STAMPED 3.3.0.0, because four hand-maintained
+         copies of one fact is a release-day trap. The suffix suppression keeps
+         InformationalVersion a clean semver instead of gaining a +sha under CI SourceLink. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
@@ -17,20 +21,20 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
     <!-- Restrictive ACLs on the DPAPI credential files (the data dir parent, the *.dpapi files, the
          transient init pwfile). Windows-only, like every credential surface here; the extension
          methods (GetAccessControl/SetAccessControl/SetOwner) live in this package on a net10.0
          (non-windows) TFM, which the service keeps so bring-your-own mode still runs cross-platform. -->
-    <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
+    <PackageReference Include="System.IO.FileSystem.AccessControl" />
     <!-- AN4: the analysis MCP tools over Streamable HTTP — Lite's exact MCP stack/version.
          The AspNetCore package brings the Microsoft.AspNetCore.App framework reference
          (Kestrel/WebApplication) transitively, same as it does for Lite. -->
-    <PackageReference Include="ModelContextProtocol" Version="2.0.0" />
-    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.0.0" />
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
   </ItemGroup>
 
   <ItemGroup>

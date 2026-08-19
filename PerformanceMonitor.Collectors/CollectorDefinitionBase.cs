@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -47,6 +48,17 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual int? PerItemTextByteBudget => null;
 
+    public virtual TimeSpan? PerItemWallClockBudget => null;
+
+    public virtual CollectorTargetEngine TargetEngine => CollectorTargetEngine.SqlServer;
+
+    /// <summary>
+    /// Target-shape gating WITHIN this definition's engine — hosting flavour, version floors, msdb
+    /// reach. Overrides do not need to consider <see cref="TargetEngine"/>: the engine check is
+    /// composed on top by <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>,
+    /// which is what the runners call, so a T-SQL definition can never reach a non-SQL-Server target
+    /// even though this returns true by default.
+    /// </summary>
     public virtual bool AppliesTo(CollectorTargetInfo target) => true;
 
     public virtual bool YieldsOnLockTimeout => false;

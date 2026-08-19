@@ -99,10 +99,40 @@ public static class PgMigrations
         new Migration(48, "pvs-pressure-alert", V48Sql),
         new Migration(49, "database-state-alert", V49Sql),
         new Migration(50, "server-tag-colour", V50Sql),
-        new Migration(51, "query-stats-host-object", V51Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        /* #2119: V54Sql is PREPENDED ahead of the generated view. This rung's view SQL comes from the
+           LIVE generator, which since #2069 emits the V54 gz column — a ≤V50 store replaying this rung
+           on current code referenced a column three rungs before the ALTER that adds it (42703, the
+           ladder halts, every 3.3.0→3.4.0 upgrade failed). V54's ALTERs are idempotent, so pre-adding
+           here costs a fresh-through-this-rung store nothing and rung 54's own copy no-ops. This is
+           the standing hazard of generator-built rungs: any LATER column the generator learns must be
+           pre-added in EVERY earlier rung that re-emits generated SQL over existing tables — pinned by
+           MigrationLadderPins so the next collision fails in CI, not on an operator's store. */
+        new Migration(51, "query-stats-host-object", V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
         new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(55, "self-alert-knobs", V55Sql),
+        new Migration(56, "store-metrics-background-jobs", V56Sql),
+        new Migration(57, "store-job-cadence-knob", V57Sql),
+        new Migration(58, "qs-backfill-switch", V58Sql),
+        new Migration(59, "collector-memory-knobs", V59Sql),
+        new Migration(60, "database-state-edge-memory", V60Sql),
+        new Migration(61, "incident-occurrence-counters", V61Sql),
+        new Migration(62, "plan-xml-compression-knob", V62Sql),
+        new Migration(63, "pg-wait-stats", V63Sql),
+        new Migration(64, "pg-statement-stats", V64Sql),
+        new Migration(65, "pg-wraparound-stats", V65Sql),
+        new Migration(66, "pg-xmin-horizon", V66Sql),
+        new Migration(67, "pg-replication-slots", V67Sql),
+        new Migration(68, "pg-autovacuum-stats", V68Sql),
+        new Migration(69, "pg-io-stats", V69Sql),
+        new Migration(70, "monitored-server-engine", V70Sql),
+        new Migration(71, "pg-blocking-edges", V71Sql),
+        new Migration(72, "query-store-plan-map", V72Sql),
+        new Migration(73, "pg-statement-text", V73Sql),
+        new Migration(74, "query-store-text", V74Sql),
+        new Migration(75, "plan-content-retention-knob", V75Sql),
+        new Migration(76, "query-store-health", V76Sql),
     };
 
     /// <summary>
@@ -1060,6 +1090,723 @@ ALTER TABLE query_plan_dim
     ALTER COLUMN query_plan_xml DROP NOT NULL;";
 
     /// <summary>
+    /// V55 — the #2107 alert-threshold knobs, all previously compile-time constants: the store
+    /// volume's self-alert warning percent, the Collection Stopped staleness window and
+    /// consecutive-failure fast path, the low-disk CRITICAL severity tier's two floors (#1136 —
+    /// these grade the shared target-volume alert, not just the self-alert), and the analysis
+    /// notification cooldown Lite already passed through while Darling hardcoded 360. Defaults are
+    /// the constants they replace, NOT NULL so pre-V55 rows read cleanly at the appended ordinals.
+    /// </summary>
+    private const string V55Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS self_disk_free_warn_percent integer NOT NULL DEFAULT 10;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS collection_stale_minutes integer NOT NULL DEFAULT 30;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS collection_failure_threshold integer NOT NULL DEFAULT 10;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS disk_critical_free_percent integer NOT NULL DEFAULT 3;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS disk_critical_free_gb integer NOT NULL DEFAULT 2;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS analysis_notify_cooldown_minutes integer NOT NULL DEFAULT 360;";
+
+    /// <summary>
+    /// V56 — background-job telemetry columns on the #2068 self-metrics series (#2136): the store's own
+    /// TimescaleDB background jobs (CAGG refreshes, compression, retention) are its heaviest recurring
+    /// work — measured on the production store, the four most expensive jobs are all the
+    /// query_store_stats family (compression 157s, interval_hourly refresh 96s) — and their runtimes
+    /// scale serially with raw volume, so an onboarding wave moves them first. Job rows ride the same
+    /// hourly sweep under <c>object_kind = 'background_job'</c>. All nullable, appended (the V55/#1984
+    /// ordinal rule); non-job rows simply leave them NULL.
+    /// </summary>
+    private const string V56Sql = @"
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS last_run_duration_ms bigint;
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS schedule_interval_ms bigint;
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS total_runs bigint;
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS total_failures bigint;";
+
+    /// <summary>
+    /// V57 — the Store Job Over Cadence warning knob (#2136, the alert half of the V56 job telemetry):
+    /// a background job whose last run reaches this percent of its own schedule interval fires the
+    /// Warning tier of the new self-alert (the Critical tier is fixed at 100 — a job outrunning its
+    /// cadence is compounding refresh lag, which is the failure the telemetry exists to catch).
+    /// Store-backed like the V55 knobs (#2107 pattern): the column is the control plane, the C# default
+    /// remains only the shipped seed. Default 25: the production 52-server store's worst job runs at
+    /// ~7% of cadence, so 25 sits 3.5x above the observed ceiling but far ahead of real compounding.
+    /// </summary>
+    private const string V57Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS store_job_cadence_warn_percent integer NOT NULL DEFAULT 25;";
+
+    /// <summary>
+    /// V58 — the Query Store backfill off switch (#2167): a service-wide toggle the worker's backfill loop
+    /// reads live (store reload, no restart), because the #2058 backfill previously ran unconditionally —
+    /// during the 2026-08-10 consolidation a freshly restored catalog put it into sustained 64MB drains
+    /// against a cross-region production primary with no way to stop it short of gutting plan capture
+    /// fleet-wide. Default TRUE preserves today's behavior; the column rides <c>config_service</c> so the
+    /// existing config_version trigger makes a flip visible to the service's next reload poll.
+    /// </summary>
+    private const string V58Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS query_store_backfill_enabled boolean NOT NULL DEFAULT TRUE;";
+
+    /// <summary>
+    /// V59 — the two collector memory knobs that were compile-time constants (#2164 + #2170). They ride
+    /// ONE rung deliberately: peak transient memory is approximately
+    /// <c>max_concurrent_sweeps × query_store_text_budget_mb</c>, so an operator who moves one needs the
+    /// other in front of them, and shipping them together keeps the documented product of the two honest.
+    ///
+    /// <para>Defaults reproduce today's hardcoded behavior exactly (64 MB budget from
+    /// QueryStoreCollector.MaxTextBytesPerDatabase, 4-wide sweep from the #1553 gate), so an upgraded
+    /// store changes nothing until someone turns a dial. Both are clamped on READ (budget [4,256] MB,
+    /// sweeps [1,16]) rather than by CHECK constraints, matching the sibling knobs' posture: a bad value
+    /// degrades to a sane one instead of failing the service's config load.</para>
+    /// </summary>
+    private const string V59Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS query_store_text_budget_mb integer NOT NULL DEFAULT 64;
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS max_concurrent_sweeps integer NOT NULL DEFAULT 4;";
+
+    /// <summary>
+    /// V60 — restart-surviving edge memory for the database-state alert (#2166). Two nullable columns on
+    /// <c>config.database_state_expected</c>, which is already keyed per (server, database) and already
+    /// exists for this alert, so the memory lives beside the config it belongs with rather than in a new
+    /// table or smuggled into <c>config_edge_trigger_watermarks</c>' metric_name (that column feeds alert
+    /// history and mute matching; a compound key hidden in a label is a trap).
+    ///
+    /// <para>Why it must persist: the reporter's case is a database deliberately parked OFFLINE for a
+    /// month. Edge-triggering on in-memory state would re-fire every parked database on every service
+    /// restart — worse than the cooldown-repeat it replaces. NULL means never alerted, so an upgraded
+    /// store's first evaluation fires once per deviating database and then goes quiet.</para>
+    /// </summary>
+    private const string V60Sql = @"
+ALTER TABLE config.database_state_expected
+    ADD COLUMN IF NOT EXISTS last_alerted_state text;
+ALTER TABLE config.database_state_expected
+    ADD COLUMN IF NOT EXISTS last_alerted_at timestamp;";
+
+    /// <summary>
+    /// V61 — the monotonic per-fingerprint occurrence counters (#2216). The rolling-window count that rides
+    /// on an alert incident is a GAUGE: it rises as events arrive and falls as they age out of the groupers'
+    /// read window, so a consumer that only sees throttled deliveries (one per #1154 per-fingerprint
+    /// cooldown) cannot recover how many events actually happened between two of them. This table is the
+    /// accumulator's memory, keyed by the #1140 dedup fingerprint.
+    ///
+    /// <para>A NEW table rather than columns on <c>config_edge_trigger_watermarks</c>, for two independent
+    /// reasons. The key is wrong: watermarks are per (server, metric) while occurrences are per (server,
+    /// metric, FINGERPRINT) — a deadlock on one table and a deadlock on another are separate incidents with
+    /// separate totals, and folding them into one row would report their sum under both. And the cross-store
+    /// twin cannot take the columns: Lite writes that same row with <c>INSERT OR REPLACE</c> and a PARTIAL
+    /// column list, so any column added there is silently reset to its default every time an alert fires —
+    /// the counter would zero itself precisely when it was being read.</para>
+    ///
+    /// <para><c>config</c> schema because it joins the alert-coordination family (the V8 remarks put the
+    /// edge-trigger watermarks there for the same reason): service-written, operator-visible, keyed by
+    /// server. Schema-qualified per the V17 rule — the migrate session's search_path would otherwise resolve
+    /// a bare name into <c>collect</c>. No per-table grant (provisioning re-runs
+    /// <c>GRANT … ON ALL TABLES IN SCHEMA config</c> after the migration pass) and no
+    /// <c>ViewerRestrictedConfigTables</c> carve: the only identity stored is the fingerprint HASH, never
+    /// the involved object names it was computed from, so there is nothing here for the network-reachable
+    /// <c>mcp</c> role to read that it should not.</para>
+    ///
+    /// <para>NO <c>config_bump_version</c> trigger, per the V32 precedent: this is the service's own
+    /// coordination state, written on the alert path, and nothing reloads on it. A beacon bump would make
+    /// every delivered alert trigger a needless fleet reconcile.</para>
+    ///
+    /// <para><c>last_observed_at</c> is not display data — it is what makes a row's staleness decidable. The
+    /// service deletes a fingerprint's row when its incident ends, but a host that dies mid-incident leaves
+    /// one behind, and a stranded row trusted on the fingerprint's NEXT incident would decay its
+    /// already-counted mark to the new window count, read the recurrence as nothing new, and report a stale
+    /// total under a stale start time. The accumulator therefore ignores rows older than its read window.
+    /// Row growth needs no separate GC: each delivery REPLACES the set for its (server, metric), so the
+    /// table holds the live fingerprints plus whatever a crash stranded until that metric next fires.</para>
+    /// </summary>
+    private const string V61Sql = @"
+CREATE TABLE IF NOT EXISTS config.incident_occurrences (
+    server_id integer NOT NULL,
+    metric_name text NOT NULL,
+    dedup_key text NOT NULL,
+    total_occurrences bigint NOT NULL,
+    observed_window_count integer NOT NULL,
+    incident_started_at timestamp NOT NULL,
+    last_observed_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (server_id, metric_name, dedup_key)
+);";
+
+    /// <summary>
+    /// V62 — the #2171 plan-XML codec knob for direct-SQL store consumers. 'gzip' (default) keeps
+    /// today's write path; 'none' makes the dim writer store plain text in query_plan_xml (lz4 TOAST
+    /// compresses, ~8.9x measured vs gzip's 14.0x) so Grafana-class readers get plans back with plain
+    /// SQL — PostgreSQL exposes no inflate, so gzip bytes are unreadable without an untrusted-language
+    /// UDF, which is the contract failure #2171 reports. Rides config_service like V58/V59 so the
+    /// config_version trigger makes a flip visible to the next reload poll. The CHECK mirrors the
+    /// provider's normalization; both fail toward 'gzip'. Rides directly above #2216's V61 — the
+    /// merge-order gate this PR carried (never land 62 over a vacant 61; ascent-only applier) was
+    /// satisfied when that rung merged; the #2227 density pin now enforces the rule mechanically.
+    /// </summary>
+    private const string V62Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS plan_xml_compression text NOT NULL DEFAULT 'gzip';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'config_service_plan_xml_compression_check'
+    ) THEN
+        ALTER TABLE config.config_service
+            ADD CONSTRAINT config_service_plan_xml_compression_check
+            CHECK (plan_xml_compression IN ('gzip', 'none'));
+    END IF;
+END $$;";
+
+    /// <summary>
+    /// V63 — <c>pg_wait_stats</c>, the first PostgreSQL collector table: cumulative Aurora wait
+    /// counters with deltas computed on write, the Postgres counterpart of <c>wait_stats</c>.
+    /// <para>Columns are spelled out here in the generator's exact emission order (the four standard
+    /// prefix columns, then <see cref="PerformanceMonitor.Collectors.PgWaitStatsCollector"/>'s payload
+    /// in its declared order) so a fresh store — where V1 generates this from the catalog — and an
+    /// upgraded store, where this rung creates it, end up with an identical physical column order for
+    /// the binary COPY. No PRIMARY KEY, and the <c>(server_id, collection_time)</c> index, per the
+    /// convention every collector table follows.</para>
+    /// <para><c>wait_time_us</c> is MICROSECONDS. The AWS documentation contradicts itself on the unit
+    /// — microseconds for <c>aurora_stat_system_waits</c>, milliseconds for
+    /// <c>aurora_stat_backend_waits</c> — so it was settled by measurement instead: read as
+    /// milliseconds, the observed totals imply tens of thousands of concurrently waiting sessions
+    /// against a <c>max_connections</c> of 5,000, which is impossible. The name carries the unit so a
+    /// reader never has to relitigate it.</para>
+    /// <para>Both the numeric id and the decoded name are stored. The name is what an operator reads,
+    /// but the id is the stable key: wait-event name casing differs between Aurora majors
+    /// (<c>AutoVacuumMain</c> on 16.11 versus <c>AutovacuumMain</c> on 17.7), so anything keyed on the
+    /// name breaks its own history across an upgrade. Nullable because the type/event lookups are LEFT
+    /// JOINed — an event Aurora reports but does not name is still recorded.</para>
+    /// </summary>
+    private const string V63Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    wait_type_id integer,
+    wait_event_id bigint,
+    wait_type text,
+    wait_event text,
+    waits bigint,
+    wait_time_us bigint,
+    delta_waits bigint,
+    delta_wait_time_us bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
+    ON collect.pg_wait_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V64 — <c>pg_statement_stats</c>, per-query-shape execution statistics from Aurora's extended
+    /// <c>aurora_stat_statements()</c>: the Postgres counterpart of <c>query_stats</c>.
+    /// <para>Two column groups exist nowhere on the SQL Server side. The Aurora I/O source split
+    /// (<c>storage_blks_read</c> / <c>orcache_blks_hit</c> and their times) decomposes what is otherwise
+    /// an opaque block read into "came from the storage volume" versus "hit the local NVMe tier" — which
+    /// is why a cache-hit ratio computed the community way is arithmetically misleading on Aurora. And
+    /// <c>total_exec_peakmem_bytes</c> / <c>max_exec_peakmem_bytes</c> are the nearest thing PostgreSQL
+    /// has to memory-grant data, which core PostgreSQL has no concept of at all. Per-query
+    /// <c>wal_bytes</c> likewise has no SQL Server DMV equivalent.</para>
+    /// <para><b>No query text column, deliberately.</b> Text belongs in the shared
+    /// <c>query_text_dim</c> rather than inline — inline payload was 94% of a 250 GB field store — but
+    /// registering a new dim-feeding table cannot be done from a rung this late: V38 is GENERATED from
+    /// <c>PayloadDimensions.All</c>, so adding an entry makes V38 emit
+    /// <c>ALTER TABLE pg_statement_stats ADD COLUMN query_text_digest</c>, and on an upgraded store V38
+    /// runs long before this rung creates the table — the ALTER would hit a nonexistent table and fail
+    /// the entire migration. Retrofitting a dim-feeding table therefore needs either a
+    /// existence-guarded V38 or a rung-aware dimension registry, which is a design change and not a
+    /// drive-by. Until then <c>queryid</c> is the identity, which is the join key anyway, and text
+    /// arrives with a dedicated low-cadence text collector that stores each statement once instead of
+    /// once per snapshot.</para>
+    /// </summary>
+    private const string V64Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    queryid bigint,
+    database_id bigint,
+    user_id bigint,
+    toplevel boolean,
+    calls bigint,
+    total_exec_time_ms double precision,
+    min_exec_time_ms double precision,
+    max_exec_time_ms double precision,
+    mean_exec_time_ms double precision,
+    rows_returned bigint,
+    shared_blks_hit bigint,
+    shared_blks_read bigint,
+    shared_blks_dirtied bigint,
+    shared_blks_written bigint,
+    temp_blks_read bigint,
+    temp_blks_written bigint,
+    blk_read_time_ms double precision,
+    blk_write_time_ms double precision,
+    storage_blks_read bigint,
+    orcache_blks_hit bigint,
+    storage_blk_read_time_ms double precision,
+    orcache_blk_read_time_ms double precision,
+    wal_records bigint,
+    wal_fpi bigint,
+    wal_bytes bigint,
+    total_exec_peakmem_bytes bigint,
+    max_exec_peakmem_bytes bigint,
+    delta_calls bigint,
+    delta_total_exec_time_ms bigint,
+    delta_rows bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
+    ON collect.pg_statement_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V65 — <c>pg_wraparound_stats</c>: transaction id and MultiXact id freeze headroom per database.
+    /// <para>Both counters are stored, because they are independent and each is separately fatal.
+    /// MultiXact exhaustion is the one almost nobody monitors: ids are consumed when a row is locked by
+    /// several transactions at once, so a <c>SELECT FOR UPDATE</c>-heavy or foreign-key-heavy workload
+    /// burns them much faster than plain transaction ids, and a server can look comfortable on XID age
+    /// while being in trouble on MultiXact age.</para>
+    /// <para>The percentages are STORED rather than derived on read because their denominators are
+    /// per-server settings. Recomputing later against whatever <c>autovacuum_freeze_max_age</c> happens
+    /// to be then would silently rewrite history the moment someone tunes it; a stored percentage stays
+    /// true to the configuration in force when it was measured.</para>
+    /// <para>The first PostgreSQL collector table that is not Aurora-specific — it reads only core
+    /// catalog surfaces, so it populates on any PostgreSQL target.</para>
+    /// </summary>
+    private const string V65Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wraparound_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    frozen_xid_age bigint,
+    min_multixid_age bigint,
+    autovacuum_freeze_max_age bigint,
+    autovacuum_multixact_freeze_max_age bigint,
+    pct_toward_emergency_vacuum double precision,
+    pct_toward_wraparound double precision,
+    pct_toward_multixact_emergency double precision,
+    pct_toward_multixact_wraparound double precision,
+    xids_remaining bigint,
+    multixids_remaining bigint,
+    allows_connections boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wraparound_stats_time
+    ON collect.pg_wraparound_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V66 — <c>pg_xmin_horizon</c>: what is holding back the xmin horizon, attributed by cause.
+    /// <para>Four unrelated causes produce an identical picture — dead tuples accumulate, autovacuum
+    /// runs and reports success, nothing shrinks — and the fix differs completely for each: kill a
+    /// session, drop a replication slot, disable standby feedback, or resolve an orphaned prepared
+    /// transaction. That is why this table stores one row per SOURCE with the oldest holder for that
+    /// source, plus an <c>is_winner</c> flag, rather than a single horizon age. Attribution is the whole
+    /// value; an aggregate would leave a reader exactly where they started.</para>
+    /// <para><c>is_winner</c> is stamped at collection rather than derived on read, so a stored row names
+    /// the winner as of the moment it was measured — deriving it later would depend on which rows a
+    /// query happened to select, and a filtered read could crown a holder that never held the horizon.</para>
+    /// <para>Zero rows is the HEALTHY state and must never be read as a collection failure. Note also
+    /// that <c>standby_feedback</c> is expected to be absent on Aurora, whose replicas read the same
+    /// storage volume instead of streaming WAL.</para>
+    /// </summary>
+    private const string V66Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_xmin_horizon (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    source text,
+    xmin_age bigint,
+    holder text,
+    detail text,
+    is_winner boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_xmin_horizon_time
+    ON collect.pg_xmin_horizon(server_id, collection_time);";
+
+    /// <summary>
+    /// V67 — <c>collect.pg_replication_slot_stats</c>: slot state, including the two independent ways an abandoned
+    /// slot can take a server down.
+    /// <para><c>retained_wal_bytes</c> is the disk-exhaustion measure and is COMPUTED rather than read,
+    /// because the column that would answer it directly — <c>safe_wal_size</c> — is NULL whenever
+    /// <c>max_slot_wal_keep_size</c> is <c>-1</c>, which is the default. Reading only that column would
+    /// mean reporting nothing on a stock server, exactly where retention is unbounded. <c>-1</c> is
+    /// stored as the not-applicable sentinel so a consumer cannot mistake "no limit configured" for "no
+    /// data collected".</para>
+    /// <para><c>inactive_since</c> and <c>invalidation_reason</c> are PostgreSQL 17+ and
+    /// <c>conflicting</c> is 16+; on older majors the collector substitutes NULL/false so the table shape
+    /// stays constant across a mixed-version fleet and a chart does not change shape at an upgrade.
+    /// <c>inactive_since</c> is the column that distinguishes a consumer between polls from a slot
+    /// orphaned three weeks ago.</para>
+    /// </summary>
+    private const string V67Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_replication_slot_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    slot_name text,
+    slot_type text,
+    plugin text,
+    database_name text,
+    is_active boolean,
+    active_pid bigint,
+    is_temporary boolean,
+    two_phase boolean,
+    wal_status text,
+    safe_wal_size_bytes bigint,
+    retained_wal_bytes bigint,
+    xmin_age bigint,
+    catalog_xmin_age bigint,
+    inactive_since timestamp,
+    invalidation_reason text,
+    conflicting boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_replication_slot_stats_time
+    ON collect.pg_replication_slot_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V68 — <c>collect.pg_autovacuum_stats</c>, per-table autovacuum state, and the first PostgreSQL
+    /// collector on the per-database fan-out path.
+    /// <para>The threshold columns are what make the table worth having. Dead-tuple counts alone are not
+    /// actionable — autovacuum fires at <c>autovacuum_vacuum_threshold + scale_factor * reltuples</c>, so
+    /// the same count is routine on a large table and urgent on a small one. The collector computes each
+    /// table's OWN threshold, honouring per-table <c>reloptions</c> overrides rather than only the GUCs,
+    /// because those overrides are common on exactly the big hot tables where the global default is
+    /// wrong.</para>
+    /// <para><c>inserts_since_vacuum</c> / <c>insert_vacuum_threshold</c> are PostgreSQL 13+ and carry
+    /// <c>-1</c> on older majors so the table shape stays constant across a mixed-version fleet. They
+    /// cover the append-only case, which has no dead tuples at all and is therefore invisible to the
+    /// dead-tuple rule — and an append-only table that is never vacuumed is never frozen either.</para>
+    /// <para><c>database_name</c> comes from the per-database loop's connection rather than the result
+    /// set: <c>pg_stat_user_tables</c> shows only the connected database, so the connection IS the
+    /// authoritative answer. Additive and view-less exactly like V63–V67 — a fresh store gets the table
+    /// from V1's generated schema, and this rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V68Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_autovacuum_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    live_tuples bigint,
+    dead_tuples bigint,
+    mods_since_analyze bigint,
+    inserts_since_vacuum bigint,
+    vacuum_threshold bigint,
+    insert_vacuum_threshold bigint,
+    analyze_threshold bigint,
+    autovacuum_disabled boolean,
+    total_bytes bigint,
+    last_vacuum timestamp,
+    last_autovacuum timestamp,
+    last_analyze timestamp,
+    last_autoanalyze timestamp,
+    vacuum_count bigint,
+    autovacuum_count bigint,
+    analyze_count bigint,
+    autoanalyze_count bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_autovacuum_stats_time
+    ON collect.pg_autovacuum_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V69 — <c>collect.pg_io_stats</c>, I/O attributed to a (backend_type, object, context) triple rather
+    /// than to a file, from <c>pg_stat_io</c> (PostgreSQL 16+).
+    /// <para>Every counter column is NULLABLE and that is load-bearing, not incidental. PostgreSQL uses
+    /// NULL for "this counter does not apply to this combination" — the checkpointer performs no reads,
+    /// <c>bulkread</c> never extends, the <c>normal</c> context has no ring buffer to reuse — and on Aurora
+    /// the entire write side is NULL because backends there do not write data files. A NOT NULL column with
+    /// a 0 default would claim measurements that were never taken, and a consumer averaging write latency
+    /// would divide by them.</para>
+    /// <para>Cumulative counters stored raw, with the windowed change computed at read time. Additive and
+    /// view-less exactly like V63-V68: a fresh store gets the table from V1's generated schema, and this
+    /// rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V69Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_io_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    backend_type text,
+    object_type text,
+    context text,
+    reads bigint,
+    read_time_ms double precision,
+    writes bigint,
+    write_time_ms double precision,
+    writebacks bigint,
+    writeback_time_ms double precision,
+    extends bigint,
+    extend_time_ms double precision,
+    op_bytes bigint,
+    hits bigint,
+    evictions bigint,
+    reuses bigint,
+    fsyncs bigint,
+    fsync_time_ms double precision,
+    stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
+    ON collect.pg_io_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V70 — <c>config.config_monitored_servers.engine</c> and <c>.port</c>, the two columns without which a
+    /// PostgreSQL target cannot survive its own registration.
+    /// <para>The registry is store-authoritative after the first seed: darling.json seeds it once, and from
+    /// then on the worker's server list comes from this table. Every other <c>MonitoredServer</c> field had a
+    /// column here; these two did not, so a PostgreSQL entry round-tripped through the store as
+    /// <c>"sqlserver"</c> on the driver's default port (both property defaults) and the service then opened a
+    /// <c>SqlConnection</c> to it. That happens on the FIRST start, not a later one, because the seed is
+    /// immediately followed by the load that replaces the file's list with the store's.</para>
+    /// <para>Both defaults are what make this safe on an existing store. Every row already there is a SQL
+    /// Server target, and <c>port</c> is consumed only by the PostgreSQL connection builder (the SQL Server
+    /// path carries a port in the host string), so <c>0</c> means "the driver's default" exactly as the
+    /// property does. The SQL-Server-only writers — the Viewer's Add / Manage Servers dialogs — keep
+    /// inserting without naming either column and keep meaning the same thing.</para>
+    /// </summary>
+    private const string V70Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS engine text NOT NULL DEFAULT 'sqlserver';
+
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS port integer NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V71 — <c>collect.pg_blocking_edges</c>: who is blocked, by whom, and what state each side was in.
+    /// <para>An EDGE LIST, which is why the table is named for edges rather than for chains. One row per
+    /// (blocked, blocking) pair, so a chain of four is four rows and a blocker with thirty victims is thirty.
+    /// Storing a rendered tree instead would bake in one traversal and make root-blocker, depth, and fan-out
+    /// queries string work; from edges they are ordinary SQL.</para>
+    /// <para>Both sides carry their own state because the remedy depends on it: a chain rooted in
+    /// <c>idle in transaction</c> is an application defect, one rooted in a long-running query is a tuning
+    /// problem, and the pid alone does not distinguish them. That doubling of columns is the point of the
+    /// table.</para>
+    /// <para><b>Reader beware — sparse by design.</b> This table is empty on a healthy instance, and unlike
+    /// SQL Server's <c>blocked_process_report</c> there is no engine-side recorder behind it: PostgreSQL
+    /// materialises nothing unless something asks, so a gap means "not sampled", not "not blocked". A count
+    /// over this table measures how often blocking was CAUGHT.</para>
+    /// <para>Additive and view-less exactly like V63-V69: a fresh store gets the table from V1's generated
+    /// schema, and this rung is what an already-existing store gets.</para>
+    /// </summary>
+    private const string V71Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_blocking_edges (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    blocked_backend_id bigint,
+    blocked_pid integer,
+    blocking_backend_id bigint,
+    blocking_pid integer,
+    database_name text,
+    blocked_username text,
+    blocked_application_name text,
+    blocked_client_addr text,
+    blocked_state text,
+    blocked_wait_event_type text,
+    blocked_wait_event text,
+    blocked_query text,
+    blocked_xact_duration_ms bigint,
+    blocked_query_duration_ms bigint,
+    blocking_username text,
+    blocking_application_name text,
+    blocking_client_addr text,
+    blocking_state text,
+    blocking_wait_event_type text,
+    blocking_wait_event text,
+    blocking_query text,
+    blocking_xact_duration_ms bigint,
+    blocking_query_duration_ms bigint,
+    blocked_pid_count integer,
+    blocking_is_idle_in_transaction boolean,
+    query_text_may_be_truncated boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_blocking_edges_time
+    ON collect.pg_blocking_edges(server_id, collection_time);";
+
+    /// <summary>
+    /// V73 — <c>collect.pg_statement_text</c>: one row per <c>(server_id, queryid)</c> holding the statement text
+    /// for a PostgreSQL target, so <c>get_pg_top_queries</c> can return something a human can read (#2219).
+    ///
+    /// <para><b>The gap this closes.</b> <c>pg_statement_stats</c> identifies queries by <c>queryid</c> and stores
+    /// no text, because <c>aurora_stat_statements</c>'s <c>showtext</c> costs real money per collection and
+    /// normalized text is highly repetitive. But <c>queryid</c> is NOT stable across a major version upgrade, so
+    /// after one the stored history joins to nothing readable — a list of integers that used to be your slowest
+    /// queries. Keying text on <c>(server_id, queryid)</c> is what preserves the OLD ids' text when the live view
+    /// re-keys, which is the whole point: no live fetch can recover it afterwards.</para>
+    ///
+    /// <para><b>Inline text, not a <c>query_text_dim</c> digest, and that is a deliberate reversal of what V64's
+    /// comment promised.</b> The dimension route is blocked and would stay expensive to unblock: V38 is GENERATED
+    /// from <c>PayloadDimensions.All</c>, so registering <c>pg_statement_stats</c> makes V38 emit an
+    /// <c>ALTER TABLE</c> against a table it has not created yet on every upgraded store, and it would also break
+    /// V64's own ladder diff, which asserts each rung equals the generated schema. More importantly the dimension
+    /// needs the liveness interlock <see cref="QueryStorePlanMap"/> documents at length — the GC sweeps on
+    /// <c>last_seen</c> rather than counting references, so a dim row can be collected while live facts still
+    /// point at it, and the failure mode is SILENTLY missing text. Inline cannot dangle. It costs cross-server
+    /// dedup — one row per server per queryid rather than one per distinct text — which on a 52-server fleet of
+    /// <c>pg_stat_statements.max = 5000</c> is a few hundred MB against a store whose Query Store plan XML alone
+    /// measured 43 GB. Paying that to make a silent-loss mode impossible is the trade.</para>
+    ///
+    /// <para>Not a hypertable and not a collector table: one row per statement per server, near-static once a
+    /// workload is warm, so it is dimension-shaped and pruned on <c>last_seen</c> rather than by
+    /// <c>drop_chunks</c>. That also keeps it out of the generated-schema ladder diff, exactly as V72's
+    /// <c>query_store_plan_map</c> is — the established shape for content keyed to facts rather than collected
+    /// as facts.</para>
+    ///
+    /// <para><c>first_seen</c> is kept alongside <c>last_seen</c> because they answer different questions: when a
+    /// statement shape first appeared on this server (which survives the upgrade re-key and is the only record of
+    /// it) versus whether the text is still live enough to keep. NUMBERED <c>max(dev) + 1</c> without a gap, for
+    /// the reason V72's comment gives — a gap is skipped silently on every upgraded store.</para>
+    /// </summary>
+    private const string V73Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
+    server_id integer NOT NULL,
+    queryid bigint NOT NULL,
+    query_text text NOT NULL,
+    first_seen timestamp NOT NULL,
+    last_seen timestamp NOT NULL,
+    PRIMARY KEY (server_id, queryid)
+);
+CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
+    ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V76 — the per-database Query Store health table (#2319): what database_config's single
+    /// is_query_store_on bit cannot say — actual vs desired state (the cap-hit READ_ONLY transition
+    /// and its readonly_reason), current vs max storage, cleanup mode and thresholds, and the
+    /// runtime-stats interval length. Body matches PgSchemaGenerator's emission for the definition
+    /// (verified by generating it) plus the rung's explicit collect. prefix, so fresh stores (which
+    /// generate from the catalog) and upgraded stores (which run this rung) agree byte-for-byte.
+    /// Hypertable conversion is automatic from CollectorCatalog on the next service start, the same
+    /// path pvs_stats took in V47. The v_ passthrough keeps the two viewers' SQL byte-identical.
+    /// </summary>
+    private const string V76Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_health (
+    config_id bigint NOT NULL,
+    capture_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    actual_state text,
+    desired_state text,
+    readonly_reason integer,
+    current_storage_size_mb bigint,
+    max_storage_size_mb bigint,
+    size_based_cleanup_mode text,
+    stale_query_threshold_days bigint,
+    max_plans_per_query bigint,
+    interval_length_minutes bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_health_time ON collect.query_store_health(server_id, capture_time);
+
+CREATE OR REPLACE VIEW v_query_store_health AS SELECT * FROM query_store_health;";
+
+    /// <summary>
+    /// V75 — the plan-content retention knob (#2316). The payload dimensions' GC horizon is coupled to
+    /// the WIDEST dim-feeding fact retention (90 days) so a raised override can never orphan a reader —
+    /// which also means a store younger than that horizon has an UNBOUNDED plan dimension: measured on
+    /// the 42-server dogfood fleet, <c>query_plan_dim</c> reached 127 GB (63% of the store) in its first
+    /// 22 days, growing ~6 GB/day of parameter-sniffing recompile churn (65 distinct XMLs per plan SHAPE
+    /// per day; the worst single shape produced 57k in one day), with the coupled GC unable to delete a
+    /// single row until the horizon crossed the dim's birth date — a month AFTER the projected disk-full.
+    /// This knob decouples plan CONTENT lifetime from fact lifetime: facts keep their full retention
+    /// (metrics, hashes and text stay analyzable); stored plan XML older than this many days since last
+    /// sighting becomes unfetchable, which every reader already renders as a missing plan. Clamped on
+    /// READ like the V59 knobs ([7,365]; 0 = disabled, restoring the fact-coupled horizon alone).
+    /// </summary>
+    private const string V75Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS plan_content_retention_days integer NOT NULL DEFAULT 21;";
+
+    /// <summary>
+    /// V74 — where the query-text fetch lands statement text (#2150), keyed
+    /// <c>(server_id, database_name, query_id)</c>.
+    ///
+    /// <para>The runtime-stats payload carried <c>query_sql_text</c> (<c>nvarchar(max)</c>) inside a
+    /// <c>TOP ... WITH TIES ... ORDER BY last_execution_time</c>, and a Top-N Sort carries every output
+    /// column through the sort while reading ALL of its input first — so choosing the rows to ship
+    /// materialized text for the entire qualifying set. With #2210's plan XML already gone and that column
+    /// as the only difference, time-to-first-row measured 4.67s against 0.45s at 1,505 rows and 5.02s
+    /// against 0.57s at 4,037.</para>
+    ///
+    /// <para>Keyed on <c>query_id</c> rather than <c>query_text_id</c> because <c>query_id</c> is ALREADY a
+    /// stored column on the fact table — so this rung adds a table and touches nothing existing, and readers
+    /// get the join key for free. Text is stored INLINE rather than as a digest into <c>query_plan_dim</c>'s
+    /// sibling: Query Store already de-duplicates it one row per statement per database, so there is nothing
+    /// to squeeze, and inline removes the dimension GC liveness interlock whose failure mode is silently
+    /// missing text. Not a hypertable — it has a PRIMARY KEY and no time dimension — so it is pruned on
+    /// <c>last_seen</c> rather than by <c>drop_chunks</c>, exactly like <c>query_store_plan_map</c>.</para>
+    /// </summary>
+    private const string V74Sql = @"CREATE TABLE IF NOT EXISTS collect.query_store_text (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    query_id bigint NOT NULL,
+    query_sql_text text,
+    last_seen timestamp NOT NULL,
+    PRIMARY KEY (server_id, database_name, query_id)
+);
+CREATE INDEX IF NOT EXISTS idx_query_store_text_last_seen
+    ON collect.query_store_text(last_seen);";
+
+    /// <summary>
+    /// V72 — the Query Store plan map (#2210): <c>(server_id, database_name, plan_id) → digest</c>, so Query
+    /// Store facts can reference plan XML they no longer carry once the cutover moves that content into the
+    /// shared <c>query_plan_dim</c>. Plan XML was stored INLINE on <c>query_store_stats</c> at roughly 5x
+    /// redundancy — the same plans re-shipped pass after pass — which is what this replaces.
+    ///
+    /// <para><c>plan_hash</c> is the re-verification key and is nullable on purpose: rows written before it
+    /// existed re-verify once and self-heal. <c>last_seen</c> is the liveness column the map prune sweeps and
+    /// the batch touch refreshes — load-bearing, because the dimension GC decides what to collect from
+    /// <c>last_seen</c> rather than by counting references, and ending the re-shipping ends the signal that
+    /// used to keep those dim rows alive.</para>
+    ///
+    /// <para>NUMBERED <c>max(dev) + 1</c>, WITHOUT a gap, and that is the load-bearing part. The runner skips
+    /// any rung at or below the store's stamped version, so a gap left for another in-flight branch is skipped
+    /// SILENTLY on every upgraded store the moment this one stamps a higher number. Gapping is only safe when
+    /// the gap-filler lands first, which a branch cannot guarantee about another branch.</para>
+    ///
+    /// <para>The race this comment was written to survive HAPPENED: it was V61 while #2213 and the PostgreSQL
+    /// collector rungs were in flight, they merged first and took the ladder to V71, and the collision surfaced
+    /// as a conflict on the migration list — loudly, on the merge, exactly as intended — so this renumbered to
+    /// sit immediately above them. A collision is loud; a gap is silent, and a map table that was never created
+    /// reads as "plan not yet collected" on every lookup, so the cutover would look healthy and hold nothing.</para>
+    /// </summary>
+    private const string V72Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_plan_map (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    plan_id bigint NOT NULL,
+    digest bytea NOT NULL,
+    plan_hash text,
+    last_seen timestamp NOT NULL,
+    PRIMARY KEY (server_id, database_name, plan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen
+    ON collect.query_store_plan_map(last_seen);";
+
+    /// <summary>
     /// V9 — the FinOps copy-parity fields that were user-input config or previously live-only:
     /// <c>server_properties</c> gains the three inventory columns the shared ServerPropertiesCollector now
     /// SELECTs (start time / host OS / AG replica role — Lite's FinOps Server Inventory previously read
@@ -1168,8 +1915,11 @@ ALTER TABLE server_properties ADD COLUMN IF NOT EXISTS utc_offset_minutes intege
 /* --- A. Config plane: the Viewer writes desired state, the service reads + honors it. --- */
 
 /* 1. config_monitored_servers — the desired-state twin of the collect.servers observed registry.
-      server_id = ServerIdHelper.GetDeterministicHashCode(BuildStorageName(host,database,ro)), the
-      SAME identity the collectors stamp, so it JOINs collected data. is_enabled drives collection;
+      server_id is THIS ROW'S identity and this table owns it: the service reads it here rather than
+      recomputing it, so a stored id keeps working when the fields below no longer produce it (#2218).
+      It is minted from the storage identity host[:database][:RO] — the same value the collectors
+      stamp, which is why it JOINs collected data and why no existing store needs migrating — but that
+      is now the ALLOCATION rule, not a definition anything re-derives. is_enabled drives collection;
       the connection fields reconstruct a MonitoredServer for the service's connect path. */
 CREATE TABLE IF NOT EXISTS config.config_monitored_servers (
     server_id integer NOT NULL PRIMARY KEY,

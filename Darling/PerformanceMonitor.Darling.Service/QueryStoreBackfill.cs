@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -23,8 +24,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// #2022 — Query Store phase 2 (of #1960): the newest-first backfill worker for the history the
 /// live path never takes. Phase 1 made the LIVE path hole-free, but two bounded windows still
 /// discard history by design: first contact takes only the trailing 60 minutes of a ~30-day
-/// catalog, and post-outage catch-up is clamped to 24h (the #1556 incident fix) as a bounded,
-/// logged hole. One mechanism fills both:
+/// catalog, and post-outage catch-up is clamped to <see cref="WatermarkPolicy.MaxCatchup"/> (the
+/// #1556 incident fix, tightened to 1h by #2102) as a bounded, logged hole. One mechanism fills
+/// both, and every slice of it windows at most <see cref="QueryStoreBackfillState.MaxSliceSpan"/>
+/// at a time (#2102 — the query's cost grows with window width, so an unchunked wide range on a
+/// big database re-times-out forever instead of draining):
 ///
 /// <para><b>The tail (first contact).</b> The backfill ceiling is DERIVED, exactly like the live
 /// watermark: MIN(last_execution_time) over the rows already stored for a database. Everything at
@@ -83,18 +87,27 @@ public sealed class QueryStoreBackfill
     private readonly ILogger? _logger;
     private readonly Func<bool> _capturePlans;
 
+    /* #2164: the per-database text budget override in MB, read live like _capturePlans. Backfill slices
+       carry the SAME nvarchar(max) query-text/plan-XML payload over the same link as a live tick, so the
+       operator knob has to reach here too — a knob that only bounds the tick would leave the heavier of
+       the two paths at the compile-time 64 MB, which is precisely the drain the knob exists to shorten. */
+    private readonly Func<int> _textBudgetMb;
+
     public QueryStoreBackfill(
         NpgsqlDataSource postgres,
         DarlingCollectorRunner runner,
         CollectorDeltaCalculator deltas,
         ILogger? logger,
-        Func<bool>? capturePlans = null)
+        Func<bool>? capturePlans = null,
+        Func<int>? textBudgetMb = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
         _capturePlans = capturePlans ?? (() => true);
+        /* Null provider = keep the collector's compile-time budget (tests and any non-Darling host). */
+        _textBudgetMb = textBudgetMb ?? (() => 0);
     }
 
     /// <summary>
@@ -106,8 +119,28 @@ public sealed class QueryStoreBackfill
     /// </summary>
     public async Task<bool> RunServerSliceAsync(ServerRuntime server, CancellationToken cancellationToken)
     {
-        if (!QueryStoreCollector.Instance.AppliesTo(server.Target))
+        /* The COMPOSED gate, not the definition's own AppliesTo. Query Store is a SQL Server feature and this
+           method opens SqlConnections, but the raw override never checks the engine — it reads
+           SqlMajorVersion, and CollectorTargetInfo treats 0 as "assume newest" so a PostgreSQL target (which
+           has no SqlMajorVersion at all) sails straight through. Latent today only because the caller happens
+           to be reached from a SQL-Server-shaped path; one new call site and it becomes B1 again. */
+        if (!CollectorCatalog.AppliesTo(QueryStoreCollector.Instance, server.Target))
         {
+            return false;
+        }
+
+        /* #2111 yield-to-live: a backfill slice scans the same QS internal tables the live sweep
+           reads, on a replica that is often MAXDOP-1 — when the live path is failing on this
+           server, running a slice anyway is the contention that keeps it failing. Skip the server
+           this tick (false = the tick is free for another server); the hole waits, live recovers,
+           backfill resumes. Debug, not Warning: the live failure already logs loudly every cycle,
+           and this is the designed response to it. */
+        if (QueryStoreBackfillState.ShouldYieldToLive(
+            _runner.LastQueryStoreItemFailureUtc(server.ServerId), DateTime.UtcNow))
+        {
+            _logger?.LogDebug(
+                "query_store backfill on '{Server}': yielding to the live path (recent live query_store failure)",
+                server.Config.DisplayName);
             return false;
         }
 
@@ -134,7 +167,7 @@ public sealed class QueryStoreBackfill
                 }
 
                 var holeFloor = holeFrom > floorLimit ? holeFrom : floorLimit;
-                await RunSliceAsync(server, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
+                await RunCountedSliceAsync(server, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
                 return true;
             }
 
@@ -160,11 +193,38 @@ public sealed class QueryStoreBackfill
                 continue;
             }
 
-            await RunSliceAsync(server, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
+            await RunCountedSliceAsync(server, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Consecutive failed slices per server — the adaptive-shrink signal's backfill half (#2111
+    /// promoted): a server whose hour-wide slices keep dying at the command timeout digs in
+    /// progressively narrower chunks (<see cref="QueryStoreBackfillState.AdaptiveSpan"/>) until one
+    /// fits. Reset by any completed slice; in-memory on purpose, like the live counters — a restart
+    /// forgetting it costs one full-width slice. Concurrent for symmetry with the Lite twin — the
+    /// worker is single-threaded today, but nothing pins that.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+
+    /// <summary>Runs one slice with the failure accounting wrapped around it — the worker's outer
+    /// catch still logs the throw exactly as before.</summary>
+    private async Task RunCountedSliceAsync(
+        ServerRuntime server, string databaseName, DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunSliceAsync(server, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
+            _consecutiveSliceFailures.TryRemove(server.ServerId, out _);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _consecutiveSliceFailures.AddOrUpdate(server.ServerId, 1, static (_, count) => count + 1);
+            throw;
+        }
     }
 
     /// <summary>
@@ -178,6 +238,17 @@ public sealed class QueryStoreBackfill
     private async Task RunSliceAsync(
         ServerRuntime server, string databaseName, DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
     {
+        /* #2102: one slice queries at most the top MaxSliceSpan of the remaining range. The byte
+           budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
+           window on a big database times out at the command timeout every tick and the range never
+           drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
+        /* #2111 adaptive shrink: after consecutive failed slices this server digs in narrower
+           chunks until one fits its command timeout; a completed slice resets to full width. */
+        var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
+            QueryStoreBackfillState.MaxSliceSpan,
+            _consecutiveSliceFailures.TryGetValue(server.ServerId, out var recentFailures) ? recentFailures : 0);
+        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
+
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
         {
@@ -188,6 +259,8 @@ public sealed class QueryStoreBackfill
             Target = server.Target,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             CapturePlanXml = _capturePlans(),
+            /* #2164: 0 from the default provider means "no override" — the collector keeps its constant. */
+            TextByteBudgetOverride = _textBudgetMb() > 0 ? _textBudgetMb() * 1024 * 1024 : null,
         };
 
         var timeout = definition.CommandTimeoutSecondsOverride ?? DarlingCollectorRunner.CommandTimeoutSeconds;
@@ -201,7 +274,7 @@ public sealed class QueryStoreBackfill
                needed; CurrentDatabaseName feeds ReadAsync's database attribution exactly as on
                the live Azure path. */
             context.CurrentDatabaseName = databaseName;
-            var azurePlan = definition.BuildBackfillQuery(context, floorUtc, ceilingUtc);
+            var azurePlan = definition.BuildBackfillQuery(context, sliceFloor, ceilingUtc);
             using var dbConnection = await _runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
             using var dbCommand = DarlingCollectorRunner.CreateCollectorCommand(azurePlan, dbConnection, timeout);
             using var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken);
@@ -233,7 +306,7 @@ public sealed class QueryStoreBackfill
                 }
             }
 
-            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, floorUtc, ceilingUtc);
+            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, sliceFloor, ceilingUtc);
             using var command = DarlingCollectorRunner.CreateCollectorCommand(plan, sqlConnection, timeout);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             await definition.ReadItemAsync(databaseName, reader, rows, context, cancellationToken);
@@ -241,6 +314,27 @@ public sealed class QueryStoreBackfill
 
         if (rows.Count == 0)
         {
+            if (sliceFloor > floorUtc)
+            {
+                /* Only this CHUNK is quiet — the range below it is unexplored, so this is an
+                   advance, not a terminal verdict (#2102). The persisted hole ceiling shrinks past
+                   the quiet chunk; a derived-boundary tail converts its remainder to a hole record,
+                   because MIN over stored rows cannot walk through quiet space (an empty chunk
+                   ships nothing, so the derived ceiling would re-ask the same chunk forever). The
+                   tail marks done in the same breath — the hole owns the rest of the dig, and the
+                   scan services holes first. */
+                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, sliceFloor), cancellationToken);
+                if (!isHole)
+                {
+                    await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
+                }
+
+                _logger?.LogInformation(
+                    "query_store backfill on '{Server}' [{Database}]: quiet chunk {Floor:o}..{Ceiling:o}, continuing below ({Range}).",
+                    server.Config.DisplayName, databaseName, sliceFloor, ceilingUtc, isHole ? "hole" : "tail");
+                return;
+            }
+
             /* Query Store retains nothing inside the window — the monitored catalog is shorter
                than the horizon (or the hole's span was never persisted at the source). Terminal
                for this range, and cheaper to record than to re-ask every tick. */
@@ -266,7 +360,11 @@ public sealed class QueryStoreBackfill
         var boundary = context.PerItemShippedBoundary;
         if (isHole)
         {
-            if (boundary is null || boundary <= floorUtc)
+            /* A chunked slice's rows all sit at or above its own chunk floor, so a missing shipped
+               boundary falls back to the chunk floor rather than deleting (#2102) — deletion under
+               a bounded window would orphan the unexplored range below it. */
+            var shippedTo = boundary ?? sliceFloor;
+            if (shippedTo <= floorUtc)
             {
                 await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
             }
@@ -274,7 +372,7 @@ public sealed class QueryStoreBackfill
             {
                 /* Shrink the ceiling to the oldest shipped row; the from-side stays at the floor we
                    actually used (anything below it is horizon-expired either way). */
-                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, boundary.Value), cancellationToken);
+                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, shippedTo), cancellationToken);
             }
         }
         else if (boundary is not null && boundary <= floorUtc)

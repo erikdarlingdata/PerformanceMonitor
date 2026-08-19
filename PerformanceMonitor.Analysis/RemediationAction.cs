@@ -276,4 +276,13 @@ public sealed record ForcePlanTarget(
        an execution input — see FactRemediation.ExtractPlanRegressionTargets for why naming a replica
        is not the same as being able to TARGET one. Appended last with a default so the positional
        construction sites and the persisted-action JSON round-trip stay source- and wire-compatible. */
-    string? ReplicaRole = null);
+    string? ReplicaRole = null,
+
+    /* #2138 gap 3: this query's hash ALSO carried the PARAMETER_SENSITIVITY detector's plan-cache
+       signature in the same analysis window (computed with the detector's own thresholds inside the
+       regressed_queries drill-down, so the flag can never disagree with the fact). Steers the caution
+       block in the force-plan preview — forcing the "best" plan on a parameter-sensitive query pins
+       one shape for ALL parameter values — and is the standing gate for the future auto-force bot:
+       a flagged target is never auto-forced, it gets an investigate verdict. Display + disclosure
+       only. Appended with a default for the same wire-compatibility reasons as ReplicaRole. */
+    bool ParameterSensitivityCoFired = false);

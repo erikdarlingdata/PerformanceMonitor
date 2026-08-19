@@ -74,6 +74,19 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
             .ToArray();
     }
 
+    /// <summary>
+    /// Lite's parameter contract, pinned as a PREFIX rather than as the whole list (#2159).
+    ///
+    /// <para>This used to assert the full parameter list, which was the same thing until Darling's incident
+    /// readers gained a trailing optional <c>dedup_key</c> that Lite does not have. The guarantee that actually
+    /// matters was never "the lists are identical" — it is that a client written against LITE's contract still
+    /// calls Darling correctly. A trailing optional parameter preserves exactly that, positionally and by name,
+    /// so the prefix is the honest form of the assertion and the full-list form was over-tight.</para>
+    ///
+    /// <para>Anything appended must therefore stay optional AND stay at the end. <c>StartsWith</c> semantics are
+    /// spelled out by comparing the first N rather than by trusting a substring of a joined string, so a
+    /// REORDERING that keeps the same names still fails.</para>
+    /// </summary>
     [Theory]
     [InlineData("get_blocking", "server_name,hours_back,limit")]
     [InlineData("get_deadlocks", "server_name,hours_back,limit")]
@@ -83,7 +96,55 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     [InlineData("get_deadlock_trend", "server_name,hours_back")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
-        Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
+        var expected = expectedCsv.Split(',');
+        var actual = McpParams(toolName).Select(p => p.Name).ToArray();
+
+        Assert.True(actual.Length >= expected.Length,
+            $"{toolName} dropped a parameter Lite has: [{string.Join(",", actual)}]");
+        Assert.Equal(expected, actual.Take(expected.Length).ToArray());
+    }
+
+    /// <summary>
+    /// #2159's <c>dedup_key</c>, pinned as a TRAILING OPTIONAL parameter on exactly the three incident readers
+    /// that can resolve a fingerprint — and pinned as absent everywhere else.
+    ///
+    /// <para>Optional and trailing is what keeps <see cref="ParamContract_MatchesLite"/> true, so it is asserted
+    /// here rather than left to review. Absent on the trend tools because a per-minute count series has no single
+    /// incident to resolve to, and absent on <c>get_blocked_process_xml</c> because it is reached FROM an incident
+    /// the operator has already identified rather than used to find one.</para>
+    /// </summary>
+    [Fact]
+    public void ParamContract_DedupKeyIsATrailingOptionalOnTheIncidentReaders()
+    {
+        foreach (var tool in new[] { "get_blocking", "get_deadlocks", "get_deadlock_detail" })
+        {
+            var ps = McpParams(tool);
+            Assert.Equal("dedup_key", ps[^1].Name);
+            Assert.True(ps[^1].Optional, $"{tool}.dedup_key must be optional so Lite-shaped calls still work");
+        }
+
+        foreach (var tool in new[] { "get_blocking_trend", "get_deadlock_trend", "get_blocked_process_xml" })
+            Assert.DoesNotContain("dedup_key", McpParams(tool).Select(p => p.Name));
+    }
+
+    /// <summary>
+    /// The instructions have to ADVERTISE <c>dedup_key</c>, or the feature is unreachable in practice: an agent
+    /// picks tools and arguments from this text, and a parameter it never reads is one it never passes. Same
+    /// reason the store-metrics and AG tools pin their own mentions.
+    ///
+    /// <para>Also pins the two caveats that turn an empty result into a diagnosable one — the display-name
+    /// scoping and that <c>hours_back</c> still bounds the search — because those are the failure modes an agent
+    /// would otherwise report as "no such incident".</para>
+    /// </summary>
+    [Fact]
+    public void Instructions_AdvertiseDedupKeyAndItsScoping()
+    {
+        var text = DarlingMcpInstructions.Text;
+
+        Assert.Contains("dedup_key", text, StringComparison.Ordinal);
+        Assert.Contains("Dedup Key", text, StringComparison.Ordinal);
+        Assert.Contains("DISPLAY name", text, StringComparison.Ordinal);
+        Assert.Contains("hours_back` still bounds the search", text, StringComparison.Ordinal);
     }
 
     [Fact]

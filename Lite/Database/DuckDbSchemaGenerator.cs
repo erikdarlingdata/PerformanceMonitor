@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Linq;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Database;
@@ -207,6 +208,10 @@ public static class DuckDbSchemaGenerator
             ["database_config.database_name"] = "NOT NULL",
             ["database_scoped_config.database_name"] = "NOT NULL",
             ["database_scoped_config.configuration_name"] = "NOT NULL",
+            /* #2319: the row is named by the database it was enumerated from; every other column is
+               nullable because sys.database_query_store_options answers even for a QS-off database and
+               nothing else on the row is guaranteed. */
+            ["query_store_health.database_name"] = "NOT NULL",
             /* Every plan_correction row is named by the database it was enumerated from — including the
                enablement-only row a database with no recommendations produces. Nothing else on the row
                is guaranteed non-null (a database that has never had a regression carries no
@@ -274,19 +279,35 @@ public static class DuckDbSchemaGenerator
     private static string? PayloadConstraint(string table, string column) =>
         PayloadColumnConstraints.TryGetValue($"{table}.{column}", out var c) ? c : null;
 
-    /// <summary>Every collector target table, in catalog order (the generated table/index set).</summary>
+    /// <summary>
+    /// The catalog entries Lite stores, which is the SQL Server ones ONLY.
+    /// <para>The collector catalog is deliberately engine-mixed and shared with Darling, but Lite has no
+    /// PostgreSQL target and cannot acquire one — the engine gate in
+    /// <c>CollectorCatalog.AppliesTo(definition, target)</c> means a PostgreSQL definition is never
+    /// dispatched here. Emitting their tables anyway would put seven permanently-empty tables into every
+    /// seat's local DuckDB file forever. Darling makes the opposite choice deliberately (its central store
+    /// may gain a PostgreSQL target at any time, so it carries the tables empty); Lite's file is per-seat and
+    /// disposable, so the tables would be pure noise.</para>
+    /// <para>Filtering here rather than at each call site keeps table, index and name generation in step by
+    /// construction — the three used to walk the catalog independently, which is exactly how one of them
+    /// would come to disagree.</para>
+    /// </summary>
+    internal static IEnumerable<ICollectorSchemaInfo> StoredCollectors =>
+        CollectorCatalog.All.Where(s => s.TargetEngine == CollectorTargetEngine.SqlServer);
+
+    /// <summary>Every collector target table Lite stores, in catalog order (the generated table/index set).</summary>
     public static IEnumerable<string> CollectorTableNames()
     {
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in StoredCollectors)
         {
             yield return schema.TargetTable;
         }
     }
 
-    /// <summary>The generated <c>CREATE TABLE</c> statements for all catalog collectors, in catalog order.</summary>
+    /// <summary>The generated <c>CREATE TABLE</c> statements for the collectors Lite stores, in catalog order.</summary>
     public static IEnumerable<string> CreateTableStatements()
     {
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in StoredCollectors)
         {
             yield return CreateTable(schema);
         }
@@ -298,7 +319,7 @@ public static class DuckDbSchemaGenerator
     /// </summary>
     public static IEnumerable<string> CreateIndexStatements()
     {
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in StoredCollectors)
         {
             var index = CreateIndex(schema);
             if (index is not null)

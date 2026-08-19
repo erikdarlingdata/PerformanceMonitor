@@ -263,6 +263,80 @@ public sealed partial class ViewerDataService : IAsyncDisposable
             ? ApplyConnectionTimeout(connectionString, seconds)
             : connectionString;
         _dataSource = NpgsqlDataSource.Create(effectiveConnectionString);
+        StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
+    }
+
+    /// <summary>
+    /// Whether this viewer's store is reached over loopback — the best available proxy for "the Darling service
+    /// runs on THIS machine" (#2279).
+    ///
+    /// <para><b>Why it is a proxy for that at all.</b> A DPAPI blob is <c>LocalMachine</c>-scoped, so a
+    /// credential this viewer encrypts is decryptable only on this machine, and the service is the thing that
+    /// has to decrypt it. The managed deploy builds its store connection on literal <c>127.0.0.1</c>
+    /// (<c>ViewerSettings</c>, matching the service's own <c>DarlingManagedPostgres.BuildConnectionString</c>),
+    /// and the service runs where its managed store runs. So a loopback store means viewer and service share a
+    /// machine and a saved credential will work — which is the single-box deploy the DPAPI design targets, and
+    /// where a warning would be pure noise.</para>
+    ///
+    /// <para><b>What it deliberately does not claim.</b> A non-loopback store does NOT prove the viewer is
+    /// remote — a bring-your-own store on another host with the service local is a real configuration, and it
+    /// reads as false here. That is why #2279 warns rather than refuses: this signal is good enough to decide
+    /// whether to SAY something, and not good enough to decide whether to BLOCK. Getting that backwards would
+    /// refuse a legitimate first-run Add on the service host.</para>
+    /// </summary>
+    public bool StoreIsOnThisMachine { get; }
+
+    /// <summary>
+    /// True when a store connection string names a loopback host, or names none at all (#2279).
+    ///
+    /// <para>Static and pure so the rule is testable without a store — it is the whole basis of the warning, and
+    /// a viewer cannot be stood up in a unit test. Uses the base <see cref="DbConnectionStringBuilder"/> rather
+    /// than Npgsql's, for the reason documented on <see cref="ApplyConnectionTimeout"/>: the Npgsql builder
+    /// answers <c>ContainsKey</c> for every KNOWN key rather than only the present ones, so it cannot tell an
+    /// omitted host from a specified one.</para>
+    ///
+    /// <para>An omitted host counts as loopback because that is what it MEANS — Npgsql defaults to localhost, so
+    /// a string with no <c>Host</c> is a local store and must not warn. <c>::1</c> and <c>localhost</c> are
+    /// included alongside <c>127.0.0.1</c> even though the managed path always writes the literal IPv4 form,
+    /// because a hand-written BYO string pointing at the local box is still local and warning about it would be
+    /// wrong.</para>
+    /// </summary>
+    internal static bool StoreHostIsLoopback(string? connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            return true;
+        }
+
+        string? host = null;
+        try
+        {
+            var builder = new DbConnectionStringBuilder { ConnectionString = connectionString };
+            if (builder.ContainsKey("Host"))
+            {
+                host = builder["Host"]?.ToString();
+            }
+            else if (builder.ContainsKey("Server"))
+            {
+                host = builder["Server"]?.ToString();
+            }
+        }
+        catch (ArgumentException)
+        {
+            /* An unparseable string is not evidence the store is remote, and this decides only whether to show
+               a hint — so fail toward silence rather than toward a warning nobody can act on. */
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return true;
+        }
+
+        var trimmed = host.Trim();
+        return trimmed.Equals("127.0.0.1", StringComparison.Ordinal)
+            || trimmed.Equals("::1", StringComparison.Ordinal)
+            || trimmed.Equals("localhost", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -436,7 +510,22 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_stats' AND column_name = 'host_object_name'),
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'analysis_findings' AND column_name = 'drill_down_json'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'store_metrics'),
-    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_plan_dim' AND column_name = 'query_plan_gz')";
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'query_plan_dim' AND column_name = 'query_plan_gz'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'self_disk_free_warn_percent'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'store_metrics' AND column_name = 'last_run_duration_ms'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings' AND column_name = 'store_job_cadence_warn_percent'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'query_store_backfill_enabled'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'query_store_text_budget_mb'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'database_state_expected' AND column_name = 'last_alerted_state'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'incident_occurrences'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'plan_xml_compression'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_monitored_servers' AND column_name = 'engine'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_blocking_edges'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_plan_map'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_statement_text'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_text'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_service' AND column_name = 'plan_content_retention_days'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_health')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -457,7 +546,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51));
             }
 
             return null;
@@ -482,8 +571,189 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false)
     {
+        /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
+           A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
+           rung always needs one, whatever it happens to be, because RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion and a fully-migrated store must map to EXACTLY that or the version
+           banner reports a mismatch on a store that is current. Being a collector table makes it no less
+           reliable as a sentinel; it simply is not interesting for any other reason.
+
+           Deliberately NOT spelled with its collect.<table> name here, and this is the only place in the
+           file where that matters. ViewerCollectorCoverageTests scans this reader layer for collector table
+           names by plain substring to decide which tables the viewer actually reads; it strips the probe's
+           information_schema lines precisely so a migration sentinel cannot fake coverage, but a PROSE
+           mention has no such line to strip. Naming the table in this comment made the table look read,
+           which silently exempted it from the coverage ratchet — the exact failure that pin exists to
+           catch, reported as a stale allow-list entry. */
+        /* V72 (the Query Store plan map, #2210): table-existence sentinel, and it has to sit ABOVE the V71
+           arm because these are evaluated newest-first — a V72 store also has V71's table, so testing V71
+           first would report every V72 store as V71 and the viewer would show a spurious upgrade banner
+           against a store that is actually current.
+
+           The gate matters rather than being bookkeeping: the SERVICE writes this map on every plan fetch and
+           resolves plan XML through it, so a viewer pointed at a V71 store while the service expects V72 would
+           find no map rows and render every plan as "not yet collected" — indistinguishable from a healthy
+           store that simply has not fetched yet, which is the one failure mode this design works hardest to
+           avoid being silent about.
+
+           The table is named in the probe line above and deliberately NOT in this prose, per the V71 arm's
+           finding: the coverage ratchet strips information_schema lines but cannot strip a comment, so a
+           prose mention would exempt the table from it. */
+        /* #2150: newest first, and the arm below STAYS for the same reason every previous one did — a store
+           migrated to exactly 73 must map to 73 rather than falling through. The table is named only in the
+           probe line, not in this prose, per the V71 finding: the coverage ratchet strips
+           information_schema lines but cannot strip a comment, so a prose mention would exempt the table
+           from it. */
+        /* #2316: newest first. The arm below STAYS — a store migrated to exactly 74 must map to 74
+           rather than falling through. The column is named only in the probe line, not in this prose,
+           per the V71 finding: the coverage ratchet strips information_schema lines but cannot strip a
+           comment, so a prose mention would exempt it. */
+        /* #2319: newest first. The arm below STAYS — a store migrated to exactly 75 must map to 75
+           rather than falling through. The table is named only in the probe line, not in this prose,
+           per the V71 finding: the coverage ratchet strips information_schema lines but cannot strip
+           a comment, so a prose mention would exempt it. */
+        if (hasQueryStoreHealth)
+        {
+            return 76;
+        }
+
+        if (hasPlanContentRetentionKnob)
+        {
+            return 75;
+        }
+
+        if (hasQueryStoreText)
+        {
+            return 74;
+        }
+
+        /* #2219: newest first. The previous arm STAYS — a store migrated to exactly 72 must still map to 72
+           rather than falling through to the pre-PostgreSQL floor. */
+        if (hasPgStatementText)
+        {
+            return 73;
+        }
+
+        if (hasQueryStorePlanMap)
+        {
+            return 72;
+        }
+
+        if (hasPgBlockingEdges)
+        {
+            return 71;
+        }
+
+        /* V70 (the monitored-server engine + port columns): column-existence sentinel, newest-first arm, and
+           the reason to gate is the standing invariant rather than a 42703 — RequiredStoreSchemaVersion is
+           StorageVersion.SchemaVersion, so a fully-migrated store must map to EXACTLY that or the version
+           banner reports a mismatch on a store that is current.
+
+           V63-V69 (the seven PostgreSQL collector tables) get no arms of their own deliberately: they add
+           tables in `collect` that no viewer read names, so a store between them is only ever transient
+           mid-migration, and the invariant that has to hold is "fully migrated maps to the top rung" — which
+           V70, the top rung, is what senses. */
+        if (hasMonitoredServerEngine)
+        {
+            return 70;
+        }
+
+        /* V62 (the #2171 plan-XML codec knob): column-existence sentinel, newest-first arm.
+           config_service.plan_xml_compression exists only at V62 or later. Sits directly above the
+           V61 arm it merged over - a store carrying both sentinels is V62 and must map there, not to
+           the first older arm that happens to match. */
+        if (hasPlanXmlCompressionKnob)
+        {
+            return 62;
+        }
+
+        /* V61 (per-fingerprint occurrence counters, #2216): table-existence sentinel, newest-first arm.
+           config.incident_occurrences exists only at V61 or later.
+
+           Same reason to gate as V60 rather than V59: nothing in the VIEWER names this table (it is the
+           alert engine's accumulator memory, written and read by the service), so the viewer would not
+           42703 against a V60 store. The gate exists to keep the standing invariant —
+           RequiredStoreSchemaVersion is StorageVersion.SchemaVersion, so a fully-migrated store has to map
+           to exactly that or the version banner reports a mismatch on a store that is current. The
+           consequence of a V60 store is on the SERVICE side: the occurrence load/save would fail, the
+           accumulator would fall back to reporting the total as the window count, and #2216's counter would
+           silently be a gauge again. */
+        if (hasIncidentOccurrences)
+        {
+            return 61;
+        }
+
+        /* V60 (database-state edge memory, #2166): column-existence sentinel, newest-first arm.
+           config.database_state_expected.last_alerted_state exists only at V60 or later.
+
+           Unlike the V59 arm below, the reason to gate here is NOT that the viewer would 42703: the
+           expected-state editor names only expected_state / is_user_override, so nothing in the viewer
+           touches either V60 column. The gate is the standing invariant instead — RequiredStoreSchemaVersion
+           is StorageVersion.SchemaVersion, so a fully-migrated store must map to exactly that or the version
+           banner reports a mismatch on a store that is actually current. The columns are written by the
+           SERVICE (the alert engine's edge memory) and read by its deviation query, so it is the service that
+           would fail on a V59 store, which is precisely why the viewer must not report V59 as good. Stated
+           explicitly because the V59 wording does not transfer, and someone deciding later whether this gate
+           can be relaxed needs the real reason. */
+        if (hasDatabaseStateEdgeMemory)
+        {
+            return 60;
+        }
+
+        /* V59 (the collector memory knobs, #2164 + #2170): column-existence sentinel, newest-first arm.
+           config_service.query_store_text_budget_mb exists only at V59 or later. The viewer NAMES both new
+           columns in ServiceConfigSelectSql/UpdateFlagsSql, so against a V58 store the Settings read would
+           fail 42703 — the gate must refuse it, and a fully-migrated V59 store must map to exactly
+           RequiredStoreSchemaVersion. */
+        if (hasCollectorMemoryKnobs)
+        {
+            return 59;
+        }
+
+        /* V58 (the Query Store backfill off switch, #2167): column-existence sentinel, newest-first arm.
+           config_service.query_store_backfill_enabled exists only at V58 or later. The viewer NAMES it in
+           ServiceConfigSelectSql/UpdateFlagsSql, so against a V57 store the Settings read would fail
+           42703 — the gate must refuse it, and a fully-migrated V58 store must map to exactly
+           RequiredStoreSchemaVersion. */
+        if (hasBackfillSwitch)
+        {
+            return 58;
+        }
+
+        /* V57 (the Store Job Over Cadence warning knob, #2136): column-existence sentinel, newest-first
+           arm. config_alert_settings.store_job_cadence_warn_percent exists only at V57 or later. The
+           viewer NAMES it in AlertSettingsSelectSql/Upsert, so against a V56 store the Settings read
+           would fail 42703 — the gate must refuse it, and a fully-migrated V57 store must map to
+           exactly RequiredStoreSchemaVersion. */
+        if (hasJobCadenceKnob)
+        {
+            return 57;
+        }
+
+        /* V56 (background-job self-metrics columns, #2136): column-existence sentinel, newest-first arm.
+           store_metrics.last_run_duration_ms exists only at V56 or later. The viewer never reads these
+           columns — they feed the service's own capacity series (job duration vs schedule cadence) over
+           MCP/REST — so like V53's rung nothing in the viewer would fail against a V55 store. The rung
+           exists so a fully-migrated store maps to exactly RequiredStoreSchemaVersion instead of capping
+           at 55 and tripping the connect-time gate against a healthy store. Under-reporting is the
+           guarded failure. */
+        if (hasJobMetricsColumns)
+        {
+            return 56;
+        }
+
+        /* V55 (self-alert threshold knobs, #2107): column-existence sentinel, newest-first arm.
+           config_alert_settings.self_disk_free_warn_percent exists only at V55 or later. The viewer
+           NAMES the V55 columns in AlertSettingsSelectSql/Upsert, so against a V54 store the
+           Settings read would fail 42703 — the gate must refuse it, and a fully-migrated V55 store
+           must map to exactly RequiredStoreSchemaVersion. */
+        if (hasSelfAlertKnobs)
+        {
+            return 55;
+        }
+
         /* V54 (gzip plan-dim content, #2069): column-existence sentinel, newest-first arm.
            query_plan_dim.query_plan_gz exists only at V54 or later. The viewer NAMES the column in
            its plan-fetch reads (gz-else-text coalesce), so against a V53 store those reads would
@@ -961,7 +1231,10 @@ public sealed class ViewerStoreUnreachableException : Exception
     public ViewerStoreUnreachableException(Exception innerException)
         : base(
             "Can't reach the Darling store — is the Darling service running? Check the postgres section of " +
-            "darling.json (the host, port, and database must point at the running service's store).",
+            "darling.json (the host, port, and database must point at the running service's store). " +
+            /* #2117: the swallowed detail cost a field operator hours — a TLS chain rejection, a wrong
+               password, a pg_hba refusal, and a dead host all read identically without it. */
+            $"Underlying error: {innerException?.Message?.Split('\n')[0].TrimEnd('\r') ?? "(none)"}",
             innerException)
     {
     }

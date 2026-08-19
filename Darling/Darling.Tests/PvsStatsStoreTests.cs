@@ -45,8 +45,10 @@ public sealed class PvsStatsStoreTests
            (#2060, the persisted finding drill-down), then V53 (#2068, the store self-metrics table) followed
            this migration — the newest-rung pins track the newest, the V47 identity pins below are
            unchanged. */
-        Assert.Equal(54, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(54, StorageVersion.SchemaVersion);
+        /* The invariant the test name states, with no literal to go stale: the build's schema version IS
+           the newest registered rung. Three in-flight branches bumping versions made the literal form a
+           recurring multi-test failure (#2210 round, again here at V62). */
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* collect.-qualified like V44 and V34, and idempotent so a re-run is a no-op. */
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pvs_stats (", v47.Sql, StringComparison.Ordinal);
@@ -86,8 +88,9 @@ public sealed class PvsStatsStoreTests
            compares the result against RequiredStoreSchemaVersion. A probe that cannot SEE the newest
            migration reports every healthy store as skewed and refuses to open it — permanently.
            (53 since #2068's store self-metrics table; the full-sentinel pin lives in
-           ViewerDataServiceTests.) */
-        Assert.Equal(54, ViewerDataService.RequiredStoreSchemaVersion);
+           ViewerDataServiceTests.) Invariant form, no literal to go stale: the gate always
+           requires exactly the build's schema version. */
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
         Assert.Contains("table_name = 'pvs_stats'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The V47 arm: pvs_stats present (and nothing newer) maps to exactly 47. */

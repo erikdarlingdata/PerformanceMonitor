@@ -67,6 +67,51 @@ public class AlertIncidentRenderTests
     }
 
     [Fact]
+    public void TeamsPayload_EachFieldsItem_GetsItsOwnLabeledSection()
+    {
+        /* #2108: the association between an item's fields IS the item boundary — a flat fact list
+           loses it. Each Fields-carrying detail item becomes its own MessageCard section, titled by
+           its heading and carrying ONLY its own facts; advice prose stays folded into the lead
+           section, because it is commentary on the whole alert. */
+        var ctx = new AlertContext();
+        ctx.Details.Add(new AlertDetailItem
+        {
+            Heading = "Deadlock 1 of 2",
+            Fields = new() { ("Database", "SalesDB"), ("Dedup Key", "aaa") }
+        });
+        ctx.Details.Add(new AlertDetailItem
+        {
+            Heading = "Deadlock 2 of 2",
+            Fields = new() { ("Database", "OtherDb"), ("Dedup Key", "bbb") }
+        });
+        ctx.Details.Add(new AlertDetailItem { Heading = "Check the graph", Body = "Advice prose." });
+
+        var payload = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(payload);
+        var sections = doc.RootElement.GetProperty("sections").EnumerateArray().ToList();
+        /* lead + one per Fields item + snooze-hint text section (Branding has none here → 3). */
+        Assert.Equal(3, sections.Count);
+
+        var lead = sections[0];
+        Assert.Contains("Deadlocks Detected", lead.GetProperty("activityTitle").GetString());
+        Assert.Contains(lead.GetProperty("facts").EnumerateArray(),
+            f => f.GetProperty("name").GetString() == "Advice");
+
+        var first = sections[1];
+        Assert.Equal("Deadlock 1 of 2", first.GetProperty("activityTitle").GetString());
+        var firstFacts = first.GetProperty("facts").EnumerateArray().ToList();
+        Assert.Equal(2, firstFacts.Count);
+        Assert.Equal("SalesDB", firstFacts[0].GetProperty("value").GetString());
+        Assert.Equal("aaa", firstFacts[1].GetProperty("value").GetString());
+
+        var second = sections[2];
+        Assert.Equal("Deadlock 2 of 2", second.GetProperty("activityTitle").GetString());
+        Assert.Contains(second.GetProperty("facts").EnumerateArray(),
+            f => f.GetProperty("value").GetString() == "bbb");
+    }
+
+    [Fact]
     public void DedupKey_RendersOnTeamsSlackAndBothEmailBodies()
     {
         var ctx = new AlertContext();

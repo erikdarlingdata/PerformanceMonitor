@@ -77,3 +77,9 @@ TestResults/
 # holds a LIVE database password in cleartext.
 viewer-config/
 darling.json
+
+# Local verification harnesses for the PostgreSQL work (Darling/tools/pg-harnesses). Throwaway net10.0
+# console apps that reference the real projects, standing in for test suites that cannot execute on macOS.
+# Deliberately untracked for now: whether pincheck in particular belongs in the repo is Erik's call, and it
+# should not join a PR by accident.
+Darling/tools/pg-harnesses/

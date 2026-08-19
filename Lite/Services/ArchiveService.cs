@@ -60,7 +60,9 @@ public class ArchiveService
        new table and let it grow unbounded past the 512 MB reset threshold. Mirrors
        DuckDbInitializer.ArchivableTables (same table set); a test pins the two together. */
     internal static readonly (string Table, string TimeColumn)[] ArchivableTables =
-        CollectorCatalog.All.Select(c => (c.TargetTable, c.PrefixTimeColumnName))
+        /* Filtered exactly as DuckDbInitializer.ArchivableTables is, and for the same reason: Lite never
+           creates the PostgreSQL collectors' tables, so archiving them would target nothing. */
+        DuckDbSchemaGenerator.StoredCollectors.Select(c => (c.TargetTable, c.PrefixTimeColumnName))
             .Concat([("config_alert_log", "alert_time"), ("collection_log", "collection_time")])
             .ToArray();
 

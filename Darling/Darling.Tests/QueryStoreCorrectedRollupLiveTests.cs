@@ -51,6 +51,63 @@ public sealed class QueryStoreCorrectedRollupLiveTests
     /// closed form so the expectation is derived, not a magic number transcribed from a test run.</summary>
     private const long InflatedSum = ReCollections * (ReCollections + 1L) / 2L;
 
+    /// <summary>
+    /// L1's retention horizon in days (#2223), from the product's own TIMESPAN rather than re-parsing the
+    /// interval string.
+    ///
+    /// <para>Review catch: the first cut split <c>IntervalRetentionInterval</c> on whitespace and parsed the
+    /// leading number, reimplementing a conversion that already exists typed — and one that would quietly
+    /// produce a wrong seed depth if the interval were ever written <c>"1 week"</c>. It matters more here than
+    /// it looks: this feeds a static initializer, so a bad parse fails as a
+    /// <c>TypeInitializationException</c> across the whole class rather than as anything readable.
+    /// <c>TimescaleContinuousAggregateTests</c> pins the span equal to the string, so this cannot drift from
+    /// the SQL the policy is created with.</para>
+    /// </summary>
+    private static readonly int L1RetentionDays = TimescaleSupport.IntervalRetentionSpan.Days;
+
+    /// <summary>
+    /// How deep every retention-arming test in this class seeds its history — DERIVED from L1's horizon, with
+    /// two days of margin, so nothing a test seeds is ever eligible for deletion by a policy that test itself
+    /// arms.
+    ///
+    /// <para><b>#2223, and it was a class-wide contradiction rather than one test's bug.</b> All four tests here
+    /// that call <c>EnsureRetentionPoliciesAsync</c> used to seed a hardcoded 9 days while step 1 of each arms
+    /// L1's retention at <c>drop_after =&gt; INTERVAL '7 days'</c>. Each therefore armed a policy guaranteed to
+    /// want to delete two days of its own fixture, and then asserted against floors those buckets defined.</para>
+    ///
+    /// <para><b>How it failed.</b> In the re-hold test, <c>l1Floor</c> is read once and the backfill it is
+    /// compared against runs ~20 lines later. If the armed retention job fires inside that window it drops L1's
+    /// two oldest buckets, so the rebuilt consumer can only backfill to <c>now - 7 days</c> while the assertion
+    /// still holds the pre-deletion floor. The reported failure was consumer <c>08-05</c> against L1
+    /// <c>08-03</c> on a fixture seeded from <c>08-03</c> — the consumer floor was EXACTLY
+    /// <c>now - IntervalRetentionInterval</c>, which is what identified the mechanism. Intermittent because it
+    /// depends on the job firing in that window: solo runs passed every time, full-suite runs failed about half,
+    /// and more wall clock means more chances.</para>
+    ///
+    /// <para>Derived rather than re-hardcoded to a smaller number so that changing the product horizon moves
+    /// every fixture with it, instead of silently reintroducing this the next time it is tuned. The relationship
+    /// is pinned by <see cref="SeededHistoryStaysInsideTheHorizonItArms"/>.</para>
+    /// </summary>
+    private static readonly int SeedDepthDays = L1RetentionDays - 2;
+
+    /// <summary>
+    /// The #2223 invariant itself: a test may not seed history that a policy it arms would delete. Pinned as a
+    /// test rather than trusted as arithmetic, because the product horizon is tunable and the whole failure mode
+    /// was a fixture silently drifting outside it.
+    /// </summary>
+    [Fact]
+    public void SeededHistoryStaysInsideTheHorizonItArms()
+    {
+        Assert.True(SeedDepthDays < L1RetentionDays,
+            $"seeded history ({SeedDepthDays}d) must stay inside L1's retention horizon " +
+            $"({TimescaleSupport.IntervalRetentionInterval}) or the retention job these tests arm can delete " +
+            $"the buckets they assert on — that is #2223.");
+
+        /* And deep enough to still be the scenario: the coverage gap has to span more than one daily bucket. */
+        Assert.True(SeedDepthDays >= 3,
+            $"seeded history ({SeedDepthDays}d) must span at least three days for a multi-bucket coverage gap.");
+    }
+
     [Fact]
     public async Task CorrectedRollups_DedupTheReCollectedInterval_WhileTheOldPairKeepsInflating()
     {
@@ -174,7 +231,7 @@ public sealed class QueryStoreCorrectedRollupLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        var oldest = now.Date.AddDays(-9);
+        var oldest = now.Date.AddDays(-SeedDepthDays);
 
         /* Pre-existing raw history, one interval per hour, going back well past any refresh policy's 3-day
            window — the shape every real store upgrading into this build is in. */
@@ -391,7 +448,7 @@ public sealed class QueryStoreCorrectedRollupLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        var oldest = now.Date.AddDays(-9);
+        var oldest = now.Date.AddDays(-SeedDepthDays);
 
         for (var offset = 0; oldest.AddHours(offset) < now; offset += 3)
         {
@@ -495,7 +552,7 @@ public sealed class QueryStoreCorrectedRollupLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        var oldest = now.Date.AddDays(-9);
+        var oldest = now.Date.AddDays(-SeedDepthDays);
         var span = (From: oldest.AddDays(-1), To: now.AddDays(1));
 
         for (var offset = 0; oldest.AddHours(offset) < now; offset += 3)
@@ -603,7 +660,7 @@ public sealed class QueryStoreCorrectedRollupLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        var oldest = now.Date.AddDays(-9);
+        var oldest = now.Date.AddDays(-SeedDepthDays);
         var span = (From: oldest.AddDays(-1), To: now.AddDays(1));
 
         for (var offset = 0; oldest.AddHours(offset) < now; offset += 3)

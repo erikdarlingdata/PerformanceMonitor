@@ -467,6 +467,9 @@ WHERE status = 'in_progress'
     {
         if (probe.Success)
         {
+            /* The PostgreSQL facts ride alongside rather than replacing anything: an existing consumer
+               reading majorVersion/engineEdition keeps working, and one that knows about engine can tell
+               why those are 0 on a Postgres target instead of reading it as a half-failed probe. */
             var json = JsonSerializer.Serialize(new
             {
                 success = true,
@@ -477,6 +480,12 @@ WHERE status = 'in_progress'
                 isAzureManagedInstance = probe.IsAzureManagedInstance,
                 isAwsRds = probe.IsAwsRds,
                 hasMsdbAccess = probe.HasMsdbAccess,
+                engine = probe.Engine.ToString(),
+                postgresMajorVersion = probe.PostgresMajorVersion,
+                postgresVersionNum = probe.PostgresVersionNum,
+                isAurora = probe.IsAurora,
+                isInRecovery = probe.IsInRecovery,
+                facts = DarlingServerConnector.DescribeProbeFacts(probe),
             });
             return ("connected", json);
         }

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Alerting;
@@ -65,4 +66,63 @@ public interface IAlertStateStore
     /// only — when a failed-job alert actually fires.
     /// </summary>
     Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark);
+
+    /// <summary>
+    /// Records the effective state a database was just alerted about (#2166), so the next evaluation can
+    /// tell a NEW deviation from the same one it already reported. Called on-fire only, which makes it a
+    /// low-frequency write like the watermarks above.
+    ///
+    /// <para>Persistence is the requirement, not an optimization: the case this exists for is a database
+    /// deliberately parked OFFLINE for weeks. In-memory edge state would re-fire every parked database on
+    /// every service restart, which is worse than the cooldown-repeat being replaced.</para>
+    ///
+    /// <para>A host that does not persist it may no-op; the engine then sees no memory, every deviation
+    /// reads as new, and behavior is exactly the pre-#2166 cooldown-repeat. That is the intended fallback
+    /// rather than a broken state.</para>
+    /// </summary>
+    Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState);
+
+    /// <summary>
+    /// Forgets what <see cref="SaveDatabaseStateAlertedAsync"/> recorded, called when a database returns to
+    /// its expected state (#2166). The falling edge of an edge trigger: without it the memory is permanent
+    /// and each database can only ever announce once, so a second parking of the same database in the same
+    /// state — the repeat soft-delete workflow this alert is FOR — would be silently swallowed.
+    ///
+    /// <para>Same no-op fallback as its sibling for hosts that do not persist: no memory to clear means
+    /// nothing to go stale.</para>
+    /// </summary>
+    Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName);
+
+    /// <summary>
+    /// Loads the per-fingerprint occurrence accounting for one server/metric (#2216), keyed by #1140 dedup
+    /// fingerprint — the state <see cref="IncidentOccurrenceAccumulator"/> needs to turn the groupers'
+    /// window gauge into a monotonic total. Returns an empty map when nothing is persisted.
+    ///
+    /// <para>Persistence is the requirement, not an optimization: the value of the counter is that it
+    /// survives the throttling the consumer is subject to, and a counter reset by every service restart
+    /// would be a second gauge wearing a total's name. A host that cannot persist may return an empty map
+    /// and no-op the save — the accumulator then reports the total as equal to the window count, which is
+    /// exactly the pre-#2216 information rather than a wrong number.</para>
+    /// </summary>
+    Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(
+        string serverKey, string metricName);
+
+    /// <summary>
+    /// REPLACES the persisted occurrence set for one server/metric with <paramref name="states"/> (#2216):
+    /// rows in the map are upserted, and rows the store holds for this (server, metric) that are NOT in the
+    /// map are deleted. An empty map therefore clears the metric — which is how the falling edge is
+    /// recorded, so there is no separate clear method to forget to call.
+    ///
+    /// <para>Replace-the-set rather than upsert-each-row because absence carries meaning: a fingerprint
+    /// with no events left in the window has a FINISHED incident, and leaving its row behind would make the
+    /// next incident on that fingerprint read as a continuation of the old one — an undercount reported
+    /// with a stale start time. The accumulator's staleness horizon is the backstop for rows a crash
+    /// stranded before any of this could run; it is not a substitute for deleting them here.</para>
+    ///
+    /// <para>Called once per delivered alert (cooldown-gated by construction), so it is a low-frequency
+    /// write like the watermarks above. Implementations should make the upsert-and-delete atomic: a
+    /// partially-applied set can strand a row that the staleness horizon then has to catch.</para>
+    /// </summary>
+    Task SaveIncidentOccurrencesAsync(
+        string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states);
 }

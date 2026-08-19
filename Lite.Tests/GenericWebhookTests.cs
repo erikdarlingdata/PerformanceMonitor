@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Text.Json;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -265,5 +266,159 @@ public class GenericWebhookTests
         var (request, _) = ApplyHeaders(new Dictionary<string, string> { ["Authorization"] = "Bearer ghp_token" });
 
         Assert.Equal("Bearer ghp_token", string.Join("", request.Headers.GetValues("Authorization")));
+    }
+
+    /* ---------------- #2302: the automation tokens ---------------- */
+
+    private static AlertContext TwoIncidentContext()
+    {
+        var context = new AlertContext();
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Deadlock 1",
+            /* The motivating delimiter collision: {{context}}'s flattening joins on " | " and ": ",
+               and this value contains BOTH — plus a quote — so only structure can carry it. */
+            Fields = { ("Victim SQL", "SELECT a | b FROM t WHERE x = 'y: \"z\"'") }
+        });
+        context.Incidents = new List<AlertIncident>
+        {
+            new("aa11", new List<string> { "db1.dbo.t1" }, OccurrenceCount: 3, TotalOccurrences: 17,
+                IncidentStartedUtc: new System.DateTime(2026, 8, 17, 10, 0, 0, System.DateTimeKind.Utc)),
+            new("bb22", new List<string> { "db2.dbo.t2" }),
+        };
+        return context;
+    }
+
+    [Fact]
+    public void ContextJsonToken_SubstitutesRawStructure_InThePersistedContextJsonShape()
+    {
+        const string template = """{"metric": "{{metric}}", "context": {{context_json}}}""";
+        var payload = WebhookAlertService.BuildGenericPayload(
+            "Deadlocks Detected", "SRV", "2", "0", Branding, context: TwoIncidentContext(), bodyTemplate: template);
+
+        var root = JsonDocument.Parse(payload).RootElement;
+        var contextElement = root.GetProperty("context");
+
+        /* Structure, not a string — the whole point of the token. */
+        Assert.Equal(JsonValueKind.Object, contextElement.ValueKind);
+        var incidents = contextElement.GetProperty("Incidents");
+        Assert.Equal(2, incidents.GetArrayLength());
+        Assert.Equal("aa11", incidents[0].GetProperty("DedupKey").GetString());
+        Assert.Equal(17, incidents[0].GetProperty("TotalOccurrences").GetInt64());
+
+        /* The hostile Victim SQL arrives as a field VALUE, byte-exact — no delimiter parsing needed. */
+        var field = contextElement.GetProperty("Details")[0].GetProperty("Fields")[0];
+        Assert.Equal("SELECT a | b FROM t WHERE x = 'y: \"z\"'", field.GetProperty("Value").GetString());
+
+        /* One shape for every consumer: the embedded JSON is EXACTLY what the alert-history
+           ContextJson persists, so it must round-trip through the same serializer. */
+        Assert.True(AlertContextSerializer.TryDeserialize(contextElement.GetRawText(), out var roundTripped));
+        Assert.Equal(2, roundTripped.Incidents!.Count);
+        Assert.Equal("bb22", roundTripped.Incidents[1].DedupKey);
+    }
+
+    [Fact]
+    public void ContextJsonToken_IsAnEmptyObject_WhenTheAlertCarriesNoContext()
+    {
+        const string template = """{"context": {{context_json}}, "incidents": {{incidents_json}}}""";
+        var payload = Build("High CPU", "SRV", template: template);
+
+        var root = JsonDocument.Parse(payload).RootElement;
+        Assert.Equal(JsonValueKind.Object, root.GetProperty("context").ValueKind);
+        Assert.Equal(0, root.GetProperty("incidents").GetArrayLength());
+    }
+
+    [Fact]
+    public void IncidentsJsonToken_IsJustTheArray()
+    {
+        const string template = """{"incidents": {{incidents_json}}}""";
+        var payload = WebhookAlertService.BuildGenericPayload(
+            "Deadlocks Detected", "SRV", "2", "0", Branding, context: TwoIncidentContext(), bodyTemplate: template);
+
+        var incidents = JsonDocument.Parse(payload).RootElement.GetProperty("incidents");
+        Assert.Equal(2, incidents.GetArrayLength());
+        Assert.Equal("db1.dbo.t1", incidents[0].GetProperty("InvolvedObjects")[0].GetString());
+    }
+
+    [Fact]
+    public void DedupKeyToken_MatchesThePagerDutyDerivation_IncludingTheFallback()
+    {
+        const string template = """{"dedup": "{{dedup_key}}"}""";
+
+        /* With an incident: the first incident's fingerprint, same anchor PagerDuty correlates on. */
+        var withIncident = WebhookAlertService.BuildGenericPayload(
+            "Deadlocks Detected", "SRV", "2", "0", Branding, context: TwoIncidentContext(),
+            bodyTemplate: template, serverId: "37");
+        Assert.Equal("aa11", JsonDocument.Parse(withIncident).RootElement.GetProperty("dedup").GetString());
+
+        /* Without one: the stable metric+server fallback — the key level/threshold alerts (High CPU,
+           Collection Stopped) never exposed before, keyed on serverId when the caller has one. */
+        var fallback = WebhookAlertService.BuildGenericPayload(
+            "High CPU", "SRV", "97", "90", Branding, bodyTemplate: template, serverId: "37");
+        Assert.Equal("37:High CPU", JsonDocument.Parse(fallback).RootElement.GetProperty("dedup").GetString());
+
+        /* And the serverName stands in when no id exists — the PagerDuty call site's own precedence. */
+        var byName = Build("High CPU", "SRV", template: template);
+        Assert.Equal("SRV:High CPU", JsonDocument.Parse(byName).RootElement.GetProperty("dedup").GetString());
+    }
+
+    [Fact]
+    public void ContextJsonToken_RedactsRemediationTsql_LikeEveryOtherChannel()
+    {
+        /* The review catch: every channel replaces copy-paste T-SQL with the "see email / in-app dialog"
+           hint before anything leaves the process, and the raw token must not be the one exception. */
+        var context = TwoIncidentContext();
+        context.Details.Add(new AlertDetailItem
+        {
+            Heading = "Remediation T-SQL",
+            Body = "ALTER DATABASE [x] SET READ_COMMITTED_SNAPSHOT ON;",
+            IsCodeBlock = true,
+            Remediation = new RemediationAction("RCSI_OFF", "DB_CONFIG", new List<ForcePlanTarget>())
+        });
+
+        const string template = """{"context": {{context_json}}}""";
+        var payload = WebhookAlertService.BuildGenericPayload(
+            "Deadlocks Detected", "SRV", "2", "0", Branding, context: context, bodyTemplate: template);
+
+        /* The T-SQL never reaches the wire; the hint and the code-block FLAG do, so a consumer still
+           learns a remediation exists and where to read it. */
+        Assert.DoesNotContain("ALTER DATABASE", payload, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("RCSI_OFF", payload, System.StringComparison.Ordinal);
+        var details = JsonDocument.Parse(payload).RootElement.GetProperty("context").GetProperty("Details");
+        var codeBlock = details[1];
+        Assert.True(codeBlock.GetProperty("IsCodeBlock").GetBoolean());
+        Assert.Contains("in-app Alert Details", codeBlock.GetProperty("Body").GetString(), System.StringComparison.Ordinal);
+        Assert.Equal(JsonValueKind.Null, codeBlock.GetProperty("Remediation").ValueKind);
+
+        /* Redaction copies — the SAME context instance flows on to email/Teams afterwards, and those
+           channels legitimately carry the T-SQL (email) or their own hint. Mutation here would be a
+           cross-channel bug this pin exists to forbid. */
+        Assert.Equal("ALTER DATABASE [x] SET READ_COMMITTED_SNAPSHOT ON;", context.Details[1].Body);
+        Assert.NotNull(context.Details[1].Remediation);
+    }
+
+    [Fact]
+    public void ValidateGenericConfig_RejectsAQuotedRawToken_AtSaveTime()
+    {
+        /* The trap this forbids (#2310 review catch): with a null context the raw tokens render to the
+           quote-free {} / [], so `"context": "{{context_json}}"` — the exact mistake the doc comment
+           warns about — used to validate clean and test-send clean, then break on the first deadlock
+           alert with real structure. The stand-in context is quote-bearing by construction, so the
+           mistake now fails where the operator can see it. */
+        Assert.NotNull(WebhookAlertService.ValidateGenericConfig(null, """{"context": "{{context_json}}"}"""));
+        Assert.NotNull(WebhookAlertService.ValidateGenericConfig(null, """{"incidents": "{{incidents_json}}"}"""));
+
+        /* And the CORRECT unquoted usage still validates. */
+        Assert.Null(WebhookAlertService.ValidateGenericConfig(null, """{"context": {{context_json}}, "incidents": {{incidents_json}}, "dedup": "{{dedup_key}}"}"""));
+    }
+
+    [Fact]
+    public void DefaultTemplate_DoesNotCarryTheAutomationTokens()
+    {
+        /* #2302's compatibility promise: the shipped default stays byte-identical, so no existing
+           consumer's payload changes shape. The automation tokens are opt-in via a custom template. */
+        Assert.DoesNotContain("context_json", WebhookAlertService.DefaultGenericBodyTemplate, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("incidents_json", WebhookAlertService.DefaultGenericBodyTemplate, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("dedup_key", WebhookAlertService.DefaultGenericBodyTemplate, System.StringComparison.Ordinal);
     }
 }

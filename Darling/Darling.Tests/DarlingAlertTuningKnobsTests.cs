@@ -30,6 +30,41 @@ namespace Darling.Tests;
    out; this comment is here so the next sweep does not "fix" it. */
 public sealed class DarlingAlertTuningKnobsTests
 {
+    /* ---------------- #2107: the previously-hardcoded thresholds through the settings seam ---------------- */
+
+    [Fact]
+    public void SelfAlertKnobs_DefaultsAreTheConstantsTheyReplaced_AndReadsClampLikeSiblings()
+    {
+        var config = new DarlingConfig();
+        var settings = new DarlingAlertSettings(config);
+
+        /* Defaults mirror the V55 DDL — the compile-time constants these knobs replaced. */
+        Assert.Equal(10, settings.SelfDiskFreeWarnPercent);
+        Assert.Equal(30, settings.CollectionStaleMinutes);
+        Assert.Equal(10, settings.CollectionFailureThreshold);
+        Assert.Equal(3, settings.DiskCriticalFreePercent);
+        Assert.Equal(2, settings.DiskCriticalFreeGb);
+        Assert.Equal(360, settings.AnalysisNotifyCooldownMinutes);
+
+        /* Live reload through the by-reference seam, clamped on read — a hand-edited store value
+           can't drive a nonsense threshold: a 0-minute staleness window would fire every sweep, a
+           0 failure threshold on the fast path would fire on any single failure, and the analysis
+           cooldown keeps the shared engine's documented [30, 10080]. */
+        config.Alerts.SelfDiskFreeWarnPercent = 150;
+        config.Alerts.CollectionStaleMinutes = 0;
+        config.Alerts.CollectionFailureThreshold = 0;
+        config.Alerts.DiskCriticalFreePercent = -5;
+        config.Alerts.DiskCriticalFreeGb = -1;
+        config.Alerts.AnalysisNotifyCooldownMinutes = 99999;
+
+        Assert.Equal(100, settings.SelfDiskFreeWarnPercent);
+        Assert.Equal(5, settings.CollectionStaleMinutes);
+        Assert.Equal(1, settings.CollectionFailureThreshold);
+        Assert.Equal(0, settings.DiskCriticalFreePercent);
+        Assert.Equal(0, settings.DiskCriticalFreeGb);
+        Assert.Equal(10080, settings.AnalysisNotifyCooldownMinutes);
+    }
+
     /* ---------------- pure: the long-running-query read shape through the settings seam ---------------- */
 
     [Fact]

@@ -44,6 +44,14 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool FailedJobEnabled => App.AlertFailedJobEnabled;
     public bool DatabaseStateEnabled => App.AlertDatabaseStateEnabled;
 
+    /* #2157: ON with no user setting yet. The alert fires only on a failure counter that ROSE since the
+       previous collection, so a fleet with no failing forces is silent by construction — there is nothing
+       for a toggle to protect anyone from. Kept a hardcoded true rather than a darling.json/settings.json
+       flag on purpose: Darling's store reload REPLACES the whole Alerts object, so a json-only alert flag
+       would be silently reset on the first config_version bump. If this needs to be configurable it goes
+       in the store, with the migration ladder that implies. */
+    public bool ForcePlanFailureEnabled => true;
+
     public int CpuThresholdPercent => App.AlertCpuThreshold;
     public int BlockingCountThreshold => App.AlertBlockingThreshold;
 
@@ -63,6 +71,16 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int TempDbSpaceThresholdPercent => App.AlertTempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => App.AlertLowDiskThresholdPercent;
     public int LowDiskThresholdGb => App.AlertLowDiskThresholdGb;
+
+    /* #2107: the low-disk CRITICAL tier floors — settings.json-backed like their WARNING-tier
+       siblings above. The three Darling self-monitoring knobs below them return the shipped
+       defaults: Lite has no headless store volume or fleet collection loop to self-monitor, and
+       the members exist so the two apps' settings objects stay one shape (the PVS precedent). */
+    public int DiskCriticalFreePercent => App.AlertDiskCriticalFreePercent;
+    public int DiskCriticalFreeGb => App.AlertDiskCriticalFreeGb;
+    public int SelfDiskFreeWarnPercent => 10;
+    public int CollectionStaleMinutes => 30;
+    public int CollectionFailureThreshold => 10;
     public int PvsThresholdPercent => App.AlertPvsThresholdPercent;
     public int PvsFloorGb => App.AlertPvsFloorGb;
     public int LongRunningJobMultiplier => App.AlertLongRunningJobMultiplier;

@@ -108,6 +108,7 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<ServerConfigRow>? _serverConfigFilterMgr;
     private DataGridFilterManager<DatabaseConfigRow>? _databaseConfigFilterMgr;
     private DataGridFilterManager<DatabaseScopedConfigRow>? _dbScopedConfigFilterMgr;
+    private DataGridFilterManager<QueryStoreHealthRow>? _queryStoreHealthFilterMgr;
     private DataGridFilterManager<AutomaticTuningRow>? _automaticTuningFilterMgr;
     private DataGridFilterManager<TraceFlagRow>? _traceFlagsFilterMgr;
     private DataGridFilterManager<CollectorHealthRow>? _collectionHealthFilterMgr;

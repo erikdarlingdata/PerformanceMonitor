@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Regenerates the previous-release migration-ladder fixture at each RELEASE CUT (#2119).
+       Must be pointed at the RELEASE TAG's Storage project, never the working tree — the whole
+       point is freezing that era's generator output:
+
+         git worktree add /tmp/pm-vX.Y.Z vX.Y.Z
+         dotnet run -p:StorageProject=/tmp/pm-vX.Y.Z/Darling/PerformanceMonitor.Darling.Storage/PerformanceMonitor.Darling.Storage.csproj
+           (then the CLI argument separator, then) ../../Darling.Tests/Fixtures/migration-ladder-vX.Y.Z.sql
+
+       The separator is spelled out in words rather than shown, because two consecutive dashes are
+       illegal inside an XML comment and made this project file unloadable.
+
+       Then point MigrationUpgradeLadderLiveTests at the new fixture and retire the old one. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(StorageProject)" />
+  </ItemGroup>
+</Project>

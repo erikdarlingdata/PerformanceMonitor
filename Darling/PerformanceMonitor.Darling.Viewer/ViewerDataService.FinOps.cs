@@ -95,6 +95,21 @@ public sealed class UtilizationEfficiencyRow
     public int PhysicalMemoryMb { get; set; }
     public int BufferPoolMb { get; set; }
     public decimal MemoryRatio { get; set; }
+
+    /// <summary>Peak resource-semaphore waiters over the window. Any waiter at all means a query asked for
+    /// workspace memory and did not simply get it — the signal the verdict uses in place of the ratio that
+    /// pinned at 1.0 (#2246).</summary>
+    public long MaxGrantWaiters { get; set; }
+
+    /// <summary>Grant timeouts accrued over the window (delta, not cumulative).</summary>
+    public long GrantTimeouts { get; set; }
+
+    /// <summary>Grants forced through below what was requested, over the window.</summary>
+    public long ForcedGrants { get; set; }
+
+    /// <summary>Peak granted-over-target workspace memory, as a percentage. Fleet max is 18.8%.</summary>
+    public decimal GrantUtilizationPct { get; set; }
+
     public int MaxWorkersCount { get; set; }
     public int CurrentWorkersCount { get; set; }
     public int CpuCount { get; set; }

@@ -617,4 +617,64 @@ WHERE hypertable_name = 'wait_stats'
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    /* ---------------- #2143 drop_chunks deadlock retry ---------------- */
+
+    private static PostgresException Deadlock() =>
+        new("deadlock detected", "ERROR", "ERROR", PostgresErrorCodes.DeadlockDetected);
+
+    [Fact]
+    public async Task DropChunksRetry_OneDeadlock_RetriesOnce_AndSucceeds()
+    {
+        /* The field case (#2143, caught by the nightly's purge e2e): the first attempt loses a deadlock
+           to a background job whose locks clear in milliseconds — the retry completes the purge instead
+           of wasting the cycle on the DELETE fallback. */
+        var calls = 0;
+        var result = await DarlingRetention.ExecuteDropChunksWithDeadlockRetryAsync(
+            () => ++calls == 1 ? throw Deadlock() : Task.FromResult(3),
+            "collection_log", logger: null);
+
+        Assert.Equal(2, calls);
+        Assert.Equal(3, result);
+    }
+
+    [Fact]
+    public async Task DropChunksRetry_TwoDeadlocks_GivesUpToTheDeleteFallback()
+    {
+        /* A second deadlock in a row is STANDING contention — camping a retry loop on a lock queue is
+           worse than the DELETE fallback + next cycle. Exactly two attempts, then null. */
+        var calls = 0;
+        var result = await DarlingRetention.ExecuteDropChunksWithDeadlockRetryAsync(
+            () => { calls++; throw Deadlock(); },
+            "collection_log", logger: null);
+
+        Assert.Equal(2, calls);
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task DropChunksRetry_NonDeadlockFailure_DoesNotRetry()
+    {
+        /* Only 40P01 earns a retry — any other failure keeps the original single-shot posture (a missing
+           relation or a permission error does not get better by asking again). */
+        var calls = 0;
+        var result = await DarlingRetention.ExecuteDropChunksWithDeadlockRetryAsync(
+            () => { calls++; throw new InvalidOperationException("not a deadlock"); },
+            "collection_log", logger: null);
+
+        Assert.Equal(1, calls);
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task DropChunksRetry_CleanRun_IsSingleShot()
+    {
+        var calls = 0;
+        var result = await DarlingRetention.ExecuteDropChunksWithDeadlockRetryAsync(
+            () => Task.FromResult(++calls == 1 ? 7 : -1),
+            "collection_log", logger: null);
+
+        Assert.Equal(1, calls);
+        Assert.Equal(7, result);
+    }
 }

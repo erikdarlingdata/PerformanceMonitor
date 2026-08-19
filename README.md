@@ -108,7 +108,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 ### Lite Collectors
 
-38 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
+42 collectors run on independent, configurable schedules (the long-running-query completion trace is opt-in and ships disabled):
 
 | Collector | Default | Source |
 |---|---|---|
@@ -123,6 +123,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | query_stats | 1 min | `sys.dm_exec_query_stats` (deltas) |
 | procedure_stats | 1 min | `sys.dm_exec_procedure_stats` (deltas) |
 | cpu_utilization | 1 min | `sys.dm_os_ring_buffers` scheduler monitor |
+| database_states | 1 min | `sys.databases` state per database — feeds the database offline/unhealthy alert (not Azure SQL DB) |
 | file_io_stats | 1 min | `sys.dm_io_virtual_file_stats` (deltas) |
 | memory_stats | 1 min | `sys.dm_os_sys_memory` + memory counters |
 | memory_grant_stats | 1 min | `sys.dm_exec_query_memory_grants` |
@@ -146,6 +147,7 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 | running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
 | database_size_stats | 1 hour | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
 | pvs_stats | 1 hour | `sys.dm_tran_persistent_version_store_stats` + `sys.databases` (ADR persistent version store size and cleanup state per database; SQL Server 2019+ only, always collected on Azure SQL DB) |
+| query_store_health | 1 hour | `sys.database_query_store_options` per database (actual vs desired state, readonly_reason, storage used vs cap, cleanup thresholds, runtime-stats interval length; SQL Server 2016+, one row per database with OFF recorded explicitly) |
 | server_properties | on connect | `SERVERPROPERTY()` hardware and licensing metadata |
 | index_object_stats | Daily | `sys.dm_db_partition_stats` + `sys.dm_db_index_usage_stats` + `sys.dm_db_index_operational_stats` |
 | server_config | On connect | `sys.configurations` |
@@ -205,7 +207,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip | Server-bound |
-| MCP server (LLM integration) | Built-in (74 tools) | On request | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (77 tools) | On request | Built into Dashboard (66 tools) |
 
 ---
 
@@ -341,7 +343,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 74 tools; **Darling** exposes the analysis + data-read surface on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 77 tools; **Darling** exposes the analysis + data-read surface on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
@@ -358,7 +360,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 | TempDB | `get_tempdb_trend` |
 | Perfmon | `get_perfmon_stats`, `get_perfmon_trend` |
 | Jobs | `get_running_jobs` |
-| Configuration | `get_server_config`, `get_database_config`, `get_database_scoped_config`, `get_trace_flags` |
+| Configuration | `get_server_config`, `get_database_config`, `get_database_scoped_config`, `get_query_store_health`, `get_trace_flags` |
 | Server Info | `get_server_properties`, `get_database_sizes` |
 | Object/Index Stats | `get_table_index_sizes`, `get_index_usage`, `get_object_locking` |
 | Sessions | `get_session_stats` |

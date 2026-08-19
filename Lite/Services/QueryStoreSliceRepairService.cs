@@ -574,9 +574,6 @@ COPY (
     }
 
     /// <summary>
-    /// Drops DuckDB's cached view of every external file, by toggling the cache off and back on.
-    ///
-    /// <summary>
     /// Promotes a rewritten file over the original, and makes the store able to READ it — the two are one
     /// operation, which is why they live in one helper rather than being two things a caller must remember.
     ///

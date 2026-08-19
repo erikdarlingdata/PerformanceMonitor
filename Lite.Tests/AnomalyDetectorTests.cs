@@ -31,6 +31,26 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     private static readonly DateTime _analysisEnd = _now;
     private static readonly DateTime _analysisStart = _now.AddHours(-4);
 
+    /* #2177: the start of a seeded baseline day, floored to the HOUR.
+
+       Every seed helper below writes several samples spanning ~21 minutes from this point. They used to
+       start at whatever time-of-day _analysisStart inherited from the wall clock, so when a CI run put
+       _analysisStart within 21 minutes of midnight the span crossed a date boundary and each intended
+       'day' contributed TWO distinct dates — doubling the distinct-day count the baseline-quality gate
+       counts, which flipped a deliberately-thin (2-day) baseline into a trustworthy one and sent the
+       detector down the z-path instead of the absolute fallback. Deterministic failure for runs between
+       03:39 and 04:00 UTC.
+
+       Flooring to the hour rather than midday-anchoring (#1972's discipline elsewhere) is deliberate:
+       the Full baseline tier buckets by hour AND day-of-week, so the seeds must keep _analysisStart's
+       hour and weekday to land in the same bucket the analysis window reads. Starting at :00 keeps both
+       while making a 21-minute span unable to leave the hour, let alone the date. */
+    private static DateTime SeedDayStart(int daysBack)
+    {
+        var day = _analysisStart.AddDays(-daysBack);
+        return day.Date.AddHours(day.Hour);
+    }
+
     private long _nextId = -1;
 
     public AnomalyDetectorTests(SharedDuckDbFixture fixture)
@@ -457,7 +477,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
-            var baseDay = _analysisStart.AddDays(-day);
+            var baseDay = SeedDayStart(day);
             for (int i = 0; i < 4; i++)
             {
                 var cpu = Math.Clamp(avgCpu + rng.Next(-variance, variance + 1), 0, 100);
@@ -479,7 +499,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var rng = new Random(42);
         foreach (var day in new[] { 7, 14 })
         {
-            var baseDay = _analysisStart.AddDays(-day);
+            var baseDay = SeedDayStart(day);
             for (int i = 0; i < 8; i++)
             {
                 var cpu = Math.Clamp(avgCpu + rng.Next(-variance, variance + 1), 0, 100);
@@ -495,7 +515,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
-            var baseDay = _analysisStart.AddDays(-day);
+            var baseDay = SeedDayStart(day);
             for (int i = 0; i < 4; i++)
             {
                 var value = Math.Max(0, avgValue + rng.Next(-variance, variance + 1));
@@ -511,7 +531,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
-            var baseDay = _analysisStart.AddDays(-day);
+            var baseDay = SeedDayStart(day);
             for (int i = 0; i < 4; i++)
             {
                 var count = Math.Max(1, avgConnections + rng.Next(-variance, variance + 1));
@@ -527,7 +547,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var rng = new Random(42);
         for (int day = 1; day <= 14; day++)
         {
-            var baseDay = _analysisStart.AddDays(-day);
+            var baseDay = SeedDayStart(day);
             for (int i = 0; i < 4; i++)
             {
                 var elapsed = Math.Max(0, avgElapsed + rng.Next(-variance, variance + 1));
@@ -542,7 +562,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await ExecuteSeedAsync("BEGIN TRANSACTION");
         for (int day = 1; day <= 14; day++)
         {
-            var baseDay = _analysisStart.AddDays(-day);
+            var baseDay = SeedDayStart(day);
             for (int i = 0; i < 4; i++)
                 await SeedWaitStatAsync(baseDay.AddMinutes(i * 3), "SOS_SCHEDULER_YIELD", 100);
         }
@@ -554,7 +574,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await ExecuteSeedAsync("BEGIN TRANSACTION");
         for (int day = 1; day <= 14; day++)
         {
-            var baseDay = _analysisStart.AddDays(-day);
+            var baseDay = SeedDayStart(day);
             for (int i = 0; i < 4; i++)
                 await SeedMemoryStatAsync(baseDay.AddMinutes(i * 3), avgTotalServerMb, targetMb);
         }

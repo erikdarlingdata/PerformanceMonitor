@@ -76,8 +76,10 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(33, PgMigrations.Scripts[32].Version);
         /* The newest migration is asserted by identity rather than by ordinal: this ladder is walked by every
            stacked branch at once, and a positional pin turns each addition into a conflict for the next. */
-        Assert.Equal(54, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(54, StorageVersion.SchemaVersion);
+        /* The invariant the test name states, with no literal to go stale: the build's schema version IS
+           the newest registered rung. Three in-flight branches bumping versions made the literal form a
+           recurring multi-test failure (#2210 round, again here at V62). */
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
 
         /* V34 (#991) creates the two Availability Group collector tables. Schema-qualified collect.* and
            CREATE TABLE IF NOT EXISTS, per the file's additive-create idiom (V29): a no-op on a fresh store

@@ -17,10 +17,17 @@ namespace PerformanceMonitor.Collectors;
 /// one cycle tried to pull the entire backlog at once and drove the 0→13GB commit-limit blowout.
 ///
 /// <para>
-/// <see cref="ClampCatchup"/> floors a stale watermark to <c>now - 24h</c>: a routine restart or a
-/// brief outage never clamps (its watermark is minutes old), a multi-day outage survives with a
-/// deliberate, logged, BOUNDED hole (the source still retains the older data; the viewer's windows
-/// are 24h anyway). This is deliberately NOT applied to every timestamp watermark — for a ring-buffer
+/// <see cref="ClampCatchup"/> floors a stale watermark to <c>now - 1h</c>: a routine restart never
+/// clamps (its watermark is minutes old), and anything longer survives as a deliberate, logged,
+/// BOUNDED hole that the backfill worker (#2022/#2058) trickles in afterwards. The horizon was 24h
+/// until the use1 migration wedge (#2102) proved a row cap is not a cost cap: the per-database query
+/// aggregates and sorts the WHOLE window before TOP or the byte budget can bound anything, so its
+/// cost grows with window width. A big database that missed one 60s cycle faced a wider window the
+/// next cycle, which cost more and timed out again — a self-sustaining spiral the 24h clamp sat far
+/// above and never interrupted. One hour is the envelope the fleet already proves every day (Query
+/// Store's 900s flush cadence makes 15–60min effective windows the routine steady state), and the
+/// clamp floor slides forward with <c>now</c>, so recovery is immediate no matter how stale the
+/// watermark got. This is deliberately NOT applied to every timestamp watermark — for a ring-buffer
 /// or rolling-trace source the clamp is a no-op at best and, on a quiet <c>default_trace</c> whose
 /// 100MB ring can span days, a WRONG truncation of legitimate catch-up. It is therefore scoped to
 /// exactly ONE collector: query_store's per-database cutoff (the only unbounded-persisted source among
@@ -40,13 +47,15 @@ namespace PerformanceMonitor.Collectors;
 public static class WatermarkPolicy
 {
     /// <summary>
-    /// The maximum catch-up horizon. 24h is chosen so routine outages never clamp while a multi-day
-    /// outage survives with a single logged, bounded hole. Exposed so a test pins the boundary.
+    /// The maximum catch-up horizon — the live path's one-query cost envelope, matched to
+    /// <see cref="QueryStoreBackfillState.MaxSliceSpan"/> so no path ever windows wider than the
+    /// steady state the fleet proves (#2102). Everything older is the backfill worker's job.
+    /// Exposed so a test pins the boundary.
     /// </summary>
-    public static readonly TimeSpan MaxCatchup = TimeSpan.FromHours(24);
+    public static readonly TimeSpan MaxCatchup = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// Floors a &gt;24h-stale timestamp watermark to <c>now - 24h</c>; a null watermark (nothing
+    /// Floors a stale timestamp watermark to <c>now - <see cref="MaxCatchup"/></c>; a null watermark (nothing
     /// collected yet — the definition's documented first-run window applies) stays null, and a
     /// watermark within the horizon is returned unchanged. Compare the result to the input to tell
     /// whether a clamp fired (the runner logs a WARNING when it does).

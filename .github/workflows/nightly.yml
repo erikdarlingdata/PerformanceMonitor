@@ -331,9 +331,9 @@ jobs:
       # and continuous-aggregate policy jobs, so without them this job tested a configuration no
       # customer runs and made scheduler-racing failures luck-of-the-slot instead of reproducible.
       # Values are the product's own derivation from the live hypertable count
-      # (TimescaleSupport.HypertableCount = the 41-collector catalog + collection_log = 42):
-      #   timescaledb.max_background_workers = HypertableCount + 2  = 44
-      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 55
+      # (TimescaleSupport.HypertableCount = the 50-collector catalog + collection_log = 51):
+      #   timescaledb.max_background_workers = HypertableCount + 2  = 53
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 64
       # Kept honest by CiClusterWorkerSizingTests (parses this file against the formula) and
       # CiClusterWorkerSizingLiveTests (asserts the running cluster serves them). Must configure
       # the cluster identically to build.yml's darling-pg job: that guard parses the appended
@@ -354,8 +354,8 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 44"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 55"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 53"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 64"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
@@ -482,6 +482,6 @@ jobs:
       # GitHub-native provenance for the tarball (SLSA): verified with
       #   gh attestation verify PerformanceMonitorDarling-linux-x64-<v>.tar.gz -R erikdarlingdata/PerformanceMonitor
       - name: Attest the linux tarball (GitHub provenance)
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz

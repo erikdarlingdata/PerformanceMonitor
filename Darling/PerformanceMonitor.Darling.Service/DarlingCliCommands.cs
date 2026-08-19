@@ -21,6 +21,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -121,6 +122,14 @@ public static class DarlingCliCommands
     public static bool IsRecompressPlanDimVerb(string arg) =>
         string.Equals(arg, "--recompress-plan-dim", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="AddServerAsync"/> handles — register monitored server(s) in the store from a
+    /// JSON array on STDIN (#2256). The store is authoritative after the first seed, so on a headless host with no
+    /// GUI and no MCP client this was previously impossible: the web surface excludes the write tools by design
+    /// and darling.json is a one-time bootstrap.</summary>
+    public static bool IsAddServerVerb(string arg) =>
+        string.Equals(arg, "--add-server", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(arg, "--add-servers", StringComparison.OrdinalIgnoreCase);
+
     /// <summary><c>--version</c>/<c>-v</c> — print the product version and exit.</summary>
     public static bool IsVersionVerb(string arg) =>
         string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase)
@@ -151,7 +160,8 @@ public static class DarlingCliCommands
         || IsDisableWebVerb(arg)
         || IsBackfillRollupsVerb(arg)
         || IsCollapseLegacySlicesVerb(arg)
-        || IsRecompressPlanDimVerb(arg);
+        || IsRecompressPlanDimVerb(arg)
+        || IsAddServerVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -224,6 +234,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -285,11 +296,7 @@ public static class DarlingCliCommands
             return $"  [FAIL] {serverName}: {probe.Error}";
         }
 
-        var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
-            ? DarlingServerConnector.DescribeEngineEdition(probe.EngineEdition)
-            : probe.EngineEditionDescription;
-        var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (failed-job alerts unavailable)";
-        return $"  [PASS] {serverName}: SQL major version {probe.MajorVersion}, {edition}, {msdb}";
+        return $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
     }
 
     /// <summary>
@@ -338,8 +345,18 @@ public static class DarlingCliCommands
         /* Read the cert BEFORE anything reaches STDOUT: every STDERR line — including the missing-cert NOTE —
            must be emitted ahead of the payload (#1953 item 3). The field report watched the live password scroll
            past and only THEN saw the redirect advice, which is exactly backwards for a warning. */
-        var certificate = File.Exists(handoff.CertificatePath)
-            ? (await File.ReadAllTextAsync(handoff.CertificatePath, cancellationToken)).Trim()
+        /* #2117: prefer the distributable ROOT (the CA that signed the served leaf) when the store
+           carries the fixed chain shape — that is what verify-full's Root Certificate must anchor
+           on. A legacy store has no root.crt, and its single self-signed server.crt remains the
+           right (if Windows-hostile) thing to print. */
+        var distributableCertPath = DarlingManagedPostgres.RootCertificatePathFor(handoff.CertificatePath);
+        if (!File.Exists(distributableCertPath))
+        {
+            distributableCertPath = handoff.CertificatePath;
+        }
+
+        var certificate = File.Exists(distributableCertPath)
+            ? (await File.ReadAllTextAsync(distributableCertPath, cancellationToken)).Trim()
             : null;
 
         /* Guidance + the live-secret warning go to STDERR, so redirecting STDOUT to a file or the clipboard
@@ -383,7 +400,9 @@ public static class DarlingCliCommands
         /* Emit the server cert PEM so the operator can copy it to the viewer machine. */
         if (certificate is not null)
         {
-            output.WriteLine($"# Server TLS certificate ({DarlingManagedPostgres.ServerCertFileName}) — save as '{clientCertificatePath}' on the viewer machine:");
+            /* #2117 review catch: name the file whose CONTENT is actually below — root.crt on a
+               chain-shaped store, server.crt only on a legacy one. */
+            output.WriteLine($"# Server TLS certificate ({Path.GetFileName(distributableCertPath)}) — save as '{clientCertificatePath}' on the viewer machine:");
             output.WriteLine(certificate);
         }
 
@@ -469,10 +488,13 @@ public static class DarlingCliCommands
 
         if (!File.Exists(credentialPath))
         {
-            error.WriteLine(
-                $"The '{role}' role credential ({credentialPath}) does not exist yet. Start the PerformanceMonitor " +
-                "Darling service once so its first run provisions the least-privilege roles and their credentials, " +
-                "then re-run this command.");
+            /* #2197: which of the two things this means is decided from the store's own files, not assumed.
+               A bootstrap that has already failed produces this same absence, and telling THAT operator to
+               start the service again is the dead end the field report walked into. */
+            error.WriteLine(DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                $"The '{role}' role credential ({credentialPath})",
+                "provisions the least-privilege roles and their credentials",
+                dataDirectory));
             return null;
         }
 
@@ -644,13 +666,20 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        /* #2117: prefer the distributable ROOT on chain-shaped stores — the print verb's rule. */
+        var exportCertPath = DarlingManagedPostgres.RootCertificatePathFor(handoff.CertificatePath);
+        if (!File.Exists(exportCertPath))
+        {
+            exportCertPath = handoff.CertificatePath;
+        }
+
         try
         {
-            certificate = (await File.ReadAllTextAsync(handoff.CertificatePath, cancellationToken)).Trim();
+            certificate = (await File.ReadAllTextAsync(exportCertPath, cancellationToken)).Trim();
         }
         catch (Exception ex)
         {
-            error.WriteLine($"Could not read the server TLS certificate ({handoff.CertificatePath}): {ex.Message}");
+            error.WriteLine($"Could not read the server TLS certificate ({exportCertPath}): {ex.Message}");
             return 1;
         }
 
@@ -2427,9 +2456,7 @@ public static class DarlingCliCommands
         var connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
         if (connectionString is null)
         {
-            error.WriteLine(
-                "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once " +
-                "so its first run initializes the store, then re-run this command.");
+            error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
             return 1;
         }
 
@@ -2927,7 +2954,7 @@ public static class DarlingCliCommands
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(postgres.Managed
-                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to repair.");
             return 1;
         }
@@ -2981,42 +3008,118 @@ public static class DarlingCliCommands
             return 0;
         }
 
-        /* SLICED PER DAY, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
+        /* SLICED, not one call over the whole span. CollapseSliceAsync runs each slice in ONE
            transaction, and that transaction takes locks on the raw chunks it touches — which the compression
            policy also wants. Handing it the entire survey span would make one long transaction sitting across
            however much history the store keeps, which is exactly the lock-duration family that has bitten this
-           repo before (#1564/#1567). On a default 4-day raw tier this is a handful of slices; on a store with
-           a widened retention it is the protection the method's own doc promises.
+           repo before (#1564/#1567).
+
+           Slice width is ADAPTIVE (#2105 round three): a day is the fast default, but on the field store
+           that motivated this the FIRST day-wide stage aggregation blew through the 15-minute statement
+           timeout — the operator watched it die at minute ~15 with the bare stream exception, three walls
+           deep. A failed slice now halves the window and retries the SAME start (the shared
+           QueryStoreBackfillState.AdaptiveSpan schedule the backfill worker uses, 24h base → 22.5m floor),
+           a completed slice resets to full width, and only a slice that fails AT the floor gives up to the
+           existing re-run message. Narrowing is announced so the operator sees progress, not a hang.
 
            The half-open upper bound includes the newest collapsed row — the survey reports that instant
            itself, not a bound past it — hence the final slice's one-second nudge. */
         long removed = 0;
         var sliceStart = survey.OldestUtc!.Value.Date;
+        var spanStart = sliceStart;
         var collapseEnd = survey.NewestUtc!.Value.AddSeconds(1);
+        var fullWidth = TimeSpan.FromDays(1);
+        var consecutiveFailures = 0;
+        var retriedAtWidth = false;
 
-        try
+        while (sliceStart < collapseEnd)
         {
-            while (sliceStart < collapseEnd)
+            var span = QueryStoreBackfillState.AdaptiveSpan(fullWidth, consecutiveFailures);
+            var sliceEnd = sliceStart + span;
+            if (sliceEnd > collapseEnd)
             {
-                var sliceEnd = sliceStart.AddDays(1);
-                if (sliceEnd > collapseEnd)
-                {
-                    sliceEnd = collapseEnd;
-                }
+                sliceEnd = collapseEnd;
+            }
 
-                removed += await QueryStoreSliceRepair.CollapseSliceAsync(
+            /* The width the slice ACTUALLY covers — the final slice clamps to the range end, so the
+               nominal AdaptiveSpan width can overstate it, and both the retry decision and the operator
+               messages must speak in real terms (review catch). */
+            var actualWidth = sliceEnd - sliceStart;
+
+            try
+            {
+                var sliceRemoved = await QueryStoreSliceRepair.CollapseSliceAsync(
                     connection, sliceStart, sliceEnd, cancellationToken);
+                removed += sliceRemoved;
 
+                /* Per-slice progress (#2105 operator feedback): the run used to be SILENT between the
+                   survey banner and DONE — on a big backlog that is an hour-plus of blank console that
+                   reads as a hang, on the exact stores where trust in this verb is already bruised.
+                   Percent is of the survey's own span, so it always ends at 100. */
+                var pctDone = 100.0 * (sliceEnd - spanStart).Ticks / (collapseEnd - spanStart).Ticks;
+                output.WriteLine($"  [OK] {sliceStart:yyyy-MM-dd HH:mm} +{actualWidth.TotalMinutes:F0}m — {sliceRemoved:N0} removed ({pctDone:F0}% of span, {removed:N0} total)");
+
+                consecutiveFailures = 0;
+                retriedAtWidth = false;
                 sliceStart = sliceEnd;
             }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            /* Each slice is its own transaction, so earlier slices are already committed and are not lost —
-               and the collapse is idempotent, so re-running picks up where this stopped. */
-            error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing slice was rolled back: {ex.Message}");
-            error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
-            return 1;
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var next = NextNarrowingFailureCount(fullWidth, consecutiveFailures, actualWidth);
+
+                /* A slice already at/below the adaptive floor (usually the clamped final tail — nothing
+                   says the leftover is ≥ the floor) can't be narrowed, but its likeliest failure is the
+                   transient/connection kind the fresh-connection retry exists for — so it earns ONE
+                   same-width retry before the give-up (review catch: giving up on the tail's first
+                   failure silently exempted the run's usual last slice from the retry mechanism). */
+                var sameWidthRetry = next is null && !retriedAtWidth;
+
+                if (next is int || sameWidthRetry)
+                {
+                    /* The statement-timeout failure this loop exists to survive surfaces as a broken
+                       STREAM, not a clean server-side cancel — the connection underneath is very likely
+                       dead, and retrying on it would fail instantly through every halving step (review
+                       catch). Cycle it: close is safe on a broken connection, and reopen draws a fresh
+                       physical connection. Session state doesn't matter — the slice's SET LOCAL and
+                       per-command timeouts are transaction/command scoped. A failed REOPEN degrades to
+                       the same clean idempotent-rerun message as every other failure here, never an
+                       unhandled crash (review catch — this verb has no caller safety net). */
+                    try
+                    {
+                        await connection.CloseAsync();
+                        await connection.OpenAsync(cancellationToken);
+                    }
+                    catch (Exception reopenEx) when (reopenEx is not OperationCanceledException)
+                    {
+                        error.WriteLine($"  The collapse failed after {removed:N0} row(s); the slice at {sliceStart:yyyy-MM-dd HH:mm} failed ({FirstLineOf(ex.Message)}) and the store connection could not be reopened: {FirstLineOf(reopenEx.Message)}");
+                        error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
+                        return 1;
+                    }
+
+                    if (next is int narrowerFailures)
+                    {
+                        consecutiveFailures = narrowerFailures;
+                        retriedAtWidth = false;
+                        var narrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, narrowerFailures);
+                        output.WriteLine($"  [RETRY] slice {sliceStart:yyyy-MM-dd HH:mm} +{actualWidth.TotalMinutes:F0}m failed ({FirstLineOf(ex.Message)}); narrowing to {narrower.TotalMinutes:F0}m and retrying.");
+                    }
+                    else
+                    {
+                        retriedAtWidth = true;
+                        output.WriteLine($"  [RETRY] slice {sliceStart:yyyy-MM-dd HH:mm} +{actualWidth.TotalMinutes:F0}m failed ({FirstLineOf(ex.Message)}); already at the narrowest width — retrying once on a fresh connection.");
+                    }
+
+                    continue;
+                }
+
+                /* Narrowing exhausted AND the same-width retry spent — this range cannot be repaired
+                   unattended. Each slice is its own transaction, so earlier slices are already committed
+                   and are not lost — and the collapse is idempotent, so re-running picks up where this
+                   stopped. */
+                error.WriteLine($"  The collapse failed after {removed:N0} row(s); the failing {actualWidth.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}");
+                error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
+                return 1;
+            }
         }
 
         output.WriteLine($"  Collapsed. Rows removed: {removed:N0}");
@@ -3063,6 +3166,37 @@ public static class DarlingCliCommands
     /// <summary>Floors an instant to its bucket, so a refresh window covers whole buckets on both edges.</summary>
     private static DateTime Floor(DateTime value, TimeSpan bucket)
         => bucket <= TimeSpan.Zero ? value : new DateTime(value.Ticks - (value.Ticks % bucket.Ticks), value.Kind);
+
+    /// <summary>
+    /// The collapse loop's narrowing decision, pure so it pins without a live timeout: the smallest
+    /// failure count whose <see cref="QueryStoreBackfillState.AdaptiveSpan"/> width actually narrows a
+    /// slice that COVERED <paramref name="actualWidth"/> (a clamped final slice can be narrower than
+    /// several nominal halving steps, and re-running an identical window just re-hits the same wall), or
+    /// null when no step can — the slice already sits at/below the adaptive floor, where the caller's
+    /// one same-width fresh-connection retry is the only move left.
+    /// </summary>
+    internal static int? NextNarrowingFailureCount(TimeSpan fullWidth, int consecutiveFailures, TimeSpan actualWidth)
+    {
+        var next = consecutiveFailures + 1;
+        var narrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, next);
+        while (narrower >= actualWidth)
+        {
+            var evenNarrower = QueryStoreBackfillState.AdaptiveSpan(fullWidth, next + 1);
+            if (evenNarrower >= narrower)
+            {
+                return null;
+            }
+
+            next++;
+            narrower = evenNarrower;
+        }
+
+        return next;
+    }
+
+    /// <summary>An exception message's first line, CR-trimmed — one-line operator output must stay one line.</summary>
+    private static string FirstLineOf(string message)
+        => message.Split('\n')[0].TrimEnd('\r');
 
     /// <summary>How <c>--recompress-plan-dim</c> handles the closing VACUUM FULL (#2076).</summary>
     public enum RecompressVacuumMode
@@ -3118,6 +3252,30 @@ public static class DarlingCliCommands
         }
 
         return (configPath, dryRun, mode, null);
+    }
+
+    /// <summary>
+    /// #2171: whether the store's plan_xml_compression setting is 'none' — the mode where the live
+    /// writer stores plans as plain text and recompression would fight it forever. Reads defensively:
+    /// the column arrives at V62, and the verb must keep working against the older stores it exists
+    /// to convert, so a missing column (42703) is "no mode to conflict with". Public-for-tests via
+    /// the live suite; the verb is its only production caller.
+    /// </summary>
+    internal static async Task<bool> StoreIsSetToPlainTextPlansAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var codec = new NpgsqlCommand(
+                "SELECT plan_xml_compression FROM config_service WHERE id = 1", connection);
+            return await codec.ExecuteScalarAsync(cancellationToken) is string mode
+                && string.Equals(mode.Trim(), "none", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42703")
+        {
+            /* Pre-V62 store: no column, no mode to conflict with — proceed. */
+            return false;
+        }
     }
 
     /// <summary>
@@ -3177,7 +3335,7 @@ public static class DarlingCliCommands
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(postgres.Managed
-                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to convert.");
             return 1;
         }
@@ -3196,6 +3354,20 @@ public static class DarlingCliCommands
         output.WriteLine();
         output.WriteLine("PerformanceMonitor Darling — plan-dimension recompression (--recompress-plan-dim)");
         output.WriteLine();
+
+        /* #2171: a store configured plan_xml_compression = 'none' WANTS text rows — the operator chose
+           direct-SQL readability, and this verb would convert exactly the rows the live writer keeps
+           producing, the two fighting forever. Refuse with the way out rather than silently churning. */
+        if (await StoreIsSetToPlainTextPlansAsync(connection, cancellationToken))
+        {
+            error.WriteLine(
+                "This store is configured plan_xml_compression = 'none' (plans deliberately stored as " +
+                "plain text for direct-SQL consumers, #2171). Recompressing would convert rows the live " +
+                "writer keeps producing as text - the two would fight forever. If you want gzip storage " +
+                "back, set plan_xml_compression = 'gzip' in the store's service settings first, then " +
+                "re-run this verb.");
+            return 1;
+        }
 
         PlanDimRecompression.Survey survey;
         try
@@ -3416,6 +3588,208 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
+    /// What <c>--add-server</c> prints when stdin carries nothing — to STDOUT, per the [#2097] lesson that a
+    /// prompt or error on STDERR is invisible in the ISE and some integrated terminals, so a verb that writes
+    /// only there reads as hung.
+    /// </summary>
+    public static string AddServerUsageText() =>
+        "Nothing arrived on stdin, so no server was added." + Environment.NewLine +
+        Environment.NewLine +
+        "--add-server (or --add-servers) reads a JSON ARRAY of servers from stdin — the same shape the" + Environment.NewLine +
+        "add_servers MCP tool takes." + Environment.NewLine +
+        "The password is read from stdin rather than the command line on purpose: an argument is visible in the" + Environment.NewLine +
+        "process list and in shell history." + Environment.NewLine +
+        Environment.NewLine +
+        "  PowerShell:  Get-Content servers.json | .\\PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
+        "  cmd:         type servers.json | PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
+        Environment.NewLine +
+        "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
+        "  [" + Environment.NewLine +
+        "    {\"host\":\"sql01\",\"auth\":\"integrated\"}," + Environment.NewLine +
+        "    {\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\"," + Environment.NewLine +
+        "     \"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\"}" + Environment.NewLine +
+        "  ]";
+
+    /// <summary>
+    /// Renders the <c>add_servers</c> result JSON as operator lines plus an exit code. PURE, so the formatting and
+    /// the exit-code policy pin without a store — the same split <see cref="FormatProbeLine"/> uses.
+    ///
+    /// <para>Exit 0 requires that something landed and nothing failed. A batch of pure duplicates exits 0: re-running
+    /// the same file is idempotent, not an error. Nothing at all landed (an empty array, or every entry rejected)
+    /// exits 1, because a verb that changed nothing must not report success to a deployment script.</para>
+    /// </summary>
+    internal static (IReadOnlyList<string> Lines, int ExitCode) FormatAddServerOutcome(string resultJson)
+    {
+        var lines = new List<string>();
+        try
+        {
+            using var document = JsonDocument.Parse(resultJson);
+            var root = document.RootElement;
+
+            /* The whole-payload rejection shape — {status, message} with no per-server results. */
+            if (!root.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array)
+            {
+                var status = root.TryGetProperty("status", out var s) ? s.GetString() : "error";
+                var message = root.TryGetProperty("message", out var m) ? m.GetString() : resultJson;
+                lines.Add($"  [{status?.ToUpperInvariant()}] {message}");
+                return (lines, 1);
+            }
+
+            foreach (var result in results.EnumerateArray())
+            {
+                var server = result.TryGetProperty("server", out var sv) ? sv.GetString() : null;
+                var status = (result.TryGetProperty("status", out var st) ? st.GetString() : null) ?? string.Empty;
+                var detail = result.TryGetProperty("detail", out var dt) ? dt.GetString() : null;
+                var tag = status switch
+                {
+                    "added" => "ADDED",
+                    "duplicate" => "SKIP",
+                    "connection_failed" => "FAIL",
+                    "invalid" => "INVALID",
+                    _ => status.ToUpperInvariant(),
+                };
+                lines.Add(string.IsNullOrWhiteSpace(detail)
+                    ? $"  [{tag}] {server ?? "(unnamed)"}"
+                    : $"  [{tag}] {server ?? "(unnamed)"}: {detail}");
+            }
+
+            var added = root.TryGetProperty("added", out var a) ? a.GetInt32() : 0;
+            var skipped = root.TryGetProperty("skipped", out var k) ? k.GetInt32() : 0;
+            var failed = root.TryGetProperty("failed", out var f) ? f.GetInt32() : 0;
+
+            lines.Add(string.Empty);
+            lines.Add(string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} added, {1} already registered, {2} failed.",
+                added,
+                skipped,
+                failed));
+
+            if (added > 0)
+            {
+                /* The registry write bumps config_version through trg_bump_monitored_servers, which the worker
+                   polls every sweep — so say the restart is unnecessary rather than leaving them to wonder. */
+                lines.Add("The running service picks these up on its next config poll; no restart is needed.");
+            }
+
+            return (lines, failed > 0 || (added == 0 && skipped == 0) ? 1 : 0);
+        }
+        catch (JsonException)
+        {
+            /* Not every failure arrives as JSON. AddServersAsync's catch-all returns McpHelpers.FormatError,
+               which is PLAIN TEXT ("Error during add_servers: ..."), so a genuine store failure that happens
+               AFTER the request parsed — a dropped connection mid-batch, a constraint violation — lands here.
+               That text IS the message the operator needs; wrapping it in "could not parse" buries the one line
+               that explains the failure, precisely when the verb is being used as a deployment gate. Only
+               something that looked like JSON and was not gets the parse wrapper. */
+            var text = resultJson?.Trim() ?? string.Empty;
+            lines.Add(text.StartsWith('{') || text.StartsWith('[')
+                ? $"  Could not parse the result: {text}"
+                : $"  {text}");
+            return (lines, 1);
+        }
+    }
+
+    /// <summary>
+    /// <c>--add-server</c> (#2256): registers monitored server(s) in the store from a JSON array on stdin, through
+    /// the SAME <see cref="DarlingMcpServerAdminTools.AddServers"/> path the MCP tool uses — so validation, dedupe,
+    /// the in-process connection probe, password encryption and the identity computation are shared rather than
+    /// reimplemented. <c>server_id</c> in particular is a hash of the storage name, which is exactly the part an
+    /// operator cannot safely produce by hand.
+    ///
+    /// <para>Why this exists: the store is authoritative after the first seed, so darling.json edits are ignored,
+    /// and the web surface deliberately excludes the write tools. A headless host — the field report ran Windows
+    /// Server 2012, which cannot run the Viewer at all — had no supported path.</para>
+    /// </summary>
+    public static async Task<int> AddServerAsync(
+        string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var json = input is null ? null : await input.ReadToEndAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            output.WriteLine(AddServerUsageText());
+            return 1;
+        }
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return 1;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return 1;
+        }
+
+        string? connectionString;
+        if (postgres.Managed)
+        {
+            /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no
+               such guard, which is why this is scoped to the managed branch rather than the whole verb — a Linux
+               host pointed at its own Postgres can register servers. */
+            if (!OperatingSystem.IsWindows())
+            {
+                error.WriteLine("A managed Postgres store keeps its credential in DPAPI, so --add-server needs Windows. "
+                    + "A bring-your-own store (postgres.connectionString) works on any platform.");
+                return 1;
+            }
+
+            connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                /* Emitted HERE, inside the branch the guard above proved is Windows, rather than from a shared
+                   check below keyed on postgres.Managed. The sibling verbs can write it below because they carry
+                   [SupportedOSPlatform("windows")] on the whole method; this one deliberately does not, and a
+                   bool is not something the platform analyzer can correlate with an earlier OS guard — so the
+                   call has to sit where Windows is provable rather than where it merely happens to hold. */
+                error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
+                return 1;
+            }
+        }
+        else
+        {
+            connectionString = postgres.ConnectionString;
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                error.WriteLine("postgres.connectionString is empty, so there is no store to register a server in.");
+                return 1;
+            }
+        }
+
+        output.WriteLine();
+        output.WriteLine("PerformanceMonitor Darling — register monitored server(s) (--add-server)");
+        output.WriteLine();
+
+        string resultJson;
+        try
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            resultJson = await DarlingMcpServerAdminTools.AddServers(dataSource, json);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not reach the store: {ex.Message}");
+            return 1;
+        }
+
+        var (lines, exitCode) = FormatAddServerOutcome(resultJson);
+        foreach (var line in lines)
+        {
+            output.WriteLine(line);
+        }
+
+        return exitCode;
+    }
+
+    /// <summary>
     /// Materializes the query-acceleration rollups back over pre-existing history so the held raw retention
     /// policies can arm themselves (#1759 Phase 2). Runs while the service is UP.
     ///
@@ -3465,7 +3839,7 @@ public static class DarlingCliCommands
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             error.WriteLine(postgres.Managed
-                ? "The managed store credential does not exist yet — start the PerformanceMonitor Darling service once so its first run initializes the store, then re-run this command."
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
                 : "postgres.connectionString is empty, so there is no store to back fill.");
             return 1;
         }

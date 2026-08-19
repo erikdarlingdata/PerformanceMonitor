@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -165,11 +166,27 @@ public sealed class DuckDbSchemaGeneratorTests
     [Fact]
     public void Generated_EmitsEveryCatalogTable_AndThirtyNineIndexes()
     {
-        Assert.Equal(41, DuckDbSchemaGenerator.CreateTableStatements().Count());
+        /* Counting the filtered sequence against itself could not fail. What matters is WHICH tables are
+           emitted, so the names are compared as sets — and that no PostgreSQL table leaks into Lite's DuckDB,
+           which is the actual invariant this file now guards. */
+        var emitted = DuckDbSchemaGenerator.CreateTableStatements()
+            .Select(s => Regex.Match(s, @"CREATE TABLE IF NOT EXISTS (\w+)").Groups[1].Value)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        var expected = DuckDbSchemaGenerator.StoredCollectors
+            .Select(c => c.TargetTable)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
 
-        /* 41 collectors minus the two index-less config tables = 39 indexes (database_states is a
+        Assert.Equal(expected, emitted);
+        Assert.DoesNotContain(emitted, n => n.StartsWith("pg_", StringComparison.Ordinal));
+        Assert.All(
+            CollectorCatalog.All.Where(c => c.TargetEngine == CollectorTargetEngine.PostgreSql),
+            c => Assert.DoesNotContain(c.TargetTable, emitted));
+
+        /* The stored collectors minus the two index-less config tables (database_states is a
            time-series collector and gets the default retrieval index). */
-        Assert.Equal(39, DuckDbSchemaGenerator.CreateIndexStatements().Count());
+        Assert.Equal(DuckDbSchemaGenerator.StoredCollectors.Count() - 2, DuckDbSchemaGenerator.CreateIndexStatements().Count());
     }
 
     /// <summary>
@@ -184,7 +201,7 @@ public sealed class DuckDbSchemaGeneratorTests
     {
         var failures = new List<string>();
 
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in DuckDbSchemaGenerator.StoredCollectors)
         {
             var expected = new List<(string Name, string Type)>();
             if (schema.IncludesCollectionId)
@@ -222,7 +239,7 @@ public sealed class DuckDbSchemaGeneratorTests
     [Fact]
     public void ArchivableTables_AreCatalogDriven_AndMirrorEachOther()
     {
-        var expected = CollectorCatalog.All.Select(c => c.TargetTable)
+        var expected = DuckDbSchemaGenerator.StoredCollectors.Select(c => c.TargetTable)
             .Concat(new[] { "config_alert_log", "collection_log" })
             .OrderBy(t => t, StringComparer.Ordinal)
             .ToArray();
@@ -236,7 +253,7 @@ public sealed class DuckDbSchemaGeneratorTests
         /* The time column for every archivable collector table is its catalog prefix-time column;
            the two non-collector tables carry their own. */
         var timeByTable = ArchiveService.ArchivableTables.ToDictionary(t => t.Table, t => t.TimeColumn);
-        foreach (var schema in CollectorCatalog.All)
+        foreach (var schema in DuckDbSchemaGenerator.StoredCollectors)
         {
             Assert.Equal(schema.PrefixTimeColumnName, timeByTable[schema.TargetTable]);
         }

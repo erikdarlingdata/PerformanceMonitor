@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Collectors;
 /// <see cref="WaitStatsCollector"/> exactly: single DMV, delta-based between snapshots. The
 /// Dashboard proc's server_start_time reset marker is intentionally dropped — the shared
 /// <see cref="CollectorContext.Deltas"/> calculator detects a counter reset itself (a value drop
-/// yields a 0 delta) and applies the 300 s gap policy, so no reset column is needed. Available on
+/// yields a 0 delta) and applies the shared gap policy, so no reset column is needed. Available on
 /// SQL Server, Azure SQL Database, and Azure SQL Managed Instance (verified against MS Learn), so
 /// <see cref="AppliesTo"/> is unconditionally true, matching wait_stats.
 /// </summary>
@@ -87,10 +87,10 @@ OPTION(RECOMPILE);";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta groups, key (latch_class), and the 300 s gap policy are the parity contract. */
-        var deltaWaitingRequests = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_waiting_requests", row.LatchClass, row.WaitingRequestsCount, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_wait_time", row.LatchClass, row.WaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaMaxWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_max_wait", row.LatchClass, row.MaxWaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        /* Delta groups, key (latch_class), and the shared gap policy are the parity contract. */
+        var deltaWaitingRequests = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_waiting_requests", row.LatchClass, row.WaitingRequestsCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_wait_time", row.LatchClass, row.WaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaMaxWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "latch_stats_max_wait", row.LatchClass, row.MaxWaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.LatchClass)             /* latch_class VARCHAR */

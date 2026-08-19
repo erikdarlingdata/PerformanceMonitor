@@ -41,15 +41,20 @@ public sealed class ViewerPerfmonSqlTests
     }
 
     [Fact]
-    public void PerfmonTrendsSql_SumsValueAndDelta_GroupedByCounterAndTime()
+    public void PerfmonTrendsSql_SumsValueAndDelta_ButTakesTheIntervalAsMax()
     {
         var sql = ViewerDataService.PerfmonTrendsSql(3);
 
         Assert.Contains("FROM v_perfmon_stats", sql, StringComparison.Ordinal);
-        /* The two aggregates are CAST to bigint for the typed GetInt64 reader (Postgres SUM(bigint)
+        /* Every aggregate is CAST to bigint for the typed GetInt64 reader (Postgres SUM(bigint)
            returns numeric). */
         Assert.Contains("CAST(SUM(cntr_value) AS bigint)", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(delta_cntr_value) AS bigint)", sql, StringComparison.Ordinal);
+        /* The interval is NOT additive across a counter's instance rows — it is one measured sweep gap
+           repeated per instance, so SUM would multiply the denominator by the instance count (12-17 for
+           Transactions/sec on the fleet). Same pin as the MCP read carries, #2234. */
+        Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(sample_interval_seconds)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY counter_name, collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY counter_name, collection_time", sql, StringComparison.Ordinal);
     }

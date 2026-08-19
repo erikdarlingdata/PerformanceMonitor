@@ -327,6 +327,37 @@ END;
     public const int MaxTextBytesPerDatabase = 64 * 1024 * 1024;
 
     /// <summary>
+    /// The WALL-CLOCK ceiling for one database's pass (#2150), and the bound of last resort: the row cap
+    /// bounds ROWS, the byte budget bounds BYTES, and neither bounds TIME.
+    ///
+    /// <para><b>The field report it exists for.</b> Two Azure SQL DB elastic-pool databases, same day,
+    /// across the 3.3.0 → 3.4.0 upgrade: 198 passes at a median of <b>4.8 s</b> before, then six passes of
+    /// 0.1, 37.6, 46.1, 82.1, 0.1 and <b>99.8 minutes</b> after. Because a host's live collectors run one
+    /// after another, a single 100-minute pass starves every other collector on that server — which is the
+    /// actual mechanism behind #2148's "all collection stopped".</para>
+    ///
+    /// <para><b>Why nothing already caught it.</b> The <c>CommandTimeout</c> was 30 s the whole time. It
+    /// bounds the wait for a network read and SqlClient resets it on each read that arrives, so a result
+    /// set that trickles rows never trips it — see <see cref="PerItemWallClockBudget"/>.</para>
+    ///
+    /// <para><b>Why ten minutes.</b> It has to sit far above every healthy observation and far below every
+    /// pathological one. Healthy: 4.8 s median and 31 s max across 198 field passes; 375–524 ms for the
+    /// staged query measured on a 212k-row Query Store; 6 s for the two fast post-upgrade passes.
+    /// Pathological: 37.6 minutes at the low end. Ten minutes is ~19× the worst healthy pass, ~10× the
+    /// Darling command-timeout default, and ~3.7× under the smallest pass this is meant to stop.</para>
+    ///
+    /// <para><b>It converges rather than repeating.</b> A cut pass ships nothing, so the watermark does not
+    /// advance and the range is re-read — but the failure also feeds #2111's consecutive-failure count, so
+    /// the catch-up window halves per failure toward 15 minutes until a pass fits. A success resets it and
+    /// the database returns to full width. Without that this would be a bound that fires forever on the same
+    /// impossible width; with it, a database that cannot finish narrows until it can.</para>
+    /// </summary>
+    public static readonly TimeSpan PerDatabaseWallClockBudget = TimeSpan.FromMinutes(10);
+
+    /// <inheritdoc />
+    public override TimeSpan? PerItemWallClockBudget => PerDatabaseWallClockBudget;
+
+    /// <summary>
     /// The self-identification marker every collector query carries in its leading comment. Self rows
     /// are excluded CLIENT-SIDE in the shared read loop both paths use (#1565) — the old SQL-side
     /// NOT LIKE predicate was 75% of the read's elapsed time (a full nvarchar(max) scan per row on a
@@ -476,7 +507,7 @@ END;
     /// comparison — the #1960 invariant, mirror-imaged. Everything else (columns, slice aggregation,
     /// version gates) is byte-identical, so the reader contract cannot drift between live and backfill.</para>
     /// </summary>
-    internal static string BuildPayloadBody(CollectorContext context, bool backfill = false)
+    internal static string BuildPayloadBody(CollectorContext context, bool backfill = false, string? databaseName = null)
     {
         /* Detect server version for version-gated columns.
            isNew = true for SQL Server 2017+ (product version > 13) or Azure SQL DB/MI.
@@ -605,15 +636,15 @@ END;
            comma and sit at the END of the inner select list precisely because they can be empty; the
            outer ones keep their original trailing-comma form because they are never empty. */
         string numPhysIoReadsAgg = isNew
-            ? $",\n        {WeightedAverage("avg_num_physical_io_reads")},\n        min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n        max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
+            ? $",\n    {WeightedAverage("avg_num_physical_io_reads")},\n    min_num_physical_io_reads = MIN(qsrs.min_num_physical_io_reads),\n    max_num_physical_io_reads = MAX(qsrs.max_num_physical_io_reads)"
             : "";
 
         string logBytesAgg = isNew
-            ? $",\n        {WeightedAverage("avg_log_bytes_used")},\n        min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n        max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
+            ? $",\n    {WeightedAverage("avg_log_bytes_used")},\n    min_log_bytes_used = MIN(qsrs.min_log_bytes_used),\n    max_log_bytes_used = MAX(qsrs.max_log_bytes_used)"
             : "";
 
         string tempdbAgg = isNew
-            ? $",\n        {WeightedAverage("avg_tempdb_space_used")},\n        min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n        max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
+            ? $",\n    {WeightedAverage("avg_tempdb_space_used")},\n    min_tempdb_space_used = MIN(qsrs.min_tempdb_space_used),\n    max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)"
             : "";
 
         string numPhysIoReadsCols = isNew
@@ -653,9 +684,64 @@ END;
            plans live, and Darling's stored-plan readers all guard `query_plan_text IS NOT NULL`. Not
            mirrored into the Dashboard proc: its "Download Plan" reads by exact collection_id, where
            per-row NULLs would break a real reader. */
-        string planTextCol = context.CapturePlanXml
-            ? "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,"
-            : "query_plan_text = CONVERT(nvarchar(1), NULL),";
+        /* #2164: skip the XML for plans the store already holds. 97% of the plan XML shipped in a
+           three-hour fleet window was for plans held over an hour — the ROW_NUMBER gate ships each plan once
+           per PASS but re-ships it every pass forever, and since drain is 94-97% of a pass and is per-row LOB
+           cost, NOT fetching is worth far more than fetching less. The watermark is the highest plan_id whose
+           XML was actually STORED for this database; plan_id is monotonic within a database, so a higher id
+           is a plan we have never stored. Inlined as a parsed long (never operator input) because the body
+           nests inside sp_executesql on three paths and threading another parameter through all of them buys
+           nothing. Zero — absent, malformed, or expired — renders no predicate, so the conservative path is
+           byte-identical to the pre-#2164 query.
+
+           NEVER on the backfill path. The watermark tracks the plans the LIVE window has stored, and backfill
+           digs the other way — into intervals older than anything collected, whose rows reference plans
+           compiled long ago and therefore numbered BELOW the live watermark. Applying it there would suppress
+           essentially every plan the backfill exists to fetch, silently: the slices would still ship runtime
+           stats, so a filled range would look complete while carrying no plan XML at all.
+
+           KNOWN GAP, bounded by QueryStorePlanXmlState.RefreshAfter: plan_id is monotonic in COMPILE order, which is
+           not the same as "we have stored it". A plan compiled before monitoring began, dormant through every
+           collected window, then executed again, arrives with an id below the watermark and has its XML
+           suppressed until the refresh horizon expires. Bounding it is the reason that horizon exists. The
+           exact fix is a store-DERIVED watermark (the host asking its own plan dimension for the lowest
+           plan_id missing XML) rather than this collector-derived one; that needs host plumbing on both
+           products and is tracked separately. */
+        /* #2210: the watermark now belongs to BuildPlanFetchQuery (the `watermark` parameter there,
+           resolved by the host via QueryStorePlanXmlState.Resolve). It no longer narrows anything in
+           this runtime-stats query, so there is nothing to compute here. */
+
+        /* #2210: this runtime-stats query no longer carries plan XML at all — the ROW_NUMBER-gated
+           CASE and its in-stream watermark predicate are DELETED, not reworked. BuildPlanFetchQuery is
+           the only thing that reads plan XML now: it fetches plans in plan_id order under a byte
+           budget and lands each plan ONCE per database LIFETIME instead of once per PASS. The shape
+           being replaced re-shipped every plan on every pass forever — measured at 5.0x redundancy
+           (871,196 plan-XML rows against 175,328 distinct database/plan pairs in a day, on a 33 GB
+           table). Both branches below now emit the same placeholder, so the payload is byte-identical
+           to Lite's regardless of the flag, and CapturePlanXml gates the separate BuildPlanFetchQuery
+           fetch rather than this query. Existing inline rows are NOT migrated by this change and stay
+           readable via the reader's existing NULL-guarded fallback; dropping the query_plan_text column
+           itself is a separate, later migration. */
+        const string planTextCol = "query_plan_text = CONVERT(nvarchar(1), NULL),";
+
+        /* #2150: the LAST nvarchar(max) in this projection, and now the whole remaining cost of it. The cap
+           and ship order sit above these joins, so a Top-N Sort carries the text through the sort and reads
+           all of its input before emitting row one — choosing 50,000 rows materialized text for the entire
+           qualifying set. Measured with #2210's plan XML already gone and this column as the only
+           difference: time-to-first-row 4.67s vs 0.45s at 1,505 rows, 5.02s vs 0.57s at 4,037. Neither knob
+           bounds it (TOP (500) == TOP (50000); wall time flat from a 4 MB to a 256 MB client budget).
+
+           Gated rather than removed, because Lite stores this text inline in DuckDB and reads it from
+           there — nulling it unconditionally would blind Lite, which is why this is a host flag and not a
+           deletion. The ORDINAL is identical either way, the same discipline the version-gated columns
+           above follow, so a host that has not built text storage is byte-compatible.
+
+           The query_text JOIN deliberately STAYS when the column is nulled: it is one row per key and the
+           measurement above was taken with it in place, so removing it would be an unmeasured change riding
+           along on a measured one. */
+        string queryTextCol = context.FetchQueryTextSeparately
+            ? "query_sql_text = CONVERT(nvarchar(1), NULL),"
+            : "query_sql_text = qst.query_sql_text,";
 
         /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
            version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
@@ -681,7 +767,7 @@ END;
            Leading comma: it splices into both the inner select list and the GROUP BY, and is empty on
            targets without the column. */
         string replicaGroupKey = hasReplicaAttribution
-            ? ",\n        qsrs.replica_group_id"
+            ? ",\n    qsrs.replica_group_id"
             : "";
 
         /* There is deliberately NO self-exclusion predicate in this query (#1565, actual-plan evidence
@@ -786,17 +872,114 @@ END;
            its oldest shipped row, and the next slice's strict `< @ceiling_time` resumes with no hole
            or re-ship. Same TIES, same budget, same tie-group completion; only the window and the
            direction differ. */
+        /* The interval pre-filter resolves candidate interval ids from the INTERVAL CATALOG
+           (sys.query_store_runtime_stats_interval, ~one row per interval of retained history — hundreds
+           of rows) rather than from runtime_stats itself (#2133; measured on the field store: 20 ms vs
+           426 ms for the identical id set). end_time/start_time are datetimeoffset; the datetime2
+           parameters promote with a zero offset, i.e. as the UTC instants they are — the same implicit
+           promotion the HAVING's last_execution_time comparison has always relied on. The catalog bound
+           is a SUPERSET (an interval can end after the cutoff while all its rows are older); the HAVING
+           below stays the exact row-level filter, so shipped semantics are unchanged. */
+        /* #2312: the live path has two forms. Most cycles ship CLOSED intervals only — immutable, so
+           final on first collection — and skip the OPEN interval's cumulative snapshot, which is the
+           whole re-read bill on a big multi-tenant primary (40–110 s per run measured, every one of
+           those snapshots but the latest discarded by the read side's rn = 1). The host opts a cycle
+           back in via context.IncludeOpenInterval (default true = today's exact form) on the
+           QueryStoreOpenIntervalState cadence. SYSUTCDATETIME() promotes to datetimeoffset with a zero
+           offset against end_time — the same implicit UTC-instant promotion the @cutoff_time comparison
+           has always relied on — and being server-evaluated it adds no parameter, so the
+           single-parameter sp_executesql contract is unchanged. Correctness of the skip leans on the
+           cumulative-snapshot contract: a closed interval whose final content differs from our last
+           open-snapshot must carry executions newer than the watermark, so the standing HAVING readmits
+           it; one whose content did not change IS our last snapshot. */
         var intervalPreFilter = backfill
-            ? @"f.last_execution_time > @floor_time
-        AND   f.last_execution_time < @ceiling_time"
-            : "f.last_execution_time > @cutoff_time";
+            ? @"i.end_time > @floor_time
+    AND   i.start_time < @ceiling_time"
+            : context.IncludeOpenInterval
+                ? "i.end_time > @cutoff_time"
+                : @"i.end_time > @cutoff_time
+    AND   i.end_time <= SYSUTCDATETIME()";
         var intervalHaving = backfill
             ? @"MAX(qsrs.last_execution_time) > @floor_time
-        AND MAX(qsrs.last_execution_time) < @ceiling_time"
+    AND MAX(qsrs.last_execution_time) < @ceiling_time"
             : "MAX(qsrs.last_execution_time) > @cutoff_time";
         var shipOrder = backfill ? "DESC" : "ASC";
 
+        /* STAGED, not monolithic (#2133). Joining the slice aggregate straight into the
+           query_store_plan/query/text TVFs handed the optimizer nothing but fixed-guess cardinalities,
+           and the shape it picked re-materialized a TVF per probe — a fixed cost no window width could
+           reduce. Field bisection on an 82k-plan catalog (echo, SQL 2022): the aggregate alone ran in
+           81 ms and each TVF scanned bare in ~300 ms, yet aggregate-JOIN-qsp could not finish in 30 s,
+           hinted or not; staged through the temp the same work totaled 524 ms (56 stage + 409 join).
+           That fixed cost is what wedged the big-catalog databases at EVERY catch-up width and made
+           #2125's shrink floor-pin instead of converge. The temp gives the final join REAL row counts —
+           and for that reason the old LOOP JOIN hint must NOT return: looping from the temp into the
+           TVFs is the same per-probe re-materialization by another name; the 524 ms join is unhinted,
+           chosen by the optimizer from true cardinalities. sp_QuickieStore stages for the same reason.
+
+           Batch mechanics: SELECT INTO emits no result set, so the batch still returns exactly ONE
+           result set (the reader/byte-budget contract). Inside the on-prem [db].sys.sp_executesql
+           nesting the temp's scope dies with the invocation; on Azure's direct per-database path the
+           leading DROP TABLE IF EXISTS covers pooled-connection reuse. TOP ... WITH TIES, the ship
+           order, and the derived-watermark semantics live on the final SELECT, unchanged.
+
+           BOTH statements carry OPTION(RECOMPILE) (review catch): split out on its own, the staging
+           statement would otherwise be cached via sp_executesql's parameterized text and sniffed
+           across live vs backfill windows of wildly different selectivity — the same fixed-guess
+           failure mode this rewrite removes, reintroduced one statement earlier. */
         return $@"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+DROP TABLE IF EXISTS #pm_qs_slice;
+
+SELECT /* PerformanceMonitorLite */
+    qsrs.plan_id,
+    qsrs.runtime_stats_interval_id,
+    qsrs.execution_type_desc{replicaGroupKey},
+    first_execution_time = MIN(qsrs.first_execution_time),
+    last_execution_time = MAX(qsrs.last_execution_time),
+    count_executions = SUM(qsrs.count_executions),
+    {WeightedAverage("avg_duration")},
+    min_duration = MIN(qsrs.min_duration),
+    max_duration = MAX(qsrs.max_duration),
+    {WeightedAverage("avg_cpu_time")},
+    min_cpu_time = MIN(qsrs.min_cpu_time),
+    max_cpu_time = MAX(qsrs.max_cpu_time),
+    {WeightedAverage("avg_logical_io_reads")},
+    min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
+    max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
+    {WeightedAverage("avg_logical_io_writes")},
+    min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
+    max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
+    {WeightedAverage("avg_physical_io_reads")},
+    min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
+    max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
+    {WeightedAverage("avg_clr_time")},
+    min_clr_time = MIN(qsrs.min_clr_time),
+    max_clr_time = MAX(qsrs.max_clr_time),
+    min_dop = MIN(qsrs.min_dop),
+    max_dop = MAX(qsrs.max_dop),
+    {WeightedAverage("avg_query_max_used_memory")},
+    min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
+    max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
+    {WeightedAverage("avg_rowcount")},
+    min_rowcount = MIN(qsrs.min_rowcount),
+    max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
+INTO #pm_qs_slice
+FROM sys.query_store_runtime_stats AS qsrs
+WHERE qsrs.runtime_stats_interval_id IN
+(
+    SELECT
+        i.runtime_stats_interval_id
+    FROM sys.query_store_runtime_stats_interval AS i
+    WHERE {intervalPreFilter}
+)
+GROUP BY
+    qsrs.plan_id,
+    qsrs.runtime_stats_interval_id,
+    qsrs.execution_type_desc{replicaGroupKey}
+HAVING
+    {intervalHaving}
+OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_id = qsq.query_id,
@@ -812,7 +995,7 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
                 OBJECT_SCHEMA_NAME(qsq.object_id) + N'.' + OBJECT_NAME(qsq.object_id),
                 N'Unknown')
         END,
-    query_sql_text = qst.query_sql_text,
+    {queryTextCol}
     query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
     count_executions = qsrs.count_executions,
     avg_duration = qsrs.avg_duration,
@@ -855,56 +1038,7 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     {replicaRoleCol},
     runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
     interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')
-FROM
-(
-    SELECT
-        qsrs.plan_id,
-        qsrs.runtime_stats_interval_id,
-        qsrs.execution_type_desc{replicaGroupKey},
-        first_execution_time = MIN(qsrs.first_execution_time),
-        last_execution_time = MAX(qsrs.last_execution_time),
-        count_executions = SUM(qsrs.count_executions),
-        {WeightedAverage("avg_duration")},
-        min_duration = MIN(qsrs.min_duration),
-        max_duration = MAX(qsrs.max_duration),
-        {WeightedAverage("avg_cpu_time")},
-        min_cpu_time = MIN(qsrs.min_cpu_time),
-        max_cpu_time = MAX(qsrs.max_cpu_time),
-        {WeightedAverage("avg_logical_io_reads")},
-        min_logical_io_reads = MIN(qsrs.min_logical_io_reads),
-        max_logical_io_reads = MAX(qsrs.max_logical_io_reads),
-        {WeightedAverage("avg_logical_io_writes")},
-        min_logical_io_writes = MIN(qsrs.min_logical_io_writes),
-        max_logical_io_writes = MAX(qsrs.max_logical_io_writes),
-        {WeightedAverage("avg_physical_io_reads")},
-        min_physical_io_reads = MIN(qsrs.min_physical_io_reads),
-        max_physical_io_reads = MAX(qsrs.max_physical_io_reads),
-        {WeightedAverage("avg_clr_time")},
-        min_clr_time = MIN(qsrs.min_clr_time),
-        max_clr_time = MAX(qsrs.max_clr_time),
-        min_dop = MIN(qsrs.min_dop),
-        max_dop = MAX(qsrs.max_dop),
-        {WeightedAverage("avg_query_max_used_memory")},
-        min_query_max_used_memory = MIN(qsrs.min_query_max_used_memory),
-        max_query_max_used_memory = MAX(qsrs.max_query_max_used_memory),
-        {WeightedAverage("avg_rowcount")},
-        min_rowcount = MIN(qsrs.min_rowcount),
-        max_rowcount = MAX(qsrs.max_rowcount){numPhysIoReadsAgg}{logBytesAgg}{tempdbAgg}
-    FROM sys.query_store_runtime_stats AS qsrs
-    WHERE qsrs.runtime_stats_interval_id IN
-    (
-        SELECT
-            f.runtime_stats_interval_id
-        FROM sys.query_store_runtime_stats AS f
-        WHERE {intervalPreFilter}
-    )
-    GROUP BY
-        qsrs.plan_id,
-        qsrs.runtime_stats_interval_id,
-        qsrs.execution_type_desc{replicaGroupKey}
-    HAVING
-        {intervalHaving}
-) AS qsrs
+FROM #pm_qs_slice AS qsrs
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
 JOIN sys.query_store_query AS qsq
@@ -915,7 +1049,7 @@ LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
 ORDER BY qsrs.last_execution_time {shipOrder}
-OPTION(RECOMPILE, LOOP JOIN);";
+OPTION(RECOMPILE);";
     }
 
     /// <summary>
@@ -981,7 +1115,7 @@ OPTION(RECOMPILE, LOOP JOIN);";
     public override CollectorQuery BuildPerItemQuery(string item, CollectorContext context)
     {
         /* Double single quotes so the body survives nesting inside [db].sys.sp_executesql N'...' */
-        var escapedBody = BuildPayloadBody(context).Replace("'", "''", StringComparison.Ordinal);
+        var escapedBody = BuildPayloadBody(context, databaseName: item).Replace("'", "''", StringComparison.Ordinal);
         var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
 
         var text = $@"
@@ -991,6 +1125,236 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     @cutoff_time;";
 
         return new CollectorQuery(text, BuildCutoffParameters(context));
+    }
+
+    /// <summary>
+    /// The plan-XML fetch for one database (#2210): plans above the watermark, in <c>plan_id</c> order, bounded
+    /// twice — coarsely by <paramref name="candidatePlans"/> and exactly by a running byte total.
+    ///
+    /// <para>SEPARATE from the runtime-stats query on purpose, and that separation is the fix rather than a
+    /// refactor. The runtime query ships <c>ORDER BY qsrs.last_execution_time</c>, so a budget cut truncates it
+    /// in TIME order and the plans whose XML landed are an arbitrary SUBSET of plan_ids — against which no
+    /// watermark value is safe, because receiving plan 500 while missing 300 skips 300 forever. That is why the
+    /// previous shape could not advance on a cut, and 97.8% of production passes are cut. Here rows arrive in
+    /// plan_id order, so a cut truncates a SUFFIX and the highest landed id is safe by construction.</para>
+    ///
+    /// <para>The two bounds are not redundant. The running total is exact but expensive to compute: it needs
+    /// <c>DATALENGTH</c>, and <c>sys.query_store_plan.query_plan</c> is decompressed BY the view on access, so an
+    /// unbounded candidate set pays a whole catalog's decompression to enforce a budget meant to prevent exactly
+    /// that. <c>TOP (@candidate_plans)</c> is evaluated on <c>plan_id</c> alone — no XML touched to sort or
+    /// filter — so the decompression is capped at K, sized per database by
+    /// <see cref="QueryStorePlanXmlState.CandidatePlanCount"/> from the previous pass's own bytes-per-plan.</para>
+    ///
+    /// <para>The budget test is <c>running_bytes - plan_bytes &lt; budget</c>, i.e. admit a plan when the total
+    /// BEFORE it was still under. The obvious <c>running_bytes &lt;= budget</c> is a per-database STALL: a single
+    /// plan larger than the whole budget has a running total that already exceeds it on its own row, so it is
+    /// excluded, every later row is excluded too (the total is monotonic), the pass ships nothing, the watermark
+    /// holds, and the next pass re-selects the same plan first — forever. One 13 MB plan against the 12 MB
+    /// default is enough, and it is the same never-advances failure this change exists to end, reached through
+    /// plan SIZE instead of cut ordering. Admitting the offender ships it alone, cuts after it, and moves the
+    /// watermark past it.</para>
+    ///
+    /// <para>The honest cost of that: worst-case bytes for one pass are <c>budget + largest single plan</c>,
+    /// not <c>budget</c>. The runtime-stats budget a few hundred lines up pays exactly the same price for the
+    /// same reason (measured: 19.6 MB shipped against a 12 MB budget when one very large plan carried a pass
+    /// past it), so "12 MB" is a floor on ship volume in both paths rather than a cap.</para>
+    ///
+    /// <para>Both bounds are inlined as parsed integers rather than parameters, matching the watermark predicate
+    /// above and for the same reason: the body nests inside <c>sp_executesql</c>, and the values are host-computed
+    /// longs that never touch operator input.</para>
+    ///
+    /// <para>A NULL <c>query_plan</c> — a plan too large to persist, or certain forced-plan-failure paths —
+    /// counts as ZERO bytes and STILL SHIPS, as a row with NULL text. Letting the NULL propagate through the
+    /// arithmetic instead would make the budget predicate NULL and filter the row out, and a window whose plans
+    /// are all NULL would then return nothing, hold the watermark, and re-select the same plans forever: the
+    /// same permanent stall as the oversized-plan case, reached through a different mechanism. Shipping the row
+    /// lets the watermark advance past a plan whose XML will never exist, which is correct — the store's readers
+    /// already guard <c>query_plan_text IS NOT NULL</c> because the runtime path has always been able to write
+    /// per-row NULLs there.</para>
+    ///
+    /// <para>NEVER on the backfill path, for the reason the watermark itself is not: backfill reads intervals
+    /// older than anything collected, whose plans are numbered BELOW the watermark, so a plan_id-ascending fetch
+    /// above the watermark would return nothing the backfill needs. Backfill plan XML stays on its own rows.</para>
+    ///
+    /// <para>The <c>CONVERT</c> happens ONCE, inside the candidate window, and the running total sums
+    /// <c>DATALENGTH</c> of that converted text rather than of the view column. The alternative — measure with
+    /// <c>DATALENGTH(qsp.query_plan)</c> in the window and join back to <c>sys.query_store_plan</c> for the text
+    /// — decompresses every shipped plan TWICE, and that is measured, not reasoned: on a 73,163-plan production
+    /// catalog, K=114 and a 12 MB budget, both shapes returned the same 114 rows and 1.7 MB, and the join-back
+    /// form took 274ms cold / 262ms warm against 133ms for this one. Plan-id-only with no XML touched was 114ms,
+    /// so this shape sits 19ms above the floor while the join-back form pays for the decompression twice.</para>
+    /// </summary>
+    public CollectorQuery BuildPlanFetchQuery(string item, CollectorContext context, long watermark, int candidatePlans, long budgetBytes)
+    {
+        /* The invariant the doc comment spends a paragraph on, actually enforced rather than left to the caller:
+           this query exists only to fetch plan XML, so building it with plan capture off is a caller bug, not a
+           no-op to swallow. Cheap, and it makes CapturePlanXml the single gate for the whole feature — the
+           runtime query's plan-text CASE already reads the same flag. */
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        if (!context.CapturePlanXml)
+        {
+            throw new InvalidOperationException(
+                "BuildPlanFetchQuery requires CapturePlanXml; a host that does not capture plan XML must not issue the plan fetch.");
+        }
+
+        /* A non-positive budget would make the predicate `running_bytes - plan_bytes < 0`, which excludes even
+           the FIRST candidate (its running total before it is 0, and 0 < 0 is false) — the pass ships nothing,
+           the watermark holds, and the next pass re-selects the same plans. The oversized-plan stall for a third
+           time, from a third direction. CandidatePlanCount already floors a non-positive budget for its own
+           sizing; this method has to guard its own input rather than assume the caller passed that value through. */
+        if (budgetBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(budgetBytes), budgetBytes, "The plan-fetch byte budget must be positive; a zero or negative budget ships nothing and stalls the watermark.");
+        }
+
+        /* Same failure, fourth route: TOP (0) returns no rows and TOP with a negative literal is a syntax error,
+           so a bad candidate count ships nothing and holds the watermark exactly like a bad budget. Every caller
+           today sources this from CandidatePlanCount, which floors at MinCandidatePlans — but "the only caller
+           happens to be safe" is the assumption this method has already been wrong about once. */
+        if (candidatePlans <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(candidatePlans), candidatePlans, "The candidate plan count must be positive; TOP (0) ships nothing and stalls the watermark.");
+        }
+
+        var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
+        var k = candidatePlans.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var floor = watermark.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        /* ROWS UNBOUNDED PRECEDING, not the RANGE default: RANGE would tie-group peers and, more to the point,
+           forces a spool. The frame is per-row precisely because the cut has to fall between two plans. */
+        var body = $@"WITH candidates AS (
+    SELECT TOP ({k})
+        plan_id = qsp.plan_id,
+        query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
+    FROM sys.query_store_plan AS qsp
+    WHERE qsp.plan_id > {floor}
+    ORDER BY qsp.plan_id
+),
+budgeted AS (
+    SELECT
+        plan_id = c.plan_id,
+        query_plan_text = c.query_plan_text,
+        plan_bytes = COALESCE(DATALENGTH(c.query_plan_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(c.query_plan_text), 0)) OVER (ORDER BY c.plan_id ROWS UNBOUNDED PRECEDING)
+    FROM candidates AS c
+)
+SELECT
+    plan_id = b.plan_id,
+    query_plan_text = b.query_plan_text
+FROM budgeted AS b
+WHERE b.running_bytes - b.plan_bytes < {budget}
+ORDER BY b.plan_id
+OPTION(RECOMPILE);";
+
+        var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
+
+        var text = $@"
+EXECUTE [{escapedDbName}].sys.sp_executesql
+    N'{escapedBody}';";
+
+        return new CollectorQuery(text, new List<CollectorParameter>());
+    }
+
+    /// <summary>
+    /// Statement text for one database, resumed from a <c>query_id</c> watermark and cut by a byte budget
+    /// (#2150) — the sibling of <see cref="BuildPlanFetchQuery"/>, and the other half of taking
+    /// <c>query_sql_text</c> out of the runtime stream.
+    ///
+    /// <para><b>Ordered by <c>query_id</c>, which is what makes a budget cut safe.</b> The cut falls between
+    /// two statements, so everything up to it is stored and the highest stored id is a resume point with no
+    /// hole — the same suffix argument the plan fetch rests on. <c>query_id</c> is also already a stored
+    /// payload column on the runtime row, so this needs no new fact-table column and no migration to be
+    /// joinable.</para>
+    ///
+    /// <para><b>Simpler than the plan fetch on purpose.</b> There is no candidate-window estimator here
+    /// because <c>DATALENGTH(query_sql_text)</c> is cheap: <c>sys.query_store_plan.query_plan</c> is
+    /// decompressed BY the view on access, which is what forces the plan side to bound how many plans a
+    /// windowed running total may touch, and <c>query_sql_text</c> has no such cost. A flat coarse bound
+    /// plus the exact running total is enough. There is no content hash either — plan XML can be rewritten
+    /// in place, whereas a statement's text is fixed for the life of its id.</para>
+    ///
+    /// <para><c>ROWS UNBOUNDED PRECEDING</c> rather than the <c>RANGE</c> default, for the same reason as
+    /// the plan fetch: <c>RANGE</c> would tie-group peers and force a spool, and the frame has to be per-row
+    /// because the cut falls between two rows.</para>
+    /// </summary>
+    public CollectorQuery BuildTextFetchQuery(string item, CollectorContext context, long watermark, int candidateTexts, long budgetBytes)
+    {
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        /* Same enforcement as the plan fetch's CapturePlanXml gate: this query exists only because the
+           payload stopped carrying the text, so issuing it from a host that still ships the text inline is a
+           caller bug rather than a harmless extra round trip — it would fetch and store text nobody reads. */
+        if (!context.FetchQueryTextSeparately)
+        {
+            throw new InvalidOperationException(
+                "BuildTextFetchQuery requires FetchQueryTextSeparately; a host that still ships query_sql_text inline must not issue the text fetch.");
+        }
+
+        /* A non-positive budget makes the predicate `running_bytes - text_bytes < 0` exclude even the FIRST
+           candidate (its running total before it is 0, and 0 < 0 is false), so the pass ships nothing, the
+           watermark holds, and the next pass re-selects the same statements — a stall that looks like a
+           quiet database. */
+        if (budgetBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(budgetBytes), budgetBytes, "The text-fetch byte budget must be positive; a zero or negative budget ships nothing and stalls the watermark.");
+        }
+
+        /* Same stall, other route: TOP (0) returns no rows and a negative literal is a syntax error. */
+        if (candidateTexts <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(candidateTexts), candidateTexts, "The candidate text count must be positive; TOP (0) ships nothing and stalls the watermark.");
+        }
+
+        var escapedDbName = item.Replace("]", "]]", StringComparison.Ordinal);
+        var k = candidateTexts.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var floor = watermark.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        var body = $@"WITH candidates AS (
+    SELECT TOP ({k})
+        query_id = qsq.query_id,
+        query_sql_text = qst.query_sql_text
+    FROM sys.query_store_query AS qsq
+    JOIN sys.query_store_query_text AS qst
+      ON qst.query_text_id = qsq.query_text_id
+    WHERE qsq.query_id > {floor}
+    ORDER BY qsq.query_id
+),
+budgeted AS (
+    SELECT
+        query_id = c.query_id,
+        query_sql_text = c.query_sql_text,
+        text_bytes = COALESCE(DATALENGTH(c.query_sql_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(c.query_sql_text), 0)) OVER (ORDER BY c.query_id ROWS UNBOUNDED PRECEDING)
+    FROM candidates AS c
+)
+SELECT
+    query_id = b.query_id,
+    query_sql_text = b.query_sql_text
+FROM budgeted AS b
+WHERE b.running_bytes - b.text_bytes < {budget}
+ORDER BY b.query_id
+OPTION(RECOMPILE);";
+
+        var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
+
+        var text = $@"
+EXECUTE [{escapedDbName}].sys.sp_executesql
+    N'{escapedBody}';";
+
+        return new CollectorQuery(text, new List<CollectorParameter>());
     }
 
     /// <summary>
@@ -1068,7 +1432,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            the ROW COUNT, but a row carries two nvarchar(max) fields (query text + plan XML), so 50k rows
            can still be gigabytes. Accumulate the materialized text size and STOP reading at the budget,
            disposing the reader early, so one database can never balloon the process. */
-        var budget = Instance.PerItemTextByteBudget ?? int.MaxValue;
+        /* #2164: an operator budget override wins over the compile-time default (the host supplies it
+           from the store knob; Lite passes null and keeps the const). Guarded to a positive value so a
+           corrupt/zero setting can never mean "ship nothing" — the clamp lives at the store read, and
+           this is the second line of defense. */
+        var budget = (context.TextByteBudgetOverride is > 0 ? context.TextByteBudgetOverride : Instance.PerItemTextByteBudget)
+            ?? int.MaxValue;
         long textBytes = 0;
 
         /* #1960 boundary-group completion: once the budget trips, rows TIED at the trip row's
@@ -1079,6 +1448,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            forever. Mirrors the SQL's TOP ... WITH TIES, which guarantees the same at the row cap. */
         var budgetSpent = false;
         DateTime? cutBoundary = null;
+
+        /* #2164 watermark bookkeeping: counts ONLY plans whose XML actually landed in this batch, so a
+           budget-cut pass cannot claim coverage it does not have. Plans observed but not stored are
+           deliberately not tracked — see QueryStorePlanXmlState.RefreshAfter for why the observed maximum cannot be
+           used to detect a Query Store reset. */
+        long maxStoredPlanId = 0;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1174,6 +1549,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                everything past the cut stays ahead of the watermark and next cycle resumes exactly there:
                a bounded cycle costs latency, never data. */
             textBytes += ((long)(row.QueryText?.Length ?? 0) + (row.QueryPlanText?.Length ?? 0)) * 2L;
+
+            if (row.QueryPlanText is not null && row.PlanId > maxStoredPlanId)
+            {
+                maxStoredPlanId = row.PlanId;
+            }
+
             if (!budgetSpent && textBytes >= budget)
             {
                 budgetSpent = true;
@@ -1184,7 +1565,41 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
 
         context.PerItemTextBytesShipped = textBytes;
         context.PerItemShippedBoundary = rows.Count > 0 ? rows[^1].LastExecutionTime : null;
+
+        /* #2164: persist the plan-XML watermark for this database.
+           - Advance to the highest plan_id whose XML actually stored, never past it.
+           - Never move BACKWARD: a window whose newest-executing plan is older than the newest-COMPILED one
+             is an ordinary quiet window, not a reset, and lowering the watermark there would refetch the
+             whole catalog next cycle. (Treating it as a reset is the trap documented on
+             QueryStorePlanXmlState.RefreshAfter — it holds in most steady-state windows.)
+           - Never advance AT ALL on a budget-cut pass. Rows ship ordered by last_execution_time, NOT by
+             plan_id, so the cut drops an arbitrary set of plan_ids from the tail of the window — including
+             ids BELOW the highest one that did store. Advancing past them would suppress their XML on every
+             later pass (the ids no longer clear the watermark) even though it never shipped once. The cut is
+             already resumable on the time watermark, so declining to advance costs one repeated fetch and
+             nothing else. */
+        if (context.CapturePlanXml && !string.IsNullOrEmpty(databaseName) && !budgetSpent && maxStoredPlanId > 0)
+        {
+            var standing = QueryStorePlanXmlState.Resolve(context.State, databaseName, context.CollectionTime);
+
+            if (maxStoredPlanId > standing)
+            {
+                /* The stamp dates the last FULL fetch, and is carried FORWARD across advances rather than
+                   renewed on each one. Re-stamping here would push the refresh horizon out every time a new
+                   plan compiled, so on any database that keeps compiling — the busy ones, where a stale plan
+                   is most likely to matter — the horizon would never fire and the watermark would effectively
+                   be permanent. A standing watermark of 0 means this pass WAS the full fetch (absent or just
+                   expired), so that is the one case that stamps now. */
+                var stamp = standing > 0
+                    ? QueryStorePlanXmlState.ResolveStamp(context.State, databaseName) ?? context.CollectionTime
+                    : context.CollectionTime;
+
+                context.PendingState[QueryStorePlanXmlState.KeyFor(databaseName)] =
+                    QueryStorePlanXmlState.Format(maxStoredPlanId, stamp);
+            }
+        }
     }
+
 
     /// <summary>
     /// Reads a nullable int64, converting float/decimal Query Store values to long.

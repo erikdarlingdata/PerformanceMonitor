@@ -82,8 +82,10 @@ public sealed partial class ViewerDataService
     /// split on <c>collection_time</c> (naive UTC) — the column EVERY other Darling Query Store read windows
     /// on, and the frame the toolbar's [start,end] bounds are in (Darling's <c>last_execution_time</c> is the
     /// server's LOCAL wall clock, so windowing on it against UTC bounds would be a timezone bug).
-    /// (2) The recent query-text sample is <c>MAX(query_text)</c> from Darling's already-decompressed
-    /// <c>query_text</c> column (the TVF <c>DECOMPRESS()</c>es a compressed <c>query_sql_text</c>).
+    /// (2) The recent query-text sample comes from <c>collect.query_store_text</c> (#2150), falling back to
+    /// <c>MAX(query_text)</c> on the fact rows for history collected before that table existed — either way
+    /// Darling's text is already decompressed, where the TVF <c>DECOMPRESS()</c>es a compressed
+    /// <c>query_sql_text</c>.
     /// (3) The stale INTENT comment on the Dashboard's C# caller (bounded/mirrored baseline, weighted averages,
     /// multi-metric, absolute minimums) does NOT match what the TVF actually runs — this ports the ACTUAL TVF
     /// (unbounded baseline, plain AVG, CPU-only > 25% gate, no minimums), which is what the Dashboard grid shows.</para>
@@ -194,12 +196,20 @@ public sealed partial class ViewerDataService
                 WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 25 THEN 'MEDIUM'
                 ELSE 'LOW'
             END AS severity,
-            r.query_text_sample,
+            /* #2150: text comes from collect.query_store_text now, and this projection's grain is exactly
+               that table's key, so it resolves here with a keyed join rather than inside the aggregate.
+               The MAX(query_text) sample below it stays as the fallback: it is where text lived before the
+               cutover, and it is what keeps the regression grid readable for existing history. */
+            COALESCE(x.query_sql_text, r.query_text_sample) AS query_text_sample,
             r.last_execution_time
         FROM recent_performance AS r
         JOIN baseline_performance AS b
           ON  b.database_name = r.database_name
           AND b.query_id = r.query_id
+        LEFT JOIN query_store_text AS x
+          ON  x.server_id = $1
+          AND x.database_name = r.database_name
+          AND x.query_id = r.query_id
         WHERE (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25
         ORDER BY additional_duration_ms DESC
         LIMIT 50

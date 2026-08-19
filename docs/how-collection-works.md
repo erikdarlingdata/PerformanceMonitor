@@ -1,207 +1,179 @@
 # How Collection Works
 
-A tour of the collection pipeline for people who know SQL but don't know this codebase. Read this, then read three SQL files, and you'll understand 80% of what Performance Monitor is doing on your server.
+A tour of the collection pipeline for people who know SQL but don't know this codebase. Read this, then read two or three collector definitions, and you'll understand 80% of what Performance Monitor is doing on your servers.
 
-This doc covers both editions. Full Edition first (SQL Agent → `PerformanceMonitor` database → Dashboard reads), Lite Edition second (WPF app → DuckDB file → same app reads). The shapes are similar; the surface area is different.
+There is **one collection brain and two storage engines**. Every collector — the exact T-SQL sent to a monitored server, the result-row mapping, the delta rules, the default cadence, the retention horizon — is defined once in the shared `PerformanceMonitor.Collectors` library. **Lite** writes those rows to DuckDB; **Darling** writes the same rows to PostgreSQL. A collector change lands once and both editions get it.
+
+> The **Full / Dashboard edition is deprecated** (SQL Agent jobs running T-SQL stored procedures into a `PerformanceMonitor` database). It still builds and existing installs keep working, but it does not share the collector library and is not described here. Its docs live with its code: [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md), [deprecated/Installer/README.md](../deprecated/Installer/README.md), and the `install/*.sql` scripts at the repo root belong to it.
 
 ---
 
-## Full Edition
+## The shared collector library
 
-### The minute loop
+**Project**: [`PerformanceMonitor.Collectors`](../PerformanceMonitor.Collectors/)
 
-Everything happens inside one SQL Agent job:
+This library is deliberately dependency-free — it has **zero PackageReferences**. No `Microsoft.Data.SqlClient`, no DuckDB, no Npgsql. Definitions emit SQL *text* and read results through `System.Data.Common.DbDataReader`; the host SKU supplies the connection and the row writer. That is what makes one definition serve both storage engines.
 
-| Job | What it runs |
+### What a collector definition looks like
+
+Each collector is a sealed singleton deriving from `CollectorDefinitionBase<TRow>`:
+
+```csharp
+public sealed class WaitStatsCollector : CollectorDefinitionBase<WaitStatsRow>
+{
+    public static readonly WaitStatsCollector Instance = new();
+
+    public override string Name => "wait_stats";
+    public override string TargetTable => "wait_stats";
+    public override IReadOnlyList<CollectorColumn> PayloadColumns => ...;
+
+    public override CollectorQuery BuildQuery(CollectorContext context) => ...;   // the T-SQL
+    public override ValueTask<List<WaitStatsRow>> ReadAsync(DbDataReader reader, ...);
+    public override void WritePayload(WaitStatsRow row, ICollectorRowWriter writer, ...);
+}
+```
+
+The four members that matter: **`BuildQuery`** returns the SQL text plus parameters, **`ReadAsync`** maps the reader into typed rows, **`WritePayload`** hands each row's columns to whichever writer the SKU supplied, and **`PayloadColumns`** declares the table shape that the storage layer generates DDL from. Definitions are stateless and thread-safe; per-cycle state rides on `CollectorContext`.
+
+Optional behaviours a definition can opt into, all with sensible defaults on the base class:
+
+| Member | Purpose |
 | --- | --- |
-| `PerformanceMonitor - Collection` | `EXEC collect.scheduled_master_collector @debug = 0;` on a 1-minute schedule (`Every 1 Minute`) |
-| `PerformanceMonitor - Data Retention` | `EXEC config.data_retention @debug = 1;` once a day |
-| `PerformanceMonitor - Hung Job Monitor` | Kills the Collection job if it's been stuck past its max duration |
+| `AppliesTo(target)` | Skip the collector on targets that can't serve it (Azure SQL DB, missing msdb, version floors) |
+| `RunsPerDatabase(target)` | Run once per database instead of once per server (Azure SQL DB has no cross-database DMV reach) |
+| `WatermarkColumn` / `NumericWatermarkColumn` / `PerDatabaseWatermarkColumn` | Incremental collection — only pull rows newer than what's already stored |
+| `BuildEnumerationQuery` / `BuildPerItemQuery` | Two-phase collection: list the items (usually databases), then query each one |
+| `BuildSupplementalQuery` | A best-effort second result set that enriches the primary rows; failure never fails the collector |
+| `EmitsProbeFailures` | The definition returns a trailing `(item, error)` result set so per-item failures get summarized instead of lost |
+| `YieldsOnLockTimeout` | Treat a lock timeout as "come back later," not an error (only `query_snapshots`) |
+| `StateKeys` | Persist a cursor the SQL can't derive — e.g. `default_trace_events` remembering its last trace file |
+| `CommandTimeoutSecondsOverride` | Raise the 60-second default (only `index_object_stats`, at 300s) |
+| `PerItemTextByteBudget` | Stop a text-heavy drain mid-read and defer the backlog rather than ballooning memory |
 
-When the Collection job fires, it calls the **scheduled master collector** — the dispatcher. The dispatcher is the heartbeat of the whole system. Every minute it wakes up, figures out which collectors are due, and runs them one at a time.
+### The three registration tables
 
-### The dispatcher
+There is **no DI container for collectors**. A new definition is wired up by adding it to three static tables, and a test pins them against each other so you can't add one and forget the others:
 
-**File**: [`install/42_scheduled_master_collector.sql`](../install/42_scheduled_master_collector.sql)
+| Concern | File | Shape |
+| --- | --- | --- |
+| Schema catalog — drives DDL generation | [`CollectorCatalog.cs`](../PerformanceMonitor.Collectors/CollectorCatalog.cs) | `IReadOnlyList<ICollectorSchemaInfo> All` — 48 `XCollector.Instance` entries (41 SQL Server + 7 PostgreSQL) |
+| Cadence, retention, default-enabled | [`CollectorScheduleDefaults.cs`](../PerformanceMonitor.Collectors/CollectorScheduleDefaults.cs) | `record Entry(int FrequencyMinutes, int RetentionDays, bool DefaultEnabled = true)` — 48 entries |
+| Runtime dispatch (Darling) | [`DarlingWorker.cs`](../Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs) | `s_dispatch` — 48 typed lambdas |
 
-At the core of the dispatcher is a cursor over `config.collection_schedule` that picks up anything due:
+The catalog is deliberately **engine-mixed**: the schema generator walks it to create tables and one
+store can hold both engines' data, so splitting it per engine would fragment DDL generation. What keeps
+dispatch honest is a separate gate — each definition declares a `TargetEngine`, and both SKUs drop
+wrong-engine collectors before dispatch, so a PostgreSQL definition is never sent to a SQL Server target
+or the reverse.
 
-```sql
-SELECT
-    cs.schedule_id,
-    cs.collector_name,
-    cs.frequency_minutes,
-    cs.max_duration_minutes
-FROM config.collection_schedule AS cs
-WHERE cs.enabled = 1
-AND   (
-          @force_run_all = 1
-          OR cs.next_run_time <= SYSDATETIME()
-          OR cs.next_run_time IS NULL
-      )
-ORDER BY
-    cs.next_run_time;
-```
+`FrequencyMinutes = 0` means **collect once on connect** — used for config snapshots (`server_config`, `database_config`, `database_scoped_config`, `trace_flags`, `server_properties`) that only change across restarts. `DefaultEnabled: false` ships a collector off; only `long_query_completions` does, because enabling it creates an Extended Events session on the target.
 
-For each row, the dispatcher has a big `IF/ELSE IF` block that maps `collector_name` to a specific stored procedure:
+---
 
-```sql
-ELSE IF @collector_name = N'default_trace_collector'
-BEGIN
-    EXECUTE collect.default_trace_collector @debug = @debug;
-END;
-ELSE IF @collector_name = N'blocking_deadlock_analyzer'
-BEGIN
-    EXECUTE collect.blocking_deadlock_analyzer @debug = @debug;
-END;
--- ...etc
-```
+## Darling: the 24/7 service
 
-Each collector runs inside its own `BEGIN TRY / BEGIN CATCH` block — a failure in one doesn't stop the rest of the cycle. After each run (success or failure), the dispatcher bumps `last_run_time` and `next_run_time = last_run_time + frequency_minutes` so the next tick knows when that collector is eligible again.
+**Project**: [`Darling/PerformanceMonitor.Darling.Service`](../Darling/PerformanceMonitor.Darling.Service/) · operator guide: [`Darling/README.md`](../Darling/README.md)
 
-Before any of this, the dispatcher also does two self-heal steps:
+### The sweep loop
 
-- **Ensures config tables exist** (`config.ensure_config_tables`) — lets you recover from an accidentally-dropped table without reinstalling.
-- **Detects server restarts** — if `sqlserver_start_time` has changed since last run, it captures a fresh snapshot of server properties. Config values only change across restarts, so this is the efficient moment to grab them.
+`DarlingWorker` is a `BackgroundService`. It ticks every **15 seconds** — that is the *scheduling* tick, not a collection interval. On each tick it walks every enabled server and runs whatever is due.
 
-### What a collector looks like
+Per-server sweeps run concurrently behind a semaphore sized by `MaxConcurrentSweeps` (default 4, clamped 1–16, resizable at runtime). Within one server, a semaphore serializes the scheduled sweep against an on-demand `snapshot_now`, so a user-triggered snapshot never interleaves with the regular cadence.
 
-Pick any `install/NN_collect_*.sql` file — they all follow the same shape. A minimal example:
+`RunDueCollectorsAsync` iterates the collector names, resolves each one's effective schedule, and runs anything whose next-due time has passed, then sets `NextDue = now + FrequencyMinutes`. On reconnect, first-due times are seeded from the persisted `MAX(collection_time)` per collector plus a per-server jitter, so restarting the service resumes the real cadence instead of re-phasing every collector to the same instant.
 
-**File**: [`install/29_collect_default_trace.sql`](../install/29_collect_default_trace.sql)
+### Running one collector
 
-```sql
-ALTER PROCEDURE
-    collect.default_trace_collector
-(
-    @hours_back integer = 2,
-    @include_memory_events bit = 1,
-    @include_autogrow_events bit = 1,
-    @include_object_events bit = 1,
-    -- ...more flags
-    @debug bit = 0
-)
-AS
-BEGIN
-    BEGIN TRY
-        -- 1. Validate parameters
-        IF @hours_back <= 0 OR @hours_back > 168
-        BEGIN
-            RAISERROR(N'@hours_back must be between 1 and 168 hours', 16, 1);
-            RETURN;
-        END;
+[`DarlingCollectorRunner.RunAsync`](../Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs) has three execution paths, chosen by what the definition declares:
 
-        -- 2. Detect first run (empty target table, no prior success in config.collection_log)
-        IF NOT EXISTS (SELECT 1/0 FROM collect.default_trace_events)
-        AND NOT EXISTS (SELECT 1/0 FROM config.collection_log WHERE collector_name = N'default_trace_collector' AND collection_status = N'SUCCESS')
-        BEGIN
-            SET @cutoff_time = CONVERT(datetime2(7), '19000101'); -- grab everything on first run
-        END;
+1. **Plain** — one query, optional supplemental query, map rows, write.
+2. **Per-database** — open a connection per database and run the same query in each (Azure SQL DB).
+3. **Enumerate-then-iterate** — run the enumeration query to get an item list, optionally probe it, then run the per-item query for each.
 
-        -- 3. Query the DMV / system view
-        INSERT INTO collect.default_trace_events (...)
-        SELECT ...
-        FROM sys.fn_trace_gettable(@trace_path, @max_files) AS ft
-        WHERE ft.StartTime >= @cutoff_time
-        AND   <per-collector filters>
-        AND   NOT EXISTS (<dedupe lookup on event_time + event_class + spid + event_sequence>);
+Rows are written to PostgreSQL through `PgCollectorRowWriter` using **binary COPY**. Large text — query text and plan XML — is diverted to hash-keyed dimension tables (`query_text_dim`, `query_plan_dim`) instead of being stored inline, because inline payload was 94% of one 250 GB field store.
 
-        -- 4. Log success to config.collection_log
-        INSERT INTO config.collection_log (...) VALUES (..., 'SUCCESS', @rows_collected, ...);
-    END TRY
-    BEGIN CATCH
-        -- 5. Log failure with error message
-        INSERT INTO config.collection_log (...) VALUES (..., 'ERROR', 0, @error_message);
-        THROW;
-    END CATCH;
-END;
-```
+### Error isolation
 
-Every collector does exactly these five things: **validate, detect first-run, pull from DMV, insert with dedupe, log**. Once you've read one, you've read all thirty. The differences are the source DMV, the filter conditions, and the shape of the destination table.
+Every run is wrapped so that one failure never stops the sweep. It writes exactly one row to `collect.collection_log` and returns zero rows. That row *is* the heartbeat — there is no separate heartbeat table.
 
-### The schedule table
-
-**File**: [`install/03_create_config_tables.sql`](../install/03_create_config_tables.sql) (table definition)
-
-`config.collection_schedule` is the single source of truth for *what runs and when*. It has one row per collector:
-
-| Column | Meaning |
+| Status | Meaning |
 | --- | --- |
-| `collector_name` | The name the dispatcher's `IF/ELSE` block matches on |
-| `enabled` | Bit flag — off means the dispatcher skips this row entirely |
-| `frequency_minutes` | How often to run. `0` means "on connect / daily / special" (see below) |
-| `last_run_time` | When the collector last started — updated by the dispatcher |
-| `next_run_time` | When the collector is next eligible — `last_run_time + frequency_minutes` |
-| `max_duration_minutes` | Kill switch for the hung-job monitor |
-| `retention_days` | How long to keep data in the target `collect.*` table |
+| `SUCCESS` | Completed, including a legitimate zero rows |
+| `PERMISSIONS` | A grant is missing — the collector is skipped, not broken |
+| `SESSION_MISSING` | An expected Extended Events session isn't there |
+| `YIELDED` | Lock timeout on a collector that opted into yielding; excluded from error rates and health bands |
+| `ERROR` | Anything else. Fatal or timeout additionally forces a reconnect and re-probe on the next tick |
 
-You can edit this table directly, but **don't**. The supported knobs are:
+Health is *derived* from that log by the shared `CollectorHealthClassifier` (`NEVER_RUN`, `NO_PERMISSIONS`, `FAILING`, `STALE`, `WARNING`, `HEALTHY`). Its thresholds are **relative to each collector's own cadence**, with the old flat values as floors — `FAILING` at `max(24h, 2 × interval)`, `STALE` at `max(4h, 1.5 × interval)` — so a 60-minute collector isn't judged like a 1-minute one. The on-connect collectors are exempt from staleness. One classifier is shared by Lite, the viewer, and the service so the three can't drift.
 
-- **`config.apply_collection_preset`** — bulk-sets `frequency_minutes` for all collectors at once (presets: `Aggressive`, `Balanced`, `Low-Impact`).
-- **Individual `UPDATE` statements on `enabled`** — turn specific collectors on or off.
+Observability writes are deliberately failure-isolated: they log at debug and never throw, because an observability write must never break the collection loop.
 
-**File**: [`install/41_schedule_management.sql`](../install/41_schedule_management.sql) has the preset procedure and some helper procs for listing / resetting the schedule.
+### The store
 
-### Where does the data go?
+Schema is **generated from the catalog**, not hand-written — there is no migration framework and no `.sql` files. [`PgSchemaGenerator`](../Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs) walks `CollectorCatalog.All` to emit DDL, and [`PgMigrations`](../Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs) is an append-only ladder of versioned rungs applied once each under an advisory lock.
 
-Each collector writes to a table in the `collect` schema — `collect.query_stats`, `collect.default_trace_events`, `collect.wait_stats`, etc. Same shape each time: a `collection_time datetime2` column, plus whatever the DMV gave us, plus whatever we computed.
+Two schemas: **`collect`** is service-written and user-read; **`config`** is the operator's write surface (server list, alert thresholds, schedule overrides, commands). Every fact table starts with the same four columns —
 
-Some tables use `COMPRESS()` on large text/XML columns (query text, plan XML) — stored as `varbinary(max)` and wrapped in `DECOMPRESS()` on read. That's why query text looks like gibberish if you `SELECT * FROM collect.query_stats` directly — read through `v_query_stats` instead, which handles the decompression.
+```sql
+collection_id   bigint    NOT NULL,   -- or deadlock_id, config_id, … per collector
+collection_time timestamp NOT NULL,   -- or capture_time on config snapshots; the partition column
+server_id       integer   NOT NULL,
+server_name     text      NOT NULL
+```
 
-### The Dashboard read path
+— followed by nullable payload columns. Fact tables have **no primary key** (a hypertable's unique constraint must include the partition column, and COPY ingest doesn't want one) and are indexed `(server_id, <time column>)`. Timestamps are naive UTC `timestamp`, never `timestamptz`.
 
-The Dashboard is a WPF app. It connects to the `PerformanceMonitor` database and issues SELECT queries. No collection happens in the app — the Dashboard is purely a reader. Every time you pick a time range, change a tab, or hit refresh, the app runs a SQL query against `collect.*` tables or `v_*` views, pulls rows into a `List<T>`, and binds that list to a WPF DataGrid or a ScottPlot chart.
+`server_id` is not a sequence. It is a deterministic FNV-1a hash of `host[:database][:RO]`, computed client-side by `ServerIdHelper`, so both editions derive the same id for the same server and collected rows join desired-state config without a lookup. `server_id = 0` is a reserved fleet sentinel used for run-records that aren't about one server.
 
-The query layer lives in `Dashboard/Services/DatabaseService.*.cs` — split by concern (`DatabaseService.QueryPerformance.cs`, `DatabaseService.SystemEvents.cs`, etc.). Each file is just SQL in C# strings. If the Dashboard is showing you something, there's a method somewhere in that folder returning it.
+**TimescaleDB is optional and auto-adopted.** If the extension is present, the service converts collector tables to hypertables with 1-day chunks, compression after 1 day segmented by `server_id`, and continuous aggregates for hourly/daily rollups and baselines. Without it, the store runs in plain PostgreSQL mode, fully supported. There is no configuration flag either way. Compressed chunks stay queryable — compression *is* the archival tier.
+
+### Schedules and overrides
+
+Effective cadence and retention resolve per collector per server, **per column**, so a partial override falls through to the layer beneath it:
+
+1. Per-server row in `config.config_collector_schedules`
+2. Fleet-wide row in the same table (`server_id IS NULL`)
+3. The code default in `CollectorScheduleDefaults`
+
+That table is intentionally seeded empty — an absent row means "use the default," so deleting override rows is a clean reset. Any write to the control plane bumps `config_service.config_version` via a trigger, and the worker polls that one integer each sweep and hot-swaps its live config. There is no schedule knob in `darling.json`.
 
 ### Retention
 
-**File**: [`install/45_create_agent_jobs.sql`](../install/45_create_agent_jobs.sql) (job definition) and wherever `config.data_retention` lives.
+Three independent mechanisms:
 
-Once a day, the `PerformanceMonitor - Data Retention` job runs a `DELETE` loop per `collect.*` table, respecting each row's `retention_days` from `config.collection_schedule`. Targeted batched deletes, not a truncate — history older than the retention window disappears; recent data is untouched.
+- **Daily service purge** — horizons come from `CollectorScheduleDefaults` (7 days for snapshot-ish collectors, 30 for most, 90 for size/index/PVS, 365 for `server_properties` and `job_history`). With TimescaleDB this is `drop_chunks`, which is metadata-only; without it, a time-sliced `DELETE` that is safe against compressed chunks. Failure-isolated per table, with an auditable run-record under `server_id = 0`.
+- **TimescaleDB retention policies** for the rollup tiers — raw `query_stats` at 4 days, hourly aggregates at 90, daily kept indefinitely. Every policy is created *paused* and arms itself only once it can prove each downstream consumer has already captured the range it would drop. The governing rule, stated in the code: never drop what your consumer has not captured yet.
+- **Bounded deletes** for the non-hypertable tables (alert history at 90 days, terminal commands at 30 — a pending command is never purged at any age).
+
+Darling deliberately does not archive before deleting; compression is the archive.
 
 ---
 
-## Lite Edition
+## Lite: the desktop edition
 
-### What's different
+**Project**: [`Lite`](../Lite/)
 
-Lite is a standalone WPF app — **no SQL Agent involved, no PerformanceMonitor database**. The app itself is the collector, and the storage is a local DuckDB file (`%LocalAppData%\PerformanceMonitorLite-Data\monitor.duckdb`).
+Lite is a standalone WPF app — no service, no central store. It runs the **same collector definitions**, and its `RemoteCollectorService.<Name>.cs` partials are thin delegations, one per collector:
 
-The shape still mirrors Full: a dispatcher picks collectors, each collector pulls from DMVs and writes to a destination table, and a reader service hands data to the UI.
+```csharp
+private Task<int> CollectCpuUtilizationAsync(ServerConnection server, CancellationToken cancellationToken)
+    => RunCollectorDefinitionAsync(CpuUtilizationCollector.Instance, server, cancellationToken);
+```
 
-### The two services
+The SQL is not in those files — it is in the shared definition. That is the cross-SKU parity contract: engine quirks and dedup rules live in one place so Lite and Darling cannot disagree about what a collector means.
 
-**Writer**: [`Lite/Services/RemoteCollectorService.cs`](../Lite/Services/RemoteCollectorService.cs) plus one `RemoteCollectorService.<Name>.cs` partial per collector (19 of them). The service opens a `SqlConnection` to the monitored server, runs DMV queries, and bulk-inserts results into DuckDB.
-
-**Reader**: [`Lite/Services/LocalDataService.*.cs`](../Lite/Services/) — queries DuckDB and returns results to the UI.
-
-Only one connection writes at a time. DuckDB is single-writer, so within a given server the collectors run **sequentially** (not in parallel). Multi-server parallelism still works — each monitored server runs its own serialized collector chain.
-
-### The schedule
-
-**File**: [`Lite/config/collection_schedule.json`](../Lite/config/collection_schedule.json)
-
-A JSON file, not a table. User-editable. The Lite app reads it at startup and at each wake-up tick. Same shape as the Full Edition schedule (name, enabled, frequency_minutes, retention_days) with one convention: `frequency_minutes: 0` means "run once at connect time" — used for server config, database config, trace flags, etc. that don't change between restarts.
-
-### Data retention
-
-Lite runs retention inline as part of each collection cycle — no separate job. Each collector checks its `retention_days` against the max timestamp in its target table and deletes older rows. DuckDB checkpoints after each cycle to flush the WAL.
+Storage is a local DuckDB file plus a Parquet archive. DuckDB is single-writer, so collectors for a given server run **sequentially**; multi-server parallelism still works, each server running its own serialized chain. Schedules come from [`Lite/config/collection_schedule.json`](../Lite/config/collection_schedule.json) rather than a table, and retention runs inline at the end of each cycle.
 
 ---
 
 ## Where to look next
 
-If you want to **understand a specific feature**, find the code from the UI outward:
-1. Find the grid/chart in the app.
-2. Find its XAML file (`Dashboard/*.xaml` or `Lite/Controls/*.xaml`).
-3. Follow the `Click` handler or `ItemsSource` binding to the `*.xaml.cs` file.
-4. Follow the service call (`_databaseService.GetXxxAsync(...)` in Full, `LocalDataService.GetXxxAsync(...)` in Lite) to the query.
+**To understand a collector**, read its definition in `PerformanceMonitor.Collectors/<Name>Collector.cs`. The `BuildQuery` body is the exact SQL sent to your server — that is the whole story of what it touches.
 
-If you want to **understand a specific collector**, read:
-1. `install/NN_collect_<name>.sql` for Full Edition, or
-2. `Lite/Services/RemoteCollectorService.<Name>.cs` for Lite.
+**To understand what's stored**, read [`Darling/Darling.Tests/Fixtures/migration-ladder-*.sql`](../Darling/Darling.Tests/Fixtures/). It is the entire schema ladder as resolved SQL, regenerated per release, and it is the fastest way to see every table without reading a generator. Do not hand-edit it.
 
-If you want to **add a collector or a new data source**, the dispatcher file in Full (`42_scheduled_master_collector.sql`) or `RemoteCollectorService.cs` in Lite is where you wire it up — those are the files that know about every collector.
+**To add a collector**, you need four edits: the definition itself, a `CollectorCatalog.All` entry, a `CollectorScheduleDefaults.All` entry, and — for Darling — an `s_dispatch` lambda plus an append-only migration rung spelling out the table in the generator's column order. Migration versions are never edited or reordered; the runner only applies versions above the store's current max. Pinned tests will tell you which of the four you forgot.
+
+**To trace a UI element back to data**, follow the XAML binding to its `*.xaml.cs`, then the service call into the query layer (`LocalDataService.*` in Lite, `DarlingDataReader.*` in Darling).
 
 If something feels genuinely undocumented rather than "read the code," open an issue. Gaps get prioritized based on what comes up.

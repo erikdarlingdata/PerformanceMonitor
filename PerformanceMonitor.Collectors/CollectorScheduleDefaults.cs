@@ -78,6 +78,11 @@ public static class CollectorScheduleDefaults
            retention mirror the sibling XE collectors. */
         ["long_query_completions"] = new(1, 30, DefaultEnabled: false),
         ["database_scoped_config"] = new(0, 30),
+        /* #2319: hourly, NOT the config family's on-load cadence — actual_state, readonly_reason and
+           current_storage_size_mb change BY THEMSELVES (the cap-hit transition to READ_ONLY is the point
+           of collecting this), and an on-load snapshot would miss the transition until the next
+           reconnect. One cheap row per database per hour; 30 days to match its config siblings. */
+        ["query_store_health"] = new(60, 30),
         ["trace_flags"] = new(0, 30),
         ["running_jobs"] = new(5, 7),
         ["database_size_stats"] = new(60, 90),
@@ -115,5 +120,59 @@ public static class CollectorScheduleDefaults
            this collector adds is the slow CONSEQUENCE, and 90 days is the window that shows a PVS
            trend against the database-growth trend it explains. */
         ["pvs_stats"] = new(60, 90),
+
+        /* PostgreSQL. Same cadence and horizon as wait_stats, deliberately: it is the same kind of
+           signal (cumulative counters, delta-on-write) read at the same resolution, and matching the
+           two means a mixed-engine store shows one time axis without resampling.
+
+           Enabled by default despite being Aurora-only, because the cost of it being wrong is
+           nothing: on a SQL Server target the engine gate drops it before dispatch with no log row,
+           and on non-Aurora PostgreSQL its own AppliesTo returns false. It only ever runs where
+           there is something to read. */
+        ["pg_wait_stats"] = new(1, 30),
+
+        /* Same cadence and horizon as query_stats, its SQL Server counterpart. */
+        ["pg_statement_stats"] = new(1, 30),
+
+        /* Freeze headroom moves slowly — autovacuum shifts it in steps, not continuously — so a
+           5-minute read is ample, and 90 days is the horizon that shows an age trend against the
+           table-growth trend that usually explains it. Cheap: a handful of rows from a shared
+           catalog. */
+        ["pg_wraparound_stats"] = new(5, 90),
+
+        /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
+           indicator, and the thing an operator wants is the session or slot that appeared minutes
+           ago, before it has cost anything. At most five rows a cycle. 30 days matches the other
+           per-minute health series. */
+        ["pg_xmin_horizon"] = new(1, 30),
+
+        /* Per-minute: retained WAL on an abandoned slot grows at whatever rate the server generates
+           WAL, which on a busy writer fills a volume in hours, not days. 90 days of retention because
+           the question after an incident is "how long was that slot orphaned", and that answer has to
+           outlive the incident. A handful of rows a cycle. */
+        ["pg_replication_slots"] = new(1, 90),
+
+        /* Hourly, unlike every other PostgreSQL collector, because this one is a per-database
+           fan-out and on PostgreSQL that means one CONNECTION per database per cycle — a database
+           count that is fine hourly would be a connection storm per minute. Autovacuum also works on
+           the scale of minutes to hours, so a per-minute read would mostly re-record the same state.
+           90 days matches database_size_stats: the useful reading is a bloat trend, not a spot check. */
+        ["pg_autovacuum_stats"] = new(60, 90),
+
+        /* Back to per-minute: pg_stat_io is cluster-wide (one connection, no fan-out) and returned
+           25-37 rows per snapshot on the fleet, so the cost is the same order as pg_wait_stats. 30 days
+           matches the other rate collectors — the value here is correlating an I/O shift against a
+           deployment, which is a days-to-weeks question, not a quarterly one. */
+        ["pg_io_stats"] = new(1, 30),
+
+        /* Per-minute, and the cadence IS the limitation. Unlike SQL Server's blocked-process report —
+           where the engine itself records an event when blocking crosses a threshold, so evidence exists
+           whether or not anyone looked — PostgreSQL records nothing. This is a sample, so blocking shorter
+           than one minute is simply not seen. A minute is the floor worth paying for:
+           pg_blocking_pids() takes ShareLock on the lock manager partitions per call, and the whole
+           point of a blocking monitor is to not become the contention it reports. 30 days matches the
+           other per-minute series, and is the horizon that answers "is this the same chain every
+           Monday at open" — the question that turns a one-off into a pattern. */
+        ["pg_blocking"] = new(1, 30),
     };
 }

@@ -7,10 +7,12 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
@@ -33,6 +35,19 @@ public sealed class ServerRuntime
     public required string StorageName { get; init; }
 
     public required int ServerId { get; init; }
+
+    /// <summary>
+    /// The database this connection ACTUALLY landed in — <c>DB_NAME()</c>, or <c>current_database()</c> on
+    /// PostgreSQL — or null when the probe did not return it (#2228).
+    ///
+    /// <para>Not the same thing as <c>Config.Database</c>, which is what the registration ASKED for. An
+    /// Initial Catalog that is absent, misspelled, or overridden by the server lands somewhere else, and every
+    /// collected row is then stored under this registration's identity while describing a different database.
+    /// Nothing detected that: identity is registration-derived and never checked against the connection, so N
+    /// registrations that silently resolve to one database produce N identities and N full copies of the same
+    /// rows — the shape #2220 reported as byte-identical deadlock graphs under six ids.</para>
+    /// </summary>
+    public string? ConnectedDatabase { get; init; }
 
     public bool HasMsdbAccess { get; init; }
 
@@ -60,7 +75,17 @@ public static class DarlingServerConnector
        depend on it (#1535). sqlserver_start_time - the one column that needs the DMV - is not read
        here (the service never surfaces a start time), so unlike Lite/Dashboard no best-effort
        start-time read is needed. Columns: 0 sql_version, 1 major_version, 2 utc_offset,
-       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access. */
+       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228).
+
+       #2228 — connected_database is DB_NAME(): the database this connection ACTUALLY reached, which is not
+       necessarily the one the registration names. An Initial Catalog that is absent, misspelled or overridden
+       lands somewhere else, and every collected row is then stored under this registration's identity while
+       describing a different database. DB_NAME() keeps this query's no-permission property: it needs no DMV,
+       so it does not reintroduce the VIEW DATABASE STATE dependency #1535 removed. APPENDED, because every
+       read above is positional and inserting a column mid-list shifts five other fields onto wrong values.
+
+       Comments inside these probe strings stay to one short line each: the text is sent to the monitored
+       server on every connect, so the reasoning belongs here rather than on the wire. */
     public const string DetectionQueryText = @"
 SELECT
     @@VERSION AS sql_version,
@@ -68,7 +93,50 @@ SELECT
     DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
     CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
-    HAS_DBACCESS(N'msdb') AS has_msdb_access";
+    HAS_DBACCESS(N'msdb') AS has_msdb_access,
+    -- #2228: which database this connection actually landed in. Appended; see the comment above.
+    DB_NAME() AS connected_database";
+
+    /// <summary>
+    /// The tripwire's verdict: the message to raise when a registration is connected to a database it does not
+    /// name, or null when there is nothing to say (#2228).
+    ///
+    /// <para><b>Silent unless BOTH sides name a database.</b> A registration with no <c>database</c> is
+    /// server-scoped by design — it is meant to land wherever the login defaults and enumerate from there — so
+    /// comparing it to whatever that default turned out to be would fire on every correctly-configured
+    /// server-scoped registration in the fleet. That is the failure mode that gets a tripwire ignored, and an
+    /// ignored tripwire is worse than none: it trains the operator past the one line that matters.</para>
+    ///
+    /// <para>Case-insensitive because SQL Server database names are, under every collation the product
+    /// supports, and a registration that differs from the server only in case is not a misconfiguration.
+    /// PostgreSQL is case-sensitive in principle, but a registration whose case differs there fails to connect
+    /// rather than landing elsewhere, so the looser comparison costs nothing and avoids a false positive on
+    /// the engine where it would be wrong.</para>
+    ///
+    /// <para>Names what is WRONG and what to change, in that order, because the log line is the whole
+    /// diagnosis: the operator has to be able to act on it without reading the source. Deliberately does not
+    /// say "N copies" — this function sees one registration and cannot know whether a sibling collides with
+    /// it; claiming otherwise would be a guess dressed as a finding.</para>
+    /// </summary>
+    public static string? DescribeDatabaseMismatch(string? registeredDatabase, string? connectedDatabase, string displayName)
+    {
+        if (string.IsNullOrWhiteSpace(registeredDatabase) || string.IsNullOrWhiteSpace(connectedDatabase))
+        {
+            return null;
+        }
+
+        if (string.Equals(registeredDatabase.Trim(), connectedDatabase.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return $"Registration '{displayName}' is registered for database '{registeredDatabase}' but its connection " +
+               $"landed in '{connectedDatabase}'. Everything collected under this registration describes " +
+               $"'{connectedDatabase}', stored under this registration's identity — so if another registration " +
+               $"names '{connectedDatabase}', both are collecting the same database and its history is duplicated " +
+               "under two identities. Check this server's Initial Catalog / database setting in the Viewer's " +
+               "Manage Servers, or the 'database' field for it in darling.json.";
+    }
 
     public static string ResolveConnectionString(MonitoredServer config, ILogger? logger = null)
     {
@@ -113,9 +181,37 @@ SELECT
         return MonitoredServerConnection.BuildConnectionString(config, password);
     }
 
+    /* The PostgreSQL detection query. Deliberately built only from surfaces a pg_monitor-grade login
+       can read on Amazon Aurora, verified against live 16.11 and 17.7 clusters:
+
+         current_setting('server_version_num') -> 160011 / 170007, so the major is a division rather
+           than string parsing (version() text formatting has changed across releases).
+         pg_is_in_recovery()                   -> reader vs writer. On Aurora every reader endpoint is
+           its own instance with its own statistics, so this is identity, not a routing hint.
+         aurora_version()                      -> present only on Aurora. Wrapped: on stock PostgreSQL
+           the function does not exist, and a missing function must read as "not Aurora" rather than
+           failing the whole probe.
+
+       No timezone offset column: unlike SQL Server's DATEDIFF-on-GETDATE idiom, Postgres timestamps
+       here are read as-is and the store's convention is naive UTC either way. */
+    public const string PostgresDetectionQueryText = @"
+SELECT
+    version() AS server_version_text,
+    current_setting('server_version_num')::int / 10000 AS major_version,
+    pg_is_in_recovery() AS is_in_recovery,
+    (SELECT count(*) FROM pg_proc WHERE proname = 'aurora_version') > 0 AS has_aurora_marker,
+    current_setting('server_version_num')::int AS server_version_num,
+    -- #2228: which database this connection actually landed in. Appended; see the comment above.
+    current_database() AS connected_database";
+
     /// <summary>Connects, probes, and returns the runtime state for one configured server.</summary>
     public static async Task<ServerRuntime> ConnectAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
     {
+        if (config.IsPostgres)
+        {
+            return await ConnectPostgresAsync(config, logger, cancellationToken);
+        }
+
         var connectionString = ResolveConnectionString(config, logger);
         var storageName = config.StorageName;
 
@@ -127,6 +223,7 @@ SELECT
 
         int majorVersion = 0, engineEdition = 0;
         bool isAwsRds = false, hasMsdbAccess = true;
+        string? connectedDatabase = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             // Column indices per DetectionQueryText: 1 major_version, 3 engine_edition,
@@ -135,6 +232,7 @@ SELECT
             engineEdition = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
             isAwsRds = !reader.IsDBNull(4) && reader.GetInt32(4) == 1;
             hasMsdbAccess = reader.IsDBNull(5) || reader.GetInt32(5) == 1;
+            connectedDatabase = reader.IsDBNull(6) ? null : reader.GetString(6);   /* #2228 */
         }
 
         return new ServerRuntime
@@ -153,10 +251,76 @@ SELECT
                 HasMsdbAccess = hasMsdbAccess,
             },
             StorageName = storageName,
-            ServerId = ServerIdHelper.GetDeterministicHashCode(storageName),
+            /* #2218: the STORED identity, not a fresh hash of storageName. This is the runtime's only
+               identity stamp — DarlingCollectorRunner copies it onto every CollectorContext, so every
+               collected row keys on whatever this says — which is why it has to read the registry rather
+               than re-derive from the connection fields the operator can edit. */
+            ServerId = config.ServerId,
             HasMsdbAccess = hasMsdbAccess,
             IsAwsRds = isAwsRds,
             EngineEdition = engineEdition,
+            ConnectedDatabase = connectedDatabase,
+        };
+    }
+
+    /// <summary>
+    /// The PostgreSQL connect-and-probe. Same contract as the SQL Server path — open, probe, return a
+    /// <see cref="ServerRuntime"/> whose <see cref="CollectorTargetInfo"/> is what the collectors' gate
+    /// reads — with the SQL Server-only facts left at their defaults.
+    /// <para><c>HasMsdbAccess</c> stays <c>true</c> and the Azure flags stay <c>false</c> because they are
+    /// meaningless here; no Postgres definition consults them, and the engine check in
+    /// <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/> keeps every
+    /// T-SQL definition away from this target regardless of their values.</para>
+    /// </summary>
+    private static async Task<ServerRuntime> ConnectPostgresAsync(
+        MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var connectionString = ResolveConnectionString(config, logger);
+        var storageName = config.StorageName;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        using var command = new NpgsqlCommand(PostgresDetectionQueryText, connection) { CommandTimeout = 30 };
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        int majorVersion = 0, versionNum = 0;
+        bool isInRecovery = false, isAurora = false;
+        string versionText = "";
+        string? connectedDatabase = null;
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            versionText = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            majorVersion = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+            isInRecovery = !reader.IsDBNull(2) && reader.GetBoolean(2);
+            isAurora = !reader.IsDBNull(3) && reader.GetBoolean(3);
+            versionNum = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
+            connectedDatabase = reader.IsDBNull(5) ? null : reader.GetString(5);   /* #2228 */
+        }
+
+        logger?.LogInformation(
+            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora} — {VersionText}",
+            config.DisplayName, majorVersion, versionNum, isInRecovery ? "reader (in recovery)" : "writer", isAurora,
+            versionText);
+
+        /* A Postgres target reached through the SQL Server path would have failed on the detection
+           query, so an engine mismatch is loud. The reverse — a SQL Server host configured as
+           "postgres" — fails at connect, which is equally loud. */
+        return new ServerRuntime
+        {
+            Config = config,
+            ConnectionString = connectionString,
+            Target = new CollectorTargetInfo
+            {
+                Engine = CollectorTargetEngine.PostgreSql,
+                PostgresMajorVersion = majorVersion,
+                PostgresVersionNum = versionNum,
+                IsAurora = isAurora,
+                IsInRecovery = isInRecovery,
+            },
+            StorageName = storageName,
+            ServerId = config.ServerId,
+            ConnectedDatabase = connectedDatabase,
         };
     }
 
@@ -178,16 +342,26 @@ SELECT
         try
         {
             var runtime = await ConnectAsync(config, logger, cancellationToken);
+            var isPostgres = runtime.Target.Engine == CollectorTargetEngine.PostgreSql;
             return new ConnectionProbeResult(
                 Success: true,
                 MajorVersion: runtime.Target.SqlMajorVersion,
                 EngineEdition: runtime.EngineEdition,
-                EngineEditionDescription: DescribeEngineEdition(runtime.EngineEdition),
+                /* No edition on a PostgreSQL target, and DescribeEngineEdition(0) would say
+                   "Unknown (0)" — which reads as a probe that half-failed rather than one that
+                   succeeded against a different engine. */
+                EngineEditionDescription: isPostgres ? null : DescribeEngineEdition(runtime.EngineEdition),
                 IsAzureSqlDb: runtime.Target.IsAzureSqlDb,
                 IsAzureManagedInstance: runtime.Target.IsAzureManagedInstance,
                 IsAwsRds: runtime.IsAwsRds,
                 HasMsdbAccess: runtime.HasMsdbAccess,
-                Error: null);
+                Error: null,
+                ConnectedDatabase: runtime.ConnectedDatabase,
+                Engine: runtime.Target.Engine,
+                PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
+                PostgresVersionNum: runtime.Target.PostgresVersionNum,
+                IsAurora: runtime.Target.IsAurora,
+                IsInRecovery: runtime.Target.IsInRecovery);
         }
         catch (OperationCanceledException)
         {
@@ -206,6 +380,51 @@ SELECT
                 HasMsdbAccess: false,
                 Error: ex.Message);
         }
+    }
+
+    /// <summary>
+    /// The probed facts for a REACHABLE target, as one clause — shared by the <c>--test-connection</c>
+    /// PASS line (<c>DarlingCliCommands.FormatProbeLine</c>) and the <c>add_servers</c> MCP tool's detail
+    /// text, which previously each formatted their own and could drift.
+    /// <para>The engine decides what is worth saying. A SQL Server target reports version, edition and
+    /// msdb access, because msdb access gates three collectors. A PostgreSQL target has none of those,
+    /// so it reports version, writer-vs-reader, Aurora-vs-not — and then the number that actually
+    /// answers "will this target give me what I expect", which is how many of the PostgreSQL collectors
+    /// clear the gate. A stock-PostgreSQL reader clears three of seven, and finding that out at
+    /// pre-flight is the point of the verb.</para>
+    /// </summary>
+    public static string DescribeProbeFacts(ConnectionProbeResult probe)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+
+        if (probe.Engine != CollectorTargetEngine.PostgreSql)
+        {
+            var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
+                ? DescribeEngineEdition(probe.EngineEdition)
+                : probe.EngineEditionDescription;
+            var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (failed-job alerts unavailable)";
+            return $"SQL major version {probe.MajorVersion}, {edition}, {msdb}";
+        }
+
+        var target = probe.ToTargetInfo();
+        var postgresDefinitions = CollectorCatalog.All
+            .Where(d => d.TargetEngine == CollectorTargetEngine.PostgreSql)
+            .ToList();
+        var skipped = postgresDefinitions
+            .Where(d => !CollectorCatalog.AppliesTo(d, target))
+            .Select(d => d.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        var role = probe.IsInRecovery ? "reader (in recovery)" : "writer";
+        var flavour = probe.IsAurora ? "Aurora" : "not Aurora";
+        var applies = skipped.Count == 0
+            ? $"all {postgresDefinitions.Count} PostgreSQL collectors apply"
+            : $"{postgresDefinitions.Count - skipped.Count} of {postgresDefinitions.Count} PostgreSQL collectors apply " +
+              $"(skipped: {string.Join(", ", skipped)})";
+
+        return $"PostgreSQL {probe.PostgresMajorVersion} (server_version_num {probe.PostgresVersionNum}), " +
+            $"{role}, {flavour} — {applies}";
     }
 
     /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.</summary>
@@ -228,6 +447,11 @@ SELECT
 /// The outcome of a connect-and-probe attempt (<see cref="DarlingServerConnector.ProbeAsync"/>): the
 /// success flag plus the probed target facts, or the error message on failure. Deliberately carries NO
 /// credentials so it is safe to serialize into <c>config_command.result_json</c> and print from the CLI.
+/// <para>The SQL Server facts come first because they came first; the PostgreSQL ones are trailing
+/// optional parameters so every existing construction site — including the tests — keeps compiling and
+/// keeps meaning "a SQL Server target". <see cref="Engine"/> is what a reader should branch on: on a
+/// PostgreSQL target <see cref="MajorVersion"/> and <see cref="EngineEdition"/> are 0 and
+/// <see cref="HasMsdbAccess"/> is meaningless, so reporting them would be worse than silence.</para>
 /// </summary>
 public sealed record ConnectionProbeResult(
     bool Success,
@@ -238,4 +462,33 @@ public sealed record ConnectionProbeResult(
     bool IsAzureManagedInstance,
     bool IsAwsRds,
     bool HasMsdbAccess,
-    string? Error);
+    string? Error,
+    CollectorTargetEngine Engine = CollectorTargetEngine.SqlServer,
+    int PostgresMajorVersion = 0,
+    int PostgresVersionNum = 0,
+    bool IsAurora = false,
+    bool IsInRecovery = false,
+    /* #2280: the database the connection ACTUALLY reached, so a registration-time collision check can compare
+       what the SERVER says against what other registrations claim, rather than comparing two claims. Trailing
+       and defaulted, so every existing construction of this record still compiles unchanged. */
+    string? ConnectedDatabase = null)
+{
+    /// <summary>
+    /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually
+    /// run against it. These are the same fields <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>
+    /// reads, which is why a count derived from this is a real answer and not an estimate.
+    /// </summary>
+    public CollectorTargetInfo ToTargetInfo() => new()
+    {
+        Engine = Engine,
+        IsAzureSqlDb = IsAzureSqlDb,
+        IsAzureManagedInstance = IsAzureManagedInstance,
+        IsAwsRds = IsAwsRds,
+        SqlMajorVersion = MajorVersion,
+        HasMsdbAccess = HasMsdbAccess,
+        PostgresMajorVersion = PostgresMajorVersion,
+        PostgresVersionNum = PostgresVersionNum,
+        IsAurora = IsAurora,
+        IsInRecovery = IsInRecovery,
+    };
+}

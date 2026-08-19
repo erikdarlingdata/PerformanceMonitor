@@ -101,15 +101,31 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
             rootFactKey: "SOS_SCHEDULER_YIELD", storyPathHash: "reco_none_hash",
             remediation: null);
 
+        /* #2138: a FORCE finding with a PSP-flagged target. Asserting its verdict at the WIRE — after
+           the persisted action round-trips the store — proves both the one-line tool wiring (a dropped
+           field here is invisible to the builder's unit pins) and, incidentally, that the #2140 DTO
+           mirror really does carry the flag through persistence. */
+        var force = MakeFinding(
+            findingId: 900003, analysisTime, severity: 1.6,
+            rootFactKey: "PLAN_REGRESSION", storyPathHash: "reco_force_hash",
+            remediation: new RemediationAction(
+                "PLAN_REGRESSION", "force",
+                new[]
+                {
+                    new ForcePlanTarget(
+                        "MyDb", 123, 99, "0xBEST", "0xLATEST", 9000, 1200, 7.5,
+                        ReplicaRole: null, ParameterSensitivityCoFired: true)
+                }));
+
         await store.InsertFindingsAsync(
-            new List<AnalysisFinding> { destructive, nonRemediable }, context);
+            new List<AnalysisFinding> { destructive, nonRemediable, force }, context);
 
         var json = await McpAnalysisTools.GetAnalysisFindings(
             new AnalysisService(_duckDb), _serverManager, "TestServer", 24);
 
         using var doc = JsonDocument.Parse(json);
         var findings = doc.RootElement.GetProperty("findings").EnumerateArray().ToList();
-        Assert.Equal(2, findings.Count);
+        Assert.Equal(3, findings.Count);
 
         /* The field is present on EVERY finding (JsonOptions does not ignore nulls). */
         Assert.All(findings, f => Assert.True(f.TryGetProperty("remediation_command", out _),
@@ -133,6 +149,26 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
         /* Non-remediable finding: the field is present but null (no command). */
         var none = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "reco_none_hash");
         Assert.Equal(JsonValueKind.Null, none.GetProperty("remediation_command").ValueKind);
+
+        /* #2138: structured_remediation rides every finding (present-but-null off the force verb)... */
+        Assert.All(findings, f => Assert.True(f.TryGetProperty("structured_remediation", out _),
+            "every finding must expose structured_remediation"));
+        Assert.Equal(JsonValueKind.Null, rcsi.GetProperty("structured_remediation").ValueKind);
+        Assert.Equal(JsonValueKind.Null, none.GetProperty("structured_remediation").ValueKind);
+
+        /* ...and the force finding's verdict crosses the wire intact: ineligible, the blocker NAMED,
+           the artifacts split. This is the flag surviving FindingStore -> AlertContextSerializer ->
+           tool projection end to end, not just the builder's unit pins. */
+        var forced = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "reco_force_hash");
+        var structured = forced.GetProperty("structured_remediation");
+        Assert.Equal("force", structured.GetProperty("verb").GetString());
+        var target = Assert.Single(structured.GetProperty("force_plan_targets").EnumerateArray());
+        Assert.False(target.GetProperty("eligible").GetBoolean());
+        Assert.Equal("parameter_sensitivity_cofired",
+            Assert.Single(target.GetProperty("blockers").EnumerateArray()).GetString());
+        Assert.Contains("sp_query_store_force_plan", target.GetProperty("force_sql").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("force_failure_count", target.GetProperty("verify_sql").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(7.5, target.GetProperty("evidence").GetProperty("regression_factor").GetDouble());
     }
 
     /// <summary>

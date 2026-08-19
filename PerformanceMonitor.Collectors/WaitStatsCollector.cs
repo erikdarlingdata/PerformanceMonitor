@@ -89,10 +89,10 @@ OPTION(RECOMPILE);";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta groups, keys, and the 300 s gap policy are the parity contract — do not reorder. */
-        var deltaWaitingTasks = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_tasks", row.WaitType, row.WaitingTasks, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_time", row.WaitType, row.WaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaSignalWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_signal", row.WaitType, row.SignalWaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        /* Delta groups, keys, and the shared gap policy are the parity contract — do not reorder. */
+        var deltaWaitingTasks = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_tasks", row.WaitType, row.WaitingTasks, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_time", row.WaitType, row.WaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSignalWaitTimeMs = context.Deltas.CalculateDelta(context.ServerId, "wait_stats_signal", row.WaitType, row.SignalWaitTimeMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.WaitType)              /* wait_type VARCHAR */

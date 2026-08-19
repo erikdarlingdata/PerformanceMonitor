@@ -55,6 +55,7 @@ public sealed class DarlingSelfAlertTests
         public bool FailedJobEnabled { get; set; }
         public bool PvsEnabled { get; set; }
         public bool DatabaseStateEnabled { get; set; }
+        public bool ForcePlanFailureEnabled { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }
@@ -70,6 +71,12 @@ public sealed class DarlingSelfAlertTests
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
+        /* #2107: the previously-hardcoded knobs, at their shipped defaults. */
+        public int DiskCriticalFreePercent { get; set; } = 3;
+        public int DiskCriticalFreeGb { get; set; } = 2;
+        public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int CollectionStaleMinutes { get; set; } = 30;
+        public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;
         public int LongRunningJobMultiplier { get; set; } = 3;
@@ -160,6 +167,9 @@ public sealed class DarlingSelfAlertTests
         /// <summary>#1696 (V37): AG disconnect re-fire minutes. Default 0 = off, the shipped behavior.</summary>
         public int AgDisconnectRefireMinutes { get; set; }
 
+        /// <summary>#2136 (V57): the Store Job Over Cadence warning percent. Default is the shipped 25.</summary>
+        public int StoreJobCadenceWarnPercent { get; set; } = 25;
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -176,7 +186,8 @@ public sealed class DarlingSelfAlertTests
             notifyAgHealth: () => NotifyAgHealth,
             agLagAlertSeconds: () => AgLagAlertSeconds,
             agRedoQueueAlertKb: () => AgRedoQueueAlertKb,
-            agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes);
+            agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes,
+            storeJobCadenceWarnPercent: () => StoreJobCadenceWarnPercent);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -813,7 +824,7 @@ public sealed class DarlingSelfAlertTests
     /* ---------------- store disk pressure edge ---------------- */
 
     [Fact]
-    public async Task DiskPressure_FiresOnce_ThenCooldownSuppresses_ThenReFires()
+    public async Task DiskPressure_FiresOnce_ThenStaysQuietAtUnchangedLevel_ReFiresOnlyOnWorsening()
     {
         var h = new Harness();
         var e = h.Build();
@@ -829,8 +840,37 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* After the cooldown the standing condition re-fires. */
+        /* #2101: the cooldown elapsing is NOT enough — a standing breach at an UNCHANGED level stays
+           quiet (the field report: 7.3% free re-notified every 15 minutes for hours). */
         h.Now = h.Now.AddMinutes(5);
+        await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Worsened less than the 1pp margin (5.0% → 4.5%) — jitter, still quiet. */
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyDiskPressureAsync(45 * Gib, 1000 * Gib, null, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Genuinely worsened (5.0% → 3.5%, past the margin) — re-fires, and re-anchors the watermark. */
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyDiskPressureAsync(35 * Gib, 1000 * Gib, null, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task DiskPressure_Recovery_ClearsTheWorseningWatermark_SoTheNextBreachIsFresh()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);   /* breach at 5% */
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyDiskPressureAsync(50 * Gib, 100 * Gib, null, Ct);  /* recovered */
+
+        /* A NEW breach at the same 5% level after recovery must fire — the watermark died with the
+           old episode, or a volume that oscillates around the threshold would go permanently silent. */
+        h.Now = h.Now.AddMinutes(6);
         await e.ApplyDiskPressureAsync(5 * Gib, 100 * Gib, null, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
@@ -1988,6 +2028,9 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new AnomalousJobsResult(SnapshotIsFresh: true, new List<AnomalousJobInfo>()));
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DatabaseStateInfo>());
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<ForcePlanFailureInfo>());
     }
 
     private sealed class StubStateStore : IAlertStateStore
@@ -1996,6 +2039,16 @@ public sealed class DarlingSelfAlertTests
         public Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark) => Task.CompletedTask;
         public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey) => Task.FromResult<DateTime?>(null);
         public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark) => Task.CompletedTask;
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) => Task.CompletedTask;
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) => Task.CompletedTask;
+
+        /* #2216: the self-alert paths carry no fingerprintable incidents, so the engine never accumulates
+           against this stub — it exists to satisfy the seam. */
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) =>
+            Task.FromResult<IReadOnlyDictionary<string, IncidentOccurrenceState>>(
+                new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
+
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states) => Task.CompletedTask;
     }
 
     /* ---------------- live collection_log reads (gated on DARLING_TEST_PG) ---------------- */
@@ -2280,5 +2333,109 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             .ToList();
 
         Assert.Contains(warnings, x => x.Message.Contains("[muted]", StringComparison.Ordinal));
+    }
+
+    /* ---------------- #2136 Store Job Over Cadence ---------------- */
+
+    private static StoreJobCadenceReading CadenceJob(
+        long id = 1028, long? durMs = 900_000, long schedMs = 3_600_000,
+        string name = "policy_compression query_store_stats") =>
+        new(id, name, durMs, schedMs);
+
+    [Fact]
+    public async Task JobOverCadence_WarningTier_FiresAtTheKnobPercent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 900s of 3600s = exactly 25%, the shipped default — the boundary is inclusive. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("storejob:1028", fired.ServerKey);  /* prefixed so it never parses as a server_id */
+        Assert.Contains("25% of its schedule interval", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_UnderTheKnob_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 249s of 3600s ≈ 7% — the production store's worst job today. Must not fire at the default 25. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 249_000) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_At100Percent_EscalatesToCritical()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 3700s of 3600s — the job outruns its own cadence; runs back up behind each other. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 3_700_000) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_HonorsTheLiveKnob()
+    {
+        var h = new Harness { StoreJobCadenceWarnPercent = 50 };
+        var e = h.Build();
+
+        /* 30% breaches the default 25 but not the configured 50 — the seam is read live. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 1_080_000) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_NoScheduleOrNoRun_IsSkippedWithoutJudging()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A one-shot job (no interval) and a job with no completed run have no cadence to breach. */
+        await e.ApplyStoreJobCadenceAsync(new[]
+        {
+            CadenceJob(id: 1, schedMs: 0),
+            CadenceJob(id: 2, durMs: null),
+        }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_IsAStandingCondition_ReFiresOnlyOnCooldown_AndWritesOneRecoveryRow()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Breach: fires once. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Still breaching one minute later — inside the 5-minute cooldown, no re-fire. */
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Still breaching past the cooldown — re-fires under the SAME metric name. */
+        h.Now = h.Now.AddMinutes(10);
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* A later run comes back under: exactly one recovery audit row, and a fresh breach fires again. */
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 200_000) }, Ct);
+        var recovered = Assert.Single(h.History.Records);
+        Assert.Equal("Store Job Cadence Recovered", recovered.MetricName);
     }
 }

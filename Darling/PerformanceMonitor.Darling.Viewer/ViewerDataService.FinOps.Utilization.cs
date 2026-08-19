@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -59,6 +60,20 @@ server_info AS (
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1
+),
+/* Workspace-memory pressure, which is what being short of memory actually looks like: a query asked the
+   resource semaphore for a grant and did not simply get it. Counts of events, so no threshold to tune
+   (#2246). The utilization peak rides along to stop a CPU-quiet server that is straining its semaphore
+   from being called idle. */
+grants AS (
+    SELECT
+        MAX(waiter_count) AS max_grant_waiters,
+        SUM(COALESCE(timeout_error_count_delta, 0)) AS grant_timeouts,
+        SUM(COALESCE(forced_grant_count_delta, 0)) AS forced_grants,
+        MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
+    FROM v_memory_grant_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
 )
 SELECT
     c.avg_cpu_pct,
@@ -72,10 +87,15 @@ SELECT
     m.memory_ratio,
     m.max_workers_count,
     m.current_workers_count,
-    s.cpu_count
+    s.cpu_count,
+    COALESCE(g.max_grant_waiters, 0),
+    COALESCE(g.grant_timeouts, 0),
+    COALESCE(g.forced_grants, 0),
+    COALESCE(g.grant_utilization_pct, 0)
 FROM cpu_stats c
 CROSS JOIN mem_latest m
-LEFT JOIN server_info s ON true";
+LEFT JOIN server_info s ON true
+LEFT JOIN grants g ON true";
 
     public async Task<UtilizationEfficiencyRow?> GetUtilizationEfficiencyAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -93,11 +113,20 @@ LEFT JOIN server_info s ON true";
         var p95Cpu = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
         var memRatio = reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8));
 
-        var status = "RIGHT_SIZED";
-        if (avgCpu < 15 && maxCpu < 40 && memRatio < 0.5m)
-            status = "OVER_PROVISIONED";
-        else if (p95Cpu > 85 || memRatio > 0.95m)
-            status = "UNDER_PROVISIONED";
+        var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
+        var currentWorkers = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
+
+        /* memory_ratio is still SELECTed and still displayed — it is a real fact about the instance — but it
+           is no longer part of the verdict: Total over Target Server Memory converges at 1.0 on any warmed
+           server, so it reported every server as under-provisioned (#2246). */
+        var status = ProvisioningVerdict.Evaluate(
+            avgCpu, maxCpu, p95Cpu,
+            maxGrantWaiters: reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+            grantTimeouts: reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),
+            forcedGrants: reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
+            grantUtilizationPercent: reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
+            maxWorkers: maxWorkers,
+            currentWorkers: currentWorkers);
 
         return new UtilizationEfficiencyRow
         {
@@ -111,8 +140,12 @@ LEFT JOIN server_info s ON true";
             BufferPoolMb = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
             MemoryRatio = memRatio,
             ProvisioningStatus = status,
-            MaxWorkersCount = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
-            CurrentWorkersCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
+            MaxGrantWaiters = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+            GrantTimeouts = reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),
+            ForcedGrants = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
+            GrantUtilizationPct = reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
+            MaxWorkersCount = maxWorkers,
+            CurrentWorkersCount = currentWorkers,
             CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11))
         };
     }
@@ -133,8 +166,24 @@ WITH daily_cpu AS (
 daily_mem AS (
     SELECT
         CAST(collection_time AS DATE) AS day,
-        AVG(CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0)) AS avg_memory_ratio
+        AVG(CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0)) AS avg_memory_ratio,
+        MAX(max_workers_count) AS max_workers_count,
+        MAX(current_workers_count) AS current_workers_count
     FROM v_memory_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    GROUP BY CAST(collection_time AS DATE)
+),
+/* Same pressure signals as the point-in-time read, per day, so a day cannot be classified by a rule
+   the current verdict does not use (#2246). */
+daily_grants AS (
+    SELECT
+        CAST(collection_time AS DATE) AS day,
+        MAX(waiter_count) AS max_grant_waiters,
+        SUM(COALESCE(timeout_error_count_delta, 0)) AS grant_timeouts,
+        SUM(COALESCE(forced_grant_count_delta, 0)) AS forced_grants,
+        MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
+    FROM v_memory_grant_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     GROUP BY CAST(collection_time AS DATE)
@@ -144,9 +193,16 @@ SELECT
     c.avg_cpu_pct,
     c.max_cpu_pct,
     c.p95_cpu_pct,
-    COALESCE(m.avg_memory_ratio, 0)
+    COALESCE(m.avg_memory_ratio, 0),
+    COALESCE(g.max_grant_waiters, 0),
+    COALESCE(g.grant_timeouts, 0),
+    COALESCE(g.forced_grants, 0),
+    COALESCE(g.grant_utilization_pct, 0),
+    COALESCE(m.max_workers_count, 0),
+    COALESCE(m.current_workers_count, 0)
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
+LEFT JOIN daily_grants g ON g.day = c.day
 ORDER BY c.day";
 
     public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, CancellationToken cancellationToken = default)
@@ -166,11 +222,14 @@ ORDER BY c.day";
             var p95Cpu = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
             var memRatio = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4));
 
-            var status = "RIGHT_SIZED";
-            if (avgCpu < 15 && maxCpu < 40 && memRatio < 0.5m)
-                status = "OVER_PROVISIONED";
-            else if (p95Cpu > 85 || memRatio > 0.95m)
-                status = "UNDER_PROVISIONED";
+            var status = ProvisioningVerdict.Evaluate(
+                avgCpu, maxCpu, p95Cpu,
+                maxGrantWaiters: reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                grantTimeouts: reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6)),
+                forcedGrants: reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
+                grantUtilizationPercent: reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8)),
+                maxWorkers: reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
+                currentWorkers: reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)));
 
             items.Add(new ProvisioningTrendRow
             {

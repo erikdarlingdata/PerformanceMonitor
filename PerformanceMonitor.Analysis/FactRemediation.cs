@@ -771,7 +771,8 @@ public static class FactRemediation
                 LatestCpuPerExecUs: GetDouble(row, "latest_cpu_per_exec_us"),
                 BestCpuPerExecUs: GetDouble(row, "best_cpu_per_exec_us"),
                 RegressionFactor: GetDouble(row, "regression_factor"),
-                ReplicaRole: string.IsNullOrEmpty(replicaRole) ? null : replicaRole);
+                ReplicaRole: string.IsNullOrEmpty(replicaRole) ? null : replicaRole,
+                ParameterSensitivityCoFired: GetBool(row, "parameter_sensitivity_cofired"));
         }
 
         foreach (var key in order)
@@ -816,6 +817,7 @@ public static class FactRemediation
             if (!string.IsNullOrEmpty(target.ReplicaRole))
                 sb.AppendLine($"--   measured on replica: {target.ReplicaRole}");
             AppendSecondaryReplicaDisclosure(sb, target);
+            AppendParameterSensitivityCaution(sb, target);
             sb.AppendLine($"USE {QuoteName(target.Database)};");
             sb.AppendLine($"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             sb.AppendLine();
@@ -893,6 +895,135 @@ public static class FactRemediation
         sb.AppendLine("--   https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-query-store-force-plan-transact-sql");
         sb.AppendLine("--   https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-query-store-replicas");
         sb.AppendLine("--");
+    }
+
+    /// <summary>
+    /// The #2138 gap-3 caution, emitted only for a target whose query ALSO carried the
+    /// PARAMETER_SENSITIVITY detector's plan-cache signature in the same analysis window (the
+    /// regressed_queries drill-down computes the flag with the detector's own thresholds, so this text
+    /// can never appear without the detector's evidence). Forcing under parameter sensitivity is the
+    /// one case where the recommendation itself can become the regression: the "best" and "regressed"
+    /// plans may each be right for DIFFERENT parameter populations, and pinning the cheap one hands the
+    /// other population the wrong plan permanently — quietly, because a forced plan no longer
+    /// recompiles away. So the gentler levers are named first, and the future auto-force bot treats
+    /// this flag as a hard gate: a flagged target is never auto-forced, it gets an investigate verdict.
+    /// Emits NOTHING when the flag is false, which keeps the render-stability golden meaningful — the
+    /// unflagged rendering is still the one it pins (the #1882 replica-disclosure discipline).
+    /// </summary>
+    private static void AppendParameterSensitivityCaution(StringBuilder sb, ForcePlanTarget target)
+    {
+        if (!target.ParameterSensitivityCoFired)
+            return;
+
+        sb.AppendLine("--");
+        sb.AppendLine("-- CAUTION: this query also shows the parameter-sensitivity signature in the plan cache");
+        sb.AppendLine("-- (one cached plan whose per-execution cost varies >= 10x across parameter values). The");
+        sb.AppendLine("-- regressed plan and the best plan may each be right for DIFFERENT parameter values, and");
+        sb.AppendLine("-- forcing pins one shape for all of them -- the population that preferred the other plan");
+        sb.AppendLine("-- inherits the wrong one permanently. Before forcing, consider the gentler levers first:");
+        sb.AppendLine("-- update statistics on the tables involved and watch whether the plan settles, or on");
+        sb.AppendLine("-- SQL Server 2022+ evaluate PSP optimization / a Query Store hint instead of a hard force.");
+        sb.AppendLine("-- If you do force, re-check the per-parameter cost spread afterwards, not just the average.");
+    }
+
+    /// <summary>
+    /// THE force-plan policy gate (#2138): the named reasons this target must not be force-planned
+    /// without a human. Fills <see cref="StructuredForcePlanTarget.Blockers"/> on the MCP surfaces
+    /// today, and is the function the Phase 1+ auto-force bot consults before acting — one
+    /// implementation, so what agents inspect is what the bot enforces. Deliberately built ONLY from
+    /// fields the persisted target carries; a gate that re-derives evidence at judgment time can
+    /// disagree with the evidence the finding displayed.
+    /// <list type="bullet">
+    /// <item><b>parameter_sensitivity_cofired</b> — the query's plan-cache history shows the PSP
+    /// signature (#2140); forcing pins ONE shape for every parameter value, so the "best" plan may be
+    /// the wrong plan for the population that preferred the other one.</item>
+    /// <item><b>secondary_replica_evidence</b> — the regression was measured on a non-primary replica,
+    /// but the statement forces on the PRIMARY (#1882's disclosure, as data): acting on it changes the
+    /// primary's write workload on the strength of what a read-only replica did.</item>
+    /// </list>
+    /// </summary>
+    public static IReadOnlyList<string> ForcePlanBlockers(ForcePlanTarget target)
+    {
+        if (target is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        var blockers = new List<string>();
+        if (target.ParameterSensitivityCoFired)
+        {
+            blockers.Add("parameter_sensitivity_cofired");
+        }
+
+        if (IsNonPrimaryReplicaRow(target.ReplicaRole))
+        {
+            blockers.Add("secondary_replica_evidence");
+        }
+
+        return blockers;
+    }
+
+    /// <summary>
+    /// The machine-first remediation projection (#2138) — see <see cref="StructuredRemediation"/> for
+    /// why it exists and why it is built at read time rather than persisted. Null when the action is
+    /// null or carries no force-plan targets (other verbs can gain shapes when a consumer needs them).
+    /// </summary>
+    public static StructuredRemediation? BuildStructuredRemediation(RemediationAction? action)
+    {
+        if (action?.Targets is not { Count: > 0 } targets)
+        {
+            return null;
+        }
+
+        var structured = new List<StructuredForcePlanTarget>(targets.Count);
+        foreach (var t in targets)
+        {
+            var blockers = ForcePlanBlockers(t);
+            structured.Add(new StructuredForcePlanTarget(
+                t.Database,
+                t.QueryId,
+                t.PlanId,
+                t.LatestPlanHash,
+                t.BestPlanHash,
+                string.IsNullOrEmpty(t.ReplicaRole) ? null : t.ReplicaRole,
+                Eligible: blockers.Count == 0,
+                blockers,
+                new StructuredForcePlanEvidence(
+                    t.RegressionFactor,
+                    t.LatestCpuPerExecUs,
+                    t.BestCpuPerExecUs,
+                    t.ParameterSensitivityCoFired),
+                ForceSql: $"USE {QuoteName(t.Database)};{Environment.NewLine}" +
+                    $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};",
+                UnforceSql: $"USE {QuoteName(t.Database)};{Environment.NewLine}" +
+                    $"EXEC sys.sp_query_store_unforce_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};",
+                VerifySql: BuildForcePlanVerifySql(t)));
+        }
+
+        return new StructuredRemediation(action.FactKey, action.Action, structured);
+    }
+
+    /// <summary>
+    /// The post-force verification an agent (or the future bot's self-review window) runs: did the force
+    /// STICK (<c>is_forced_plan</c>, <c>force_failure_count</c>, and the failure reason when it did not),
+    /// and what has the per-interval cost looked like SINCE — the same two questions the #2141 arc's
+    /// "re-check the spread, not just the average" advice asks, as runnable statements.
+    /// </summary>
+    private static string BuildForcePlanVerifySql(ForcePlanTarget t)
+    {
+        var nl = Environment.NewLine;
+        return
+            $"USE {QuoteName(t.Database)};{nl}" +
+            $"SELECT qsp.plan_id, qsp.is_forced_plan, qsp.force_failure_count, qsp.last_force_failure_reason_desc{nl}" +
+            $"FROM sys.query_store_plan AS qsp{nl}" +
+            $"WHERE qsp.query_id = {t.QueryId};{nl}" +
+            $"{nl}" +
+            $"SELECT TOP (24) rs.plan_id, rs.runtime_stats_interval_id, rs.count_executions, rs.avg_cpu_time, rs.avg_duration, rs.max_cpu_time{nl}" +
+            $"FROM sys.query_store_runtime_stats AS rs{nl}" +
+            $"JOIN sys.query_store_plan AS qsp{nl}" +
+            $"  ON qsp.plan_id = rs.plan_id{nl}" +
+            $"WHERE qsp.query_id = {t.QueryId}{nl}" +
+            $"ORDER BY rs.runtime_stats_interval_id DESC;";
     }
 
     /// <summary>
@@ -1306,8 +1437,17 @@ public static class FactRemediation
                       "-- defaults there when omitted). Scope it with @replica_group_id to target that replica." + nl
                     : string.Empty;
 
+                // #2138 gap 3: two lines, same discipline as the replica disclosure — this surface is
+                // PASTED, so the parameter-sensitivity warning matters here at least as much as in the
+                // preview, and it matters that it stays short enough to survive the paste.
+                var pspCaution = t.ParameterSensitivityCoFired
+                    ? "-- CAUTION: parameter-sensitive (plan-cache cost varies >= 10x across parameter values)." + nl +
+                      "-- Forcing pins ONE shape for every value; consider stats updates first (see the preview)." + nl
+                    : string.Empty;
+
                 blocks.Add(
                     disclosure +
+                    pspCaution +
                     $"USE {QuoteName(t.Database)};" + nl +
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};");
             }

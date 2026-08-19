@@ -15,6 +15,17 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public sealed class CollectorTargetInfo
 {
+    /// <summary>
+    /// Which database engine this target actually is. Defaults to
+    /// <see cref="CollectorTargetEngine.SqlServer"/>, so every target the probes classify today —
+    /// and every bare <c>new CollectorTargetInfo()</c> in a test — keeps its present behaviour.
+    /// <para>A definition is only dispatched when its <see cref="ICollectorSchemaInfo.TargetEngine"/>
+    /// matches this; see <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>.
+    /// The SQL Server hosting flags below (<see cref="IsAzureSqlDb"/> and friends) are meaningful
+    /// only when this is <see cref="CollectorTargetEngine.SqlServer"/>.</para>
+    /// </summary>
+    public CollectorTargetEngine Engine { get; init; } = CollectorTargetEngine.SqlServer;
+
     /// <summary>True when the target is Azure SQL Database (engine edition 5).</summary>
     public bool IsAzureSqlDb { get; init; }
 
@@ -50,4 +61,45 @@ public sealed class CollectorTargetInfo
     /// silently gates collection off.</para>
     /// </summary>
     public bool HasMsdbAccess { get; init; } = true;
+
+    /* ---- PostgreSQL facts. Meaningful only when Engine is PostgreSql; the SQL Server flags above
+       are correspondingly meaningless on a Postgres target. Kept flat alongside them for now
+       because there are few; if this list grows much further it wants its own sub-object rather
+       than more parallel properties. ---- */
+
+    /// <summary>
+    /// PostgreSQL major version (16, 17); 0 when unknown. Derived from
+    /// <c>server_version_num / 10000</c> rather than parsing <c>version()</c> text, whose formatting
+    /// has changed across releases.
+    /// <para>Definitions gate on this for the real 16→17 breaks: <c>pg_stat_bgwriter</c> loses five
+    /// columns to <c>pg_stat_checkpointer</c> and deletes two, <c>pg_stat_statements</c> renames
+    /// <c>blk_*_time</c> to <c>shared_blk_*_time</c>, and <c>pg_stat_progress_vacuum</c> renames two
+    /// columns. A fleet spanning both majors hits all of them.</para>
+    /// </summary>
+    public int PostgresMajorVersion { get; init; }
+
+    /// <summary>
+    /// The full <c>server_version_num</c> (e.g. 160011, 170007), for the minor-version gates a major
+    /// alone cannot express — <c>aurora_stat_resource_usage()</c> needs Aurora 16.9+/17.5+ and is
+    /// absent on 17.4, so a major-only check would call a function that is not there.
+    /// </summary>
+    public int PostgresVersionNum { get; init; }
+
+    /// <summary>
+    /// True when the target is Amazon Aurora PostgreSQL, detected by the presence of
+    /// <c>aurora_version</c> in <c>pg_proc</c>.
+    /// <para>This gates a large proprietary surface that stock PostgreSQL does not have at all, most
+    /// importantly <c>aurora_stat_system_waits()</c> — cumulative wait counters, which core PostgreSQL
+    /// simply does not provide in any version.</para>
+    /// </summary>
+    public bool IsAurora { get; init; }
+
+    /// <summary>
+    /// True when the target is in recovery, i.e. a read replica (<c>pg_is_in_recovery()</c>).
+    /// <para>Not a routing hint: on Aurora every reader is a separate instance with its own
+    /// statistics — its own <c>pg_stat_statements</c> contents and its own wait profile — so a reader
+    /// is a distinct monitoring identity worth collecting from, not a shadow of the writer. Some
+    /// surfaces are writer-only and gate off this.</para>
+    /// </summary>
+    public bool IsInRecovery { get; init; }
 }

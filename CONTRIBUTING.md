@@ -230,7 +230,35 @@ ORDER BY
 OPTION(RECOMPILE);
 ```
 
-The full T-SQL style guide is in [CLAUDE.md](CLAUDE.md).
+A few more rules that come up in review, and the reasoning behind the ones that are
+not obvious:
+
+- **Unicode literals**: prefix with `N` (`N'ONLINE'`, not `'ONLINE'`).
+- **`ON` continues its `JOIN` at two spaces**, so the join graph reads down the left edge.
+- **`AND` / `OR` align their predicates** (`AND   d.state_desc = N'ONLINE'`), so a `WHERE`
+  clause reads as a list rather than as prose.
+- **`GROUP BY` / `ORDER BY` put each term on its own indented line**, so adding one is a
+  one-line diff.
+- **Never suggest missing-index DMV recommendations.** `sys.dm_db_missing_index_*` output
+  is not used in this project and changes proposing it will not be accepted.
+- **No full-text search.**
+
+Collector queries specifically:
+
+- **`OPTION(RECOMPILE)` on collector queries.** These run with parameters whose selectivity
+  varies enormously between a first-run catch-up window and a steady-state minute, and a plan
+  cached from one is wrong for the other. A statement added to an existing batch needs its own
+  hint — one on a neighbouring statement does not cover it.
+- **Comments explain WHY, at length.** This codebase's comments carry measurements, issue
+  numbers, and the failure the line prevents. A comment restating the code is noise; one
+  recording "this threshold was 300s and the fleet's median gap is 299s, so it discarded half
+  of every sweep" is what stops the next person undoing it.
+
+Darling's PostgreSQL store (not T-SQL — the Darling service stores to PostgreSQL/TimescaleDB):
+
+- **Schema-qualify every object in a migration** (`collect.*`, `config.*`). The migrate session's
+  `search_path` resolves bare names to a different schema, so an unqualified `CREATE` or `ALTER`
+  can land an object in the wrong one silently.
 
 ### C# Style
 

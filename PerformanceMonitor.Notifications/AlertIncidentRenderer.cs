@@ -6,7 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -63,6 +65,16 @@ public static class AlertIncidentRenderer
             incident.InvolvedObjects.Count > 0 ? string.Join(", ", incident.InvolvedObjects) : "(unresolved)"));
         if (incident.OccurrenceCount > 1)
             item.Fields.Add(("Occurrences", incident.OccurrenceCount.ToString()));
+        /* #2216: the monotonic total, as its OWN fact rather than a correction to "Occurrences".
+           Automation keys on the fact name (see class remarks), so redefining the existing one from
+           a window gauge to a total would silently change what every current consumer reads — the
+           two facts answer different questions and both are emitted. Emitted whenever an
+           accumulator produced one, INCLUDING when it equals the window count: a consumer polling
+           for a total must not have the field vanish on the incident's first delivery. */
+        if (incident.TotalOccurrences is long total)
+            item.Fields.Add(("Total Occurrences", total.ToString(CultureInfo.InvariantCulture)));
+        if (incident.IncidentStartedUtc is DateTime started)
+            item.Fields.Add(("Incident Since", started.ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture)));
         if (!string.IsNullOrEmpty(incident.WaitRange))
             item.Fields.Add(("Wait Range", incident.WaitRange));
         return item;

@@ -106,7 +106,11 @@ public sealed class McpPerfmonTools
             {
                 time = p.CollectionTime.ToString("o"),
                 value = p.Value,
-                delta_value = p.DeltaValue
+                delta_value = p.DeltaValue,
+                /* The delta's denominator. 0 means no delta was knowable, so delta_value = 0 with an
+                   interval of 0 must NOT be read as "no activity"; derive rates as
+                   delta_value / sample_interval_seconds rather than assuming a fixed cadence (#2234). */
+                sample_interval_seconds = p.SampleIntervalSeconds
             });
 
             return JsonSerializer.Serialize(new

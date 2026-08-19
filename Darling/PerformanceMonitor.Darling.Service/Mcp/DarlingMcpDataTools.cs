@@ -430,7 +430,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Supports database and parallelism filtering.")]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. Also returns cpu_attribution: the returned rows' summed CPU-seconds against the SQL process's measured CPU-seconds for the window (avg cpu_utilization % x core count x window) - attributed_cpu_ratio says how much of the box the ranking explains; when the CPU series or core count is missing, or covers too little of the window, the ratio is omitted rather than invented.")]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -438,10 +438,21 @@ public sealed class DarlingMcpDataTools
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1. Note: max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled. Confirm current parallelism with analyze_query_plan, which reads the actual plan.")] bool parallel_only = false,
-        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0)
+        [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
+        [Description("Grouping. 'query_hash' (default) is one row per (database, query_hash, host_object). 'host_object' rolls every statement of a hosting procedure/function into ONE row — use it when dynamic SQL built with per-value literals fragments one logical statement across many query_hash values, which makes top-N-by-hash structurally unable to surface it (measured at 21 fragments for one statement, whose combined CPU was the largest on the instance while no single fragment ranked). Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up.")] string group_by = "query_hash")
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
+
+        /* #2235: an unrecognised value must not silently fall back to the default grouping — a caller who
+           asked for a rollup and got a per-hash ranking would read it as "this proc is not hot", which is
+           the exact wrong conclusion this option exists to prevent. */
+        var rollUp = string.Equals(group_by, "host_object", StringComparison.OrdinalIgnoreCase);
+        if (!rollUp && !string.Equals(group_by, "query_hash", StringComparison.OrdinalIgnoreCase))
+        {
+            return McpHelpers.Status("invalid",
+                $"group_by must be 'query_hash' or 'host_object' (got '{group_by}').");
+        }
 
         var validation = McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
@@ -451,13 +462,29 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
 
-            IEnumerable<DarlingDataReader.TopQueryRow> filtered = rows;
-            if (parallel_only || min_dop > 1)
-                filtered = filtered.Where(r => r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2));
+            var filtered = rows
+                .Where(r => !(parallel_only || min_dop > 1) || (r.MaxDop > 1 && r.MaxDop >= (min_dop > 1 ? min_dop : 2)))
+                .ToList();
+
+            /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
+               the caller-visible ranking (post top-N, post filters), denominator is measured, and the
+               ratio is omitted rather than invented when a denominator piece is missing. The two reads
+               are independent, so they run concurrently (review catch). */
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
+            var attribution = CpuAttribution.Compute(
+                filtered.Sum(r => r.TotalCpuUs) / 1_000_000.0,
+                now.AddHours(-hours_back), now,
+                cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
+                properties?.CpuCount ?? 0);
 
             var result = filtered.Select(r => new
             {
@@ -475,6 +502,10 @@ public sealed class DarlingMcpDataTools
                 max_cpu_ms = r.MaxCpuUs / 1000.0,
                 min_elapsed_ms = r.MinElapsedUs / 1000.0,
                 max_elapsed_ms = r.MaxElapsedUs / 1000.0,
+                /* #2235: min/max are lifetime extremes (see QueryStatExtremes) — flagged only on
+                   the provable case, an extreme exceeding the whole window's total. */
+                extremes_note = QueryStatExtremes.LifetimeExtremeNote(
+                    r.TotalCpuUs, r.MaxCpuUs, r.TotalElapsedUs, r.MaxElapsedUs),
                 min_dop = r.MinDop,
                 max_dop = r.MaxDop,
                 is_parallel = r.MaxDop > 1,
@@ -496,6 +527,13 @@ public sealed class DarlingMcpDataTools
                 distinct_texts = r.DistinctTexts,
                 text_note = r.DistinctTexts > 1
                     ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
+                    : null,
+                // #2235: under host_object rollup this is the finding, not a decoration — it is the number
+                // that explains why a per-hash ranking could not surface this statement. query_hash is one
+                // member of the group when it is > 1, exactly as query_text already is for distinct_texts.
+                distinct_query_hashes = r.DistinctQueryHashes,
+                rollup_note = r.DistinctQueryHashes > 1
+                    ? $"rolled up {r.DistinctQueryHashes} query_hash values belonging to {r.HostObjectName} — dynamic SQL with per-value literals fragments one statement across hashes, so none of these would rank individually; query_hash and query_text are one representative fragment"
                     : null
             });
 
@@ -503,6 +541,16 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #2235: echoed so a stored or pasted payload cannot be misread as the other grouping —
+                   the two answer different questions and the rows look alike. */
+                group_by = rollUp ? "host_object" : "query_hash",
+                cpu_attribution = new
+                {
+                    ranked_cpu_seconds = attribution.RankedCpuSeconds,
+                    sql_cpu_seconds_in_window = attribution.SqlCpuSecondsInWindow,
+                    attributed_cpu_ratio = attribution.AttributedCpuRatio,
+                    note = attribution.Note
+                },
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -512,7 +560,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time. Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears.")]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time. Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. Also returns cpu_attribution: the returned rows' summed CPU-seconds against the SQL process's measured CPU-seconds for the window (avg cpu_utilization % x core count x window) - attributed_cpu_ratio says how much of the box the ranking explains; when the CPU series or core count is missing, or covers too little of the window, the ratio is omitted rather than invented.")]
     public static async Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -537,6 +585,19 @@ public sealed class DarlingMcpDataTools
                     "unavailable",
                     "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
+            /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
+               same concurrent independent reads. */
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+            await Task.WhenAll(cpuAggregateTask, propertiesTask);
+            var cpuAggregate = await cpuAggregateTask;
+            var properties = await propertiesTask;
+            var attribution = CpuAttribution.Compute(
+                rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
+                now.AddHours(-hours_back), now,
+                cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
+                properties?.CpuCount ?? 0);
+
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -553,6 +614,9 @@ public sealed class DarlingMcpDataTools
                 max_cpu_ms = r.MaxCpuUs / 1000.0,
                 min_elapsed_ms = r.MinElapsedUs / 1000.0,
                 max_elapsed_ms = r.MaxElapsedUs / 1000.0,
+                /* #2235: same lifetime-extremes flag as the queries tool. */
+                extremes_note = QueryStatExtremes.LifetimeExtremeNote(
+                    r.TotalCpuUs, r.MaxCpuUs, r.TotalElapsedUs, r.MaxElapsedUs),
                 avg_reads = r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
                 total_logical_reads = r.TotalLogicalReads,
                 total_logical_writes = r.TotalLogicalWrites,
@@ -564,6 +628,13 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                cpu_attribution = new
+                {
+                    ranked_cpu_seconds = attribution.RankedCpuSeconds,
+                    sql_cpu_seconds_in_window = attribution.SqlCpuSecondsInWindow,
+                    attributed_cpu_ratio = attribution.AttributedCpuRatio,
+                    note = attribution.Note
+                },
                 procedures = result
             }, McpHelpers.JsonOptions);
         }
@@ -675,7 +746,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on.")]
+    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes.")]
     public static async Task<string> GetCollectionHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -719,9 +790,43 @@ public sealed class DarlingMcpDataTools
                     r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases)
             });
 
+            /* #2296: the roll-up that makes half-rate collection visible. Every collector on a saturated
+               server reads HEALTHY — from each one's own seat nothing is wrong — so the condition only
+               existed as a service-log warning ("collection body has not completed … skipping relaunch").
+               The verdict compares the collectors' combined execution demand (average duration amortized
+               by cadence) against the minute the fastest cadence holds; heaviest_collectors names where
+               the budget goes, which is the actionable half of the answer. */
+            var pressure = SweepPressureClassifier.Compute(
+                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.FrequencyMinutes)));
+            var heaviest = rows
+                .Where(r => r.FrequencyMinutes > 0 && r.AvgDurationMs > 0)
+                .OrderByDescending(r => r.AvgDurationMs / r.FrequencyMinutes)
+                .Take(3)
+                .Select(r => new
+                {
+                    collector = r.CollectorName,
+                    avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
+                    frequency_minutes = r.FrequencyMinutes
+                });
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                sweep_pressure = new
+                {
+                    busy_ms_per_minute = Math.Round(pressure.BusyMsPerMinute, 0),
+                    busy_percent = Math.Round(pressure.BusyPercent, 1),
+                    verdict = pressure.Verdict,
+                    heaviest_collectors = heaviest,
+                    note = pressure.Verdict switch
+                    {
+                        SweepPressureClassifier.Saturated =>
+                            "The collection body cannot finish inside its cadence: relaunches are skipped every cycle and this server collects at a multiple of its configured interval, while each collector above correctly reads healthy from its own seat. The lever is capacity or placement (lighter or fewer scheduled collectors, a longer cadence, or a collector closer to the target), not collector repair.",
+                        SweepPressureClassifier.AtRisk =>
+                            "The collection body's average demand is close to its cadence; variance will intermittently push it over, skipping relaunches and stretching the delivered interval.",
+                        _ => null
+                    }
+                },
                 collectors = result
             }, McpHelpers.JsonOptions);
         }

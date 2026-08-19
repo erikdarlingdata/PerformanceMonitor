@@ -1,0 +1,285 @@
+name: Claude review guard
+
+# #2229: the review workflow can finish green and leave nothing an operator can read. Two ways,
+# both observed on this repo, both silent:
+#
+#   1. claude-code-action refuses to run when .github/workflows/claude-review.yml differs from the
+#      DEFAULT branch -- the check is server-side, during the OIDC token exchange. It exits SUCCESS
+#      in about four seconds and sets no output a caller can read.
+#   2. The review runs for real and posts nothing anyway. PR #2213 did this eleven times; one run
+#      spent $4.18 over 24 turns with 6 permission denials, reported subtype=success, and left zero
+#      comments. A 104-file change merged unreviewed and nothing anywhere said so.
+#
+# What it must NOT do is call a CLEAN review a failure. The prompt tells the reviewer HOW to report
+# findings, not to report when it has none, so silence on a one-line change is the correct outcome --
+# and a mark that goes red there is one people learn to ignore, which costs more than it catches. So
+# the zero-posted verdict is keyed on whether claude-review.yml actually promises a post.
+#
+# This guard is a SEPARATE workflow on purpose. Editing claude-review.yml makes this branch's copy
+# differ from the default branch, which triggers cause (1) for EVERY pull request in the repo until
+# the next release -- so a guard living inside the file it protects would disable review each time
+# it was touched. Nothing here invokes claude-code-action, so this file can be edited freely.
+#
+# It polls rather than using `on: workflow_run` because workflow_run only ever fires from the copy
+# of a workflow that is on the default branch: that variant would be dormant, and untestable, until
+# a release shipped it.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dev, main]
+
+# Match the review's own cancel-in-progress behavior. A new push cancels the review it is watching,
+# so the guard has to go too, or it waits out its deadline on a run that was cancelled by design.
+concurrency:
+  group: claude-review-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # The review is capped at 30 minutes; leave room to observe one that uses all of it.
+    timeout-minutes: 40
+    # No issues: scope here, despite the tally reading repos/.../issues/$PR/comments for
+    # top-level output. A pull request IS an issue to that API, and the PullRequests scope
+    # covers its comments: run 31726598542 was granted exactly Actions/Checks/Contents/
+    # Metadata/PullRequests read and counted issue: 1 from that endpoint without a 403.
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Verify the review posted something
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          R: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WF: .github/workflows/claude-review.yml
+          # Coupling to a step NAME in the other workflow. Deliberate: the step's conclusion is the
+          # only structured way to tell "no token, skipped cleanly" from "ran and said nothing".
+          REVIEW_STEP: Claude review
+          # Author of every artifact the review leaves behind (the action reports bot_name).
+          REVIEW_BOT: claude[bot]
+          # Whether "posted nothing" is a DEFECT depends on whether the review is obliged to post.
+          # Today's prompt says "use gh pr comment for top-level feedback" -- an instruction about
+          # HOW to report findings, not a promise to report when there are none -- so a clean review
+          # is legitimately silent, and failing on it would make this mark red on every tidy PR.
+          # Keyed on a sentinel in the prompt rather than on prose so the coupling is exact: add
+          # MUST_POST_SENTINEL to $WF along with the #2229 allowedTools cure and this guard turns
+          # strict by itself, with no second edit here to forget.
+          MUST_POST_SENTINEL: ALWAYS POST
+        run: |
+          set -euo pipefail
+
+          # "$*", not "$1": every echo in this step wraps across lines with a trailing backslash,
+          # which produces SEPARATE ARGUMENTS that echo joins with a space. A helper reading only $1
+          # silently truncates at the first wrap -- the summary keeps its opening clause and drops
+          # the rest, with nothing to show that it did. Identical for the single-argument calls.
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # #2309: every one-shot catalog lookup below goes through this, because under `set -e` a
+          # bare $(gh api ...) assignment that fails KILLS the step with one context-free stderr
+          # line -- which is how a transient 404/503 became a deterministic-looking hard red on
+          # three PRs in one afternoon, with no annotation naming the call that died. A lookup
+          # failure is not a review verdict (the same rule the sentinel read at the bottom already
+          # encodes): name the endpoint, mark the review UNCONFIRMED, exit 0. The helper assigns to
+          # LOOKUP_OUT instead of being command-substituted because an exit inside $() only leaves
+          # the subshell -- the one shape that CANNOT work here.
+          LOOKUP_OUT=''
+          lookup() {
+            local what=$1; shift
+            # stderr goes to its OWN capture, never into LOOKUP_OUT: a SUCCESSFUL gh call that
+            # prints a warning (deprecation notice, scope hint) must not pollute a value the call
+            # sites compare ("$step" != "success") or feed to arithmetic -- that would be this
+            # exact defect class reintroduced through the fix (review catch on #2309's own PR).
+            local errfile err
+            # The plumbing itself must not be able to kill the step either (review catch on the
+            # #2309 fix): a failed mktemp degrades to /dev/null (stderr is then lost but the
+            # verdict path survives), and the cat/rm are failure-tolerant for the same reason.
+            errfile=$(mktemp 2>/dev/null || echo /dev/null)
+            if ! LOOKUP_OUT=$(gh api "$@" 2>"$errfile"); then
+              err=$(cat "$errfile" 2>/dev/null || true)
+              [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+              echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${err:-$LOOKUP_OUT}."\
+                "A lookup failure must not become a review verdict (#2309), so the review is"\
+                "UNCONFIRMED -- read the PR's comments to confirm it by eye, or re-run this guard."
+              summary "- Guard lookup failed at ${what}; review UNCONFIRMED (#2309)."
+              exit 0
+            fi
+            [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
+          }
+
+          # Wait for the review run on this exact commit. Nothing appearing inside the grace window
+          # means review is not operating here at all -- no secret, or a fork PR, which the review
+          # workflow no-ops by design and which is not this guard's business.
+          # The poll deliberately does NOT use lookup(): a transient API failure mid-poll should
+          # consume one attempt and try again, not end the guard -- `|| line=''` keeps `set -e`
+          # out of it, and an empty line is already the loop's no-run-yet case (#2309).
+          run_id=''; status=''; conclusion=''; created=''; seen=''
+          for attempt in $(seq 1 70); do
+            line=$(gh api \
+              "repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=1" \
+              --jq '.workflow_runs[0] // empty
+                    | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"' \
+              2>/dev/null || true)
+            if [ -n "$line" ]; then
+              read -r run_id status conclusion created <<<"$line"
+              seen=1
+              [ "$status" = "completed" ] && break
+            # Keyed on never having seen a run, not on this poll being empty: a transient empty
+            # listing after one was found must not be read as "review is not operating here".
+            elif [ -z "$seen" ] && [ "$attempt" -ge 6 ]; then
+              echo "::notice title=No review run::No Claude Auto Review run exists for $SHA, so"\
+                "review is not operating on this PR (missing secret, or a fork). Nothing to verify."
+              exit 0
+            fi
+            sleep 30
+          done
+
+          if [ "$status" != "completed" ]; then
+            echo "::warning title=Review did not finish::Gave up waiting on review run $run_id for"\
+              "PR #$PR after 35 minutes. Its own 30-minute timeout will mark it; this PR is NOT"\
+              "Claude-reviewed."
+            summary '### Claude review did not finish inside the guard window'
+            exit 0
+          fi
+
+          if [ "$conclusion" = "cancelled" ] || [ "$conclusion" = "skipped" ]; then
+            echo "::notice title=Review $conclusion::run $run_id was $conclusion; nothing to verify."
+            exit 0
+          fi
+
+          # The step's own conclusion, which separates a clean no-op from a real run.
+          lookup "review-run jobs (step conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
+            --jq '[.jobs[].steps[] | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
+          step=$LOOKUP_OUT
+
+          if [ -z "$step" ]; then
+            echo "::error title=Guard cannot find the review step::No step named"\
+              "'$REVIEW_STEP' in run $run_id. This guard reads that step to verify the review, so"\
+              "renaming it in $WF blinds the guard -- update REVIEW_STEP here to match."
+            summary "### Guard is blind: no step named \`$REVIEW_STEP\` in the review run"
+            exit 1
+          fi
+
+          if [ "$step" = "skipped" ]; then
+            echo "::notice title=Review skipped cleanly::The '$REVIEW_STEP' step was skipped"\
+              "(no CLAUDE_CODE_OAUTH_TOKEN, or a fork PR). Nothing to verify."
+            exit 0
+          fi
+
+          # Did the action invoke Claude at all? Its workflow-validation skip reaches the outside
+          # world ONLY as a warning annotation: it sets skipped_due_to_workflow_validation_mismatch,
+          # but that output is not declared in the composite action's outputs block, and it returns
+          # before execution_file and conclusion are ever set. Actions job ids double as check-run
+          # ids, which is what makes the annotation readable from a different workflow.
+          never_ran=''
+          lookup "review-run jobs (annotation scan)" "repos/$R/actions/runs/$run_id/jobs" --paginate --jq '.jobs[].id'
+          for job in $LOOKUP_OUT; do
+            if gh api "repos/$R/check-runs/$job/annotations" --jq '.[].message' 2>/dev/null \
+                 | grep -qF 'Skipping action due to workflow validation'; then
+              never_ran=1
+              break
+            fi
+          done
+
+          if [ -n "$never_ran" ]; then
+            lookup "PR changed files" "repos/$R/pulls/$PR/files" --paginate --jq '.[].filename'
+            touched=$(printf '%s' "$LOOKUP_OUT" | { grep -Fx "$WF" || true; })
+            summary '### Claude review never ran'
+            if [ -n "$touched" ]; then
+              # Expected and unavoidable: the action requires that file to match the default branch
+              # byte for byte, so a PR editing it cannot be reviewed until it merges. A warning, not
+              # a failure -- a mark that is always red on workflow PRs is one people learn to ignore.
+              echo "::warning title=Review skipped - PR edits the workflow::This PR changes $WF,"\
+                "which claude-code-action refuses to run until it matches $DEFAULT_BRANCH. This PR"\
+                "is NOT Claude-reviewed and cannot be until it merges -- a human must review it."
+              summary "- Expected: this PR edits \`$WF\`, so a human must review it."
+              exit 0
+            fi
+            # Nothing in this PR explains the skip, so $WF on this branch has drifted from the
+            # default branch -- which silently disables review for EVERY PR, not just this one.
+            echo "::error title=Review disabled repo-wide::Claude never ran and this PR does not"\
+              "touch $WF, so that file has drifted from $DEFAULT_BRANCH. Every PR in the repo is"\
+              "silently going unreviewed until the two match."
+            summary "- Unexpected: \`$WF\` has drifted from \`$DEFAULT_BRANCH\`; ALL PRs go unreviewed."
+            exit 1
+          fi
+
+          if [ "$step" != "success" ]; then
+            echo "::error title=Review step failed::The '$REVIEW_STEP' step reported '$step' in run"\
+              "$run_id, so no review happened. Read that run for the cause; do NOT read this PR as"\
+              "reviewed."
+            summary "### Claude review failed (step conclusion: \`$step\`)"
+            exit 1
+          fi
+
+          # Count all three artifact kinds, scoped to the reviewer. Reviews on this repo routinely
+          # carry an EMPTY body and put every finding in INLINE comments -- #2225 had fifteen
+          # reviews with body_len=0 and twelve findings inline, so counting review bodies alone
+          # would call it silent. The AUTHOR filter matters just as much: the review window runs up
+          # to 30 minutes, so without it any human or unrelated bot commenting inside that window
+          # satisfies the guard and recreates the false pass this exists to catch. If the app is
+          # ever renamed this reports a false "posted nothing" -- loud and wrong, which is the safer
+          # direction for a guard to fail.
+          mine='select(.user.login == env.REVIEW_BOT)'
+          lookup "issue-comment tally" "repos/$R/issues/$PR/comments" --paginate \
+            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
+          issue=$LOOKUP_OUT
+          lookup "inline-comment tally" "repos/$R/pulls/$PR/comments" --paginate \
+            --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
+          inline=$LOOKUP_OUT
+          lookup "review tally" "repos/$R/pulls/$PR/reviews" --paginate \
+            --jq "[.[] | $mine | select(.submitted_at != null
+                                        and .submitted_at > \"$created\")] | length"
+          reviews=$LOOKUP_OUT
+          total=$(( issue + inline + reviews ))
+          echo "posted by $REVIEW_BOT since $created -- issue: $issue, inline: $inline,"\
+            "reviews: $reviews"
+          summary '### Claude review output'
+          summary "- issue comments: $issue"
+          summary "- inline comments: $inline"
+          summary "- reviews: $reviews"
+
+          if [ "$total" -ne 0 ]; then
+            exit 0
+          fi
+
+          # Nothing posted. Whether that is a defect or a clean bill of health is NOT decidable from
+          # the artifact count -- the two are the same observation from out here -- so it is decided
+          # by the contract in $WF on the DEFAULT branch, which is the copy the action validated and
+          # ran. A missing file or an unreadable one reads as "no obligation", the same as a prompt
+          # without the sentinel: a lookup failure must not become a review verdict.
+          # The trailing `|| true` is load-bearing under `set -euo pipefail`: without it a 404 on
+          # $WF, or a payload base64 cannot decode, fails the PIPELINE and kills this step -- turning
+          # a lookup failure into exactly the hard guard failure the comment above forbids. Verified
+          # against all four inputs: sentinel present, sentinel absent, empty, undecodable.
+          encoded=$(gh api "repos/$R/contents/$WF?ref=$DEFAULT_BRANCH" --jq '.content' 2>/dev/null \
+            || true)
+          must_post=$(printf '%s' "$encoded" | base64 -d 2>/dev/null \
+            | { grep -qF "$MUST_POST_SENTINEL" && echo 1 || true; } || true)
+
+          if [ -z "$must_post" ]; then
+            # The honest reading of today's prompt. Still surfaced, because "reviewed and clean" and
+            # "reviewed and swallowed" are the same observation, and a reader deciding whether to
+            # trust the green check needs to know that which one it is cannot be told from here.
+            echo "::warning title=Review posted nothing::Review run $run_id completed and left no"\
+              "comment, inline comment, or review by $REVIEW_BOT on PR #$PR. $WF does not oblige"\
+              "the review to post when it finds nothing, so this is consistent with a clean review"\
+              "-- but it is ALSO what the #2229 swallowed-output failure looks like, and the two"\
+              "cannot be told apart from here. Treat the review as unconfirmed."
+            summary '- Nothing posted. Consistent with a clean review, and also indistinguishable'\
+              'from the #2229 failure because the prompt does not require a post. UNCONFIRMED.'
+            exit 0
+          fi
+
+          # The prompt promises a post, so silence is a broken promise and nothing else.
+          echo "::error title=Review posted nothing::Review run $run_id completed but left no"\
+            "comment, inline comment, or review by $REVIEW_BOT on PR #$PR, and $WF requires a post"\
+            "even for a clean review. Real money was spent and the output vanished (#2229, and PR"\
+            "#2213 which did this eleven times). Do NOT read this PR as reviewed; re-run the review"\
+            "workflow."
+          summary "- Nothing posted, and \`$WF\` requires a post. The output was LOST."
+          exit 1

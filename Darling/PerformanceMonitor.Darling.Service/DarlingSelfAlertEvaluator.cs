@@ -154,6 +154,13 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, bool> _activeDiskPressure = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDiskPressureAlert = new();
 
+    /// <summary>
+    /// The free-percent level the last Store Disk Pressure alert reported (#2101) — the worsening
+    /// watermark <see cref="LowDiskAlertGate.ShouldAlert"/> compares against, exactly the engine's
+    /// <c>_lastAlertedLowDiskPercent</c> idiom. Cleared on recovery so the next breach is fresh.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, double> _lastAlertedDiskPressurePercent = new();
+
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
 
@@ -176,6 +183,25 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>Prefixes the fleet-level compression-job alert serverKey so it never parses as a server_id.</summary>
     private const string CompressionKeyPrefix = "compressjob:";
+
+    /* Store Job Over Cadence edge state (#2136). FLEET-level like disk pressure, MULTI-keyed by job_id like
+       the compression machine, but a STANDING condition (the AG Sync Fell Behind idiom): active flag +
+       cooldown re-fire while a job's last run keeps breaching its share of the schedule interval, one
+       "Store Job Cadence Recovered" resolution when a later run comes back under. */
+    private readonly ConcurrentDictionary<string, bool> _activeJobOverCadence = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastJobOverCadenceAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #2136 alert metric name — the Warning and Critical tiers share it (severity carries the
+    /// tier), so the deliverer's per-metric cooldown and the recovery resolution correlate cleanly.</summary>
+    internal const string JobCadenceMetric = "Store Job Over Cadence";
+
+    /// <summary>Prefixes the fleet-level cadence alert serverKey so it never parses as a server_id.</summary>
+    private const string JobCadenceKeyPrefix = "storejob:";
+
+    /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
+    /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
+    /// The Critical tier is FIXED at 100: a job outrunning its own cadence compounds refresh lag.</summary>
+    private readonly Func<int> _storeJobCadenceWarnPercent;
 
     /* Availability Group edge state (#991), keyed by a COMPOSITE of serverId + the AG grain — an AG condition
        is per replica (ag + replica) or per database (ag + database + replica), not per server, so one server's
@@ -243,7 +269,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<bool>? notifyAgHealth = null,
         Func<int>? agLagAlertSeconds = null,
         Func<long>? agRedoQueueAlertKb = null,
-        Func<int>? agDisconnectRefireMinutes = null)
+        Func<int>? agDisconnectRefireMinutes = null,
+        Func<int>? storeJobCadenceWarnPercent = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -260,6 +287,9 @@ internal sealed class DarlingSelfAlertEvaluator
         _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
         _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
         _agDisconnectRefireMinutes = agDisconnectRefireMinutes ?? (() => 0);
+        /* Unsupplied falls back to the V57 DDL default, so an evaluator built without the seam behaves
+           like a store at its shipped defaults (the AG-seam discipline). */
+        _storeJobCadenceWarnPercent = storeJobCadenceWarnPercent ?? (() => 25);
     }
 
     private enum ConnectionState
@@ -296,9 +326,13 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             try
             {
+                /* #2107: store-backed window/threshold (clamped on read); the constants remain
+                   only as the shipped defaults. */
                 var (lastSuccess, recentRuns, recentSuccess) =
-                    await ReadCollectionSignalsAsync(postgres, serverId, ConsecutiveFailureThreshold, cancellationToken);
-                bool stopped = IsCollectionStopped(lastSuccess, recentRuns, recentSuccess, _utcNow(), out var reason);
+                    await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
+                bool stopped = IsCollectionStopped(
+                    lastSuccess, recentRuns, recentSuccess, _utcNow(),
+                    SettingsStaleWindow, _settings.CollectionFailureThreshold, out var reason);
                 await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -338,7 +372,7 @@ internal sealed class DarlingSelfAlertEvaluator
             var (agentCollectionTimeUtc, agentRunning) = await ReadLatestAgentStatusAsync(postgres, serverId, cancellationToken);
             bool? freshRunning = agentRunning.HasValue
                 && agentCollectionTimeUtc.HasValue
-                && _utcNow() - agentCollectionTimeUtc.Value < StaleWindow
+                && _utcNow() - agentCollectionTimeUtc.Value < SettingsStaleWindow
                     ? agentRunning
                     : null;
 
@@ -410,8 +444,12 @@ internal sealed class DarlingSelfAlertEvaluator
         /* A snapshot only judges while it is fresh; a missing one (no AGs, or the collector has never run) and
            a stale one are both "no signal", exactly as agent_status is treated above. */
         bool IsFresh(DateTime? snapshotUtc) =>
-            snapshotUtc.HasValue && _utcNow() - snapshotUtc.Value < StaleWindow;
+            snapshotUtc.HasValue && _utcNow() - snapshotUtc.Value < SettingsStaleWindow;
     }
+
+    /// <summary>#2107: the staleness window the sweep actually uses — store-backed, clamped on
+    /// read; <see cref="StaleWindow"/> remains only as the shipped default.</summary>
+    private TimeSpan SettingsStaleWindow => TimeSpan.FromMinutes(_settings.CollectionStaleMinutes);
 
     /// <summary>
     /// Pure collection-stopped decision from the three store signals — no I/O, so it pins directly.
@@ -422,16 +460,23 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     internal static bool IsCollectionStopped(
         DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, DateTime nowUtc, out string reason)
+        => IsCollectionStopped(lastSuccessUtc, recentRunCount, recentSuccessCount, nowUtc, StaleWindow, ConsecutiveFailureThreshold, out reason);
+
+    /// <summary>#2107: the configurable form — the sweep passes the store-backed window and
+    /// threshold; the constant overload keeps the shipped defaults for the tests pinning them.</summary>
+    internal static bool IsCollectionStopped(
+        DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, DateTime nowUtc,
+        TimeSpan staleWindow, int consecutiveFailureThreshold, out string reason)
     {
         /* Fast path: the most-recent N runs all failed. */
-        if (recentRunCount >= ConsecutiveFailureThreshold && recentSuccessCount == 0)
+        if (recentRunCount >= consecutiveFailureThreshold && recentSuccessCount == 0)
         {
             reason = $"The last {recentRunCount.ToString(CultureInfo.InvariantCulture)} collector runs all failed — no data is landing.";
             return true;
         }
 
         /* Backstop: a server that HAS collected before but hasn't succeeded within the staleness window. */
-        if (lastSuccessUtc.HasValue && nowUtc - lastSuccessUtc.Value >= StaleWindow)
+        if (lastSuccessUtc.HasValue && nowUtc - lastSuccessUtc.Value >= staleWindow)
         {
             int minutes = (int)(nowUtc - lastSuccessUtc.Value).TotalMinutes;
             reason = $"No successful collection in {minutes.ToString(CultureInfo.InvariantCulture)} minutes — the collectors are failing or the server is unreachable.";
@@ -920,7 +965,8 @@ internal sealed class DarlingSelfAlertEvaluator
                             $"suspended ({suspendReason})",
                         /* suspend_reason_desc against "SYNCHRONIZING". */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: AgDatabaseContext(database, ("Suspend Reason", suspendReason)));
                 }
                 else if (suspension == AgSuspensionDecision.Resumed)
                 {
@@ -965,7 +1011,8 @@ internal sealed class DarlingSelfAlertEvaluator
                            ("Sales2024"), neither. #1846 already classified this metric state-only for exactly
                            that reason; this is the write side finally agreeing with it. */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: AgDatabaseContext(database));
                 }
             }
         }
@@ -988,6 +1035,11 @@ internal sealed class DarlingSelfAlertEvaluator
             }
         }
     }
+
+    /// <summary>The #2109 discrete-facts context for a database-scoped AG alert — the shared
+    /// builder keyed off the reading, so the fact names cannot drift from Lite's.</summary>
+    private static AlertContext AgDatabaseContext(AgDatabaseReading database, params (string, string)[] extras)
+        => AgAlertContexts.ForDatabase(database.DatabaseName, database.AgName, database.ReplicaServerName, extras);
 
     /// <summary>The prefix every AG state key for one server starts with — the scope for
     /// <see cref="Forget"/> and for the per-server recovery sweep.</summary>
@@ -1059,6 +1111,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the one dangerous ambiguity this metric must never have back into the signature.</para>
     /// </summary>
     internal static bool IsDiskPressure(long freeBytes, long totalBytes, out string reason, out double percentFree)
+        => IsDiskPressure(freeBytes, totalBytes, DiskFreeWarnPercent, out reason, out percentFree);
+
+    /// <summary>#2107: the configurable form — the sweep passes the store-backed
+    /// <c>SelfDiskFreeWarnPercent</c>; the constant-threshold overload keeps the shipped default
+    /// for the tests pinning it.</summary>
+    internal static bool IsDiskPressure(long freeBytes, long totalBytes, double warnPercent, out string reason, out double percentFree)
     {
         if (totalBytes <= 0)
         {
@@ -1068,7 +1126,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         percentFree = (double)freeBytes / totalBytes * 100.0;
-        if (percentFree < DiskFreeWarnPercent)
+        if (percentFree < warnPercent)
         {
             reason = $"The monitor store's disk volume has only {percentFree.ToString("0.#", CultureInfo.InvariantCulture)}% free ({FormatGb(freeBytes)} of {FormatGb(totalBytes)}).";
             return true;
@@ -1130,18 +1188,34 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        bool pressure = IsDiskPressure(free, total, out var reason, out var percentFree);
+        /* #2107: store-backed threshold (clamped on read); the constant remains only as the
+           shipped default. */
+        double warnPercent = _settings.SelfDiskFreeWarnPercent;
+        bool pressure = IsDiskPressure(free, total, warnPercent, out var reason, out var percentFree);
 
         if (pressure)
         {
             _activeDiskPressure[DiskKey] = true;
-            if (CooldownElapsed(_lastDiskPressureAlert, DiskKey, now))
+
+            /* #2101: a standing breach at an UNCHANGED level must not re-notify every cooldown — a
+               store volume parked at 7% free is one condition, not a condition per 15 minutes. The
+               same #754 worsening gate the target-server volume alert runs behind: fire on entry,
+               re-fire only when free% has dropped at least the margin below the last-alerted level
+               (still cooldown-limited), one resolution on recovery. This is THE self-alert with a
+               real measurement, which is what makes the gate fit here and deliberately NOT on the
+               state-only siblings (Collection Stopped / Agent Not Running / Capture Down) — those
+               have no level to worsen, and their per-cooldown "still broken" reminder is wanted. */
+            double? lastAlertedPercent =
+                _lastAlertedDiskPressurePercent.TryGetValue(DiskKey, out var lastPct) ? lastPct : (double?)null;
+            if (LowDiskAlertGate.ShouldAlert(percentFree, lastAlertedPercent)
+                && CooldownElapsed(_lastDiskPressureAlert, DiskKey, now))
             {
                 _lastDiskPressureAlert[DiskKey] = now;
+                _lastAlertedDiskPressurePercent[DiskKey] = percentFree;
                 var storeText = storeSizeBytes is long size ? $" The store currently holds {FormatGb(size)}." : "";
                 await FireAsync(
                     DiskKey, "Monitor Store", "Store Disk Pressure", reason,
-                    $"{DiskFreeWarnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
+                    $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
                         "store volume, shorten retention (config_collector_schedules), enable TimescaleDB compression, " +
@@ -1155,12 +1229,13 @@ internal sealed class DarlingSelfAlertEvaluator
                        explicitly means an operator's volume path ("D2:\\") can no longer get there first,
                        and the stored value stops depending on prose word order. The threshold is a real
                        bound too, which is what separates this metric from every sibling above. */
-                    numericCurrentValue: percentFree, numericThresholdValue: DiskFreeWarnPercent,
+                    numericCurrentValue: percentFree, numericThresholdValue: warnPercent,
                     cancellationToken);
             }
         }
         else if (_activeDiskPressure.TryRemove(DiskKey, out var was) && was)
         {
+            _lastAlertedDiskPressurePercent.TryRemove(DiskKey, out _);
             await RecordResolutionAsync(new AlertResolution(
                 DiskKey, "Monitor Store", "Store Disk Pressure",
                 "Store Disk Pressure Resolved", "Monitor store volume free space recovered"), cancellationToken);
@@ -1308,6 +1383,102 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             _logger?.LogError("Compression-job health self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #2136 Store Job Over Cadence check — rides the worker's hourly
+    /// compression-job health sweep (same connection, same Timescale gate). Same failure isolation as
+    /// <see cref="EvaluateCompressionJobsAsync"/>; cancellation still propagates.
+    /// </summary>
+    public async Task EvaluateStoreJobCadenceAsync(
+        IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyStoreJobCadenceAsync(jobs, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Store-job cadence self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Store Job Over Cadence condition (#2136) from the latest job readings: a
+    /// background job whose last SUCCESSFUL run consumed at least the warning share of its own schedule
+    /// interval is living too close to its ceiling — these runtimes scale SERIALLY with raw volume (the
+    /// finalize hash-aggregate runs in one process), so an onboarding wave moves them first, and a job
+    /// that outgrows its cadence compounds refresh lag silently. Tiers: WARNING at the store-backed knob
+    /// (V57, default 25), CRITICAL fixed at 100 — past 100 the job is still running when its next run is
+    /// due, which is no longer "close to" the ceiling but through it. A STANDING condition (the AG Sync
+    /// Fell Behind idiom): fire once on breach, re-fire only after the alert cooldown while it persists,
+    /// one "Store Job Cadence Recovered" resolution row when a later run comes back under the warning
+    /// threshold. A job with no schedule interval or no completed run yet has no cadence to breach and is
+    /// skipped without touching its standing state (no signal, the agent-status discipline). Gated on the
+    /// master alerts switch. Internal so it pins directly with a recording deliverer + controllable clock.
+    /// </summary>
+    internal async Task ApplyStoreJobCadenceAsync(
+        IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        int warnPercent = _storeJobCadenceWarnPercent();
+
+        foreach (var job in jobs)
+        {
+            if (job.ScheduleIntervalMs <= 0 || job.LastRunDurationMs is not long durationMs)
+            {
+                continue;
+            }
+
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            double percent = 100.0 * durationMs / job.ScheduleIntervalMs;
+            var label = string.IsNullOrEmpty(job.JobName) ? $"job {key}" : $"{job.JobName} [{key}]";
+
+            if (percent >= warnPercent)
+            {
+                _activeJobOverCadence[key] = true;
+                if (CooldownElapsed(_lastJobOverCadenceAlert, key, now))
+                {
+                    _lastJobOverCadenceAlert[key] = now;
+                    bool critical = percent >= 100.0;
+                    await FireAsync(
+                        JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                        $"{percent:F0}% of schedule interval", $"{warnPercent}%",
+                        detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
+                            $"{job.ScheduleIntervalMs / 1000.0:F0}s schedule interval ({percent:F0}%). " +
+                            (critical
+                                ? "The job now takes at least as long as its own cadence, so runs back up behind each " +
+                                  "other and everything it maintains (continuous-aggregate freshness, compression, " +
+                                  "retention) falls further behind every cycle. "
+                                : "These runtimes scale with raw data volume, so this is the early warning that the " +
+                                  "store is outgrowing its job schedule — an onboarding wave moves this number first. ") +
+                            "Compare the job's duration series in collect.store_metrics (object_kind = " +
+                            "'background_job') to see the trend, and either reduce raw volume, extend the job's " +
+                            "schedule_interval deliberately, or scale the store host.",
+                        severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                        shortMessage: $"{label} ran {percent:F0}% of its schedule interval",
+                        numericCurrentValue: Math.Round(percent, 1),
+                        numericThresholdValue: critical ? 100 : warnPercent,
+                        cancellationToken);
+                }
+            }
+            else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                    "Store Job Cadence Recovered",
+                    $"Monitor Store: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
+            }
         }
     }
 
@@ -1777,10 +1948,14 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
     /// <param name="numericThresholdValue">The bound behind <paramref name="thresholdValue"/>, on the same
     /// terms. Almost every self-alert's threshold is an English phrase ("collecting", "Online", "running
     /// on schedule"), not a bound.</param>
+    /* The optional context TRAILS the cancellation token so the dozens of existing positional call
+       sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
+       database alerts) name it. */
     private async Task FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
-        double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken)
+        double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
+        AlertContext? context = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. */
@@ -1801,7 +1976,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
 
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
-            Context: null, DetailText: detail,
+            Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
             Muted: muted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
     }

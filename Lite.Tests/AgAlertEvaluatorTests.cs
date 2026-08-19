@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -121,6 +120,39 @@ public class AgAlertEvaluatorTests
             ServerId, new[] { Database(suspended: false) }, 300, 0, Cooldown));
         Assert.Equal("AG Data Movement Resumed", resumed.MetricName);
         Assert.True(resumed.IsResolution);
+    }
+
+    [Fact]
+    public void DatabaseScopedAlerts_CarryTheDiscreteDatabaseFacts()
+    {
+        /* #2109: the database-scoped AG alerts carry Database / Availability Group / Replica as
+           discrete fields (the wire contract downstream automation routes on), via the SAME shared
+           builder Darling's evaluator uses — the fact names cannot drift between the SKUs. */
+        var e = new AgAlertEvaluator();
+
+        /* Suspension is edge-triggered with first-sighting-silent semantics — establish the healthy
+           baseline first, exactly like the edge test above. */
+        Assert.Empty(e.EvaluateDatabases(ServerId, new[] { Database(suspended: false) }, 300, 0, Cooldown));
+
+        var suspended = Assert.Single(e.EvaluateDatabases(
+            ServerId, new[] { Database(suspended: true, suspendReason: "SUSPEND_FROM_USER") }, 300, 0, Cooldown));
+        var item = Assert.Single(suspended.Context!.Details);
+        Assert.Contains(item.Fields, f => f.Label == "Database");
+        Assert.Contains(item.Fields, f => f.Label == "Availability Group");
+        Assert.Contains(item.Fields, f => f.Label == "Replica");
+        Assert.Contains(("Suspend Reason", "SUSPEND_FROM_USER"), item.Fields);
+
+        var behind = Assert.Single(
+            e.EvaluateDatabases(
+                ServerId, new[] { Database(suspended: false, lagSeconds: 600) }, 300, 0, Cooldown),
+            a => a.MetricName == AgAlertPolicy.SyncFellBehindMetric);
+        Assert.Contains(Assert.Single(behind.Context!.Details).Fields, f => f.Label == "Database");
+
+        /* Resolutions stay context-less — they carry no database-scoped payload to route on. */
+        var resumed = Assert.Single(
+            e.EvaluateDatabases(ServerId, new[] { Database(suspended: false) }, 300, 0, Cooldown),
+            a => a.IsResolution);
+        Assert.Null(resumed.Context);
     }
 
     /* ---------------- sync fell behind ---------------- */

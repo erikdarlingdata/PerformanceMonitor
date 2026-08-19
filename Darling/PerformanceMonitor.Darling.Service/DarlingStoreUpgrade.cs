@@ -1539,14 +1539,18 @@ internal sealed class DarlingStoreUpgrade
             File.WriteAllText(passwordFile, context.Password + "\n");
             DarlingFileSecurity.HardenFile(passwordFile, allowInteractiveRead: false);
 
+            var newInitDb = Path.Combine(context.NewBinDirectory, "initdb.exe");
             var (initExit, initOutput) = await DarlingManagedPostgres.RunToolAsync(
-                Path.Combine(context.NewBinDirectory, "initdb.exe"),
+                newInitDb,
                 BuildInitDbArguments(newDataDirectory, context.UserName, passwordFile, identity, context.NewMajor),
                 s_initDbTimeout,
                 cancellationToken);
             if (initExit != 0)
             {
-                throw new InvalidOperationException($"initdb of the new cluster failed (exit {initExit}):\n{initOutput}");
+                throw new InvalidOperationException(
+                    $"initdb of the new cluster failed (exit {DarlingToolExitCode.Describe(initExit)}):" +
+                    DarlingToolExitCode.Diagnose(initExit, newInitDb) +
+                    $"\n{DarlingToolExitCode.FormatOutput(initOutput, initExit)}");
             }
 
             step = "conf-new-cluster";
@@ -1560,8 +1564,9 @@ internal sealed class DarlingStoreUpgrade
             step = "pg_upgrade-check";
             var environment = BuildLibpqCredentialEnvironment(context.Password);
 
+            var pgUpgrade = Path.Combine(context.NewBinDirectory, "pg_upgrade.exe");
             var checkExit = await DarlingManagedPostgres.RunDetachingToolAsync(
-                Path.Combine(context.NewBinDirectory, "pg_upgrade.exe"),
+                pgUpgrade,
                 BuildPgUpgradeArguments(
                     context.OldBinDirectory, context.NewBinDirectory, context.DataDirectory, newDataDirectory,
                     context.UserName, mode, checkOnly: true, jobs: 1, QuiesceTimescaleServerOptions),
@@ -1571,8 +1576,16 @@ internal sealed class DarlingStoreUpgrade
                 parent);
             if (checkExit != 0)
             {
+                /* "The clusters are not compatible" is pg_upgrade's verdict, and only pg_upgrade can reach it.
+                   A Windows status means pg_upgrade never ran, so the compatibility claim would be invented
+                   (#2186) — the same wrong-blame the pg_ctl status message carried. */
+                var checkDiagnosis = DarlingToolExitCode.Diagnose(checkExit, pgUpgrade);
                 throw new InvalidOperationException(
-                    $"pg_upgrade --check failed (exit {checkExit}) — the clusters are not compatible and NOTHING has been changed.\n{ReadPgUpgradeLogTail(newDataDirectory)}");
+                    $"pg_upgrade --check failed (exit {DarlingToolExitCode.Describe(checkExit)})" +
+                    (checkDiagnosis.Length == 0
+                        ? " — the clusters are not compatible and NOTHING has been changed."
+                        : ". NOTHING has been changed." + checkDiagnosis) +
+                    $"\n{ReadPgUpgradeLogTail(newDataDirectory)}");
             }
 
             step = "pg_upgrade";
@@ -1585,7 +1598,7 @@ internal sealed class DarlingStoreUpgrade
                becomes the complaint. */
             const int jobs = 1;
             var upgradeExit = await DarlingManagedPostgres.RunDetachingToolAsync(
-                Path.Combine(context.NewBinDirectory, "pg_upgrade.exe"),
+                pgUpgrade,
                 BuildPgUpgradeArguments(
                     context.OldBinDirectory, context.NewBinDirectory, context.DataDirectory, newDataDirectory,
                     context.UserName, mode, checkOnly: false, jobs, QuiesceTimescaleServerOptions),
@@ -1596,7 +1609,9 @@ internal sealed class DarlingStoreUpgrade
             if (upgradeExit != 0)
             {
                 throw new InvalidOperationException(
-                    $"pg_upgrade failed (exit {upgradeExit}).\n{ReadPgUpgradeLogTail(newDataDirectory)}");
+                    $"pg_upgrade failed (exit {DarlingToolExitCode.Describe(upgradeExit)})." +
+                    DarlingToolExitCode.Diagnose(upgradeExit, pgUpgrade) +
+                    $"\n{ReadPgUpgradeLogTail(newDataDirectory)}");
             }
 
             /* ---- 7. swap the directories so the configured path holds the upgraded cluster. The
@@ -1772,8 +1787,9 @@ internal sealed class DarlingStoreUpgrade
             Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)))!,
             DarlingManagedPostgres.ServerLogFileName);
 
+        var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
         var exitCode = await DarlingManagedPostgres.RunDetachingToolAsync(
-            Path.Combine(binDirectory, "pg_ctl.exe"),
+            pgCtl,
             $"-D \"{dataDirectory}\" -o \"-p {port} -c listen_addresses=127.0.0.1\" -l \"{serverLog}\" -w -t 120 start",
             TimeSpan.FromMinutes(5),
             cancellationToken);
@@ -1781,21 +1797,25 @@ internal sealed class DarlingStoreUpgrade
         if (exitCode != 0)
         {
             throw new InvalidOperationException(
-                $"could not start the cluster in {dataDirectory} with the runtime at {binDirectory} (pg_ctl exit {exitCode})");
+                $"could not start the cluster in {dataDirectory} with the runtime at {binDirectory} (pg_ctl exit {DarlingToolExitCode.Describe(exitCode)})" +
+                DarlingToolExitCode.Diagnose(exitCode, pgCtl));
         }
     }
 
     private async Task StopClusterAsync(string binDirectory, string dataDirectory, CancellationToken cancellationToken)
     {
+        var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
         var (exitCode, output) = await DarlingManagedPostgres.RunToolAsync(
-            Path.Combine(binDirectory, "pg_ctl.exe"),
+            pgCtl,
             $"stop -D \"{dataDirectory}\" -m fast -w -t 120",
             s_toolTimeout,
             cancellationToken);
 
         if (exitCode != 0)
         {
-            throw new InvalidOperationException($"could not cleanly stop the cluster in {dataDirectory} (pg_ctl exit {exitCode}): {output}");
+            throw new InvalidOperationException(
+                $"could not cleanly stop the cluster in {dataDirectory} (pg_ctl exit {DarlingToolExitCode.Describe(exitCode)}): {DarlingToolExitCode.FormatOutput(output, exitCode)}" +
+                DarlingToolExitCode.Diagnose(exitCode, pgCtl));
         }
     }
 
@@ -2229,8 +2249,10 @@ internal sealed class DarlingStoreUpgrade
             else
             {
                 _logger.LogWarning(
-                    "Post-upgrade analyze reported exit {ExitCode} ({Output}). The store is fully usable; autovacuum will build the remaining statistics.",
-                    exitCode, output);
+                    "Post-upgrade analyze reported exit {ExitCode} ({ExitCodeMeaning}): {Output}. The store is fully usable; autovacuum will build the remaining statistics.",
+                    exitCode,
+                    DarlingToolExitCode.Describe(exitCode),
+                    DarlingToolExitCode.FormatOutput(output, exitCode));
             }
         }
         catch (OperationCanceledException)

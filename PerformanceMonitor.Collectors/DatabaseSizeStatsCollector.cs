@@ -73,7 +73,12 @@ CREATE TABLE #file_space
 (
     database_id int NOT NULL,
     file_id int NOT NULL,
-    used_size_mb decimal(19,2) NULL
+    used_size_mb decimal(19,2) NULL,
+    /* #2169: the file's CURRENT size, read in-database alongside SpaceUsed. sys.master_files.size is the
+       size recorded at configuration time and does NOT track autogrowth for tempdb, so a grown tempdb
+       reported used (current) against total (startup) and produced a used% above 100. Every database
+       benefits — master_files can lag any autogrowth — but tempdb is where it is guaranteed to. */
+    current_size_mb decimal(19,2) NULL
 );
 
 /* #1851: every failure below used to die in an empty CATCH, so a database that was mid-restore or
@@ -106,11 +111,12 @@ WHILE @@FETCH_STATUS = 0
 BEGIN
     BEGIN TRY
         SET @sql = N'EXECUTE ' + QUOTENAME(@db_name) + N'.sys.sp_executesql N''
-INSERT #file_space (database_id, file_id, used_size_mb)
+INSERT #file_space (database_id, file_id, used_size_mb, current_size_mb)
 SELECT
     DB_ID(),
     df.file_id,
-    CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''''SpaceUsed'''') * 8.0 / 1024.0)
+    CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''''SpaceUsed'''') * 8.0 / 1024.0),
+    CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)
 FROM sys.database_files AS df;'';';
 
         EXECUTE sys.sp_executesql @sql;
@@ -138,7 +144,11 @@ SELECT
     file_name = mf.name,
     physical_name = mf.physical_name,
     total_size_mb =
-        CONVERT(decimal(19,2), mf.size * 8.0 / 1024.0),
+        /* #2169: in-database current size when the probe got it, else master_files. Both operands of the
+           used% the viewer computes then come from the SAME snapshot, so used can no longer exceed total
+           on a database whose files grew since configuration (tempdb, always). A probe that failed leaves
+           this NULL and falls back — worse precision, never a wrong ratio direction. */
+        CONVERT(decimal(19,2), COALESCE(fs.current_size_mb, mf.size * 8.0 / 1024.0)),
     used_size_mb =
         fs.used_size_mb,
     auto_growth_mb =

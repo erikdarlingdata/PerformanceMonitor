@@ -118,6 +118,9 @@ public partial class SettingsWindow : Window
         /* Default the global plan-capture flag to the store's default (TRUE) so an unread/unseeded state never
            shows it off — the store read overwrites it, and Save is guarded by _storeLoaded regardless. */
         CapturePlansCheckBox.IsChecked = true;
+        QueryStoreBackfillCheckBox.IsChecked = true;
+        QueryStoreTextBudgetMbTextBox.Text = "64";
+        MaxConcurrentSweepsTextBox.Text = "4";
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
@@ -160,6 +163,9 @@ public partial class SettingsWindow : Window
             if (sections.Service is not null)
             {
                 CapturePlansCheckBox.IsChecked = sections.Service.CapturePlans;
+                QueryStoreBackfillCheckBox.IsChecked = sections.Service.QueryStoreBackfillEnabled;
+                QueryStoreTextBudgetMbTextBox.Text = sections.Service.QueryStoreTextBudgetMb.ToString(CultureInfo.InvariantCulture);
+                MaxConcurrentSweepsTextBox.Text = sections.Service.MaxConcurrentSweeps.ToString(CultureInfo.InvariantCulture);
                 McpEnabledCheckBox.IsChecked = sections.Service.McpEnabled;
                 McpPortTextBox.Text = sections.Service.McpPort.ToString(CultureInfo.InvariantCulture);
                 WebEnabledCheckBox.IsChecked = sections.Service.WebEnabled;
@@ -390,9 +396,12 @@ public partial class SettingsWindow : Window
     /// the <c>config_service</c> write. Returns false when an ENABLED surface has a bad port (a disabled surface
     /// with a bad port keeps its last-known value and does not block the save).</summary>
     private bool TryReadServiceFlags(
-        out bool capturePlans, out bool mcpEnabled, out int mcpPort, out bool webEnabled, out int webPort)
+        out bool capturePlans, out bool mcpEnabled, out int mcpPort, out bool webEnabled, out int webPort,
+        out int textBudgetMb, out int maxSweeps)
     {
         capturePlans = CapturePlansCheckBox.IsChecked == true;
+        textBudgetMb = 64;
+        maxSweeps = 4;
         mcpEnabled = McpEnabledCheckBox.IsChecked == true;
         mcpPort = _appSettings.McpPort;
         webEnabled = WebEnabledCheckBox.IsChecked == true;
@@ -418,6 +427,33 @@ public partial class SettingsWindow : Window
         {
             MessageBox.Show(
                 "Web dashboard port must be between 1024 and 65535.\nPorts 0-1023 are well-known privileged ports reserved by the operating system.",
+                "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        /* #2164 / #2170 collector memory knobs. Unlike the ports these are always in force (there is no
+           "disabled" state to excuse a bad value), so a bad entry always blocks the save rather than
+           silently keeping a last-known value. The service clamps on read as defense in depth. */
+        if (int.TryParse(QueryStoreTextBudgetMbTextBox.Text, out var parsedBudget) && parsedBudget is >= 4 and <= 256)
+        {
+            textBudgetMb = parsedBudget;
+        }
+        else
+        {
+            MessageBox.Show(
+                "Query Store text budget must be between 4 and 256 MB.",
+                "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        if (int.TryParse(MaxConcurrentSweepsTextBox.Text, out var parsedSweeps) && parsedSweeps is >= 1 and <= 16)
+        {
+            maxSweeps = parsedSweeps;
+        }
+        else
+        {
+            MessageBox.Show(
+                "Concurrent server sweeps must be between 1 and 16.",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
@@ -703,6 +739,12 @@ public partial class SettingsWindow : Window
         AlertLowDiskCheckBox.IsChecked = r.LowDiskEnabled;
         AlertLowDiskThresholdPercentBox.Text = r.LowDiskThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertLowDiskThresholdGbBox.Text = r.LowDiskThresholdGb.ToString(CultureInfo.InvariantCulture);
+        AlertDiskCriticalPercentBox.Text = r.DiskCriticalFreePercent.ToString(CultureInfo.InvariantCulture);
+        AlertDiskCriticalGbBox.Text = r.DiskCriticalFreeGb.ToString(CultureInfo.InvariantCulture);
+        AlertSelfDiskWarnPercentBox.Text = r.SelfDiskFreeWarnPercent.ToString(CultureInfo.InvariantCulture);
+        AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
+        AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
+        AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -716,6 +758,7 @@ public partial class SettingsWindow : Window
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisNotificationsCheckBox.IsChecked = r.AnalysisNotificationsEnabled;
         AnalysisNotifySeverityBox.Text = r.AnalysisNotifySeverity.ToString("0.0", CultureInfo.InvariantCulture);
+        AnalysisNotifyCooldownBox.Text = r.AnalysisNotifyCooldownMinutes.ToString(CultureInfo.InvariantCulture);
         /* #1141/#1236: the delivery mode + per-event cap are now STORE-backed (the service honors them),
            seeded from the row like every other alert-engine control. */
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
@@ -794,6 +837,20 @@ public partial class SettingsWindow : Window
             row.LowDiskThresholdPercent = lowDiskPct;
         if (int.TryParse(AlertLowDiskThresholdGbBox.Text, out var lowDiskGb) && lowDiskGb >= 0)
             row.LowDiskThresholdGb = lowDiskGb;
+        /* #2107: the previously-hardcoded knobs, validated to the same ranges the service clamps. */
+        if (int.TryParse(AlertDiskCriticalPercentBox.Text, out var critPct) && critPct is >= 0 and <= 100)
+            row.DiskCriticalFreePercent = critPct;
+        if (int.TryParse(AlertDiskCriticalGbBox.Text, out var critGb) && critGb >= 0)
+            row.DiskCriticalFreeGb = critGb;
+        if (int.TryParse(AlertSelfDiskWarnPercentBox.Text, out var selfDiskPct) && selfDiskPct is >= 0 and <= 100)
+            row.SelfDiskFreeWarnPercent = selfDiskPct;
+        if (int.TryParse(AlertCollectionStaleMinutesBox.Text, out var staleMin) && staleMin is >= 5 and <= 1440)
+            row.CollectionStaleMinutes = staleMin;
+        if (int.TryParse(AlertCollectionFailureThresholdBox.Text, out var failThresh) && failThresh is >= 1 and <= 1000)
+            row.CollectionFailureThreshold = failThresh;
+        /* #2136: validated to the same range DarlingAlertSettings clamps ([5, 100]). */
+        if (int.TryParse(AlertStoreJobCadenceWarnPercentBox.Text, out var cadencePct) && cadencePct is >= 5 and <= 100)
+            row.StoreJobCadenceWarnPercent = cadencePct;
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -818,6 +875,11 @@ public partial class SettingsWindow : Window
             row.AnalysisNotifySeverity = analysisSeverity;
         else
             errors.Add("Analysis notify severity must be between 0.0 and 2.0.");
+
+        if (int.TryParse(AnalysisNotifyCooldownBox.Text, out var analysisCooldown) && analysisCooldown is >= 30 and <= 10080)
+            row.AnalysisNotifyCooldownMinutes = analysisCooldown;
+        else
+            errors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
 
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
@@ -860,6 +922,14 @@ public partial class SettingsWindow : Window
         AlertTempDbSpaceThresholdBox.Text = "80";
         AlertLowDiskThresholdPercentBox.Text = "10";
         AlertLowDiskThresholdGbBox.Text = "5";
+        /* #2107: the previously-hardcoded knobs reset to the constants they replaced. */
+        AlertDiskCriticalPercentBox.Text = "3";
+        AlertDiskCriticalGbBox.Text = "2";
+        AlertSelfDiskWarnPercentBox.Text = "10";
+        AlertCollectionStaleMinutesBox.Text = "30";
+        AlertCollectionFailureThresholdBox.Text = "10";
+        AlertStoreJobCadenceWarnPercentBox.Text = "25";
+        AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
         AlertLongRunningJobMultiplierBox.Text = "3";
@@ -961,6 +1031,13 @@ public partial class SettingsWindow : Window
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
+        /* #2107: the new threshold boxes follow the master switch like every sibling. */
+        AlertDiskCriticalPercentBox.IsEnabled = enabled;
+        AlertDiskCriticalGbBox.IsEnabled = enabled;
+        AlertSelfDiskWarnPercentBox.IsEnabled = enabled;
+        AlertCollectionStaleMinutesBox.IsEnabled = enabled;
+        AlertCollectionFailureThresholdBox.IsEnabled = enabled;
+        AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;
@@ -1385,7 +1462,8 @@ public partial class SettingsWindow : Window
     {
         var errors = new List<string>();
         var mcpValid = TryReadServiceFlags(
-            out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort);
+            out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort,
+            out var textBudgetMb, out var maxSweeps);
         var alertRow = BuildAlertRowFromControls(errors);
         SaveViewerLocalAlertFields(errors);
         var notifyRow = BuildNotificationRowFromControls(errors);
@@ -1444,7 +1522,8 @@ public partial class SettingsWindow : Window
             {
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);
-                await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort);
+                await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
+                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps);
             }
             catch (ViewerReadOnlyException ex)
             {

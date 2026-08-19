@@ -106,7 +106,8 @@ public sealed class QueryStoreReplicaSplitAnalysisTests : IClassFixture<SharedDu
         DateTime firstExecutionTime,
         DateTime lastExecutionTime,
         long avgCpuUs,
-        string? replicaRole)
+        string? replicaRole,
+        long? avgDurUs = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -135,8 +136,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
            floor even after the dedup collapses the repeat collections down to one row. */
         cmd.Parameters.Add(new DuckDBParameter { Value = 100L });
         cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs });
-        /* Duration tracks CPU so GREATEST(cpu ratio, duration ratio) is unambiguous. */
-        cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs + 20_000 });
+        /* Duration defaults to CPU + 20ms, so the classic seeds regress on BOTH signals and fire the
+           CPU-primary path (#2138); the split-signal tests pass avgDurUs to move one without the other. */
+        cmd.Parameters.Add(new DuckDBParameter { Value = avgDurUs ?? avgCpuUs + 20_000 });
         cmd.Parameters.Add(new DuckDBParameter { Value = planHash });
         cmd.Parameters.Add(new DuckDBParameter { Value = false });
         cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
@@ -182,6 +184,58 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             await SeedAsync(collectionTime, planId: 2, BadPlanHash, intervalId: 2,
                 badFirstExec, badLastExec, badCpuUs, role);
         }
+    }
+
+    /// <summary>
+    /// One plan-cache row for THE regressed query's hash ('0xREGRESSQH'), carrying — or, with a tame
+    /// worker-time spread, deliberately missing — the PARAMETER_SENSITIVITY detector's firing
+    /// signature (#2138 gap 3). Grants flat, no spills: the worker ratio is the only dial.
+    /// </summary>
+    private async Task SeedPlanCacheRowAsync(long minWorkerUs, long maxWorkerUs)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_hash, query_plan_hash, creation_time, execution_count,
+     min_worker_time, max_worker_time, min_grant_kb, max_grant_kb,
+     min_spills, max_spills, query_text, delta_execution_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = PeriodEnd.AddMinutes(-5) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = Db });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "0xREGRESSQH" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = BadPlanHash });
+        cmd.Parameters.Add(new DuckDBParameter { Value = PeriodStart.AddDays(-3) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 100L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = minWorkerUs });
+        cmd.Parameters.Add(new DuckDBParameter { Value = maxWorkerUs });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 1_024L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 1_024L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "SELECT * FROM dbo.Orders WHERE CustomerId = @id" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 50L });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// One replica-less query, two plans, CPU and duration controlled INDEPENDENTLY — the seed shape for
+    /// the #2138 CPU-primary scoring pins, where which signal moved is the entire test.
+    /// </summary>
+    private async Task SeedCpuAndDurationSplitAsync(
+        long goodCpuUs, long goodDurUs, long badCpuUs, long badDurUs)
+    {
+        var collectionTime = PeriodEnd.AddMinutes(-10);
+
+        await SeedAsync(collectionTime, planId: 1, GoodPlanHash, intervalId: 1,
+            PeriodStart.AddDays(-6), PeriodStart.AddDays(-5), goodCpuUs, replicaRole: null, goodDurUs);
+        await SeedAsync(collectionTime, planId: 2, BadPlanHash, intervalId: 2,
+            PeriodStart.AddDays(-1), PeriodEnd, badCpuUs, replicaRole: null, badDurUs);
     }
 
     private async Task<Fact?> CollectPlanRegressionFactAsync()
@@ -287,5 +341,100 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.NotNull(fact);
         Assert.Equal(2.0, fact!.Metadata["offender_count"]);
         Assert.Equal(12.0, fact.Metadata["worst_regression_factor"], precision: 1);
+    }
+
+    [Fact]
+    public async Task DurationOnlyRegression_DoesNotFire_CpuIsThePrimarySignal()
+    {
+        /* #2138: duration alone is confounded by blocking, IO waits and machine contention that no plan
+           choice caused. CPU flat, duration 5x worse — under the old GREATEST this fired at 5.0; now the
+           CPU path (1x < 2) and the corroboration gate (1x < 1.25) both decline it. */
+        await SeedCpuAndDurationSplitAsync(
+            goodCpuUs: 100_000, goodDurUs: 120_000,
+            badCpuUs: 100_000, badDurUs: 600_000);
+
+        Assert.Null(await CollectPlanRegressionFactAsync());
+
+        /* The drill-down runs the same scoring — a row here that the fact never counted would be
+           incoherent in the report. */
+        Assert.Empty(await CollectRegressedQueriesDrillDownAsync());
+    }
+
+    [Fact]
+    public async Task ExtremeDurationRegression_WithMildCpuCorroboration_FiresAtHalfTheDurationRatio()
+    {
+        /* #2138: the duration path stays open for the genuinely extreme case — 6x duration with 1.5x CPU
+           corroboration — but scores at HALF the duration ratio (3.0, not 6.0) so it competes honestly
+           with CPU-detected rows. */
+        await SeedCpuAndDurationSplitAsync(
+            goodCpuUs: 100_000, goodDurUs: 100_000,
+            badCpuUs: 150_000, badDurUs: 600_000);
+
+        var fact = await CollectPlanRegressionFactAsync();
+
+        Assert.NotNull(fact);
+        Assert.Equal(3.0, fact!.Metadata["worst_regression_factor"], precision: 1);
+        /* A duration-fired row reports the duration dimension. */
+        Assert.Equal(2.0, fact.Metadata["regressed_dimension"]);
+    }
+
+    [Fact]
+    public async Task CpuFiredRow_WithLargerDurationRatio_StillReportsTheCpuDimension()
+    {
+        /* Review catch on #2138: CPU has PRECEDENCE in the scoring, so cpu 2.5x with duration 10x (a
+           genuine CPU regression that also picked up blocking) fires the CPU branch at 2.5 — and must
+           be LABELED cpu. Comparing raw ratio magnitudes, correct under the old GREATEST, would call
+           this duration-caused; a plan-forcing bot reading the dimension would misjudge WHY. */
+        await SeedCpuAndDurationSplitAsync(
+            goodCpuUs: 100_000, goodDurUs: 100_000,
+            badCpuUs: 250_000, badDurUs: 1_000_000);
+
+        var fact = await CollectPlanRegressionFactAsync();
+
+        Assert.NotNull(fact);
+        Assert.Equal(2.5, fact!.Metadata["worst_regression_factor"], precision: 1);
+        Assert.Equal(1.0, fact.Metadata["regressed_dimension"]);
+    }
+
+    [Fact]
+    public async Task BelowTheSpendFloor_ATinyQuery_DoesNotFire()
+    {
+        /* #2138: a 12x CPU ratio on a query burning 1.2 CPU-seconds across the whole 14-day window
+           (100 execs x 12ms) is sampling jitter, not a finding. Same 12x ratio as the NonAgServer arm —
+           the only difference is absolute spend, so this pins the 10-CPU-second noise floor and nothing
+           else. */
+        await SeedCpuAndDurationSplitAsync(
+            goodCpuUs: 1_000, goodDurUs: 21_000,
+            badCpuUs: 12_000, badDurUs: 32_000);
+
+        Assert.Null(await CollectPlanRegressionFactAsync());
+        Assert.Empty(await CollectRegressedQueriesDrillDownAsync());
+    }
+
+    [Fact]
+    public async Task RegressedQuery_WithThePlanCachePspSignature_CarriesTheCoFiredFlag()
+    {
+        /* #2138 gap 3: the same query hash regresses in Query Store AND shows the parameter-sensitivity
+           signature in the plan cache (min 15ms, max 300ms — past every detector floor, ratio 20x). The
+           drill-down row must say so, because the force-plan remediation's caution and the future bot's
+           never-auto-force gate both read this flag. */
+        await SeedOneReplicaAsync(role: null, BadCpuUsPrimary, offsetSeconds: 0);
+        await SeedPlanCacheRowAsync(minWorkerUs: 15_000, maxWorkerUs: 300_000);
+
+        var row = Assert.Single(await CollectRegressedQueriesDrillDownAsync());
+        Assert.True(row.GetProperty("parameter_sensitivity_cofired").GetBoolean());
+    }
+
+    [Fact]
+    public async Task RegressedQuery_BelowThePspRatio_FlagStaysFalse()
+    {
+        /* Same floors, but a 2x worker-time spread — ordinary variance, not the >= 10x signature. Pins
+           that the flag uses the PARAMETER_SENSITIVITY detector's own threshold, not mere presence of
+           the hash in the plan cache. */
+        await SeedOneReplicaAsync(role: null, BadCpuUsPrimary, offsetSeconds: 0);
+        await SeedPlanCacheRowAsync(minWorkerUs: 150_000, maxWorkerUs: 300_000);
+
+        var row = Assert.Single(await CollectRegressedQueriesDrillDownAsync());
+        Assert.False(row.GetProperty("parameter_sensitivity_cofired").GetBoolean());
     }
 }

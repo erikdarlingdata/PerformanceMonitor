@@ -70,7 +70,7 @@ public sealed class DistinctTextsLiveTests
 
             /* ---- reader: the blend counts 2, the single-text hash 1, the legacy hash 0. */
             var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
-                postgres, ServerId, now.AddHours(-1), now.AddMinutes(5), top: 10, databaseName: null, ct);
+                postgres, ServerId, now.AddHours(-1), now.AddMinutes(5), top: 10, databaseName: null, cancellationToken: ct);
 
             Assert.Equal(2, rows.Single(r => r.QueryHash == "0xINSEXECHASH").DistinctTexts);
             Assert.Equal(1, rows.Single(r => r.QueryHash == "0xSINGLEHASH").DistinctTexts);

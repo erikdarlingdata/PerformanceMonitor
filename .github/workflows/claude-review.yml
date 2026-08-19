@@ -41,8 +41,9 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request. Follow the conventions in CLAUDE.md and the T-SQL style
-            guide it points to. This repository ships two apps that must stay in parity — Lite
+            Review this pull request. Follow the conventions in CONTRIBUTING.md — including
+            its T-SQL style section (AS on table aliases, column_name = expression aliasing,
+            OPTION(RECOMPILE) on collector queries). This repository ships two apps that must stay in parity — Lite
             and Darling — so flag any change made to one but not its counterpart. Focus on:
             - Correctness: bugs, edge cases, null/error handling at system boundaries
             - Lite/Darling parity drift

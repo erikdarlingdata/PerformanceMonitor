@@ -152,6 +152,12 @@ public class LiteAlertForwardingTests : IDisposable
 
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+
+        /* #2157: settable so a forwarding test can plant a risen-counter row. */
+        public List<ForcePlanFailureInfo> ForcePlanFailures { get; } = new();
+
+        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<ForcePlanFailureInfo>(ForcePlanFailures));
     }
 
     private sealed class InMemoryStateStore : IAlertStateStore
@@ -176,6 +182,44 @@ public class LiteAlertForwardingTests : IDisposable
         public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark)
         {
             FailedJobWatermarks[serverKey] = watermark;
+            return Task.CompletedTask;
+        }
+
+        /* #2216: replace-the-set, exactly like both real stores — whatever arrives IS the metric's state, so
+           an empty map clears it. A fake that merged instead would hide the falling-edge bug class. */
+        public Dictionary<(string Key, string Metric), Dictionary<string, IncidentOccurrenceState>> Occurrences { get; } = new();
+
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) =>
+            Task.FromResult<IReadOnlyDictionary<string, IncidentOccurrenceState>>(
+                Occurrences.TryGetValue((serverKey, metricName), out var states)
+                    ? states
+                    : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
+
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
+        {
+            var replacement = new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
+            foreach (var entry in states)
+            {
+                replacement[entry.Key] = entry.Value;
+            }
+            Occurrences[(serverKey, metricName)] = replacement;
+            return Task.CompletedTask;
+        }
+
+        /* #2166 */
+        public List<(string Server, string Db, string State)> DatabaseStateAlerted { get; } = new();
+
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState)
+        {
+            DatabaseStateAlerted.Add((serverKey, databaseName, effectiveState));
+            return Task.CompletedTask;
+        }
+
+        public List<(string Server, string Db)> DatabaseStateCleared { get; } = new();
+
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName)
+        {
+            DatabaseStateCleared.Add((serverKey, databaseName));
             return Task.CompletedTask;
         }
     }

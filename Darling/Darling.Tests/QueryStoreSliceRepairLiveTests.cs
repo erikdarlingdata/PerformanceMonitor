@@ -34,6 +34,16 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryStoreSliceRepairLiveTests
 {
+    [Fact]
+    public void SliceStatementTimeout_IsGenerousButBounded()
+    {
+        /* #2105 field failure: Npgsql's default 30s killed the stage aggregation on a store fresh
+           off a large catch-up, surfacing as "Exception while reading from stream" with no mention
+           of a timeout. Bounded on purpose - the slice transaction holds chunk locks the live
+           service's compression jobs also want, so infinite (the VACUUM precedent) is wrong here. */
+        Assert.Equal(900, QueryStoreSliceRepair.SliceStatementTimeoutSeconds);
+    }
+
     private const int TestServerId = -919120;
 
     /// <summary>
@@ -238,6 +248,7 @@ public sealed class QueryStoreSliceRepairLiveTests
             var dryText = dryOut.ToString();
             Assert.Contains("Split intervals found : 1", dryText, StringComparison.Ordinal);
             Assert.Contains("DRY RUN — nothing was changed.", dryText, StringComparison.Ordinal);
+            Assert.DoesNotContain("[OK]", dryText, StringComparison.Ordinal);
 
             await using (var check = new NpgsqlConnection(scratch.ConnectionString))
             {
@@ -252,6 +263,12 @@ public sealed class QueryStoreSliceRepairLiveTests
             var runText = runOut.ToString();
             Assert.Contains("Collapsed. Rows removed: 1", runText, StringComparison.Ordinal);
             Assert.Contains("DONE", runText, StringComparison.Ordinal);
+            /* Per-slice progress: the real run announces each slice with its removal count and span
+               percent — a big backlog is no longer a silent console between the banner and DONE. The
+               removed figure inside the [OK] line is the same deleted-minus-reinserted derivation the
+               summary total uses, so the two cannot disagree. */
+            Assert.Contains("[OK]", runText, StringComparison.Ordinal);
+            Assert.Contains("1 removed (100% of span, 1 total)", runText, StringComparison.Ordinal);
 
             await using (var check = new NpgsqlConnection(scratch.ConnectionString))
             {
@@ -273,6 +290,68 @@ public sealed class QueryStoreSliceRepairLiveTests
                 File.Delete(configPath);
             }
         }
+    }
+
+    /// <summary>
+    /// The SECOND #2105 field failure, pinned the way DarlingRetentionTests pins the first of this class
+    /// (#1564): the collapse's DELETE touches COMPRESSED chunks — a store old enough to need this repair has
+    /// had its compression policy running the whole time — and TimescaleDB rails DML decompression at 100k
+    /// tuples per transaction by default, so the field run died at <c>53400: tuple decompression limit
+    /// exceeded</c> four minutes in. The fix is the <c>SET LOCAL ... = 0</c> lift at the top of the slice
+    /// transaction, and this test is its tripwire: the session arms the rail at ONE tuple before calling the
+    /// collapse, so the transaction-local lift is the only thing standing between the DELETE and the exact
+    /// field error. Drop the lift and this fails with the operator's 53400 instead of a silent coverage hole.
+    /// Compression is applied SYNCHRONOUSLY (the retention test's pattern — no background-job race), and the
+    /// compressed shape is PROVEN before the repair runs, not assumed.
+    /// </summary>
+    [Fact]
+    public async Task CollapsingRowsInsideACompressedChunk_SurvivesTheDecompressionRail_TheSecondFieldFailure()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #2105 compressed-chunk collapse test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        var hour = new DateTime(2026, 6, 12, 8, 0, 0, DateTimeKind.Unspecified);
+        await SeedSliceAsync(connection, hour.AddMinutes(5), intervalId: 8201, queryId: 91, planId: 111,
+            intervalStart: hour, executionCount: FlushedCount, avgDurationUs: FlushedAvgUs, ct: ct);
+        await SeedSliceAsync(connection, hour.AddMinutes(5), intervalId: 8201, queryId: 91, planId: 111,
+            intervalStart: hour, executionCount: MemoryCount, avgDurationUs: MemoryAvgUs, ct: ct);
+
+        /* Compression enablement lives in ApplyCompressionPolicyAsync (a separate service-start step this
+           test deliberately skips — a background policy racing the assertions is pure interference), so
+           enable it directly, exactly like the retention test's compressed-chunk pin; then compress the
+           seeded chunk synchronously and PROVE the compressed shape is what the collapse runs against. */
+        await ExecAsync(connection,
+            "ALTER TABLE collect.query_store_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
+        await ExecAsync(connection,
+            "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('collect.query_store_stats') c", ct);
+        Assert.True(await ScalarAsync(connection, @"
+SELECT count(*)
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'query_store_stats'
+  AND is_compressed", ct) >= 1,
+            "expected the seeded query_store_stats chunk to be compressed — the fixture is not exercising the compressed-chunk shape");
+
+        /* Arm the rail at ONE tuple for this session. The DELETE must decompress the seeded rows' batch
+           (two tuples at minimum), so only the transaction-local SET LOCAL lift lets the collapse commit. */
+        await ExecAsync(connection, "SET timescaledb.max_tuples_decompressed_per_dml_transaction = 1", ct);
+
+        var removed = await QueryStoreSliceRepair.CollapseSliceAsync(connection, hour, hour.AddHours(1), ct);
+        Assert.Equal(1, removed);
+
+        Assert.Equal(1, await RawRowCountAsync(connection, queryId: 91, ct));
+        Assert.Equal(TrueCount, await RawExecutionCountAsync(connection, queryId: 91, ct));
     }
 
     /* ─────────────────────────── helpers ─────────────────────────── */

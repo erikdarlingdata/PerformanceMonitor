@@ -9,9 +9,11 @@
 using System;
 using System.Linq;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using Xunit;
@@ -96,6 +98,96 @@ public sealed class DarlingCliCommandsTests
         Assert.Contains("Login failed", line, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A PostgreSQL target has no SQL major version, no engine edition and no msdb, so the line must not
+    /// claim any of them. Before the engine branch existed this printed "SQL major version 0,
+    /// Unknown (0), msdb access: yes" for a perfectly healthy Aurora cluster — a PASS that reads like a
+    /// misconfiguration, on the one verb whose whole job is to be trusted as a deployment gate.
+    /// </summary>
+    [Fact]
+    public void FormatProbeLine_PostgresTarget_ReportsPostgresFactsAndNoSqlServerOnes()
+    {
+        var line = DarlingCliCommands.FormatProbeLine("aurora-writer", PostgresProbe());
+
+        Assert.Contains("[PASS]", line, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL 17", line, StringComparison.Ordinal);
+        Assert.Contains("170007", line, StringComparison.Ordinal);
+        Assert.Contains("writer", line, StringComparison.Ordinal);
+        Assert.Contains("Aurora", line, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("SQL major version", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("msdb", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown (0)", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>An Aurora writer clears every gate, so the count says so rather than listing nothing.</summary>
+    [Fact]
+    public void FormatProbeLine_AuroraWriter_ReportsEveryPostgresCollectorApplies()
+    {
+        var expected = CollectorCatalog.All.Count(d => d.TargetEngine == CollectorTargetEngine.PostgreSql);
+
+        var line = DarlingCliCommands.FormatProbeLine("aurora-writer", PostgresProbe());
+
+        Assert.Contains($"all {expected} PostgreSQL collectors apply", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("skipped", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The case the count exists for. A stock-PostgreSQL 15 reader is the worst realistic target: no
+    /// Aurora functions, no pg_stat_io, and autovacuum stats that read as all zeros on a standby. Finding
+    /// that out at pre-flight is the difference between "this is configured" and "this will collect".
+    /// </summary>
+    [Fact]
+    public void FormatProbeLine_StockPostgresReader_NamesTheCollectorsThatWillNotRun()
+    {
+        var probe = PostgresProbe() with
+        {
+            PostgresMajorVersion = 15,
+            PostgresVersionNum = 150012,
+            IsAurora = false,
+            IsInRecovery = true,
+        };
+
+        var line = DarlingCliCommands.FormatProbeLine("selfhosted-replica", probe);
+
+        Assert.Contains("reader (in recovery)", line, StringComparison.Ordinal);
+        Assert.Contains("not Aurora", line, StringComparison.Ordinal);
+
+        /* The Aurora-only pair, the writer-only one and the 16+ one — each named, so nobody has to
+           reverse-engineer an empty table later. */
+        Assert.Contains("skipped:", line, StringComparison.Ordinal);
+        Assert.Contains("pg_wait_stats", line, StringComparison.Ordinal);
+        Assert.Contains("pg_statement_stats", line, StringComparison.Ordinal);
+        Assert.Contains("pg_autovacuum_stats", line, StringComparison.Ordinal);
+        Assert.Contains("pg_io_stats", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The count is derived from the real gate, not a parallel list that can rot. Asking the catalog the
+    /// same question the runner asks must give the same answer.
+    /// </summary>
+    [Fact]
+    public void ToTargetInfo_RoundTripsTheFactsTheGateReads()
+    {
+        var target = PostgresProbe().ToTargetInfo();
+
+        Assert.Equal(CollectorTargetEngine.PostgreSql, target.Engine);
+        Assert.Equal(17, target.PostgresMajorVersion);
+        Assert.Equal(170007, target.PostgresVersionNum);
+        Assert.True(target.IsAurora);
+        Assert.False(target.IsInRecovery);
+
+        Assert.All(
+            CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer),
+            d => Assert.False(CollectorCatalog.AppliesTo(d, target)));
+    }
+
+    private static ConnectionProbeResult PostgresProbe() => new(
+        Success: true, MajorVersion: 0, EngineEdition: 0, EngineEditionDescription: null,
+        IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null,
+        Engine: CollectorTargetEngine.PostgreSql, PostgresMajorVersion: 17, PostgresVersionNum: 170007,
+        IsAurora: true, IsInRecovery: false);
+
     [Fact]
     public void DescribeEngineEdition_MapsKnownEditions()
     {
@@ -103,6 +195,40 @@ public sealed class DarlingCliCommandsTests
         Assert.Equal("Azure SQL Database", DarlingServerConnector.DescribeEngineEdition(5));
         Assert.Equal("Azure SQL Managed Instance", DarlingServerConnector.DescribeEngineEdition(8));
         Assert.Contains("Unknown", DarlingServerConnector.DescribeEngineEdition(999), StringComparison.Ordinal);
+    }
+
+    /* ---- the collapse verb's adaptive narrowing decision (#2105 round three) — pure pins ---- */
+
+    private static readonly TimeSpan Day = TimeSpan.FromDays(1);
+
+    [Fact]
+    public void NextNarrowingFailureCount_FullWidthSlice_TakesTheFirstHalvingStep()
+    {
+        /* A failed 24h slice narrows to 12h — one more failure than before. */
+        Assert.Equal(1, DarlingCliCommands.NextNarrowingFailureCount(Day, 0, Day));
+        /* And a 12h slice that fails again narrows to 6h. */
+        Assert.Equal(2, DarlingCliCommands.NextNarrowingFailureCount(Day, 1, TimeSpan.FromHours(12)));
+    }
+
+    [Fact]
+    public void NextNarrowingFailureCount_ClampedTail_SkipsStepsThatWouldRerunTheSameWindow()
+    {
+        /* The review catch: a clamped 30-minute final slice is already narrower than the 12h/6h/3h/1.5h/45m
+           nominal steps — re-running any of them is the identical window. The first step that actually
+           narrows 30m is the 22.5m floor (failure count 6). */
+        Assert.Equal(6, DarlingCliCommands.NextNarrowingFailureCount(Day, 0, TimeSpan.FromMinutes(30)));
+    }
+
+    [Fact]
+    public void NextNarrowingFailureCount_AtOrBelowTheFloor_ReturnsNull_TheSameWidthRetryTakesOver()
+    {
+        /* The 24h schedule floors at 22.5m (6 halvings). A slice at or under that width cannot be
+           narrowed — the caller's one fresh-connection same-width retry is the only move left, and it
+           must NOT be skipped just because narrowing is impossible (the run's usual last slice is a
+           partial-day clamp of arbitrary width). */
+        Assert.Null(DarlingCliCommands.NextNarrowingFailureCount(Day, 0, TimeSpan.FromMinutes(22.5)));
+        Assert.Null(DarlingCliCommands.NextNarrowingFailureCount(Day, 0, TimeSpan.FromMinutes(5)));
+        Assert.Null(DarlingCliCommands.NextNarrowingFailureCount(Day, 6, TimeSpan.FromMinutes(22.5)));
     }
 }
 
@@ -431,6 +557,69 @@ public sealed class DarlingPrintViewerConnectionTests
 
             /* The live-secret warning is printed (to STDERR, so a STDOUT redirect keeps it visible). */
             Assert.Contains("LIVE database password", stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #2117's print-verb half, pinned on the CHAIN-shaped store the sibling test cannot see (it lays down
+    /// only the legacy server.crt): when root.crt exists beside server.crt, the verb must emit the ROOT —
+    /// that is what verify-full's Root Certificate anchors on against a chain-serving store — and the
+    /// header must name the file whose content is actually below (the review-caught label lie: it said
+    /// server.crt over root.crt's bytes).
+    /// </summary>
+    [Fact]
+    public async Task PrintViewerConnectionAsync_ChainShapedStore_EmitsTheRoot_AndLabelsItHonestly()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-printconn-chain-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var viewerCredential = PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(viewerCredential, PerformanceMonitor.Darling.Service.DarlingSecrets.Protect("viewer-secret-pw"));
+
+            var certPath = Path.Combine(
+                Path.GetDirectoryName(viewerCredential)!,
+                PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ServerCertFileName);
+            const string leafPem = "-----BEGIN CERTIFICATE-----\nMIIBLEAFCHAINPEM\n-----END CERTIFICATE-----";
+            const string rootPem = "-----BEGIN CERTIFICATE-----\nMIIBROOTCAPEM\n-----END CERTIFICATE-----";
+            File.WriteAllText(certPath, leafPem);
+            File.WriteAllText(
+                PerformanceMonitor.Darling.Service.DarlingManagedPostgres.RootCertificatePathFor(certPath), rootPem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            var json = $$"""
+                {
+                  "postgres": {
+                    "managed": true,
+                    "port": 5641,
+                    "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}},
+                    "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "role": "viewer" }
+                  },
+                  "servers": [ { "name": "SQL2022", "host": "SQL2022" } ]
+                }
+                """;
+            await File.WriteAllTextAsync(configPath, json);
+
+            var output = new StringWriter();
+            var exit = await DarlingCliCommands.PrintViewerConnectionAsync(configPath, output, new StringWriter(), CancellationToken.None);
+            var stdout = output.ToString();
+
+            Assert.Equal(0, exit);
+
+            /* The ROOT's content, labeled as root.crt — never the leaf chain the server serves. */
+            Assert.Contains(rootPem, stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain(leafPem, stdout, StringComparison.Ordinal);
+            Assert.Contains("(root.crt)", stdout, StringComparison.Ordinal);
+
+            /* The client-side FILE name stays server.crt (ViewerClientCertificateFileName) on purpose —
+               the save-as path in the connection string does not change with the store's shape. */
+            Assert.Contains("Root Certificate=server.crt", stdout, StringComparison.Ordinal);
         }
         finally
         {
@@ -889,6 +1078,440 @@ public sealed class DarlingConfigureNetworkTests
             return 0;
         }
 
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
+    }
+}
+
+/// <summary>
+/// #2197 — the missing-credential refusals every managed-store verb shares. Absence of a credential has two
+/// causes that want OPPOSITE advice (a genuine first run, and a bootstrap that has already failed), and
+/// before this every verb gave the first-run advice to both. The pure tests pin the evidence probe (including
+/// the two ways it must NOT fire, since a wrong "your bootstrap failed" is the same defect pointed somewhere
+/// new) and the two message voices; the end-to-end tests drive both branches through two real verbs, because
+/// a correct builder nothing calls is exactly what the sibling #1738 defect already was.
+/// </summary>
+public sealed class DarlingMissingCredentialMessageTests
+{
+    /* ---------------- pure: what counts as evidence, and what must not ---------------- */
+
+    [Fact]
+    public void FindBootstrapEvidence_NothingOnDisk_FindsNone()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-evidence-none-");
+        try
+        {
+            /* The store folder itself was never created — a genuine first run. */
+            Assert.Null(DarlingStoreBootstrapEvidence.FindBootstrapEvidence(
+                Path.Combine(root.FullName, "store", "pg")));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The field case (#2185): initdb died in the Windows loader, and the service writes the store's own
+    /// credential IMMEDIATELY BEFORE running initdb — so that one file survives the exact failure that
+    /// produces the role-credential refusal, and is what makes the sharper branch reachable at all.
+    /// </summary>
+    [Fact]
+    public void FindBootstrapEvidence_StoreCredentialWrittenBeforeInitdb_IsTheFieldCase()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-evidence-cred-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(Path.Combine(root.FullName, "store"));
+            var storeCredential = DarlingManagedPostgres.CredentialPathFor(dataDirectory);
+            File.WriteAllText(storeCredential, "not-a-real-credential");
+
+            var evidence = DarlingStoreBootstrapEvidence.FindBootstrapEvidence(dataDirectory);
+
+            Assert.NotNull(evidence);
+            Assert.Contains(storeCredential, evidence, StringComparison.Ordinal);
+            Assert.Contains("immediately before it runs initdb", evidence, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FindBootstrapEvidence_InitializedCluster_NamesTheCluster()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-evidence-pgver-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(dataDirectory);
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "18\n");
+
+            var evidence = DarlingStoreBootstrapEvidence.FindBootstrapEvidence(dataDirectory);
+
+            Assert.NotNull(evidence);
+            Assert.Contains(dataDirectory, evidence, StringComparison.Ordinal);
+            Assert.Contains("already initialized", evidence, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FindBootstrapEvidence_ServerLog_NamesIt()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-evidence-pglog-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(Path.Combine(root.FullName, "store"));
+            var serverLog = Path.Combine(root.FullName, "store", DarlingManagedPostgres.ServerLogFileName);
+            File.WriteAllText(serverLog, "FATAL: something\n");
+
+            var evidence = DarlingStoreBootstrapEvidence.FindBootstrapEvidence(dataDirectory);
+
+            Assert.NotNull(evidence);
+            Assert.Contains(serverLog, evidence, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The false-positive guard. An operator who pre-creates the data directory before the first run is
+    /// still ON their first run, and telling them to go read a service log that does not exist would be the
+    /// same misdirection this issue is about, merely pointed somewhere new.
+    /// </summary>
+    [Fact]
+    public void FindBootstrapEvidence_EmptyDataDirectory_IsNotEvidence()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-evidence-empty-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(dataDirectory);
+
+            Assert.Null(DarlingStoreBootstrapEvidence.FindBootstrapEvidence(dataDirectory));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void FindBootstrapEvidence_EmptyPath_FindsNone_WithoutProbingTheWorkingDirectory(string dataDirectory)
+    {
+        /* An empty path must never become a RELATIVE one, which would answer about whatever directory the
+           operator happened to run the verb from. */
+        Assert.Null(DarlingStoreBootstrapEvidence.FindBootstrapEvidence(dataDirectory));
+    }
+
+    /* ---------------- pure: the two voices ---------------- */
+
+    [Fact]
+    public void MissingCredentialMessage_NoEvidence_KeepsTheFirstRunAdvice_AndHedgesForAnAlreadyStartedService()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-msg-firstrun-");
+        try
+        {
+            var message = DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                @"The 'viewer' role credential (C:\store\pg-viewer-credential.dpapi)",
+                "provisions the least-privilege roles and their credentials",
+                Path.Combine(root.FullName, "store", "pg"));
+
+            /* The advice that is CORRECT for a genuine first run is unchanged — and still searchable. */
+            Assert.Contains("does not exist yet", message, StringComparison.Ordinal);
+            Assert.Contains("Start the PerformanceMonitor Darling service once", message, StringComparison.Ordinal);
+            Assert.Contains("provisions the least-privilege roles and their credentials", message, StringComparison.Ordinal);
+
+            /* Plus the sentence the old message was missing entirely: the operator who has ALREADY started
+               it is told where the reason is, and told it is not in darling.json. */
+            Assert.Contains("ALREADY started it", message, StringComparison.Ordinal);
+            Assert.Contains(DarlingStoreBootstrapEvidence.ServiceLogPath, message, StringComparison.Ordinal);
+            Assert.Contains("darling.json", message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MissingCredentialMessage_BootstrapAlreadyAttempted_PointsAtTheLog_AndNeverAtStartingTheServiceAgain()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-msg-failed-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(Path.Combine(root.FullName, "store"));
+            File.WriteAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory), "not-a-real-credential");
+
+            var message = DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                @"The 'viewer' role credential (C:\store\pg-viewer-credential.dpapi)",
+                "provisions the least-privilege roles and their credentials",
+                dataDirectory);
+
+            /* The whole point: this operator must NOT be sent to start the service again, and must not be
+               sent to darling.json either. */
+            Assert.DoesNotContain("Start the PerformanceMonitor Darling service once", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("does not exist yet", message, StringComparison.Ordinal);
+            Assert.Contains("NOT a first run", message, StringComparison.Ordinal);
+            Assert.Contains("starting it again is not the fix", message, StringComparison.Ordinal);
+
+            /* Where to look, named — and why the log is worth reading now (#2194 decodes a bundled tool
+               that Windows killed instead of printing a bare number). */
+            Assert.Contains(DarlingStoreBootstrapEvidence.ServiceLogPath, message, StringComparison.Ordinal);
+            Assert.Contains("FIRST error", message, StringComparison.Ordinal);
+            Assert.Contains("bare exit code", message, StringComparison.Ordinal);
+            Assert.Contains("Nothing in darling.json produces this", message, StringComparison.Ordinal);
+
+            /* The evidence is QUOTED rather than asserted, so the verdict is checkable by the operator. */
+            Assert.Contains(DarlingManagedPostgres.CredentialPathFor(dataDirectory), message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The lead clause is the same in both voices: field reports and the issue tracker are
+    /// searchable by it, so the branch changes what FOLLOWS it, never what an operator pastes into a
+    /// search box.</summary>
+    [Fact]
+    public void MissingCredentialMessage_BothVoices_KeepTheSameSearchableLead()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-msg-lead-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            const string subject = "The managed store credential (C:\\store\\pg-credential.dpapi)";
+
+            var firstRun = DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                subject, "initializes the store", dataDirectory);
+
+            Directory.CreateDirectory(dataDirectory);
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "18\n");
+            var attempted = DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                subject, "initializes the store", dataDirectory);
+
+            Assert.StartsWith(subject + " does not exist", firstRun, StringComparison.Ordinal);
+            Assert.StartsWith(subject + " does not exist", attempted, StringComparison.Ordinal);
+            Assert.NotEqual(firstRun, attempted);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void MissingStoreCredentialMessage_NamesTheCredentialPath_WhichTheOldMessageNeverDid()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-msg-storecred-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            var postgres = DarlingConfig.Parse($$"""
+                {
+                  "postgres": {
+                    "managed": true,
+                    "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}}
+                  }
+                }
+                """).Postgres;
+
+            var message = DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres);
+
+            Assert.Contains("The managed store credential", message, StringComparison.Ordinal);
+            Assert.Contains(DarlingManagedPostgres.CredentialPathFor(dataDirectory), message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /* ---------------- end-to-end: both branches, through two real verbs ---------------- */
+
+    [Fact]
+    public async Task PrintViewerConnection_TrueFirstRun_StillTellsThemToStartTheService()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-e2e-firstrun-");
+        try
+        {
+            /* The store folder does not exist at all — nothing has ever run against it. */
+            var configPath = WriteManagedConfig(root.FullName, Path.Combine(root.FullName, "store", "pg"));
+
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.PrintViewerConnectionAsync(
+                configPath, new StringWriter(), error, CancellationToken.None);
+            var stderr = error.ToString();
+
+            Assert.Equal(1, exit);
+            Assert.Contains("pg-viewer-credential.dpapi", stderr, StringComparison.Ordinal);
+            Assert.Contains("Start the PerformanceMonitor Darling service once", stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PrintViewerConnection_AfterAFailedBootstrap_NamesTheLogInsteadOfTheService()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-e2e-failed-");
+        try
+        {
+            /* The #2185 shape, on disk: the service ran, wrote the store credential, and its initdb died —
+               so the role credentials were never provisioned. */
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(Path.Combine(root.FullName, "store"));
+            File.WriteAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory), "not-a-real-credential");
+            var configPath = WriteManagedConfig(root.FullName, dataDirectory);
+
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.PrintViewerConnectionAsync(
+                configPath, new StringWriter(), error, CancellationToken.None);
+            var stderr = error.ToString();
+
+            Assert.Equal(1, exit);
+            Assert.Contains("pg-viewer-credential.dpapi", stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("Start the PerformanceMonitor Darling service once", stderr, StringComparison.Ordinal);
+            Assert.Contains(DarlingStoreBootstrapEvidence.ServiceLogPath, stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task EnableMcp_TrueFirstRun_StillTellsThemToStartTheService()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-e2e-mcp-firstrun-");
+        try
+        {
+            var configPath = WriteManagedConfig(root.FullName, Path.Combine(root.FullName, "store", "pg"));
+
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.EnableMcpAsync(
+                configPath, new StringWriter(), error, CancellationToken.None);
+            var stderr = error.ToString();
+
+            Assert.Equal(1, exit);
+            Assert.Contains("The managed store credential", stderr, StringComparison.Ordinal);
+            Assert.Contains("Start the PerformanceMonitor Darling service once", stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The store-credential verbs' own nasty state: a cluster EXISTS but its credential does not, so initdb
+    /// will never run again (it only runs on an empty data directory) and no number of restarts produces the
+    /// file. "Start the service once so its first run initializes the store" was a closed loop there.
+    /// </summary>
+    [Fact]
+    public async Task EnableMcp_ClusterExistsButCredentialDoesNot_NamesTheLogInsteadOfTheService()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-e2e-mcp-failed-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(dataDirectory);
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "18\n");
+            var configPath = WriteManagedConfig(root.FullName, dataDirectory);
+
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.EnableMcpAsync(
+                configPath, new StringWriter(), error, CancellationToken.None);
+            var stderr = error.ToString();
+
+            Assert.Equal(1, exit);
+            Assert.DoesNotContain("Start the PerformanceMonitor Darling service once", stderr, StringComparison.Ordinal);
+            Assert.Contains("NOT a first run", stderr, StringComparison.Ordinal);
+            Assert.Contains(DarlingStoreBootstrapEvidence.ServiceLogPath, stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /* ---------------- wiring: no verb keeps a private copy of the old advice ---------------- */
+
+    /// <summary>
+    /// The defect was five INDEPENDENT copies of one sentence, so the fix is only real if none of them
+    /// survives. Parsed at the source because four of the five sit behind a store that a test cannot stand
+    /// up, and a sixth copy added later would reintroduce the bug silently.
+    /// </summary>
+    [Fact]
+    public void NoVerbStillCarriesItsOwnFirstRunAdvice()
+    {
+        var source = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
+
+        Assert.DoesNotContain("so its first run initializes the store", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("first run provisions the least-privilege roles", source, StringComparison.Ordinal);
+
+        /* Every managed missing-credential refusal goes through the shared builder instead — one for the
+           role credentials, FIVE for the store's own (--add-server became the fifth in #2256; the count grows
+           with each new store verb, and growing it is the point — a verb that grew its OWN copy of the advice
+           instead would fail the two DoesNotContain assertions above). */
+        Assert.Equal(1, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingCredentialMessage("));
+        Assert.Equal(5, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage("));
+    }
+
+    private static string WriteManagedConfig(string directory, string dataDirectory)
+    {
+        var configPath = Path.Combine(directory, "darling.json");
+        File.WriteAllText(configPath, $$"""
+            {
+              "postgres": {
+                "managed": true,
+                "port": 5641,
+                "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}}
+              },
+              "servers": []
+            }
+            """);
+        return configPath;
+    }
+
+    /* Locate the repo from this file — the DarlingEnumerationProbeFailureTests idiom; no build-output copying. */
+    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(dir!, relative));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
         var count = 0;
         var index = 0;
         while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)

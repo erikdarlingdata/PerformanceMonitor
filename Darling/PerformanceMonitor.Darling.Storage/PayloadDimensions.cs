@@ -328,9 +328,14 @@ public static class PayloadDimensions
     /// <para>#2069: the compressed-content dim upserts gzip BYTES into
     /// <see cref="CompressedContentColumn"/> (text column left NULL on new rows); every other dim
     /// keeps the text shape. One method so the two shapes cannot drift on conflict semantics.</para>
-    public static string UpsertSql(string dimTable)
+    /// <para>#2171: <paramref name="compressContent"/> false routes the plan dim through the TEXT
+    /// branch instead - <c>query_plan_xml</c> written, <c>query_plan_gz</c> left NULL - which is the
+    /// <c>plan_xml_compression = 'none'</c> store mode for direct-SQL consumers (Grafana and friends
+    /// read the column with no extension; lz4 TOAST does the compressing). Readers need no new
+    /// arm: the text-first-else-gz resolution below already covers every mix of eras and modes.</para>
+    public static string UpsertSql(string dimTable, bool compressContent = true)
     {
-        if (string.Equals(dimTable, CompressedContentDimTable, StringComparison.Ordinal))
+        if (compressContent && string.Equals(dimTable, CompressedContentDimTable, StringComparison.Ordinal))
         {
             return
                 $"INSERT INTO {dimTable} ({DigestColumn}, {CompressedContentColumn}, {LastSeenColumn})\n" +

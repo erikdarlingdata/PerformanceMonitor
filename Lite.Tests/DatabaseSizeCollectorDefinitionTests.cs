@@ -47,6 +47,58 @@ public sealed class DatabaseSizeCollectorDefinitionTests
     }
 
     [Fact]
+    public void OnPrem_TotalSize_PrefersTheInDatabaseCurrentSize_SoTempdbCannotExceed100Percent()
+    {
+        /* #2169: the viewer computes used% as used_size_mb / total_size_mb. Used comes from FILEPROPERTY
+           read INSIDE each database; total used to come from sys.master_files.size, which records the size
+           at configuration time and does NOT track autogrowth for tempdb. A grown tempdb therefore
+           reported current usage against its startup size and rendered above 100%. The probe now captures
+           the in-database current size in the SAME round trip, and the payload prefers it, so both operands
+           come from one snapshot. */
+        var plan = DatabaseSizeStatsCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "test-server",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = s_deltas,
+        });
+
+        Assert.Contains("current_size_mb decimal(19,2) NULL", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("INSERT #file_space (database_id, file_id, used_size_mb, current_size_mb)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)", plan.Text, StringComparison.Ordinal);
+
+        /* The fallback is load-bearing: a database whose probe failed (mid-restore, permissions) still
+           reports a total from master_files rather than NULL, so it degrades in precision and never
+           disappears from the grid. */
+        Assert.Contains("COALESCE(fs.current_size_mb, mf.size * 8.0 / 1024.0)", plan.Text, StringComparison.Ordinal);
+
+        /* The stale source must no longer be the total on its own. */
+        Assert.DoesNotContain("total_size_mb =" + Environment.NewLine + "        CONVERT(decimal(19,2), mf.size * 8.0 / 1024.0),", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AzureSqlDb_AlreadyUsedInDatabaseSizes_SoItNeverHadTheTempdbSkew()
+    {
+        /* The Azure SQL DB path reads BOTH size and SpaceUsed from sys.database_files in the connected
+           database, so its used% was always internally consistent — #2169 was specific to the path that
+           mixes master_files with in-database reads (on-prem, RDS, and Managed Instance, which honors the
+           cross-database reference and therefore takes that path). Pinned so a future refactor does not
+           'unify' the two by moving Azure onto the stale source. */
+        var plan = DatabaseSizeStatsCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "test-server",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = s_deltas,
+            Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+        });
+
+        Assert.Contains("total_size_mb =", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("df.size * 8.0 / 1024.0", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("sys.master_files", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AzureDmvPermissionHint_ExplainsError300_OnAzureOnly()
     {
         /* The other half of #1631: TrudAX asked whether waiting_tasks "really requires master DB

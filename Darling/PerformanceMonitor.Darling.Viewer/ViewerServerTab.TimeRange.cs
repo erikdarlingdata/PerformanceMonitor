@@ -231,6 +231,16 @@ public partial class ViewerServerTab
                 ToDatePicker.SelectedDate = DateTime.Today;
                 _suppressRangeEvents = false;
             }
+
+            if (!isCustom)
+            {
+                /* #2154: a DatePicker's calendar dropdown is a POPUP, which lives outside the visual
+                   tree's visibility — collapsing the picker does not close an already-open dropdown,
+                   so backing out of Custom Range without picking a date left an orphaned floating
+                   calendar on screen. Close them explicitly alongside the collapse (Lite twin fix). */
+                FromDatePicker.IsDropDownOpen = false;
+                ToDatePicker.IsDropDownOpen = false;
+            }
         }
 
         /* Presets reload here; a custom range reloads off the picker changes (below), except the seeded

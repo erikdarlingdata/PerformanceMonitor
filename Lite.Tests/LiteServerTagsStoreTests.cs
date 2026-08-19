@@ -92,10 +92,10 @@ public sealed class LiteServerTagsStoreTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(2, assigned.Count(a => a.TagId == tag));
 
         await _service.UnassignServerTagAsync(new[] { 100 }, tag);
-        Assert.Single((await _service.GetServerTagAssignmentsAsync()).Where(a => a.TagId == tag));
+        Assert.Single(await _service.GetServerTagAssignmentsAsync(), a => a.TagId == tag);
 
         await _service.ClearServerTagsForServerAsync(200);
-        Assert.Empty((await _service.GetServerTagAssignmentsAsync()).Where(a => a.TagId == tag));
+        Assert.DoesNotContain(await _service.GetServerTagAssignmentsAsync(), a => a.TagId == tag);
     }
 
     [Fact]

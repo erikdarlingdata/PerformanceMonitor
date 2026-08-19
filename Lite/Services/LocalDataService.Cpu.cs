@@ -56,7 +56,50 @@ ORDER BY sample_time";
 
         return items;
     }
+
+    /// <summary>
+    /// The attributed-CPU denominator's pieces (#2320): sample count, coverage bounds, and average SQL
+    /// CPU% over the window. Windowed on collection_time (UTC) — the SAME bounds the top-queries and
+    /// top-procedures rankings use — so numerator and denominator share collection gaps; sample_time's
+    /// server-local skew is irrelevant to an average. Takes the window EXPLICITLY (not hours_back) so
+    /// the caller can hand the identical bounds to CpuAttribution.Compute — review catch: three
+    /// independently-sampled UtcNow calls backing one disclosure is drift by construction.
+    /// </summary>
+    public async Task<CpuWindowAggregateRow> GetCpuWindowAggregateAsync(int serverId, DateTime startUtc, DateTime endUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT
+    COUNT(*),
+    MIN(collection_time),
+    MAX(collection_time),
+    AVG(CAST(sqlserver_cpu_utilization AS DOUBLE))
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return new CpuWindowAggregateRow(0, null, null, null);
+        }
+
+        return new CpuWindowAggregateRow(
+            reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0)),
+            reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+            reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+            reader.IsDBNull(3) ? null : reader.GetDouble(3));
+    }
 }
+
+public sealed record CpuWindowAggregateRow(int SampleCount, DateTime? FirstSample, DateTime? LastSample, double? AvgSqlCpuPercent);
 
 public class CpuUtilizationRow
 {

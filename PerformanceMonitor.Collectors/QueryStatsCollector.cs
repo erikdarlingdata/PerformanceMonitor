@@ -83,6 +83,14 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         /// <summary>The statement's host object (schema.name) from <c>sys.dm_exec_sql_text.objectid</c>;
         /// NULL for ad-hoc/prepared text (#2012 stage 2 — splits INSERT...EXEC callers sharing a hash).</summary>
         public string? HostObjectName { get; set; }
+
+        /// <summary>
+        /// #2235: seconds since this plan was compiled, as measured on the monitored server. Feeds the
+        /// delta calculator's series-age rule and is NOT stored — a recompile presents a new
+        /// <c>plan_handle</c> and therefore a new delta key, and without this the first sighting of that
+        /// key reports 0, which on a churning instance is most of the server's CPU.
+        /// </summary>
+        public int? CompileAgeSeconds { get; set; }
     }
 
     private const string SelectColumnsText = @"
@@ -153,7 +161,14 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
                      OBJECT_SCHEMA_NAME(st.objectid, st.dbid) + N'.' + OBJECT_NAME(st.objectid, st.dbid),
                      N'Unknown'
                  )
-        END";
+        END,
+    /* #2235: how long ago this plan was compiled, so the delta calculator can tell a key that is new
+       TO US from a counter that is new to the WORLD. Sent as an AGE rather than creation_time itself
+       because creation_time is in the monitored server's local time while collection times are UTC —
+       comparing them client-side is a timezone bug on every server that is not UTC. DATEDIFF is
+       evaluated where both clocks are the same one. Not stored: PayloadColumns is unchanged, this
+       exists only to inform the delta. */
+    compile_age_seconds = DATEDIFF(SECOND, qs.creation_time, GETDATE())";
 
     /* #1959: rank on the CHEAP DMV columns inside the derived table FIRST, and run the text apply, the
        NOT LIKE self-filter, and the (Darling-only) plan-XML render against the survivors ONLY. The optimizer
@@ -388,9 +403,12 @@ OUTER APPLY
                    text — sys.dm_exec_sql_text.objectid resolved in the SELECT. This is what lets
                    readers split INSERT...EXEC callers that share a query_hash. */
                 HostObjectName = reader.IsDBNull(42) ? null : reader.GetString(42),
+                /* #2235: compile age sits at 43 — inside SelectColumnsText, so it is present in BOTH
+                   capture modes and its ordinal is fixed. That pushes the plan XML to 44. */
+                CompileAgeSeconds = reader.IsDBNull(43) ? null : reader.GetInt32(43),
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
-                   into the SELECT (ordinal 43); the short-circuit skips it entirely when off. */
-                QueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(43) ? reader.GetString(43) : null,
+                   into the SELECT (ordinal 44); the short-circuit skips it entirely when off. */
+                QueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(44) ? reader.GetString(44) : null,
             });
         }
 
@@ -402,16 +420,30 @@ OUTER APPLY
         /* Delta key = the dm_exec_query_stats row identity (sql_handle + offsets + plan_handle).
            Keying on plan_handle alone cross-contaminated multi-statement plans — parity contract. */
         var deltaKey = $"{row.SqlHandle}:{row.StatementStartOffset}:{row.StatementEndOffset}:{row.PlanHandle}";
-        var deltaExecCount = context.Deltas.CalculateDelta(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+
+        /* #2235: plan_handle is in the key above, and it changes on every recompile — so a churning plan
+           presents a NEW key on nearly every sighting, and a first sighting reports 0. That silently
+           discarded most of a plan-churning instance's CPU (a query Datadog measured at ~43% of the box
+           read as 18 executions and 2,824 ms over 168 hours), and it was invisible because the honest
+           "unknowable, not zero" path needs the SAME key to reappear lower, which a recompile never does.
+           Passing the compile age lets the calculator credit a plan whose counter demonstrably STARTED
+           since the previous pass, which is the recoverable half. The unrecoverable half is a plan
+           compiled AND evicted between two passes: it never appears in the DMV at all, so no keying
+           scheme can recover it — that ceiling is stated rather than left to be discovered.
+
+           ALL EIGHT delta'd counters take the same rule. Crediting only some would make one row's metrics
+           disagree about how much work it did, which is worse than under-reporting all of them. */
+        var age = row.CompileAgeSeconds;
+        var deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         /* Capture the collection interval alongside the CPU delta so the display can derive
            worker_time_per_second (peak CPU-ms per wall-clock second) over the window. */
-        var deltaWorkerTime = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, out var sampleIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaElapsedTime = context.Deltas.CalculateDelta(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaLogicalReads = context.Deltas.CalculateDelta(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaLogicalWrites = context.Deltas.CalculateDelta(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaPhysicalReads = context.Deltas.CalculateDelta(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaRows = context.Deltas.CalculateDelta(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaSpills = context.Deltas.CalculateDelta(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaWorkerTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, age, out var sampleIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsedTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaLogicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaLogicalWrites = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaPhysicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaRows = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpills = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.DatabaseName)

@@ -131,6 +131,32 @@ SELECT server_id, name, host, database, auth, username, encrypt_mode,
 FROM config_monitored_servers
 WHERE server_id = $1";
 
+    /// <summary>
+    /// One configured server by its ADDRESS — host, database and read-only intent (#2158). The collision check
+    /// the Add/Edit save runs before writing.
+    ///
+    /// <para><b>Why by address and not by derived id.</b> The guard used to look the address's
+    /// <see cref="ComputeServerId"/> hash up by <c>server_id</c>, which only works while every row's id still
+    /// equals the hash of its own address. Once an edit PRESERVES a row's identity — which is the point of
+    /// #2158, so a re-addressed server keeps its collected history — that stops being true, and a hash lookup
+    /// would miss the very row it is meant to protect: two registrations would end up pointing at one real
+    /// instance, which is #2228's shape. Matching the address columns asks the question the guard actually
+    /// means.</para>
+    ///
+    /// <para><c>IS NOT DISTINCT FROM</c> for <c>database</c> because it is nullable and NULL = NULL is unknown
+    /// in SQL: a plain <c>=</c> would never match the server-scoped registrations (the common case), so every
+    /// one of them would read as "address free". Secret-free projection — the caller only needs to know whether
+    /// a row exists and which id it has, so this runs for a read-only seat too.</para>
+    /// </summary>
+    public const string MonitoredServerByAddressSql = @"
+SELECT server_id, name, host, database, auth, username, encrypt_mode,
+       trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override
+FROM config_monitored_servers
+WHERE host = $1
+AND   database IS NOT DISTINCT FROM $2
+AND   read_only_intent = $3";
+
     /// <summary>Row count — the migrate-in / reconcile "is the config-server set seeded yet?" guard.</summary>
     public const string MonitoredServersCountSql = "SELECT COUNT(*) FROM config_monitored_servers";
 
@@ -260,6 +286,24 @@ ORDER BY COALESCE(s.display_name, c.name)";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRow(reader) : null;
+    }
+
+    /// <summary>
+    /// The server already registered at this address, or null when the address is free (#2158) — what the
+    /// Add/Edit save checks before writing, so one real instance cannot end up under two identities.
+    ///
+    /// <para>Secret-free by design: the caller compares ids and shows a message, so there is no reason to
+    /// read the DPAPI blob, and skipping it means a read-only seat gets the same answer instead of 42501.</para>
+    /// </summary>
+    public async Task<MonitoredServerRow?> GetMonitoredServerByAddressAsync(
+        string host, string? database, bool readOnlyIntent, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(MonitoredServerByAddressSql);
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = host });
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)database ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = readOnlyIntent });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRowNoSecret(reader) : null;
     }
 
     /// <summary>How many servers the config-server registry holds (the migrate-in / reconcile guard).</summary>

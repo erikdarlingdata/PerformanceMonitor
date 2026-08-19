@@ -102,11 +102,11 @@ OPTION(RECOMPILE);";
         /* Payload order: raw values then the three deltas (recording calculator returns value * 10). */
         Assert.Equal(new object?[] { "BUFFER", 7L, 300L, 20L, 70L, 3000L, 200L }, writer.Values);
 
-        /* Delta contract: group names, key = latch_class, the host collection time, 300 s gap policy. */
+        /* Delta contract: group names, key = latch_class, the host collection time, the shared gap policy. */
         Assert.Equal(3, deltas.Calls.Count);
-        Assert.Equal(("latch_stats_waiting_requests", "BUFFER", 7L, context.CollectionTime, 300), deltas.Calls[0]);
-        Assert.Equal(("latch_stats_wait_time", "BUFFER", 300L, context.CollectionTime, 300), deltas.Calls[1]);
-        Assert.Equal(("latch_stats_max_wait", "BUFFER", 20L, context.CollectionTime, 300), deltas.Calls[2]);
+        Assert.Equal(("latch_stats_waiting_requests", "BUFFER", 7L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[0]);
+        Assert.Equal(("latch_stats_wait_time", "BUFFER", 300L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[1]);
+        Assert.Equal(("latch_stats_max_wait", "BUFFER", 20L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[2]);
         Assert.All(deltas.Calls, _ => Assert.Equal(42, deltas.LastServerId));
     }
 }

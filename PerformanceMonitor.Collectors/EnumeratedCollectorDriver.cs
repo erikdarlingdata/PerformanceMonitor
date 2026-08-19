@@ -203,8 +203,20 @@ public static class EnumeratedCollectorDriver
     /// </summary>
     public const string UnnamedItem = "(unnamed item)";
 
+    /// <summary>
+    /// What an item abandoned at its wall-clock budget reports (#2150), <c>{0}</c> = the budget, already
+    /// rendered by <see cref="DescribeBudget"/>. Shared so the enumerated loop and each host's per-database
+    /// (Azure SQL DB) loop say the same thing, and so the wording an operator greps for is one string.
+    /// </summary>
+    public const string WallClockBudgetErrorFormat =
+        "abandoned after exceeding its {0} per-database wall-clock budget; the range was not "
+        + "collected and will be re-read next cycle (the watermark did not advance)";
+
     /// <summary><see cref="ProbeFailureNoteFormat"/> parsed once (CA1863) — the const stays the greppable, pinnable text.</summary>
     private static readonly CompositeFormat s_probeFailureNote = CompositeFormat.Parse(ProbeFailureNoteFormat);
+
+    /// <summary><see cref="WallClockBudgetErrorFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_wallClockBudget = CompositeFormat.Parse(WallClockBudgetErrorFormat);
 
     /// <summary><see cref="UnreadableFailureSetErrorFormat"/> parsed once (CA1863).</summary>
     private static readonly CompositeFormat s_unreadableFailureSet = CompositeFormat.Parse(UnreadableFailureSetErrorFormat);
@@ -382,6 +394,13 @@ public static class EnumeratedCollectorDriver
     /// surface the row-cap / byte-budget warning here — the context truncation signal persists until the
     /// next item's read resets it, so reading it post-flush is equivalent).</param>
     /// <param name="onItemError">Per-item skip log, invoked when one item fails (offline DB, timeout, permissions).</param>
+    /// <param name="perItemBudget">
+    /// Wall-clock ceiling for one item's watermark refresh plus its read (#2150), from
+    /// <c>ICollectorDefinition.PerItemWallClockBudget</c>. Null (every collector but <c>query_store</c>) leaves
+    /// the loop exactly as it was. Exceeding it abandons THAT item as a per-item failure and continues;
+    /// the WRITE is deliberately outside the budget, because abandoning a flush that is already underway
+    /// would trade a slow cycle for a partially-written one.
+    /// </param>
     public static async Task<EnumeratedRunResult> RunAsync<TRow>(
         IReadOnlyList<string> items,
         Func<string, CancellationToken, Task>? perItemWatermark,
@@ -389,7 +408,8 @@ public static class EnumeratedCollectorDriver
         Func<List<TRow>, CancellationToken, Task> writeBatch,
         Action<string, int, long, long> onItemComplete,
         Action<string, Exception> onItemError,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? perItemBudget = null)
     {
         var totalRows = 0;
         long sqlMs = 0;
@@ -402,17 +422,24 @@ public static class EnumeratedCollectorDriver
             List<TRow>? batch = null;
             long itemSqlMs = 0;
             var sqlSlice = Stopwatch.StartNew();
+
+            /* #2150: the item's wall-clock budget. Null for every collector that declares none, in which
+               case itemToken IS cancellationToken and this loop is what it always was. */
+            using var itemBudget = StartItemBudget(perItemBudget, cancellationToken);
+            var itemToken = itemBudget?.Token ?? cancellationToken;
             try
             {
                 /* Per-database watermark refresh (query_store): its cutoff — including the 24h catch-up
                    clamp — is computed HERE, inside the loop, so each database's commit advances only its
-                   own watermark and an abort loses no other database's intervals. */
+                   own watermark and an abort loses no other database's intervals. Inside the budget on
+                   purpose: it is a store read, and a store that has stopped answering is exactly the kind
+                   of stall the budget exists to bound. */
                 if (perItemWatermark is not null)
                 {
-                    await perItemWatermark(item, cancellationToken);
+                    await perItemWatermark(item, itemToken);
                 }
 
-                batch = await readItem(item, cancellationToken);
+                batch = await readItem(item, itemToken);
             }
             catch (OutOfMemoryException)
             {
@@ -421,6 +448,18 @@ public static class EnumeratedCollectorDriver
                    per-item batch is a local that unwinds with this frame — so filter+rethrow is the whole
                    handler; the host classifies the run ERROR. */
                 throw;
+            }
+            catch (Exception ex) when (ItemBudgetExpired(itemBudget, cancellationToken))
+            {
+                /* #2150: THIS item ran out of wall clock. Reported as a per-item failure so the sweep
+                   continues, which is the entire point — one database must not be able to starve the rest.
+                   Ahead of the generic catch because a cancelled command does not reliably arrive as an
+                   OperationCanceledException, so the generic filter cannot be trusted to claim it; and the
+                   token check is what keeps a real shutdown out of this arm. `ex` is deliberately dropped
+                   in favour of the budget message: whatever the provider raised on cancellation is an
+                   artifact of HOW it was cancelled, not why. */
+                _ = ex;
+                onItemError(item, ItemBudgetException(perItemBudget!.Value));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -460,4 +499,64 @@ public static class EnumeratedCollectorDriver
 
         return new EnumeratedRunResult(totalRows, sqlMs, storageMs);
     }
+
+    /// <summary>
+    /// Starts one item's wall-clock budget (#2150), or returns null when the definition declares none —
+    /// which is every collector but <c>query_store</c>, so the unbounded path stays byte-identical.
+    ///
+    /// <para>A LINKED source, so host shutdown still cancels the item promptly; the timer only adds a
+    /// second reason to stop. Callers must pass <see cref="CancellationTokenSource.Token"/> to the work
+    /// and dispose the source when the item ends.</para>
+    /// </summary>
+    public static CancellationTokenSource? StartItemBudget(TimeSpan? budget, CancellationToken outer)
+    {
+        if (budget is not TimeSpan span || span <= TimeSpan.Zero)
+        {
+            return null;
+        }
+
+        var source = CancellationTokenSource.CreateLinkedTokenSource(outer);
+        source.CancelAfter(span);
+        return source;
+    }
+
+    /// <summary>
+    /// Did THIS item's budget fire, as opposed to the host shutting down?
+    ///
+    /// <para>The distinction is the whole point: a budget expiry is a per-item fault to be reported and
+    /// skipped, while shutdown must propagate and stop the sweep. Shutdown deliberately WINS the ambiguous
+    /// case — if both are cancelled, this returns false and the exception propagates — because misreading a
+    /// shutdown as a per-item skip would have the loop keep collecting through it.</para>
+    ///
+    /// <para>Classifying on the TOKENS rather than the exception type is deliberate too. Cancelling a
+    /// SqlClient command mid-execute does not reliably surface as <see cref="OperationCanceledException"/>:
+    /// it commonly arrives as a provider exception ("Operation cancelled by user"), and which one depends on
+    /// whether the cancellation landed during the open or during the drain. The tokens know; the exception
+    /// type does not.</para>
+    /// </summary>
+    public static bool ItemBudgetExpired(CancellationTokenSource? itemBudget, CancellationToken outer) =>
+        itemBudget is not null
+        && itemBudget.IsCancellationRequested
+        && !outer.IsCancellationRequested;
+
+    /// <summary>The exception handed to the per-item error hook for an abandoned item, so both loops report
+    /// it identically. A <see cref="TimeoutException"/> because that is what it is — and because the hosts'
+    /// hooks log <c>ex.Message</c>, which carries the whole explanation.</summary>
+    public static TimeoutException ItemBudgetException(TimeSpan budget) =>
+        new(string.Format(CultureInfo.InvariantCulture, s_wallClockBudget, DescribeBudget(budget)));
+
+    /// <summary>
+    /// Renders a budget the way the operator set it, choosing the unit rather than fixing one.
+    ///
+    /// <para>Fixing it at minutes was the first cut, and a scratch harness caught it reporting a
+    /// sub-minute budget as "0.0-minute" — a message that names no number at all, on the one line an
+    /// operator has to work from. The shipped value is 10 minutes so it would never have shown in the
+    /// field; a test asserting the message merely CONTAINS "wall-clock budget" would not have shown it
+    /// either. Small values are the ones a person types while diagnosing, which is exactly when the
+    /// message matters most.</para>
+    /// </summary>
+    public static string DescribeBudget(TimeSpan budget) =>
+        budget < TimeSpan.FromMinutes(1)
+            ? string.Format(CultureInfo.InvariantCulture, "{0:0.###}-second", budget.TotalSeconds)
+            : string.Format(CultureInfo.InvariantCulture, "{0:0.#}-minute", budget.TotalMinutes);
 }

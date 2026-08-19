@@ -138,10 +138,22 @@ public static class DarlingRetention
     /// A <see cref="PurgeSummary"/>: how many tables were touched and the coarse activity count (DELETE rows
     /// plus dropped chunks). The daily caller discards it; the on-demand <c>purge_now</c> command reports it.
     /// </returns>
+    /// <param name="planContentRetentionDays">
+    /// The V75 plan-content horizon (#2316): days a payload-dimension row outlives its last sighting
+    /// before the GC may take it, independent of the fact-coupled horizon. 0 (the default here, for
+    /// callers and tests that predate the knob) disables it — the fact-coupled horizon stands alone.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
-        Func<string, int>? retentionDaysFor = null)
+        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0)
     {
+        /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
+           arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
+           store-unreachable boot the worker passes darling.json's RAW value, and a file value of 1-6
+           would prune plan content below the [7,365] contract — the failure direction is data loss, so
+           the sink does not trust its callers. */
+        planContentRetentionDays = StoreConfigProvider.ClampPlanContentRetentionDays(planContentRetentionDays);
+
         var sw = Stopwatch.StartNew();
         var tablesPurged = 0;
         var totalRowsDeleted = 0;
@@ -368,6 +380,7 @@ public static class DarlingRetention
             else
             {
                 var dimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact);
+                var planDimensionCutoff = ComputeDimensionCutoff(utcNow, widestFactRetentionDays, oldestSurvivingDigestFact, planContentRetentionDays);
                 if (dimensionCutoff < utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1)))
                 {
                     /* Fixed string, same reasoning as the defer line: the greppable signature of a store
@@ -376,11 +389,85 @@ public static class DarlingRetention
                     logger?.LogInformation("dimension GC bounded by surviving facts: dimension content newer than the oldest digest-carrying fact row is retained");
                 }
 
+                /* #2210: the Query Store plan map goes FIRST, and its cutoff is deliberately LATER than the
+                   dimension's — it prunes more aggressively, so the dim always outlives the map it points into.
+                   The two bad end-states are not symmetric. A pruned map row whose dim row survives renders a
+                   plan as "not collected" and leaves bytes unreclaimed until the dim's own horizon passes:
+                   visible, self-correcting, no wrong answers. A pruned DIM row whose map row survives is a
+                   reader resolving a live fact to absent content, silently, weeks after the cause. Ordering the
+                   cutoffs makes the recoverable end-state the only reachable one, and
+                   QueryStorePlanMap.MarginOrderingHolds is pinned against ChunkIntervalDays so shrinking that
+                   constant cannot invert it unnoticed. */
+                /* #2219: PostgreSQL statement text, on the same principle as the plan map below but with the
+                   margin in the OPPOSITE direction, because the asymmetry is the other way round. Text is what a
+                   fact row points AT, so it must OUTLIVE the statistics that reference it: text kept past its
+                   facts is a few dead bytes, whereas facts kept past their text is a top-queries answer that
+                   reads as a list of integers — the exact failure this table was added to fix. Hence a margin
+                   ADDED to the fact horizon rather than subtracted from it. */
+                var textCutoff = utcNow.AddDays(-(widestFactRetentionDays + PgStatementText.PruneMarginDays));
+                var textDeleted = await PurgeOneAsync(
+                    postgres, PgStatementText.TableName,
+                    PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
+                    textCutoff, logger, cancellationToken);
+                if (textDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += textDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+
+                /* #2316 review catch: the map must learn the plan-content horizon too, or the dedicated
+                   dim cutoff overtakes this one and a live map row can point at deleted content — the
+                   silent-missing-plans failure the margin ordering exists to prevent. ComputeMapCutoff
+                   keeps the map's cutoff strictly NEWER than the plan dim's under every knob value, so
+                   the only reachable end-state stays the recoverable one (map row gone first, plan
+                   renders as not-collected). The visible consequence is deliberate: a Query Store plan
+                   fetch for an interval older than the knob misses, exactly like the dim itself. */
+                var mapCutoff = ComputeMapCutoff(utcNow, widestFactRetentionDays, planContentRetentionDays);
+                var mapDeleted = await PurgeOneAsync(
+                    postgres, QueryStorePlanMap.TableName,
+                    QueryStorePlanMap.PruneSql(TimescaleSupport.ChunkIntervalDays),
+                    mapCutoff, logger, cancellationToken);
+                if (mapDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += mapDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+
+                /* #2150: query_store statement text, same shape and same direction of margin as the two
+                   above — it must outlive the facts that reference it, because text retired early reads as a
+                   statement that never had text rather than as one whose text expired. */
+                var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
+                var queryTextDeleted = await PurgeOneAsync(
+                    postgres, QueryStoreTextStore.TableName,
+                    QueryStoreTextStore.PruneSql(TimescaleSupport.ChunkIntervalDays),
+                    queryTextCutoff, logger, cancellationToken);
+                if (queryTextDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += queryTextDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+
                 foreach (var dimTable in PayloadDimensions.DimTables)
                 {
+                    /* #2316 review catch: the dedicated horizon applies to PLAN content only. query_text_dim
+                       is ~40 MB against the plan dim's 127 GB — shortening it buys nothing and would quietly
+                       break "text stays analyzable for the facts' full retention", which is half the knob's
+                       own justification. The router is pure so the scoping is pinned by tests. */
                     var dimDeleted = await PurgeOneAsync(
                         postgres, dimTable, TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
-                        dimensionCutoff, logger, cancellationToken);
+                        ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff), logger, cancellationToken);
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -587,16 +674,68 @@ public static class DarlingRetention
     /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
     /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
     /// </summary>
-    internal static DateTime ComputeDimensionCutoff(DateTime utcNow, int widestFactRetentionDays, DateTime? oldestSurvivingDigestFact)
+    internal static DateTime ComputeDimensionCutoff(DateTime utcNow, int widestFactRetentionDays, DateTime? oldestSurvivingDigestFact, int planContentRetentionDays = 0)
     {
         var assumed = utcNow.AddDays(-(widestFactRetentionDays + TimescaleSupport.ChunkIntervalDays + 1));
-        if (oldestSurvivingDigestFact is null)
+        var coupled = assumed;
+        if (oldestSurvivingDigestFact is not null)
         {
-            return assumed;
+            var measured = oldestSurvivingDigestFact.Value.AddDays(-1);
+            coupled = measured < assumed ? measured : assumed;
         }
 
-        var measured = oldestSurvivingDigestFact.Value.AddDays(-1);
-        return measured < assumed ? measured : assumed;
+        /* #2316: the dedicated plan-content horizon DELIBERATELY overrides both safeties above for
+           content past its window — that is its entire point. The coupled horizon guarantees no fact
+           ever references deleted content, which also means a store younger than the fact retention
+           has an UNBOUNDED dimension (measured: 127 GB in the dim's first 22 days, with the coupled
+           GC unable to fire until a month after projected disk-full). With the knob enabled, a fact
+           older than the window keeps its metrics, hashes and text but renders a MISSING plan — the
+           null every reader already handles — in exchange for a bounded store. The same one-day
+           margin as the measured side covers the hourly last_seen refresh guard. Disabled (0 or
+           below) returns the coupled cutoff before any dedicated value is computed, so the old
+           behavior is reproduced exactly rather than approximated through a comparison. */
+        if (planContentRetentionDays <= 0)
+        {
+            return coupled;
+        }
+
+        var dedicated = utcNow.AddDays(-(planContentRetentionDays + 1));
+        return dedicated > coupled ? dedicated : coupled;
+    }
+
+    /// <summary>
+    /// Routes each payload dimension to its cutoff (#2316 review catch): the dedicated plan-content
+    /// horizon governs <c>query_plan_dim</c> ONLY — every other dimension (query text today) keeps the
+    /// fact-coupled cutoff, so text stays resolvable for the facts' full retention. Pure so the scoping
+    /// decision is pinned by tests rather than living as an inline ternary nothing exercises.
+    /// </summary>
+    internal static DateTime ComputeDimTableCutoff(string dimTable, DateTime coupledCutoff, DateTime planDimensionCutoff) =>
+        string.Equals(dimTable, PayloadDimensions.QueryPlanDimTable, StringComparison.Ordinal)
+            ? planDimensionCutoff
+            : coupledCutoff;
+
+    /// <summary>
+    /// The Query Store plan map's prune cutoff, knob-aware (#2316 review catch). The invariant
+    /// (<see cref="QueryStorePlanMap.MarginOrderingHolds"/>): the DIMENSION must outlive the MAP, so the
+    /// only reachable end-state is the recoverable one — a map row pruned while its content survives
+    /// renders "not collected" and self-corrects; content pruned while a map row survives is a live fact
+    /// resolving to absent XML, silently. The coupled pair keeps that gap at ChunkIntervalDays; the
+    /// dedicated pair keeps it at one day (map at knob, dim at knob + 1 — the same one-day stamp-skew
+    /// margin as everywhere else, because <c>TouchSql</c> refreshes the map's stamp eagerly while the
+    /// dim's refresh is hourly-guarded, so the dim's stamp can trail). Both components are strictly
+    /// ordered, so the max-of-newer composition preserves the ordering under every knob value —
+    /// pinned in PlanContentRetentionTests across the full age sweep.
+    /// </summary>
+    internal static DateTime ComputeMapCutoff(DateTime utcNow, int widestFactRetentionDays, int planContentRetentionDays = 0)
+    {
+        var coupled = utcNow.AddDays(-(widestFactRetentionDays + QueryStorePlanMap.PruneMarginDays));
+        if (planContentRetentionDays <= 0)
+        {
+            return coupled;
+        }
+
+        var dedicated = utcNow.AddDays(-planContentRetentionDays);
+        return dedicated > coupled ? dedicated : coupled;
     }
 
     /// <summary>
@@ -635,14 +774,13 @@ public static class DarlingRetention
     /// (warned; the caller falls back to DELETE for that table). drop_chunks returns one row per
     /// dropped chunk, so the count comes from reading the result set.
     /// </summary>
-    private static async Task<int?> DropChunksOneAsync(
+    private static Task<int?> DropChunksOneAsync(
         NpgsqlDataSource postgres,
         string tableName,
         string dropChunksSql,
         ILogger? logger,
         CancellationToken cancellationToken)
-    {
-        try
+        => ExecuteDropChunksWithDeadlockRetryAsync(async () =>
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(dropChunksSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
@@ -655,13 +793,40 @@ public static class DarlingRetention
             }
 
             return chunksDropped;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        }, tableName, logger);
+
+    /// <summary>
+    /// Runs one table's drop_chunks with a SINGLE immediate retry on deadlock (#2143). 40P01 is transient
+    /// by definition — the deadlock partner (in the field: a TimescaleDB background job holding chunk
+    /// locks, caught live by the nightly's purge e2e) commits or aborts within milliseconds of the abort,
+    /// so one retry converts a wasted purge cycle into a completed one. Exactly ONE retry: a second
+    /// deadlock in a row means the contention is standing, and the DELETE fallback plus next cycle's
+    /// sweep — the behavior this wraps — is the right posture, not a retry loop camped on a lock queue.
+    /// Any non-deadlock failure keeps the original single-shot behavior. Internal, delegate-seamed, so
+    /// the retry/give-up/no-retry arms pin without a store.
+    /// </summary>
+    internal static async Task<int?> ExecuteDropChunksWithDeadlockRetryAsync(
+        Func<Task<int>> dropChunks, string tableName, ILogger? logger)
+    {
+        for (var attempt = 1; ; attempt++)
         {
-            /* Failure-isolated per table — warned here, then the caller's DELETE fallback runs. */
-            logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
-                tableName, ex.Message);
-            return null;
+            try
+            {
+                return await dropChunks();
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
+            {
+                logger?.LogWarning(
+                    "Retention purge (drop_chunks) deadlocked for {Table} — retrying once (the partner clears in milliseconds): {Message}",
+                    tableName, ex.Message);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* Failure-isolated per table — warned here, then the caller's DELETE fallback runs. */
+                logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
+                    tableName, ex.Message);
+                return null;
+            }
         }
     }
 

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -73,12 +74,12 @@ public class PgBaselineProvider
     /// Returns the most specific bucket available, collapsing as needed.
     /// </summary>
     public async Task<BaselineBucket> GetBaselineAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken = default)
     {
         var hourOfDay = analysisTime.Hour;
         var dayOfWeek = (int)analysisTime.DayOfWeek; // Sunday=0 — matches EXTRACT(DOW) in both engines
 
-        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime);
+        var baselines = await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
         if (baselines == null || baselines.Count == 0)
             return BaselineBucket.Empty;
 
@@ -97,7 +98,7 @@ public class PgBaselineProvider
     public void ClearCache() => _cache.Clear();
 
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> GetOrComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var cacheKey = $"{serverId}:{metricName}";
         var roundedHour = new DateTime(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
@@ -109,7 +110,7 @@ public class PgBaselineProvider
             return cached.Buckets;
         }
 
-        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime);
+        var buckets = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
 
         _cache[cacheKey] = new CachedBaseline
         {
@@ -122,17 +123,47 @@ public class PgBaselineProvider
     }
 
     private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBaselinesAsync(
-        int serverId, string metricName, DateTime analysisTime)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var query = GetBaselineQuery(metricName);
         if (query == null) return null;
 
+        return await ComputeBucketsAsync(serverId, metricName, analysisTime, query, cancellationToken);
+    }
+
+    /// <summary>
+    /// Did this failure mean "the statement ran out of time" rather than "the connection broke"?
+    ///
+    /// <para>Worth a named predicate because the two are indistinguishable in the message Npgsql produces.
+    /// Npgsql enforces its command timeout by CANCELLING the statement, so the server logs
+    /// <c>canceling statement due to user request</c> and the client is left holding a torn stream, which it
+    /// reports as "Exception while reading from stream". Read literally that says the network failed; what
+    /// actually happened is a query outgrowing its deadline on a store that grew. On the dogfood box the two
+    /// log lines sat 267 ms apart in different files, and correlating them by hand is not a diagnosis the
+    /// next person should have to repeat.</para>
+    ///
+    /// <para>Structural, not message matching: <c>57014</c> is <c>query_canceled</c>, the server saying it
+    /// cancelled; a <see cref="TimeoutException"/> anywhere in the chain is Npgsql's own deadline. Everything
+    /// else stays "failed", because labelling a genuine connection fault a timeout is the same defect aimed
+    /// the other way.</para>
+    /// </summary>
+    internal static bool IsCommandTimeout(Exception ex) =>
+        ex is PostgresException { SqlState: "57014" }
+        || ex is TimeoutException
+        || ex.InnerException is TimeoutException;
+
+    private async Task<Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>?> ComputeBucketsAsync(
+        int serverId, string metricName, DateTime analysisTime, string query, CancellationToken cancellationToken)
+    {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
         var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
 
+        /* Timed so the failure path can say how long it got, not just that it failed — see the catch. */
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             using var cmd = new NpgsqlCommand(query, connection);
             cmd.Parameters.AddWithValue(serverId);
@@ -143,13 +174,13 @@ public class PgBaselineProvider
 
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
-            using var reader = await cmd.ExecuteReaderAsync();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
                and carry sentinel tier rows; the two event-family metrics (blocking, deadlock)
                keep the six-column classical shape — detected by column count, so their buckets
                read Median=0/Mad=0 and the robust path degrades for them. */
             var hasRobustColumns = reader.FieldCount >= 8;
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(cancellationToken))
             {
                 var hour = Convert.ToInt32(reader.GetValue(0));
                 var dow = Convert.ToInt32(reader.GetValue(1));
@@ -183,9 +214,33 @@ public class PgBaselineProvider
 
             return buckets;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!AnalysisShutdown.IsShutdownAbandon(ex, cancellationToken))
         {
-            _logger?.LogError("[PgBaselineProvider] Failed to compute baselines for {MetricName}: {Message}", metricName, ex.Message);
+            /* A command TIMEOUT and a genuine connection fault are the same message here, and that cost real
+               diagnosis time on the dogfood box: Npgsql surfaces its own client-side timeout as
+               "Exception while reading from stream" — it cancels the statement, the server logs
+               `canceling statement due to user request`, and the client only sees the torn stream. Read
+               literally, that says "the network broke"; what actually happened is that this query outgrew its
+               timeout on a store that had grown. Correlating the two logs by timestamp (267 ms apart) is not
+               something the next person should have to redo, so the distinction is reported here.
+
+               Detected structurally rather than by message text: 57014 is the server telling us it cancelled,
+               and a TimeoutException anywhere in the chain is Npgsql's own deadline. Anything else keeps the
+               old wording, because calling a real connection fault a timeout would be the same defect
+               pointing the other way. */
+            if (IsCommandTimeout(ex))
+            {
+                _logger?.LogError(
+                    "[PgBaselineProvider] Baseline query for {MetricName} did not finish within its command timeout — gave up after {Seconds:F1}s, so this metric has NO baseline this pass and its anomaly detection is silent (the collected data is unaffected). The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
+                    metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
+            }
+            else
+            {
+                _logger?.LogError(
+                    "[PgBaselineProvider] Failed to compute baselines for {MetricName} after {Seconds:F1}s: {Message}",
+                    metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
+            }
+
             return null;
         }
     }

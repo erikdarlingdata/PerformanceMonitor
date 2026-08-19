@@ -37,7 +37,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         object? probeResult = null,
         DateTime? watermark = null,
         DateTime? collectionTime = null,
-        bool capturePlanXml = false)
+        bool capturePlanXml = false,
+        bool fetchQueryTextSeparately = false)
         => new()
         {
             ServerId = 42,
@@ -48,6 +49,7 @@ public sealed class QueryStoreCollectorDefinitionTests
             Watermark = watermark,
             EnumerationProbeResult = probeResult,
             CapturePlanXml = capturePlanXml,
+            FetchQueryTextSeparately = fetchQueryTextSeparately,
         };
 
     /// <summary>
@@ -192,10 +194,11 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* Interval-grain incremental filter since #1907, on this path too — the Azure body IS the shared
            body, so the WHERE→HAVING move lands here by construction rather than by a second edit. */
-        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", Lf(plan.Text), StringComparison.Ordinal);
+        Assert.Contains("HAVING\n    MAX(qsrs.last_execution_time) > @cutoff_time", Lf(plan.Text), StringComparison.Ordinal);
         Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time ASC", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE);", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("LOOP JOIN", plan.Text, StringComparison.Ordinal);
 
         var parameter = Assert.Single(plan.Parameters);
         Assert.Equal("@cutoff_time", parameter.Name);
@@ -464,7 +467,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            Anything coarser would merge work that is genuinely distinct; anything finer would leave the
            slices split, which is the bug. */
         Assert.Contains(
-            "GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc,\n        qsrs.replica_group_id",
+            "GROUP BY\n    qsrs.plan_id,\n    qsrs.runtime_stats_interval_id,\n    qsrs.execution_type_desc,\n    qsrs.replica_group_id",
             text,
             StringComparison.Ordinal);
 
@@ -481,20 +484,137 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("max_dop = MAX(qsrs.max_dop)", text, StringComparison.Ordinal);
 
         /* The pre-filter is a prune, not a semantic: its interval list is a superset of what the HAVING
-           keeps, so it can never subtract a row. Without it the aggregate runs over the database's entire
-           retained Query Store every cycle — measured 1203ms against 375ms on a real 212k-row store. */
+           keeps, so it can never subtract a row. #2133: the ids resolve from the INTERVAL CATALOG —
+           hundreds of rows — never by scanning runtime_stats itself (measured 20 ms vs 426 ms for the
+           identical id set on the field store that wedged). */
         Assert.Contains("WHERE qsrs.runtime_stats_interval_id IN", text, StringComparison.Ordinal);
-        Assert.Contains("WHERE f.last_execution_time > @cutoff_time", text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.query_store_runtime_stats_interval AS i", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE i.end_time > @cutoff_time", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM sys.query_store_runtime_stats AS f", text, StringComparison.Ordinal);
 
-        /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay OUTSIDE the
-           aggregate so the cap counts intervals and can never truncate one interval's slices into a
+        /* #2133 STAGING: the aggregate lands in a temp table and the plan/query/text joins run FROM it,
+           so the optimizer joins with real cardinalities instead of TVF fixed guesses — the monolithic
+           join re-materialized a TVF per probe, a fixed ≥30s cost on an 82k-plan catalog that no
+           catch-up width could reduce (staged: 524 ms, same store, same window). SELECT INTO emits no
+           result set, so the batch still returns exactly one; the leading DROP covers Azure's pooled
+           direct connections (on-prem the sp_executesql scope self-cleans). */
+        Assert.Contains("DROP TABLE IF EXISTS #pm_qs_slice;", text, StringComparison.Ordinal);
+        Assert.Contains("INTO #pm_qs_slice", text, StringComparison.Ordinal);
+        Assert.Contains("FROM #pm_qs_slice AS qsrs\nJOIN sys.query_store_plan AS qsp", Lf(text), StringComparison.Ordinal);
+
+        /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay on the final
+           SELECT so the cap counts intervals and can never truncate one interval's slices into a
            partial sum. WITH TIES + ASC are the #1960 never-a-hole pair: oldest-first shipping keeps
            the derived watermark at the shipped boundary, and WITH TIES stops a bare TOP from splitting
            a group of rows tied at that boundary — the strict `> @cutoff_time` would strand the
-           unshipped half forever. */
+           unshipped half forever. The LOOP JOIN hint must never return to this query: looping from the
+           temp into the TVFs is the per-probe re-materialization #2133 removed. */
         Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", text, StringComparison.Ordinal);
-        Assert.Contains(") AS qsrs\nJOIN sys.query_store_plan AS qsp", text, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qsrs.last_execution_time ASC\nOPTION(RECOMPILE, LOOP JOIN);", text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsrs.last_execution_time ASC\nOPTION(RECOMPILE);", Lf(text), StringComparison.Ordinal);
+        Assert.DoesNotContain("LOOP JOIN", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2150: with the flag off — which is Lite, always — the payload is UNCHANGED, text and all.
+    ///
+    /// <para>This is the pin that makes the feature safe to add at all. Lite stores <c>query_sql_text</c>
+    /// inline in DuckDB and its grid reads it from there, so nulling that column unconditionally would
+    /// blind Lite. The flag exists for exactly that reason, and "off changes nothing" is the property that
+    /// has to be enforced rather than assumed.</para>
+    /// </summary>
+    [Fact]
+    public void WithoutTheFlag_TheTextStaysInline()
+    {
+        foreach (var azure in new[] { false, true })
+        {
+            var text = PayloadSql(MakeContext(isAzureSqlDb: azure));
+
+            Assert.Contains("query_sql_text = qst.query_sql_text,", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("query_sql_text = CONVERT", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #2150: with the flag on the text column becomes a placeholder AT THE SAME ORDINAL, and nothing else
+    /// about the payload moves.
+    ///
+    /// <para>The ordinal is the load-bearing part: the readers index this row by number, so a column that
+    /// changed position would silently shift every later field onto the wrong value. Asserted by
+    /// normalizing the one column out of both forms and requiring the remainder to be identical — which
+    /// covers "nothing else moved" for every column at once, rather than for the handful someone thought
+    /// to list.</para>
+    ///
+    /// <para>The <c>query_store_query_text</c> join deliberately REMAINS. It is one row per key, and the
+    /// 10x measurement behind this change was taken with it in place, so dropping it would be an
+    /// unmeasured change riding along on a measured one.</para>
+    /// </summary>
+    [Fact]
+    public void WithTheFlag_TheTextIsNulledAtTheSameOrdinal()
+    {
+        var inline = PayloadSql(MakeContext());
+        var nulled = PayloadSql(MakeContext(fetchQueryTextSeparately: true));
+
+        Assert.DoesNotContain("query_sql_text = qst.query_sql_text", nulled, StringComparison.Ordinal);
+        Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),", nulled, StringComparison.Ordinal);
+        /* Immediately before query_hash, exactly where the real column sat. */
+        Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),\n    query_hash", Lf(nulled), StringComparison.Ordinal);
+        Assert.Contains("JOIN sys.query_store_query_text AS qst", nulled, StringComparison.Ordinal);
+
+        Assert.Equal(
+            inline.Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal),
+            nulled.Replace("query_sql_text = CONVERT(nvarchar(1), NULL),", "@@TEXT@@", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #2150: the text fetch resumes from a <c>query_id</c> watermark, is cut by an exact byte budget, and
+    /// ships in <c>query_id</c> order — the ordering being what makes a budget cut a SUFFIX, so the highest
+    /// stored id resumes with no hole.
+    /// </summary>
+    [Fact]
+    public void TextFetch_ResumesFromTheWatermark_AndIsBudgetCutInQueryIdOrder()
+    {
+        var sql = QueryStoreCollector.Instance.BuildTextFetchQuery(
+            "SO", MakeContext(fetchQueryTextSeparately: true), watermark: 4242,
+            candidateTexts: QueryStoreTextState.CandidateTexts, budgetBytes: 12 * 1024 * 1024).Text;
+
+        Assert.Contains("EXECUTE [SO].sys.sp_executesql", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE qsq.query_id > 4242", sql, StringComparison.Ordinal);
+        Assert.Contains($"TOP ({QueryStoreTextState.CandidateTexts})", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qsq.query_id", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY b.query_id", sql, StringComparison.Ordinal);
+        Assert.Contains("b.running_bytes - b.text_bytes < 12582912", sql, StringComparison.Ordinal);
+        /* ROWS, not the RANGE default: RANGE tie-groups peers and forces a spool, and the frame has to be
+           per-row because the cut falls BETWEEN two statements. */
+        Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE)", sql, StringComparison.Ordinal);
+        /* It fetches text and nothing else — plan XML has its own fetch, with its own watermark. */
+        Assert.DoesNotContain("query_plan", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2150: every input that would make the fetch ship nothing and silently stall the watermark throws
+    /// instead. A stalled watermark looks exactly like a quiet database, which is why these are exceptions
+    /// rather than no-ops — the plan fetch learned this the hard way from several directions.
+    /// </summary>
+    [Fact]
+    public void TextFetch_RefusesInputsThatWouldStallTheWatermark()
+    {
+        var enabled = MakeContext(fetchQueryTextSeparately: true);
+
+        /* Issuing it while the host still ships text inline would fetch and store text nobody reads. */
+        Assert.Throws<InvalidOperationException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", MakeContext(), 0, 5_000, 1024));
+
+        /* `running_bytes - text_bytes < 0` excludes even the first candidate, so the pass ships nothing. */
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", enabled, 0, 5_000, 0));
+
+        /* TOP (0) returns no rows; a negative literal is a syntax error. */
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", enabled, 0, 0, 1024));
+
+        Assert.Throws<ArgumentNullException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", null!, 0, 5_000, 1024));
     }
 
     /// <summary>
@@ -517,11 +637,13 @@ public sealed class QueryStoreCollectorDefinitionTests
     {
         var text = PayloadSql(MakeContext(probeResult: 16));
 
-        /* Only the aggregating derived table — the outer projection references the same names as plain
-           columns, which is correct there and must not be mistaken for an un-weighted aggregate. */
-        var open = text.IndexOf("FROM\n(", StringComparison.Ordinal);
-        var close = text.IndexOf(") AS qsrs", StringComparison.Ordinal);
-        Assert.True(open > 0 && close > open, "could not locate the slice-aggregating derived table");
+        /* Only the aggregating STAGING statement (#2133: the aggregate lands in #pm_qs_slice and the
+           joins run from it) — the final projection references the same names as plain columns, which
+           is correct there and must not be mistaken for an un-weighted aggregate. The staging SELECT
+           is the marker's first occurrence; the final SELECT carries TOP on the marker line. */
+        var open = text.IndexOf("SELECT /* PerformanceMonitorLite */\n", StringComparison.Ordinal);
+        var close = text.IndexOf("INTO #pm_qs_slice", StringComparison.Ordinal);
+        Assert.True(open > 0 && close > open, "could not locate the slice-aggregating staging statement");
         var aggregate = text[open..close];
 
         var averages = System.Text.RegularExpressions.Regex
@@ -566,18 +688,18 @@ public sealed class QueryStoreCollectorDefinitionTests
         foreach (var probe in new object[] { 16, 17 })
         {
             var attributed = PayloadSql(MakeContext(probeResult: probe));
-            Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", attributed, StringComparison.Ordinal);
+            Assert.Contains("qsrs.execution_type_desc,\n    qsrs.replica_group_id", attributed, StringComparison.Ordinal);
         }
 
         var azure = AzurePayloadSql(MakeContext(isAzureSqlDb: true, probeResult: 12));
-        Assert.Contains("qsrs.execution_type_desc,\n        qsrs.replica_group_id", azure, StringComparison.Ordinal);
+        Assert.Contains("qsrs.execution_type_desc,\n    qsrs.replica_group_id", azure, StringComparison.Ordinal);
 
         /* Pre-2022 box and Managed Instance: the column must not be named anywhere, GROUP BY included. */
         foreach (var probe in new object?[] { 13, 14, 15, null })
         {
             var ungated = PayloadSql(MakeContext(probeResult: probe));
             Assert.DoesNotContain("replica_group_id", ungated, StringComparison.Ordinal);
-            Assert.Contains("GROUP BY\n        qsrs.plan_id,\n        qsrs.runtime_stats_interval_id,\n        qsrs.execution_type_desc\n", ungated, StringComparison.Ordinal);
+            Assert.Contains("GROUP BY\n    qsrs.plan_id,\n    qsrs.runtime_stats_interval_id,\n    qsrs.execution_type_desc\n", ungated, StringComparison.Ordinal);
         }
     }
 
@@ -604,13 +726,14 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("avg_log_bytes_used = NULL, min_log_bytes_used = NULL, max_log_bytes_used = NULL,", old, StringComparison.Ordinal);
         Assert.Contains("avg_tempdb_space_used = NULL, min_tempdb_space_used = NULL, max_tempdb_space_used = NULL,", old, StringComparison.Ordinal);
 
-        /* The inner list must end cleanly on the last ungated column when all three are absent. */
-        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount)\n    FROM sys.query_store_runtime_stats AS qsrs", old, StringComparison.Ordinal);
+        /* The staging list must end cleanly on the last ungated column when all three are absent —
+           #2133: the aggregate lands in #pm_qs_slice, so INTO sits between the list and FROM. */
+        Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount)\nINTO #pm_qs_slice\nFROM sys.query_store_runtime_stats AS qsrs", old, StringComparison.Ordinal);
 
         /* On 2017+ they are present, aggregated, and the list ends with the last gated family instead. */
         var newer = PayloadSql(MakeContext(probeResult: 14));
         Assert.Contains("max_rowcount = MAX(qsrs.max_rowcount),\n", newer, StringComparison.Ordinal);
-        Assert.Contains("max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)\n    FROM sys.query_store_runtime_stats AS qsrs", newer, StringComparison.Ordinal);
+        Assert.Contains("max_tempdb_space_used = MAX(qsrs.max_tempdb_space_used)\nINTO #pm_qs_slice\nFROM sys.query_store_runtime_stats AS qsrs", newer, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -763,7 +886,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            original defect with an aggregate bolted on. HAVING MAX(...) asks whether the INTERVAL saw new
            activity and then takes all of it. */
         var normalized = plan.Text.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("HAVING\n        MAX(qsrs.last_execution_time) > @cutoff_time", normalized, StringComparison.Ordinal);
+        Assert.Contains("HAVING\n    MAX(qsrs.last_execution_time) > @cutoff_time", normalized, StringComparison.Ordinal);
         Assert.DoesNotContain("WHERE qsrs.last_execution_time > @cutoff_time", normalized, StringComparison.Ordinal);
         /* #1565: NO SQL-side self-exclusion — the old NOT LIKE was 75% of the read's elapsed time (full
            nvarchar(max) scan per row on a column no index can serve; field A/B: 4.3x without it), and no
@@ -771,7 +894,8 @@ public sealed class QueryStoreCollectorDefinitionTests
            where the text is already materialized (pinned below). The query still CONTAINS the marker —
            in its own leading comment. */
         Assert.DoesNotContain("NOT LIKE", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE);", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("LOOP JOIN", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'@cutoff_time datetime2(7)',", plan.Text, StringComparison.Ordinal);
 
         var parameter = Assert.Single(plan.Parameters);
@@ -781,28 +905,23 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildPerItemQuery_PlanCapture_OffEmitsNullPlaceholder_OnMirrorsDashboard()
+    public void BuildPerItemQuery_PlanCapture_AlwaysEmitsNullPlaceholder_RegardlessOfCapturePlanXml()
     {
-        /* Lite parity (default off): query_plan_text is the nvarchar(1) NULL placeholder,
-           byte-identical to the no-plan form. Darling (on): CONVERT(nvarchar(max), qsp.query_plan)
-           from sys.query_store_plan — install/09_collect_query_store.sql's @collect_plan path. */
+        /* #2210: the runtime-stats query no longer carries plan XML at all, in EITHER capture mode — the
+           ROW_NUMBER-gated CASE and its watermark predicate are DELETED, not reworked.
+           BuildPlanFetchQuery is the only thing that reads plan XML now (it fetches plans in plan_id
+           order under a byte budget and is Darling-only), so CapturePlanXml gates that separate fetch
+           rather than this query. Lite's off path and Darling's on path are therefore byte-identical
+           here — there is no longer a Darling-only branch of this query to pin. */
         var off = QueryStoreCollector.Instance.BuildPerItemQuery("SO", MakeContext());
-        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", off.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("qsp.query_plan,", off.Text, StringComparison.Ordinal);
-
-        /* #1556 plan-text dedupe (ON branch): the plan lands once per plan_id per cycle — on the newest
-           runtime-stats interval (rn = 1) — and NULL on the older intervals, instead of the full plan XML
-           repeating on every interval row. */
         var on = QueryStoreCollector.Instance.BuildPerItemQuery("SO", MakeContext(capturePlanXml: true));
-        Assert.Contains(
-            "query_plan_text = CASE WHEN ROW_NUMBER() OVER (PARTITION BY qsp.plan_id ORDER BY qsrs.last_execution_time DESC) = 1 THEN CONVERT(nvarchar(max), qsp.query_plan) ELSE CONVERT(nvarchar(max), NULL) END,",
-            on.Text,
-            StringComparison.Ordinal);
 
-        /* Scoped to query_plan_text rather than the bare placeholder: replica_role shares the same
-           nvarchar(1) NULL idiom on a pre-2022 target (this context's probe defaults to 13), so an
-           unqualified DoesNotContain would assert on an unrelated column. */
-        Assert.DoesNotContain("query_plan_text = CONVERT(nvarchar(1), NULL)", on.Text, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", off.Text, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(1), NULL),", on.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsp.query_plan,", off.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsp.query_plan,", on.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", on.Text, StringComparison.Ordinal);
+        Assert.True(string.Equals(off.Text, on.Text, StringComparison.Ordinal), "CapturePlanXml must no longer change this query's text");
     }
 
     [Fact]
@@ -823,8 +942,11 @@ public sealed class QueryStoreCollectorDefinitionTests
         {
             Assert.Contains($"TOP ({QueryStoreCollector.MaxRowsPerDatabase}) WITH TIES", plan.Text, StringComparison.Ordinal);
             Assert.Contains("ORDER BY qsrs.last_execution_time ASC", plan.Text, StringComparison.Ordinal);
-            /* The row-bounding ORDER BY sits before the existing query hint, which the OPTION pin still checks. */
-            Assert.Contains("OPTION(RECOMPILE, LOOP JOIN);", plan.Text, StringComparison.Ordinal);
+            /* The row-bounding ORDER BY sits before the existing query hint, which the OPTION pin still
+               checks. RECOMPILE only — the old LOOP JOIN hint is the #2133 pathology (per-probe TVF
+               re-materialization) and must never return. */
+            Assert.Contains("OPTION(RECOMPILE);", plan.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("LOOP JOIN", plan.Text, StringComparison.Ordinal);
         }
 
         Assert.Equal(50_000, QueryStoreCollector.MaxRowsPerDatabase);
@@ -1082,8 +1204,11 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         Assert.Contains("EXECUTE [StackOverflow].sys.sp_executesql", plan.Text, StringComparison.Ordinal);
         Assert.Contains("N'@floor_time datetime2(7), @ceiling_time datetime2(7)'", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time > @floor_time", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        /* #2133: the pre-filter's two-sided window asks the INTERVAL CATALOG which intervals OVERLAP
+           (floor, ceiling) — end after the floor AND start before the ceiling — a superset the exact
+           HAVING below then narrows, exactly like the live path's one-sided form. */
+        Assert.Contains("i.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("i.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) > @floor_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
@@ -1109,8 +1234,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         var plan = QueryStoreCollector.Instance.BuildBackfillQuery(MakeContext(isAzureSqlDb: true), floor, ceiling);
 
         Assert.DoesNotContain("sp_executesql", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time > @floor_time", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("f.last_execution_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("i.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("i.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("@cutoff_time", plan.Text, StringComparison.Ordinal);
         /* The same eligibility gate the live Azure query leads with. */
@@ -1132,7 +1257,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            one-sided cutoff and ASC order byte-for-byte, or phase 1's watermark-exact resume breaks
            in the same PR that builds on it. */
         var live = QueryStoreCollector.Instance.BuildPerItemQuery("StackOverflow", MakeContext());
-        Assert.Contains("f.last_execution_time > @cutoff_time", live.Text, StringComparison.Ordinal);
+        Assert.Contains("i.end_time > @cutoff_time", live.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) > @cutoff_time", live.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time ASC", live.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("@floor_time", live.Text, StringComparison.Ordinal);
@@ -1272,5 +1397,78 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Equal(9001L, writer.Values[54]);                     /* runtime_stats_interval_id (#1841 tier 2) */
         Assert.Equal(new DateTime(2026, 7, 2, 10, 0, 0), writer.Values[55]); /* interval_start_time_utc, no shift applied */
         Assert.Empty(s_deltas.Calls);                               /* incremental snapshot — no deltas */
+    }
+
+    /* ---------------- #2312: the open-interval skip cycles ---------------- */
+
+    /// <summary>
+    /// The closed-only form (#2312): most cycles exclude the OPEN interval — its cumulative snapshot is
+    /// the whole re-read bill on a big primary (40–110 s per run measured) and every snapshot but the
+    /// latest is discarded by the read side's <c>rn = 1</c>. Closed intervals are immutable, so shipping
+    /// only them is final on first collection; the standing HAVING readmits a newly closed interval
+    /// whose content moved past our last open-snapshot, because counters only move with executions.
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_ClosedIntervalsOnly_ExcludesTheOpenInterval()
+    {
+        var context = MakeContext(probeResult: 16);
+        context.IncludeOpenInterval = false;
+        var text = PayloadSql(context);
+
+        Assert.Contains(
+            "WHERE i.end_time > @cutoff_time\n    AND   i.end_time <= SYSUTCDATETIME()",
+            text, StringComparison.Ordinal);
+
+        /* Server-evaluated exclusion — the single-parameter sp_executesql contract is untouched. */
+        Assert.Single(QueryStoreCollector.Instance.BuildPerItemQuery("SO", context).Parameters);
+
+        /* The row-level filter is byte-identical: the skip narrows the interval-id PRUNE only, never
+           the shipped semantics of the rows that do qualify. */
+        Assert.Contains("HAVING\n    MAX(qsrs.last_execution_time) > @cutoff_time", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>Default = today's exact form: no exclusion anywhere, so every untouched caller is byte-identical.</summary>
+    [Fact]
+    public void BuildPerItemQuery_DefaultIncludesTheOpenInterval_TodaysExactForm()
+    {
+        var text = PayloadSql(MakeContext(probeResult: 16));
+
+        Assert.Contains("WHERE i.end_time > @cutoff_time\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYSUTCDATETIME", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The remainder pin, same discipline as the text-flag one: normalize the ONE legal difference out
+    /// of the closed-only form and everything else must be byte-identical to the open form — the pin
+    /// that catches a future edit landing in one arm only.
+    /// </summary>
+    [Fact]
+    public void BuildPerItemQuery_ClosedOnly_ChangesNothingButTheIntervalPrune()
+    {
+        var closedContext = MakeContext(probeResult: 16);
+        closedContext.IncludeOpenInterval = false;
+
+        var open = PayloadSql(MakeContext(probeResult: 16));
+        var closed = PayloadSql(closedContext);
+
+        var normalized = closed.Replace(
+            "\n    AND   i.end_time <= SYSUTCDATETIME()", "", StringComparison.Ordinal);
+        Assert.NotEqual(open, closed);
+        Assert.Equal(open, normalized);
+    }
+
+    /// <summary>The backfill window pre-dates the open interval by construction; the flag must not touch it.</summary>
+    [Fact]
+    public void BuildBackfillPerItemQuery_IgnoresTheOpenIntervalFlag()
+    {
+        var floor = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var ceiling = new DateTime(2026, 6, 2, 0, 0, 0, DateTimeKind.Utc);
+
+        var flagged = MakeContext(probeResult: 16);
+        flagged.IncludeOpenInterval = false;
+
+        Assert.Equal(
+            Lf(QueryStoreCollector.Instance.BuildBackfillPerItemQuery("SO", MakeContext(probeResult: 16), floor, ceiling).Text),
+            Lf(QueryStoreCollector.Instance.BuildBackfillPerItemQuery("SO", flagged, floor, ceiling).Text));
     }
 }

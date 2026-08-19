@@ -103,13 +103,13 @@ OPTION(RECOMPILE);";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta groups, key (spinlock_name), and the 300 s gap policy are the parity contract.
+        /* Delta groups, key (spinlock_name), and the shared gap policy are the parity contract.
            spins_per_collision is a computed ratio, not a cumulative counter — no delta (mirrors
            the Dashboard's collect.spinlock_stats table). */
-        var deltaCollisions = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_collisions", row.SpinlockName, row.Collisions, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaSpins = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_spins", row.SpinlockName, row.Spins, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaSleepTime = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_sleep_time", row.SpinlockName, row.SleepTime, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaBackoffs = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_backoffs", row.SpinlockName, row.Backoffs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaCollisions = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_collisions", row.SpinlockName, row.Collisions, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpins = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_spins", row.SpinlockName, row.Spins, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSleepTime = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_sleep_time", row.SpinlockName, row.SleepTime, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaBackoffs = context.Deltas.CalculateDelta(context.ServerId, "spinlock_stats_backoffs", row.SpinlockName, row.Backoffs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.SpinlockName)       /* spinlock_name VARCHAR */

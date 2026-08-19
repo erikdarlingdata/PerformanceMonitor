@@ -11,8 +11,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="DuckDB.NET.Data" Version="1.5.3" />
-    <PackageReference Include="DuckDB.NET.Bindings.Full" Version="1.5.3" />
+    <PackageReference Include="DuckDB.NET.Data" VersionOverride="1.5.3" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" VersionOverride="1.5.3" />
   </ItemGroup>
 
   <!-- Link the real production compaction code so the reproducer exercises the

@@ -38,14 +38,14 @@ public sealed partial class ViewerDataService
     /// <summary>The service-wide flags (id=1): paused + the three viewer-owned toggles. Column order matches
     /// the service's <c>ReadServiceRowAsync</c> prefix.</summary>
     public const string ServiceConfigSelectSql =
-        "SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port FROM config_service WHERE id = 1";
+        "SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps FROM config_service WHERE id = 1";
 
     /// <summary>Updates ONLY the viewer-owned service flags on the seeded row (never <c>paused</c> — a
     /// command). The self-bump trigger fires <c>config_version</c>. $1 capture_plans, $2 mcp_enabled, $3 mcp_port,
-    /// $4 web_enabled, $5 web_port.</summary>
+    /// $4 web_enabled, $5 web_port, $6 query_store_backfill_enabled (#2167).</summary>
     public const string ServiceConfigUpdateFlagsSql = @"
 UPDATE config_service
-SET capture_plans = $1, mcp_enabled = $2, mcp_port = $3, web_enabled = $4, web_port = $5
+SET capture_plans = $1, mcp_enabled = $2, mcp_port = $3, web_enabled = $4, web_port = $5, query_store_backfill_enabled = $6, query_store_text_budget_mb = $7, max_concurrent_sweeps = $8
 WHERE id = 1";
 
     /// <summary>Reads the service-wide flags, or null when the store has not seeded <c>config_service</c> yet
@@ -68,6 +68,9 @@ WHERE id = 1";
             McpPort = reader.GetInt32(3),
             WebEnabled = reader.GetBoolean(4),
             WebPort = reader.GetInt32(5),
+            QueryStoreBackfillEnabled = reader.GetBoolean(6),
+            QueryStoreTextBudgetMb = reader.GetInt32(7),
+            MaxConcurrentSweeps = reader.GetInt32(8),
         };
     }
 
@@ -92,7 +95,7 @@ WHERE id = 1";
     /// <summary>Updates the viewer-owned service flags (Settings window Save — MCP + web dashboard + global plan
     /// capture). A no-op on an unseeded store (zero rows). Read-only seats throw <see cref="ViewerReadOnlyException"/>.</summary>
     public async Task UpdateServiceFlagsAsync(
-        bool capturePlans, bool mcpEnabled, int mcpPort, bool webEnabled, int webPort, CancellationToken cancellationToken = default)
+        bool capturePlans, bool mcpEnabled, int mcpPort, bool webEnabled, int webPort, bool queryStoreBackfillEnabled, int queryStoreTextBudgetMb, int maxConcurrentSweeps, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServiceConfigUpdateFlagsSql);
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = capturePlans });
@@ -100,6 +103,9 @@ WHERE id = 1";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = mcpPort });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = webEnabled });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = webPort });
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = queryStoreBackfillEnabled });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = queryStoreTextBudgetMb });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = maxConcurrentSweeps });
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -134,4 +140,13 @@ public sealed class ServiceConfigRow
     public int McpPort { get; set; } = 5152;
     public bool WebEnabled { get; set; }
     public int WebPort { get; set; } = 5153;
+
+    /// <summary>The #2167 Query Store backfill off switch — service reads it live; default on.</summary>
+    public bool QueryStoreBackfillEnabled { get; set; } = true;
+
+    /// <summary>The #2164 per-database query_store text budget in MB — service reads it live; default 64.</summary>
+    public int QueryStoreTextBudgetMb { get; set; } = 64;
+
+    /// <summary>The #2170 fleet sweep width — service reads it live; default 4.</summary>
+    public int MaxConcurrentSweeps { get; set; } = 4;
 }

@@ -60,7 +60,15 @@ public sealed class SharedCollectorDefaultsPinTests
     {
         var liteDefaults = ScheduleManager.GetDefaultSchedules();
 
-        Assert.Equal(liteDefaults.Count, CollectorScheduleDefaults.All.Count);
+        /* The SQL Server subset of the shared defaults, not all of it. The catalog is engine-mixed and Lite
+           has no PostgreSQL target, so its schedule table correctly does not list the PostgreSQL collectors —
+           a phantom row for a collector this SKU can never dispatch would show up in Lite's own schedule UI. */
+        var sqlServerDefaults = CollectorCatalog.All
+            .Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer)
+            .Select(d => d.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        Assert.Equal(liteDefaults.Count, sqlServerDefaults.Count);
         foreach (var schedule in liteDefaults)
         {
             Assert.True(CollectorScheduleDefaults.All.TryGetValue(schedule.Name, out var shared),

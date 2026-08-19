@@ -666,22 +666,81 @@ LIMIT 5";
 
     /// <summary>
     /// Seeds a first-observation baseline for any database in the latest snapshot that has none
-    /// (insert-if-absent; never overwrites an existing baseline or user override). A CRITICAL first
-    /// observation (SUSPECT / RECOVERY_PENDING / EMERGENCY) is deliberately NOT baselined: onboarding a
-    /// server mid-outage must not learn the bad state as expected — such a database stays pending (no
-    /// row) and the deviation read alerts on it until it recovers or an operator sets an expected state.
+    /// (insert-if-absent; never overwrites an existing baseline or user override). A first observation in
+    /// an integrity or transient state is deliberately NOT baselined
+    /// (<see cref="DatabaseStateTokens.NeverBaselinedSqlList"/>): onboarding a server mid-outage or
+    /// mid-restore must not learn that state as expected — such a database stays pending (no row) until it
+    /// settles into a steady state, and the deviation read alerts meanwhile only if the state is critical.
     /// config schema qualified explicitly; database_states resolves to collect through the search_path.
     /// $1 server_id.
     /// </summary>
-    public const string SeedDatabaseStateExpectedSql = @"
+    public const string SeedDatabaseStateExpectedSql = $@"
 INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
 SELECT $1, ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END, false, (now() AT TIME ZONE 'UTC')
 FROM database_states ds
 WHERE ds.server_id = $1
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
 AND   ds.state_desc IS NOT NULL
-AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})
 ON CONFLICT (server_id, database_name) DO NOTHING";
+
+    /// <summary>
+    /// #2189: re-learns an ILLEGITIMATE inferred baseline as ONLINE once the database reaches ONLINE. The
+    /// rule is the seed's own, applied after the fact — an expectation recording a state the seed would
+    /// refuse to learn (<see cref="DatabaseStateTokens.NeverBaselinedSqlList"/>) is not a baseline at all,
+    /// it is a snapshot of a database mid-something, and the moment that database is demonstrably healthy
+    /// the honest move is to learn the steady state rather than page about the improvement forever.
+    ///
+    /// <para>This is what heals the rows the old seed already poisoned, which the widened exclusion above
+    /// cannot: a database baselined RESTORING mid-restore deviated by being healthy forever, and the only
+    /// escape was an operator noticing and re-baselining by hand. It also covers the route that is still
+    /// open and always will be — "reset to current" pressed during a restore, or during an outage, records
+    /// whatever it sees with no state filter at all, and this un-writes it on the next sweep.</para>
+    ///
+    /// <para>Two gates, and both matter more than they look.</para>
+    ///
+    /// <para><c>is_user_override = false</c>: an operator who declared an expected state MEANT it, and
+    /// #2166's composition contract depends on that — a database parked at expected OFFLINE stays silent
+    /// while parked and still alerts the moment it comes back ONLINE. Only the machine's own inference is
+    /// second-guessed, never the operator's.</para>
+    ///
+    /// <para>The state list, which is deliberately NOT "anything that is not ONLINE". OFFLINE and STANDBY
+    /// are steady states the seed is happy to learn, and leaving one is real news that must still fire.
+    /// A STANDBY secondary that turns up ONLINE has stopped being a secondary — somebody recovered it, log
+    /// shipping is broken, and healing it would replace that alert with silence and then fire the moment
+    /// the operator FIXED it. An auto-baselined OFFLINE database brought up for an hour and re-parked would
+    /// come back deviating forever against a baseline it never had. Both are the reported bug's own shape,
+    /// which is why the heal only ever touches states that were never a legitimate baseline.</para>
+    ///
+    /// <para>Reads the EFFECTIVE state, not <c>state_desc</c> — the same CASE as the seed and the deviation
+    /// read. That is load-bearing rather than cosmetic: a standby log-shipping secondary reports
+    /// <c>state_desc = 'ONLINE'</c> with <c>is_in_standby</c> set, so matching on the raw column would
+    /// re-baseline every such secondary to ONLINE and then alert it forever for being STANDBY — the very
+    /// bug being fixed, re-created for the one database family #1986 went out of its way to keep quiet.</para>
+    ///
+    /// <para>The alerted-state memory is dropped with the baseline it described (#2166). A memory saying
+    /// "the operator was told about ONLINE" only meant anything against the stale expectation; carried
+    /// past it, it would judge the next episode against an announcement about a baseline that no longer
+    /// exists. Clearing is the safe direction — it can cost an extra alert, never a missed one. $1
+    /// server_id.</para>
+    /// </summary>
+    public const string HealDatabaseStateBaselineToOnlineSql = $@"
+UPDATE config.database_state_expected e
+SET expected_state = 'ONLINE',
+    updated_at = (now() AT TIME ZONE 'UTC'),
+    last_alerted_state = NULL,
+    last_alerted_at = NULL
+WHERE e.server_id = $1
+AND   e.is_user_override = false
+AND   e.expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})
+AND   EXISTS (
+    SELECT 1
+    FROM database_states ds
+    WHERE ds.server_id = $1
+    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   ds.database_name = e.database_name
+    AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) = 'ONLINE'
+)";
 
     /// <summary>
     /// Tidies auto-baselines for databases no longer in the newest snapshot (dropped/renamed); user
@@ -699,6 +758,42 @@ AND   NOT EXISTS (
 )";
 
     /// <summary>
+    /// #2166: clears the alerted-state memory for any database the store now shows back AT its expected
+    /// state. Runs beside the seed and the prune, on the same connection, for the same reason they do — it
+    /// is store maintenance derived from what the store holds, not from anything a process observed.
+    ///
+    /// <para>That distinction is the whole point. The engine also clears on the falling edge it witnesses,
+    /// but that path is reachable only through its in-memory active set, which empties on every restart. A
+    /// service restart landing between an alert and the recovery therefore left the persisted
+    /// <c>last_alerted_state</c> sticky forever: the database was never in <c>active</c> to be noticed as
+    /// recovered, so the next parking read as already-announced and was swallowed. This statement cannot
+    /// have that gap, because it asks the store rather than remembering. The engine's clear stays as the
+    /// immediate path — a recovery inside one process should not wait for the next cycle's sweep — and this
+    /// is what actually owns the invariant.</para>
+    ///
+    /// <para>One sample at expected is enough, deliberately, where the DEVIATION rule needs two: clearing is
+    /// the safe direction (it can only cause an extra alert, never a missed one), and a flap cannot exploit
+    /// it because a flap does not survive the two-sample deviation test to alert in the first place. The
+    /// "(ignore)" sentinel clears too — an operator silencing a database should not leave a memory behind
+    /// that outlives the silence. $1 server_id.</para>
+    /// </summary>
+    public const string ClearRecoveredDatabaseStateAlertsSql = @"
+UPDATE config.database_state_expected e
+SET last_alerted_state = NULL,
+    last_alerted_at = NULL
+WHERE e.server_id = $1
+AND   e.last_alerted_state IS NOT NULL
+AND   (e.expected_state = '(ignore)'
+       OR EXISTS (
+           SELECT 1
+           FROM database_states ds
+           WHERE ds.server_id = $1
+           AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+           AND   ds.database_name = e.database_name
+           AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) = e.expected_state
+       ))";
+
+    /// <summary>
     /// The databases whose state deviates from their expected state in BOTH of the two most recent
     /// collections (a two-sample rule that absorbs restart transients — RECOVERY_PENDING / RECOVERING — and
     /// a standby secondary's per-restore RESTORING flicker), plus databases with no baseline yet whose
@@ -707,7 +802,7 @@ AND   NOT EXISTS (
     /// sentinel; each row carries current + expected (expected is empty for a pending row). Lite's DuckDB
     /// read ported to Postgres. $1 server_id.
     /// </summary>
-    public const string DatabaseStateDeviationsSql = @"
+    public const string DatabaseStateDeviationsSql = $@"
 WITH newest AS (
     SELECT MAX(collection_time) AS t FROM database_states WHERE server_id = $1
 ),
@@ -725,7 +820,7 @@ previous AS (
     FROM database_states ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
 )
-SELECT l.database_name, l.eff, COALESCE(e.expected_state, '')
+SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, '')
 FROM latest l
 JOIN previous p
   ON p.database_name = l.database_name
@@ -733,8 +828,8 @@ LEFT JOIN config.database_state_expected e
   ON  e.server_id = $1
   AND e.database_name = l.database_name
 WHERE (e.expected_state IS NULL
-        AND l.eff IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
-        AND p.eff IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY'))
+        AND l.eff IN ({DatabaseStateTokens.CriticalSqlList})
+        AND p.eff IN ({DatabaseStateTokens.CriticalSqlList}))
    OR (e.expected_state IS NOT NULL AND e.expected_state <> '(ignore)'
         AND l.eff IS DISTINCT FROM e.expected_state
         AND p.eff IS DISTINCT FROM e.expected_state)
@@ -754,10 +849,30 @@ ORDER BY l.database_name";
             await seed.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* Beside the seed because it is the same job from the other end (#2189): the seed learns a baseline
+           for a database that has none, this un-learns one the database has since outgrown. Both run before
+           the read, so a poisoned expectation is corrected on the cycle that notices it rather than firing
+           once more first. */
+        using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection))
+        {
+            heal.Parameters.AddWithValue(serverId);
+            await heal.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection))
         {
             prune.Parameters.AddWithValue(serverId);
             await prune.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* Before the read, so this cycle judges against a memory the store has already healed rather than
+           one carried over from a restart (#2166). A database cleared here is one that is back at its
+           expected state, so it cannot appear in the deviation read below either way — the ordering matters
+           for the NEXT deviation, not this one. */
+        using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection))
+        {
+            clearRecovered.Parameters.AddWithValue(serverId);
+            await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
         }
 
         using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection))
@@ -770,9 +885,92 @@ ORDER BY l.database_name";
                 {
                     DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                     StateDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                    ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3)
                 });
             }
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Forced plans whose failure counter ROSE between the two most recent collections that carried the
+    /// plan (#2157). $1 server_id.
+    ///
+    /// <para>Shape notes: query_store_stats holds one row per plan PER INTERVAL per collection, and the
+    /// forcing columns are plan-level attributes repeated across those rows — so the CTE collapses each
+    /// (plan, collection_time) to one value with MAX before any comparison. The two-hour window bounds
+    /// the hypertable scan; a plan not collected within it is by definition not failing right now, and
+    /// Query Store's own flush cadence (900s) means an active plan appears several times inside it.</para>
+    ///
+    /// <para>The <c>&gt;</c> comparison is what makes this a delta read: equal counters are silence, and a
+    /// LOWER counter (unforce/re-force reset) is silence too rather than a negative delta.</para>
+    /// </summary>
+    public const string ForcePlanFailuresSql = @"
+WITH per_collection AS (
+    SELECT
+        qs.database_name,
+        qs.query_id,
+        qs.plan_id,
+        qs.collection_time,
+        MAX(COALESCE(qs.force_failure_count, 0)) AS failures,
+        MAX(CASE WHEN qs.is_forced_plan THEN 1 ELSE 0 END) AS forced,
+        MAX(COALESCE(qs.plan_forcing_type, '')) AS forcing_type,
+        MAX(COALESCE(qs.last_force_failure_reason, '')) AS reason
+    FROM query_store_stats AS qs
+    WHERE qs.server_id = $1
+    AND   qs.collection_time > now() - interval '2 hours'
+    GROUP BY qs.database_name, qs.query_id, qs.plan_id, qs.collection_time
+),
+ranked AS (
+    SELECT
+        pc.*,
+        ROW_NUMBER() OVER (PARTITION BY pc.database_name, pc.query_id, pc.plan_id ORDER BY pc.collection_time DESC) AS rn
+    FROM per_collection AS pc
+)
+SELECT
+    n.database_name,
+    n.query_id,
+    n.plan_id,
+    n.forcing_type,
+    n.reason,
+    n.failures - p.failures AS failure_delta,
+    n.failures AS total_failures
+FROM ranked AS n
+JOIN ranked AS p
+  ON  p.database_name = n.database_name
+  AND p.query_id = n.query_id
+  AND p.plan_id = n.plan_id
+  AND p.rn = 2
+WHERE n.rn = 1
+AND   n.forced = 1
+AND   n.failures > p.failures
+ORDER BY n.database_name, n.query_id, n.plan_id";
+
+    public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        var items = new List<ForcePlanFailureInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection);
+        command.Parameters.AddWithValue(serverId);
+
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new ForcePlanFailureInfo
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                PlanId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                ForcingType = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                FailureReason = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                FailureDelta = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                TotalFailures = reader.IsDBNull(6) ? 0 : reader.GetInt64(6)
+            });
         }
 
         return items;

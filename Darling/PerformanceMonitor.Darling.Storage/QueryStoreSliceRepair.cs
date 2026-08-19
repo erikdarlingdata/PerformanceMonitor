@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -250,11 +249,31 @@ public static class QueryStoreSliceRepair
     }
 
     /// <summary>
+    /// Per-statement timeout for the repair's heavy statements (#2105 field failure): Npgsql's
+    /// default 30s killed the STAGE aggregation on a store fresh off a large catch-up — a day
+    /// slice's GROUP BY spools every row of the day including the query-text payloads, and the
+    /// verb runs beside the live service (a managed store cannot stop it — stopping the service
+    /// stops Postgres), so collector writes and compression jobs contend for the same chunks.
+    /// The failure read as "Exception while reading from stream" after 0 rows, which is how an
+    /// Npgsql command timeout surfaces — nothing in the message says timeout. Fifteen minutes is
+    /// deliberately generous-but-bounded: the slice transaction holds chunk locks, so infinite
+    /// (the VACUUM precedent) is wrong here.
+    /// </summary>
+    public const int SliceStatementTimeoutSeconds = 900;
+
+    /// <summary>
     /// Runs the collapse over one half-open collection-time slice and returns how many rows it removed.
     ///
     /// <para>One transaction per slice: the DELETE and the INSERT must not be separable, or an abort between
     /// them destroys the interval outright rather than leaving it split. Slicing keeps that transaction — and
     /// the locks it takes on chunks a compression job may also want — short.</para>
+    ///
+    /// <para>The removed count is DERIVED from the statements' own affected-row counts — the DELETE removes
+    /// every row of every split group and the INSERT restores one combined row per group, so
+    /// <c>deleted − reinserted</c> IS the net removal. The previous shape bracketed the work with two
+    /// window-wide <c>COUNT(*)</c> scans to compute the same number, which on the stores this verb exists
+    /// for (measured: ~12 s per day-wide scan, hash-aggregate spill + a backward index scan over the
+    /// uncompressed hot chunk) paid the slice's dominant cost twice more per slice for pure bookkeeping.</para>
     /// </summary>
     public static async Task<long> CollapseSliceAsync(
         NpgsqlConnection connection, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
@@ -263,43 +282,42 @@ public static class QueryStoreSliceRepair
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        long before;
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction))
+        /* #2105 field failure round two: the repair's DELETE touches COMPRESSED chunks (a store old
+           enough to need this repair has had its compression policy running the whole time), and
+           TimescaleDB caps decompression at 100k tuples per DML transaction by default — the field
+           run died at `53400: tuple decompression limit exceeded` four minutes in. Lift it for this
+           transaction only (SET LOCAL dies with the transaction), the same rail-lift the retention
+           purge's fallback DELETE already does — deliberate bulk decompression is this verb's job.
+           On a store without the extension the qualified name is a placeholder GUC, safe everywhere. */
+        await using (var lift = new NpgsqlCommand(
+            "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection, transaction))
         {
-            count.Parameters.AddWithValue(fromUtc);
-            count.Parameters.AddWithValue(toUtc);
-            before = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
+            await lift.ExecuteNonQueryAsync(cancellationToken);
         }
 
         var statements = BuildCollapseStatements();
 
-        await using (var stage = new NpgsqlCommand(statements.Stage, connection, transaction))
+        await using (var stage = new NpgsqlCommand(statements.Stage, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
             stage.Parameters.AddWithValue(fromUtc);
             stage.Parameters.AddWithValue(toUtc);
             await stage.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var delete = new NpgsqlCommand(statements.Delete, connection, transaction))
+        long deleted;
+        await using (var delete = new NpgsqlCommand(statements.Delete, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
-            await delete.ExecuteNonQueryAsync(cancellationToken);
+            deleted = await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var insert = new NpgsqlCommand(statements.Insert, connection, transaction))
+        long reinserted;
+        await using (var insert = new NpgsqlCommand(statements.Insert, connection, transaction) { CommandTimeout = SliceStatementTimeoutSeconds })
         {
-            await insert.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        long after;
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM collect.{Table} WHERE collection_time >= $1 AND collection_time < $2", connection, transaction))
-        {
-            count.Parameters.AddWithValue(fromUtc);
-            count.Parameters.AddWithValue(toUtc);
-            after = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
+            reinserted = await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return before - after;
+        return deleted - reinserted;
     }
 
     /// <summary>The survey result: what a dry run reports and what a real run plans from.</summary>
@@ -315,7 +333,9 @@ public static class QueryStoreSliceRepair
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        await using var command = new NpgsqlCommand(SurveySql, connection);
+        /* Same #2105 timeout treatment: the survey aggregates the whole table's key columns, and a
+           dry run must not die on the store size the repair exists to handle. */
+        await using var command = new NpgsqlCommand(SurveySql, connection) { CommandTimeout = SliceStatementTimeoutSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         if (!await reader.ReadAsync(cancellationToken))

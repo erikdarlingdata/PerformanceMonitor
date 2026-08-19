@@ -43,6 +43,15 @@ internal static class DarlingConfigHistoryReader
     public sealed record DatabaseScopedConfigReadRow(
         string DatabaseName, string ConfigurationName, string? Value, string? ValueForSecondary);
 
+    /* ─────────────────────────── query store health snapshot row (not part of the change diff) ─────────────────────────── */
+
+    /* String fields coalesce DBNull to "" — the same defaults as both viewers' QueryStoreHealthRow —
+       so the two SKUs' MCP tools serialize identical JSON even in the never-observed null case. */
+    public sealed record QueryStoreHealthReadRow(
+        string DatabaseName, string ActualState, string DesiredState, int ReadonlyReason,
+        long CurrentStorageMb, long MaxStorageMb, string SizeBasedCleanupMode,
+        long StaleQueryThresholdDays, long MaxPlansPerQuery, long IntervalLengthMinutes);
+
     /* ─────────────────────────── server config snapshots ─────────────────────────── */
 
     /// <summary>Every sys.configurations snapshot for a server, oldest-first — the change tool diffs
@@ -211,6 +220,45 @@ internal static class DarlingConfigHistoryReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+
+        return rows;
+    }
+
+    /* ─────────────────────────── query store health (latest snapshot) ─────────────────────────── */
+
+    /// <summary>The latest sys.database_query_store_options snapshot per database — the viewer's
+    /// <c>QueryStoreHealthSql</c> minus its grid database filter (the tool filters in memory, like the
+    /// scoped-config read above). Unlike the config-family reads this table is HOURLY, not on-connect,
+    /// so "latest" here is at most an hour old on a healthy schedule. $1 server_id.</summary>
+    public const string QueryStoreHealthSql = """
+        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes
+        FROM v_query_store_health
+        WHERE server_id = $1
+        AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
+        ORDER BY database_name
+        """;
+
+    public static async Task<List<QueryStoreHealthReadRow>> GetLatestQueryStoreHealthAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<QueryStoreHealthReadRow>();
+        await using var command = postgres.CreateCommand(QueryStoreHealthSql);
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new QueryStoreHealthReadRow(
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                reader.IsDBNull(4) ? 0L : reader.GetInt64(4),
+                reader.IsDBNull(5) ? 0L : reader.GetInt64(5),
+                reader.IsDBNull(6) ? "" : reader.GetString(6),
+                reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
+                reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
+                reader.IsDBNull(9) ? 0L : reader.GetInt64(9)));
         }
 
         return rows;

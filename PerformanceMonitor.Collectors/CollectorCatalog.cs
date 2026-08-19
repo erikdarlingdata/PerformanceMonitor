@@ -39,6 +39,7 @@ public static class CollectorCatalog
         DatabaseStateCollector.Instance,
         TraceFlagsCollector.Instance,
         DatabaseScopedConfigCollector.Instance,
+        QueryStoreHealthCollector.Instance,
         SessionStatsCollector.Instance,
         SessionSummaryStatsCollector.Instance,
         WaitingTasksCollector.Instance,
@@ -62,6 +63,18 @@ public static class CollectorCatalog
         AgDatabaseReplicaStatesCollector.Instance,
         PlanCorrectionCollector.Instance,
         PvsStatsCollector.Instance,
+        /* PostgreSQL definitions. They live in the same catalog as the T-SQL ones on purpose: the
+           schema generator walks this list to create tables, and one store can hold data from both
+           engines, so splitting the catalog per engine would fragment DDL generation. Dispatch is
+           kept honest by the engine gate in AppliesTo(definition, target). */
+        PgWaitStatsCollector.Instance,
+        PgStatementStatsCollector.Instance,
+        PgWraparoundStatsCollector.Instance,
+        PgXminHorizonCollector.Instance,
+        PgReplicationSlotsCollector.Instance,
+        PgAutovacuumStatsCollector.Instance,
+        PgIoStatsCollector.Instance,
+        PgBlockingCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
@@ -78,7 +91,35 @@ public static class CollectorCatalog
     /// gated) so a typo surfaces as the dispatch switch's "Unknown collector" rather than a silent skip.
     /// </summary>
     public static bool AppliesTo(string collectorName, CollectorTargetInfo target) =>
-        s_byName.TryGetValue(collectorName, out var definition) ? definition.AppliesTo(target) : true;
+        s_byName.TryGetValue(collectorName, out var definition) ? AppliesTo(definition, target) : true;
+
+    /// <summary>
+    /// The full dispatch gate: a definition runs only when its
+    /// <see cref="ICollectorSchemaInfo.TargetEngine"/> matches the target's
+    /// <see cref="CollectorTargetInfo.Engine"/> AND its own
+    /// <see cref="ICollectorDefinition{TRow}.AppliesTo"/> gate passes. Both runners call this rather
+    /// than <c>AppliesTo</c> directly, so a definition written in one engine's dialect can never be
+    /// sent to the other — the individual definitions stay free to reason only about the hosting
+    /// flavour and version floors within their own engine.
+    /// <para>Both defaults are <see cref="CollectorTargetEngine.SqlServer"/>, so this is behaviour-
+    /// identical to the previous direct <c>AppliesTo</c> call for every definition and target that
+    /// exists today.</para>
+    /// </summary>
+    public static bool AppliesTo(ICollectorSchemaInfo definition, CollectorTargetInfo target) =>
+        definition.TargetEngine == target.Engine && definition.AppliesTo(target);
+
+    /// <summary>
+    /// The engine half of the gate alone, by name — for callers that want to drop a foreign-dialect
+    /// collector BEFORE dispatch rather than let it run and report zero rows. Darling's sweep uses
+    /// this so a wrong-engine collector produces no <c>collection_log</c> row at all: a gated run
+    /// would otherwise be recorded as SUCCESS, and with two engines in one catalog that would mean a
+    /// fake success per foreign collector per cycle on every server.
+    /// <para>An unknown name returns <c>true</c> (not filtered), matching
+    /// <see cref="AppliesTo(string, CollectorTargetInfo)"/>, so a typo still surfaces as the dispatch
+    /// switch's "unknown collector" rather than a silent disappearance.</para>
+    /// </summary>
+    public static bool EngineMatches(string collectorName, CollectorTargetInfo target) =>
+        !s_byName.TryGetValue(collectorName, out var definition) || definition.TargetEngine == target.Engine;
 
     /// <summary>
     /// True when <paramref name="collectorName"/>'s query carries the deliberate short

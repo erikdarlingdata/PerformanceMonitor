@@ -71,6 +71,7 @@ public sealed class AlertStoredValueTests
         public bool FailedJobEnabled { get; set; }
         public bool PvsEnabled { get; set; }
         public bool DatabaseStateEnabled { get; set; }
+        public bool ForcePlanFailureEnabled { get; set; } = true;
         public int CpuThresholdPercent { get; set; } = 80;
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }
@@ -86,6 +87,12 @@ public sealed class AlertStoredValueTests
         public int TempDbSpaceThresholdPercent { get; set; } = 80;
         public int LowDiskThresholdPercent { get; set; } = 10;
         public int LowDiskThresholdGb { get; set; } = 5;
+        /* #2107: the previously-hardcoded knobs, at their shipped defaults. */
+        public int DiskCriticalFreePercent { get; set; } = 3;
+        public int DiskCriticalFreeGb { get; set; } = 2;
+        public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int CollectionStaleMinutes { get; set; } = 30;
+        public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;
         public int LongRunningJobMultiplier { get; set; } = 3;

@@ -35,7 +35,7 @@ public sealed class DarlingMcpStoreMetricsTools
     public const int MaxDaysBack = StoreSelfMetrics.RetentionDays;
 
     [McpServerTool(Name = "get_store_metrics"), Description(
-        "Gets the monitoring store's OWN size and growth metrics — not a monitored SQL Server's. The service records an hourly self-metrics snapshot: per-hypertable total size, pre/post-compression bytes and chunk count; the query-text and query-plan payload dimension tables' total size (the store's dominant payloads) and row counts; and the whole store's size with the enabled-server count. Returns the latest snapshot per object plus a daily series over the window, with the whole-store daily growth in bytes and the derived per-server ingest rate (daily growth / enabled servers). Use for capacity forecasting: what is driving store growth, how fast, and what adding N servers would multiply.")]
+        "Gets the monitoring store's OWN size and growth metrics — not a monitored SQL Server's. The service records an hourly self-metrics snapshot: per-hypertable total size, pre/post-compression bytes and chunk count; the query-text and query-plan payload dimension tables' total size (the store's dominant payloads) and row counts; the whole store's size with the enabled-server count; and one row per TimescaleDB background job (CAGG refresh, compression, retention) with its last run duration, schedule interval, duration-vs-cadence percent, and run/failure totals — the jobs whose runtimes scale with fleet size. Returns the latest snapshot per object plus a daily series over the window, with the whole-store daily growth in bytes and the derived per-server ingest rate (daily growth / enabled servers). Use for capacity forecasting: what is driving store growth, how fast, what adding N servers would multiply, and which background job is closest to outgrowing its own cadence.")]
     public static async Task<string> GetStoreMetrics(
         NpgsqlDataSource postgres,
         [Description("Days of daily-series history. Default 30; max 400 (the series' own retention).")] int days_back = 30)
@@ -101,6 +101,16 @@ public sealed class DarlingMcpStoreMetricsTools
                             : (double?)null,
                         chunk_count = r.ChunkCount,
                         row_count = r.RowCount,
+                        /* #2136 background_job rows only (NULL elsewhere): last run duration, the job's own
+                           cadence, and how much of that cadence the run consumed — the ceiling-proximity
+                           number an onboarding wave moves first. */
+                        last_run_duration_ms = r.LastRunDurationMs,
+                        schedule_interval_ms = r.ScheduleIntervalMs,
+                        duration_vs_cadence_percent = r.LastRunDurationMs is > 0 && r.ScheduleIntervalMs is > 0
+                            ? Math.Round(100.0 * r.LastRunDurationMs.Value / r.ScheduleIntervalMs.Value, 1)
+                            : (double?)null,
+                        total_runs = r.TotalRuns,
+                        total_failures = r.TotalFailures,
                     }),
                 daily = daily
                     .Where(p => p.ObjectKind != "store")
@@ -119,6 +129,10 @@ public sealed class DarlingMcpStoreMetricsTools
                             compressed_after_bytes = p.CompressedAfterBytes,
                             chunk_count = p.ChunkCount,
                             row_count = p.RowCount,
+                            last_run_duration_ms = p.LastRunDurationMs,
+                            schedule_interval_ms = p.ScheduleIntervalMs,
+                            total_runs = p.TotalRuns,
+                            total_failures = p.TotalFailures,
                         }),
                     }),
             }, McpHelpers.JsonOptions);

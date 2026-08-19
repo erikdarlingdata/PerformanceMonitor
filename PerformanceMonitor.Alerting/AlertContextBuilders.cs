@@ -44,30 +44,24 @@ public static class AlertContextBuilders
     /// (#1140/#1141) with true occurrence count + wait range; capped at 10 groups with a "+N more"
     /// trailer; the first row with report XML becomes the attachment. Null when nothing renders.
     /// </summary>
+    /// <param name="decorateIncidents">
+    /// #2216: optional hook applied to the grouped incidents BEFORE they are rendered, so a caller that
+    /// keeps per-fingerprint history (the engine, via <see cref="IncidentOccurrenceAccumulator"/>) can
+    /// attach each incident's monotonic total. It has to run here rather than on the finished context
+    /// because the renderer projects the incidents into detail items in the same pass — decorating
+    /// afterwards would leave the rendered facts describing the undecorated values. Null for callers with
+    /// no such history, which is every path that built this context before #2216.
+    /// </param>
     public static AlertContext? BuildBlockingContext(
-        string serverName, IReadOnlyList<BlockedProcessAlertRow>? events, IReadOnlyList<string> excludedDatabases)
+        string serverName, IReadOnlyList<BlockedProcessAlertRow>? events, IReadOnlyList<string> excludedDatabases,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (events == null || events.Count == 0) return null;
 
-        IReadOnlyList<BlockedProcessAlertRow> filtered = events;
-        if (excludedDatabases is { Count: > 0 })
-        {
-            filtered = events
-                .Where(e => string.IsNullOrEmpty(e.DatabaseName) ||
-                    !excludedDatabases.Any(ex =>
-                        string.Equals(ex, e.DatabaseName, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-            if (filtered.Count == 0) return null;
-        }
+        var filtered = FilterBlocking(events, excludedDatabases);
+        if (filtered.Count == 0) return null;
 
-        /* #1140/#1141: collapse samples of the same chain into one group (true occurrence count
-           + wait range) instead of listing it once per sample, and attach the dedup fingerprint.
-           Identity is the resolved contentious object (collected server-side, §5.3), falling back
-           to database + literal-stripped query pair only when the object did not resolve. */
-        var groups = BlockingIncidentGrouper.Group(
-            serverName,
-            filtered.Select(e => new BlockingIncidentGrouper.BlockedEvent(
-                e.DatabaseName, e.ContentiousObject, e.BlockedSqlText, e.BlockingSqlText, e.WaitTimeMs, e.LockMode)));
+        var groups = GroupBlocking(serverName, filtered);
 
         const int maxGroups = 10;
         var shown = groups.Take(maxGroups).ToList();
@@ -107,36 +101,57 @@ public static class AlertContextBuilders
             context.AttachmentFileName = "blocked_process_report.xml";
         }
 
-        AlertIncidentRenderer.Apply(context, shown.Select(g => g.Incident).ToList());
+        AlertIncidentRenderer.Apply(context, Decorate(shown.Select(g => g.Incident).ToList(), decorateIncidents));
 
         return context.Details.Count == 0 ? null : context;
     }
 
     /// <summary>
-    /// The deadlock-alert context from the store's deadlock rows. Body verbatim from Lite's
-    /// pre-slice-B <c>BuildDeadlockContextAsync</c> minus the fetch: deadlocks whose processes ALL
-    /// ran in excluded databases are dropped (<see cref="IsDeadlockExcluded"/>); the first 3 render
-    /// as "Deadlock Victim" items; the first graph XML becomes the attachment; ALL deadlocks in the
-    /// window feed the #1140 involved-object fingerprint grouping. Null when nothing survives.
+    /// The deadlock-alert context from the store's deadlock rows. Deadlocks whose processes ALL ran in
+    /// excluded databases are dropped (<see cref="IsDeadlockExcluded"/>); the first graph XML becomes
+    /// the attachment; ALL deadlocks in the window feed the #1140 involved-object fingerprint grouping.
+    /// Null when nothing survives.
+    ///
+    /// <para>#2108 reshaped what displays: each fingerprint incident is now a SELF-CONTAINED unit — its
+    /// own Database (#2109), Victim SQL, Processes, Dedup Key, Involved Objects, Occurrences — rendered
+    /// via <see cref="AlertIncidentRenderer.BuildItem"/> with the forensic fields INCLUDED, and the old
+    /// standalone "Deadlock Victim" items are kept only for deadlocks the fingerprint cannot see
+    /// (no parseable objects). Before, the victim fields and the fingerprint metadata lived in separate
+    /// items — on a multi-incident card there was no way to tell which victim belonged to which
+    /// fingerprint, and the two lists even disagreed on membership (victims = first 3 raw events,
+    /// incidents = all fingerprints).</para>
     /// </summary>
+    /// <param name="decorateIncidents">
+    /// #2216: see <see cref="BuildBlockingContext"/> — the same pre-render hook, for the same reason. This
+    /// builder renders each incident itself rather than through
+    /// <see cref="AlertIncidentRenderer.Apply"/> (#2108's self-contained cards), so the hook has to sit
+    /// ahead of that loop too.
+    /// </param>
     public static AlertContext? BuildDeadlockContext(
-        string serverName, IReadOnlyList<DeadlockAlertRow>? deadlocks, IReadOnlyList<string> excludedDatabases)
+        string serverName, IReadOnlyList<DeadlockAlertRow>? deadlocks, IReadOnlyList<string> excludedDatabases,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (deadlocks == null || deadlocks.Count == 0) return null;
 
-        IReadOnlyList<DeadlockAlertRow> filtered = deadlocks;
-        if (excludedDatabases is { Count: > 0 })
-        {
-            filtered = deadlocks
-                .Where(d => !IsDeadlockExcluded(d, excludedDatabases))
-                .ToList();
-            if (filtered.Count == 0) return null;
-        }
+        var filtered = FilterDeadlocks(deadlocks, excludedDatabases);
+        if (filtered.Count == 0) return null;
 
         var context = new AlertContext();
-        var firstGraph = (string?)null;
+        var firstGraph = filtered.FirstOrDefault(d => d.HasDeadlockXml)?.DeadlockGraphXml;
+        if (!string.IsNullOrEmpty(firstGraph))
+        {
+            context.AttachmentXml = firstGraph;
+            context.AttachmentFileName = "deadlock_graph.xml";
+        }
 
-        foreach (var d in filtered.Take(3))
+        /* One parse pass per deadlock: the fingerprint's object set and the discrete Database fact's
+           database set (#2109) both come off the graph. */
+        var parsed = ParseDeadlocks(filtered);
+
+        /* Deadlocks the fingerprint cannot see (no parseable objects) would vanish entirely under the
+           incident-only rendering, so they keep the standalone victim item — the #1140 rule that "the
+           builder still displays them", now scoped to exactly the events that need it. */
+        foreach (var p in parsed.Where(p => p.Objects.Count == 0).Take(3))
         {
             var item = new AlertDetailItem
             {
@@ -144,40 +159,166 @@ public static class AlertContextBuilders
                 Fields = new()
             };
 
-            if (!string.IsNullOrEmpty(d.VictimSqlText))
-                item.Fields.Add(("Victim SQL", TruncateText(d.VictimSqlText)));
-            if (!string.IsNullOrEmpty(d.ProcessSummary))
-                item.Fields.Add(("Processes", d.ProcessSummary));
+            if (p.Databases.Count > 0)
+                item.Fields.Add(("Database", string.Join(", ", p.Databases)));
+            if (!string.IsNullOrEmpty(p.Row.VictimSqlText))
+                item.Fields.Add(("Victim SQL", TruncateText(p.Row.VictimSqlText)));
+            if (!string.IsNullOrEmpty(p.Row.ProcessSummary))
+                item.Fields.Add(("Processes", p.Row.ProcessSummary));
 
             context.Details.Add(item);
-            if (firstGraph == null && d.HasDeadlockXml)
-                firstGraph = d.DeadlockGraphXml;
         }
 
-        if (!string.IsNullOrEmpty(firstGraph))
+        /* #1140: fingerprint each deadlock by its sorted involved-object set, across ALL deadlocks in
+           the window, grouped so recurrences over the same objects collapse to one incident with a
+           count. Each incident renders self-contained (#2108): heading + its representative's forensic
+           fields + the dedup metadata, one item per incident. */
+        var groups = GroupParsedDeadlocks(serverName, parsed);
+        var incidents = Decorate(groups.Select(g => g.Incident).ToList(), decorateIncidents);
+        if (incidents.Count > 0)
         {
-            context.AttachmentXml = firstGraph;
-            context.AttachmentFileName = "deadlock_graph.xml";
+            context.Incidents = new List<AlertIncident>(incidents);
+            for (int n = 0; n < incidents.Count; n++)
+            {
+                var heading = incidents.Count == 1 ? "Deadlock" : $"Deadlock {n + 1} of {incidents.Count}";
+                context.Details.Add(AlertIncidentRenderer.BuildItem(incidents[n], heading, includeDetailFields: true));
+            }
         }
-
-        /* #1140: fingerprint each deadlock by its sorted involved-object set (parsed from the
-           graph), across ALL deadlocks in the window — not just the 3 displayed — grouped so
-           recurrences over the same objects collapse to one incident with a count. */
-        var groups = DeadlockIncidentGrouper.Group(
-            serverName,
-            filtered.Select(d => new DeadlockIncidentGrouper.DeadlockEvent(
-                DeadlockObjectExtractor.FromGraphXml(d.DeadlockGraphXml),
-                DeadlockDetailFields(d.VictimSqlText, d.ProcessSummary))));
-        AlertIncidentRenderer.Apply(context, groups.Select(g => g.Incident).ToList());
 
         return context;
     }
 
-    /* #1141: forensic detail carried on a deadlock incident so per-event cards keep the victim SQL
-       + process summary (Summary mode shows them via the builder's own items). */
-    private static List<AlertIncidentField>? DeadlockDetailFields(string? victimSql, string? processes)
+    /// <summary>
+    /// #2216: the fingerprinted incidents for a set of blocked-process rows — the SAME grouping
+    /// <see cref="BuildBlockingContext"/> renders, exposed so the alert engine can observe them on every
+    /// sweep rather than only on the sweeps that deliver an alert.
+    ///
+    /// <para>It has to be the same grouping, not a parallel implementation: the engine's occurrence state is
+    /// keyed by fingerprint, so a filter or identity rule that drifted between the counting path and the
+    /// rendering path would silently key them differently and every delivered incident would look like a
+    /// first contact. Both paths share <c>FilterBlocking</c> and <c>GroupBlocking</c> for that reason.</para>
+    ///
+    /// <para>Uncapped, unlike the rendered list. The render cap is a display budget; a fingerprint outside
+    /// the top 10 still has a live incident, and dropping it from the observation would reset its total the
+    /// next time it surfaced.</para>
+    /// </summary>
+    public static IReadOnlyList<AlertIncident> BlockingIncidents(
+        string serverName, IReadOnlyList<BlockedProcessAlertRow>? events, IReadOnlyList<string> excludedDatabases)
+    {
+        if (events == null || events.Count == 0) return Array.Empty<AlertIncident>();
+
+        var filtered = FilterBlocking(events, excludedDatabases);
+        if (filtered.Count == 0) return Array.Empty<AlertIncident>();
+
+        return GroupBlocking(serverName, filtered).Select(g => g.Incident).ToList();
+    }
+
+    /// <summary>
+    /// #2216: the deadlock twin of <see cref="BlockingIncidents"/> — same grouping
+    /// <see cref="BuildDeadlockContext"/> uses, for the same reason.
+    /// </summary>
+    public static IReadOnlyList<AlertIncident> DeadlockIncidents(
+        string serverName, IReadOnlyList<DeadlockAlertRow>? deadlocks, IReadOnlyList<string> excludedDatabases)
+    {
+        if (deadlocks == null || deadlocks.Count == 0) return Array.Empty<AlertIncident>();
+
+        var filtered = FilterDeadlocks(deadlocks, excludedDatabases);
+        if (filtered.Count == 0) return Array.Empty<AlertIncident>();
+
+        return GroupDeadlocks(serverName, filtered).Select(g => g.Incident).ToList();
+    }
+
+    /* Excluded databases drop their rows; rows with no database always pass. Shared by the render path and
+       #2216's observation path so the two can never disagree about which rows exist. */
+    private static IReadOnlyList<BlockedProcessAlertRow> FilterBlocking(
+        IReadOnlyList<BlockedProcessAlertRow> events, IReadOnlyList<string> excludedDatabases)
+    {
+        if (excludedDatabases is not { Count: > 0 })
+        {
+            return events;
+        }
+
+        return events
+            .Where(e => string.IsNullOrEmpty(e.DatabaseName) ||
+                !excludedDatabases.Any(ex =>
+                    string.Equals(ex, e.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+    }
+
+    /* A deadlock whose processes ALL ran in excluded databases is dropped. Shared, as above. */
+    private static IReadOnlyList<DeadlockAlertRow> FilterDeadlocks(
+        IReadOnlyList<DeadlockAlertRow> deadlocks, IReadOnlyList<string> excludedDatabases)
+    {
+        if (excludedDatabases is not { Count: > 0 })
+        {
+            return deadlocks;
+        }
+
+        return deadlocks.Where(d => !IsDeadlockExcluded(d, excludedDatabases)).ToList();
+    }
+
+    /* #1140/#1141: collapse samples of the same chain into one group (true occurrence count + wait range)
+       instead of listing it once per sample, and attach the dedup fingerprint. Identity is the resolved
+       contentious object (collected server-side, §5.3), falling back to database + literal-stripped query
+       pair only when the object did not resolve. */
+    private static List<BlockingIncidentGrouper.BlockingGroup> GroupBlocking(
+        string serverName, IReadOnlyList<BlockedProcessAlertRow> filtered) =>
+        BlockingIncidentGrouper.Group(
+            serverName,
+            filtered.Select(e => new BlockingIncidentGrouper.BlockedEvent(
+                e.DatabaseName, e.ContentiousObject, e.BlockedSqlText, e.BlockingSqlText, e.WaitTimeMs, e.LockMode)));
+
+    /* The graph parse, shared by the render path and #2216's observation path. Both the fingerprint's object
+       set and the #2109 Database fact come off the same pass, so parsing once per deadlock is the point. */
+    private static List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases)>
+        ParseDeadlocks(IReadOnlyList<DeadlockAlertRow> filtered) =>
+        filtered
+            .Select(d => (Row: d,
+                Objects: DeadlockObjectExtractor.FromGraphXml(d.DeadlockGraphXml),
+                Databases: DeadlockObjectExtractor.DatabasesFromGraphXml(d.DeadlockGraphXml)))
+            .ToList();
+
+    /* #1140: fingerprint each deadlock by its sorted involved-object set, across ALL deadlocks in the window,
+       grouped so recurrences over the same objects collapse to one incident with a count. */
+    private static List<DeadlockIncidentGrouper.DeadlockGroup> GroupParsedDeadlocks(
+        string serverName,
+        List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases)> parsed) =>
+        DeadlockIncidentGrouper.Group(
+            serverName,
+            parsed.Select(p => new DeadlockIncidentGrouper.DeadlockEvent(
+                p.Objects,
+                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary))));
+
+    private static List<DeadlockIncidentGrouper.DeadlockGroup> GroupDeadlocks(
+        string serverName, IReadOnlyList<DeadlockAlertRow> filtered) =>
+        GroupParsedDeadlocks(serverName, ParseDeadlocks(filtered));
+
+    /* #2216: runs the caller's incident decorator, with the no-decorator and no-incident cases short-
+       circuited. A decorator that returned a different NUMBER of incidents would silently change what the
+       alert renders — dropped incidents, or a "+N more" trailer that no longer matches the items below it —
+       so a mismatched result is discarded in favour of the originals. The accumulator's contract is
+       same-order-same-count; this makes a breach of it inert rather than invisible. */
+    private static IReadOnlyList<AlertIncident> Decorate(
+        List<AlertIncident> incidents,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorate)
+    {
+        if (decorate is null || incidents.Count == 0)
+        {
+            return incidents;
+        }
+
+        var decorated = decorate(incidents);
+        return decorated is not null && decorated.Count == incidents.Count ? decorated : incidents;
+    }
+
+    /* #1141/#2109: forensic detail carried on a deadlock incident — the representative event's
+       databases, victim SQL, and process summary. Since #2108 these render on the incident's own
+       summary item too, not just per-event cards. */
+    private static List<AlertIncidentField>? DeadlockDetailFields(
+        IReadOnlyList<string> databases, string? victimSql, string? processes)
     {
         var f = new List<AlertIncidentField>();
+        if (databases.Count > 0) f.Add(new AlertIncidentField("Database", string.Join(", ", databases)));
         if (!string.IsNullOrWhiteSpace(victimSql)) f.Add(new AlertIncidentField("Victim SQL", TruncateText(victimSql)));
         if (!string.IsNullOrWhiteSpace(processes)) f.Add(new AlertIncidentField("Processes", processes!));
         return f.Count > 0 ? f : null;
@@ -345,6 +486,9 @@ public static class AlertContextBuilders
         {
             var fields = new List<(string, string)>
             {
+                /* #2109: the database as a discrete fact, not only in the heading — downstream
+                   automation routes on the fact name, and headings are display prose. */
+                ("Database", d.DatabaseName),
                 ("PVS Size (off-row)", $"{d.PvsGb:F1} GB"),
                 ("Database Data Size", $"{d.DatabaseDataSizeMb / 1024.0:F1} GB"),
                 ("Aborted Transactions", d.CurrentAbortedTransactionCount.ToString()),

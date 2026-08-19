@@ -74,14 +74,18 @@ public sealed class DarlingMcpServerAdminTools
         DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
 
     [McpServerTool(Name = "add_servers"), Description(
-        "Adds one or more SQL Servers to the fleet the Darling service monitors — BULK onboarding: pass a JSON " +
+        "Adds one or more database servers to the fleet the Darling service monitors — BULK onboarding: pass a JSON " +
         "ARRAY of server objects and each is validated, connection-tested, and (if new and reachable) saved to the " +
         "central monitoring store, which the running service picks up within one collection sweep (no restart). " +
         "Each object: host (REQUIRED); display_name (optional, defaults to host); database (optional — set it only " +
-        "to monitor a single database, e.g. one Azure SQL Database); auth (\"Windows\" for integrated security or " +
-        "\"SQL\" for a SQL login — default \"Windows\"); username + password (REQUIRED for \"SQL\" auth, ignored for " +
-        "\"Windows\"); encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\", default \"Mandatory\"); " +
-        "trust_server_certificate (bool, default false — set true to accept a self-signed server cert); " +
+        "to monitor a single database, e.g. one Azure SQL Database); engine (\"sqlserver\" default, or \"postgres\" " +
+        "for PostgreSQL / Amazon Aurora PostgreSQL); auth (\"Windows\" for integrated security or " +
+        "\"SQL\" for a SQL login — default \"Windows\"; a PostgreSQL target REQUIRES \"SQL\"); username + password " +
+        "(REQUIRED for \"SQL\" auth, ignored for " +
+        "\"Windows\"); port (optional, PostgreSQL only — omit for 5432); " +
+        "encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\", default \"Mandatory\"); " +
+        "trust_server_certificate (bool, default false — set true to accept a self-signed server cert, and " +
+        "typically REQUIRED for Aurora, which presents an RDS CA a stock trust store does not know); " +
         "read_only_intent (bool, default false); multi_subnet_failover (bool, default false). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
@@ -89,11 +93,13 @@ public sealed class DarlingMcpServerAdminTools
         "Principal / Managed Identity auth is rejected (status \"invalid\") — the service connects with Windows or " +
         "SQL authentication only. A SQL password is encrypted at rest (DPAPI, the service identity) and is never " +
         "returned. Returns {added:N, skipped:N, failed:N, results:[{server, status:\"added\"|\"duplicate\"|" +
-        "\"connection_failed\"|\"invalid\", detail}]}. NOTE: the password travels to this endpoint in the request; " +
+        "\"connection_failed\"|\"invalid\", detail}]}, where an added server's detail reports what the probe found " +
+        "— for a PostgreSQL target that includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL " +
+        "collectors apply to it. NOTE: the password travels to this endpoint in the request; " +
         "on a LAN use the documented TLS reverse proxy.")]
     public static Task<string> AddServers(
         NpgsqlDataSource postgres,
-        [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields), e.g. [{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"...\",\"encrypt_mode\":\"Mandatory\",\"trust_server_certificate\":true},{\"host\":\"sql02\"}].")] string servers_json) =>
+        [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields), e.g. [{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"...\",\"encrypt_mode\":\"Mandatory\",\"trust_server_certificate\":true},{\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\",\"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\",\"trust_server_certificate\":true}].")] string servers_json) =>
         AddServersAsync(postgres, servers_json, DefaultProbeAsync, CancellationToken.None);
 
     /// <summary>The testable core of <c>add_servers</c>: validates + dedupes + probes (through the injected
@@ -127,6 +133,16 @@ public sealed class DarlingMcpServerAdminTools
             var (ready, duplicates) = PartitionDuplicates(entries, existingKeys);
             results.AddRange(duplicates);
 
+            /* #2280: the identities claimed so far — the store's, plus every entry this batch is about to add.
+               The gate above compares DECLARED identities; the check inside the loop compares each entry's ACTUAL
+               database (what the server just told the probe) against this set, which is what catches two
+               registrations resolving to one database while claiming different ones. */
+            var claimed = new HashSet<string>(existingKeys, StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in ready)
+            {
+                claimed.Add(entry.StorageKey);
+            }
+
             foreach (var entry in ready)
             {
                 /* Validate the connection IN-PROCESS (the service holds the network path + credentials). A failure
@@ -138,6 +154,22 @@ public sealed class DarlingMcpServerAdminTools
                         string.IsNullOrWhiteSpace(probeResult.Error)
                             ? "Could not connect to the server."
                             : $"Could not connect: {probeResult.Error}"));
+                    continue;
+                }
+
+                /* #2280: the probe just asked the server which database it actually reached. If that is a
+                   DIFFERENT database from the one this entry names, and some other registration already claims
+                   that one, then adding this would give one real database two identities and two full copies of
+                   every collected row — the #2220 field report, prevented at the point of creation instead of
+                   reported at every connect by #2277's tripwire.
+
+                   Compared against the ACTUAL database and only when it differs from the declared one: an entry
+                   that names what it reached is the normal case and is already covered by the declared gate
+                   above, so re-checking it would just re-detect that gate's own decision. */
+                var collision = ActualIdentityCollision(entry, probeResult.ConnectedDatabase, claimed);
+                if (collision is not null)
+                {
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, "collides", collision));
                     continue;
                 }
 
@@ -353,6 +385,29 @@ public sealed class DarlingMcpServerAdminTools
             return (null, Invalid(msError));
         }
 
+        var (engine, engineError) = ResolveEngine(TryGetString(obj, "engine"));
+        if (engineError != null)
+        {
+            return (null, Invalid(engineError));
+        }
+
+        /* The same rule DarlingConfig.Validate enforces for a file entry, enforced here so the two onboarding
+           paths cannot disagree: PostgreSQL has no integrated-auth path, and defaulting auth to Windows means
+           an entry that just says {"host": ..., "engine": "postgres"} would otherwise be accepted and then
+           fail at every connect. */
+        if (engine != EngineSqlServer && storeAuth != ServerStoreAuth.Sql)
+        {
+            return (null, Invalid(
+                "a PostgreSQL target requires auth \"SQL\" with a username and password " +
+                "(integrated/Kerberos auth is not supported for PostgreSQL targets)."));
+        }
+
+        var (port, portError) = ResolvePort(obj);
+        if (portError != null)
+        {
+            return (null, Invalid(portError));
+        }
+
         var probeConfig = new MonitoredServer
         {
             Name = displayName,
@@ -367,10 +422,68 @@ public sealed class DarlingMcpServerAdminTools
             TrustServerCertificate = trustCert,
             ReadOnlyIntent = readOnlyIntent,
             MultiSubnetFailover = multiSubnet,
+            Engine = engine,
+            Port = port,
         };
 
-        var storageKey = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent);
+        /* #2218: the FULL identity, matching what the store derives — engine and port included, so a PostgreSQL
+           entry does not collide with a SQL Server one on the same host. */
+        var storageKey = ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port);
         return (new ParsedServerEntry(index, displayName, storageKey, probeConfig, plaintextPassword), null);
+    }
+
+    /// <summary>
+    /// The #2280 check: why this entry must not be added, or null when it may be.
+    ///
+    /// <para>Compares the identity this entry would have if keyed on the database the server ACTUALLY reached
+    /// against the identities already claimed. Only fires when the actual database DIFFERS from the declared one
+    /// — an entry that reached what it named is the ordinary case and the declared gate has already ruled on it,
+    /// so re-checking would only re-detect that gate's decision under a more confusing name.</para>
+    ///
+    /// <para><b>Silent when the probe did not report a database</b> (a stub probe, or a target that returned
+    /// none): unknown is not the same as colliding, and refusing on an absent value would block registrations
+    /// for a reason nobody could act on.</para>
+    ///
+    /// <para><b>Keyed on the FULL identity, not on (host, database).</b> A read-only-intent registration
+    /// alongside a read-write one for the same database is legitimate and <c>read_only_intent</c> is part of the
+    /// identity, so comparing without it would refuse a valid pair. Same for engine and port after #2218.</para>
+    ///
+    /// <para>Note the asymmetry this cannot see: existing rows record only the database they DECLARE, so this
+    /// catches "the new one lands where an existing one lives" and not "both mis-resolve to a database neither
+    /// names". Closing that needs the actual database persisted per row; #2277's tripwire reports it at connect
+    /// for both in the meantime, which is why this is a guard and not the whole answer.</para>
+    /// </summary>
+    internal static string? ActualIdentityCollision(
+        ParsedServerEntry entry, string? connectedDatabase, ISet<string> claimedKeys)
+    {
+        if (entry is null || claimedKeys is null || string.IsNullOrWhiteSpace(connectedDatabase))
+        {
+            return null;
+        }
+
+        var declared = entry.ProbeConfig.Database;
+        if (!string.IsNullOrWhiteSpace(declared)
+            && string.Equals(declared.Trim(), connectedDatabase.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var actualKey = ServerIdHelper.BuildStorageName(
+            entry.ProbeConfig.Host, connectedDatabase.Trim(), entry.ProbeConfig.ReadOnlyIntent,
+            entry.ProbeConfig.Engine, entry.ProbeConfig.Port);
+
+        if (string.Equals(actualKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase)
+            || !claimedKeys.Contains(actualKey))
+        {
+            return null;
+        }
+
+        var declaredText = string.IsNullOrWhiteSpace(declared) ? "no database" : $"database '{declared}'";
+        return $"Not added: this registration names {declaredText} but its connection lands in " +
+               $"'{connectedDatabase.Trim()}', which another monitored server already covers. Adding it would " +
+               "store that one database's history under two identities and alert twice for every incident. " +
+               "Point it at the database you meant (check Initial Catalog), or monitor the existing " +
+               "registration instead.";
     }
 
     /// <summary>
@@ -405,8 +518,14 @@ public sealed class DarlingMcpServerAdminTools
     /* ─────────────────────────────── store I/O ─────────────────────────────── */
 
     /// <summary>Reads the identity fields of every existing monitored server so the dedupe gate can be seeded from
-    /// the authoritative set (mirrors the bulk dialog's <c>LoadExistingKeysAsync</c>). Non-secret columns only.</summary>
-    public const string ExistingServersSql = "SELECT host, database, read_only_intent FROM config_monitored_servers";
+    /// the authoritative set (mirrors the bulk dialog's <c>LoadExistingKeysAsync</c>). Non-secret columns only.
+    ///
+    /// <para>#2218 added <c>engine</c> and <c>port</c> to the identity, so they have to be read here too. Without
+    /// them the gate keys on a NARROWER identity than the product does, and a PostgreSQL instance on a host that
+    /// already has a SQL Server registration reads as a duplicate and is refused — a valid pair rejected because
+    /// the gate could not see what distinguishes them.</para></summary>
+    public const string ExistingServersSql =
+        "SELECT host, database, read_only_intent, engine, port FROM config_monitored_servers";
 
     /// <summary>The INSERT — column set + shape mirrored from <c>StoreConfigProvider.SeedMonitoredServersAsync</c>
     /// (the seed authority), so a tool-added row is byte-identical to a seeded one. <c>capture_plans</c> and
@@ -418,8 +537,8 @@ public sealed class DarlingMcpServerAdminTools
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-    monthly_cost_usd, capture_plans, alert_delivery_mode_override, is_enabled, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, TRUE, $14, $14)
+    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14)
 ON CONFLICT (server_id) DO NOTHING";
 
     private static async Task<List<string>> LoadExistingStorageKeysAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
@@ -432,7 +551,9 @@ ON CONFLICT (server_id) DO NOTHING";
             var host = reader.GetString(0);
             var database = reader.IsDBNull(1) ? null : reader.GetString(1);
             var readOnlyIntent = !reader.IsDBNull(2) && reader.GetBoolean(2);
-            keys.Add(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent));
+            var engine = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var port = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
+            keys.Add(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port));
         }
 
         return keys;
@@ -459,6 +580,8 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() }); // $12
         command.Parameters.Add(new NpgsqlParameter<decimal> { TypedValue = 0m });                                                     // $13
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });                           // $14
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Engine });                                           // $15
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -508,15 +631,90 @@ ON CONFLICT (server_id) DO NOTHING";
         }, McpHelpers.JsonOptions);
     }
 
-    /// <summary>The probed facts for an <c>added</c> server — edition / major version / msdb access, mirroring the
-    /// <c>--test-connection</c> CLI line (<c>DarlingCliCommands.FormatProbeLine</c>).</summary>
-    private static string DescribeProbe(ConnectionProbeResult probe)
+    /// <summary>The probed facts for an <c>added</c> server, from the same describer the
+    /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
+    /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
+    private static string DescribeProbe(ConnectionProbeResult probe) =>
+        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}.";
+
+    /// <summary>The canonical <c>engine</c> values, as written to the store.</summary>
+    internal const string EngineSqlServer = "sqlserver";
+    internal const string EnginePostgres = "postgres";
+
+    /// <summary>
+    /// Validates the optional <c>engine</c>; absent → <see cref="EngineSqlServer"/>, the
+    /// <see cref="MonitoredServer.Engine"/> default.
+    /// <para>Deliberately STRICTER than <see cref="MonitoredServer.TargetEngine"/>, which resolves anything
+    /// unrecognized to SQL Server so that one typo in darling.json cannot take the whole fleet down. That is
+    /// the right call for a file read at startup and the wrong one here: onboarding is a single deliberate act,
+    /// and silently turning <c>"postgress"</c> into a SQL Server target would hand back <c>connection_failed</c>
+    /// against a Postgres port with nothing pointing at the typo. Accepts the same aliases the parser does, so
+    /// the two never disagree about a value they both accept.</para>
+    /// </summary>
+    internal static (string Engine, string? Error) ResolveEngine(string? raw)
     {
-        var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
-            ? DarlingServerConnector.DescribeEngineEdition(probe.EngineEdition)
-            : probe.EngineEditionDescription;
-        var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (SQL Agent job data unavailable)";
-        return $"Connected — SQL major version {probe.MajorVersion}, {edition}, {msdb}.";
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return (EngineSqlServer, null);
+        }
+
+        return raw.Trim().ToLowerInvariant() switch
+        {
+            "sqlserver" or "sql" or "mssql" => (EngineSqlServer, null),
+            "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => (EnginePostgres, null),
+            _ => (EngineSqlServer,
+                "engine must be \"sqlserver\" (default) or \"postgres\" — also accepted: \"postgresql\", " +
+                "\"pg\", \"aurora\", \"aurora-postgresql\"."),
+        };
+    }
+
+    /// <summary>
+    /// Validates the optional <c>port</c>; absent or 0 → the driver's default. Consumed only by the PostgreSQL
+    /// connection builder (a SQL Server target carries its port in the host string), and range-checked here to
+    /// match <c>DarlingConfig.Validate</c> rather than failing later inside Npgsql.
+    /// </summary>
+    internal static (int Port, string? Error) ResolvePort(JsonObject obj)
+    {
+        var node = obj["port"];
+        if (node is null)
+        {
+            return (0, null);
+        }
+
+        if (!TryGetInt(node, out var port))
+        {
+            return (0, "port must be a number.");
+        }
+
+        if (port is not 0 && port is < 1 or > 65535)
+        {
+            return (0, $"port must be between 1 and 65535 (got {port}).");
+        }
+
+        return (port, null);
+    }
+
+    private static bool TryGetInt(JsonNode node, out int value)
+    {
+        try
+        {
+            value = node.GetValue<int>();
+            return true;
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidOperationException or OverflowException)
+        {
+            /* A JSON string ("5432") is a plausible thing for a caller to send; accept it rather than
+               refusing on a type technicality. */
+            if (node.GetValueKind() == JsonValueKind.String
+                && int.TryParse(node.GetValue<string>(), System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out value))
+            {
+                return true;
+            }
+
+            value = 0;
+            return false;
+        }
     }
 
     /// <summary>Validates the optional <c>encrypt_mode</c> ("Optional"/"Mandatory"/"Strict"); absent → the

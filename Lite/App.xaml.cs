@@ -16,6 +16,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Interop;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Services;
@@ -150,6 +151,8 @@ public partial class App : Application
     public static bool AlertLowDiskEnabled { get; set; } = true;
     public static int AlertLowDiskThresholdPercent { get; set; } = 10; // Alert when a volume's free space < X% (0 disables this check)
     public static int AlertLowDiskThresholdGb { get; set; } = 5;        // Alert when a volume's free space < X GB (0 disables this check)
+    public static int AlertDiskCriticalFreePercent { get; set; } = 3;   // #2107: at/below this % free the low-disk alert grades CRITICAL (#1136 tier)
+    public static int AlertDiskCriticalFreeGb { get; set; } = 2;        // #2107: at/below this many GB free is CRITICAL on any volume (OR-ed with the %)
     public static bool AlertPvsEnabled { get; set; } = true;            // #1984 ADR persistent version store pressure
     public static int AlertPvsThresholdPercent { get; set; } = 40;      // Alert when an ADR database's PVS >= X% of its data files (0 disables this check)
     public static int AlertPvsFloorGb { get; set; } = 1;                // AND-qualifier: the PVS must also be >= X GB (0 removes the floor)
@@ -193,6 +196,15 @@ public partial class App : Application
         /* Auto-detect: use semicolon when the locale's decimal separator is a comma (Italian, German, French, etc.) */
         return System.Globalization.CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator == "," ? ";" : ",";
     }
+
+    /* Collection settings */
+    /* #2167: the Query Store history backfill (#2058) — fills gaps the live path never takes (a
+       first-contact tail, an outage hole, a freshly restored database's imported catalog) in bounded
+       background slices. Default ON. Turn it off when a heavy catch-up is costing the monitored server
+       more than the history is worth; live collection is unaffected and re-enabling resumes exactly
+       where the watermarks left off, so nothing is lost by pausing it. Darling's equivalent is a store
+       column (V58) because a headless service has no window to click. */
+    public static bool QueryStoreBackfillEnabled { get; set; } = true;
 
     /* System tray settings */
     public static bool MinimizeToTray { get; set; } = true;
@@ -448,9 +460,80 @@ public partial class App : Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
+        /* Entra MFA needs a parent window handle for the WAM broker, or interactive auth fails with
+           0xwindow_handle_required instead of prompting (#2184). Registered once, before any window
+           exists, because SqlAuthenticationProvider installs process-wide: the Add/Edit dialog's Test
+           Connection and every collector connection are covered without per-site wiring. The handle
+           itself is resolved lazily per prompt, so registering this early is safe. */
+        Services.EntraInteractiveAuth.Register(ActiveWindowHandle);
+
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
         _mainWindow.Show();
+    }
+
+    /// <summary>
+    /// The window that should own an Entra MFA prompt, resolved at the moment MSAL asks (#2184).
+    ///
+    /// <para>Prefers whichever window is currently active over the main window, because a connection is
+    /// usually triggered from the Add/Edit Server dialog — parenting the account picker to the main
+    /// window behind it would let the picker appear behind the dialog the user is looking at. Falls back
+    /// to the main window, then to <see cref="IntPtr.Zero"/>, which MSAL treats the same as no handle:
+    /// the prompt fails rather than the app crashing, which is the right way round for an auth path.</para>
+    ///
+    /// <para>Resolved per call rather than captured once: a window's HWND does not exist until the
+    /// window has been sourced, and the right parent is whichever window is in front now, not the one
+    /// that existed at startup.</para>
+    ///
+    /// <para>Marshaled to the UI thread: MSAL invokes this from whatever thread SqlClient's token
+    /// acquisition runs on — collector worker threads included — and WPF enforces dispatcher affinity
+    /// on <see cref="Window"/> properties, so an off-thread read would throw rather than merely race.
+    /// The blocking Invoke is safe here because no UI-thread path blocks on a SQL connection open
+    /// (opens are async throughout; the UI stays pumping). If the dispatcher cannot deliver anyway
+    /// (shutdown timing), Zero degrades to MSAL's normal no-handle failure instead of throwing from
+    /// inside the auth callback.</para>
+    /// </summary>
+    private static IntPtr ActiveWindowHandle()
+    {
+        try
+        {
+            var dispatcher = Current?.Dispatcher;
+            if (dispatcher is null)
+                return IntPtr.Zero;
+
+            return dispatcher.CheckAccess()
+                ? ActiveWindowHandleOnUIThread()
+                : dispatcher.Invoke(ActiveWindowHandleOnUIThread);
+        }
+        catch (Exception ex)
+        {
+            /* Zero reproduces the original #2184 symptom (0xwindow_handle_required), so a throw here
+               must leave a trace - a silent fallback would be this bug's own shape one layer down. The
+               log call is guarded because this can fire during shutdown, after the dispatcher and
+               logger are gone, and logging must never be the thing that breaks auth. */
+            try { AppLogger.Warn("App", $"Entra parent-window handle resolution failed; WAM will see no handle: {ex.Message}"); } catch { /* nothing left to log to */ }
+            return IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr ActiveWindowHandleOnUIThread()
+    {
+        var app = Current;
+        if (app is null)
+            return IntPtr.Zero;
+
+        Window? active = null;
+        foreach (Window window in app.Windows)
+        {
+            if (window.IsActive)
+            {
+                active = window;
+                break;
+            }
+        }
+
+        var owner = active ?? app.MainWindow;
+        return owner is null ? IntPtr.Zero : new WindowInteropHelper(owner).Handle;
     }
 
     /// <summary>
@@ -650,6 +733,9 @@ public partial class App : Application
             if (root.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
             if (root.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = (int)Math.Max(0, v.GetInt64());
+            /* #2107: the CRITICAL tier floors, clamped like the WARNING thresholds above. */
+            if (root.TryGetProperty("alert_disk_critical_free_percent", out v)) AlertDiskCriticalFreePercent = Math.Clamp(v.GetInt32(), 0, 100);
+            if (root.TryGetProperty("alert_disk_critical_free_gb", out v)) AlertDiskCriticalFreeGb = (int)Math.Max(0, v.GetInt64());
             if (root.TryGetProperty("alert_pvs_enabled", out v)) AlertPvsEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_pvs_threshold_percent", out v)) AlertPvsThresholdPercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
             if (root.TryGetProperty("alert_pvs_floor_gb", out v)) AlertPvsFloorGb = (int)Math.Max(0, v.GetInt64());
@@ -774,6 +860,7 @@ public partial class App : Application
             if (root.TryGetProperty("smtp_recipients", out v)) SmtpRecipients = v.GetString() ?? "";
 
             if (root.TryGetProperty("analysis_enabled", out v)) AnalysisEnabled = v.GetBoolean();
+            if (root.TryGetProperty("query_store_backfill_enabled", out v)) QueryStoreBackfillEnabled = v.GetBoolean();
             if (root.TryGetProperty("analysis_notifications_enabled", out v)) AnalysisNotificationsEnabled = v.GetBoolean();
             if (root.TryGetProperty("analysis_interval_minutes", out v)) AnalysisIntervalMinutes = (int)Math.Clamp(v.GetInt64(), 5, 360);
             if (root.TryGetProperty("analysis_notify_severity", out v)) AnalysisNotifySeverity = Math.Clamp(v.GetDouble(), 0.0, 2.0);

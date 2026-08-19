@@ -184,14 +184,14 @@ OPTION(RECOMPILE);";
     {
         /* "{database}|{file}" delta key and the eight group names are the parity contract. */
         var deltaKey = $"{row.DatabaseName}|{row.FileName}";
-        var deltaReads = context.Deltas.CalculateDelta(context.ServerId, "file_io_reads", deltaKey, row.NumOfReads, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaWrites = context.Deltas.CalculateDelta(context.ServerId, "file_io_writes", deltaKey, row.NumOfWrites, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaReadBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_read_bytes", deltaKey, row.ReadBytes, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaWriteBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_write_bytes", deltaKey, row.WriteBytes, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaStallReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_read", deltaKey, row.IoStallReadMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaStallWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_write", deltaKey, row.IoStallWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaStallQueuedReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_read", deltaKey, row.IoStallQueuedReadMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaStallQueuedWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_write", deltaKey, row.IoStallQueuedWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaReads = context.Deltas.CalculateDelta(context.ServerId, "file_io_reads", deltaKey, row.NumOfReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWrites = context.Deltas.CalculateDelta(context.ServerId, "file_io_writes", deltaKey, row.NumOfWrites, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReadBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_read_bytes", deltaKey, row.ReadBytes, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWriteBytes = context.Deltas.CalculateDelta(context.ServerId, "file_io_write_bytes", deltaKey, row.WriteBytes, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_read", deltaKey, row.IoStallReadMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_write", deltaKey, row.IoStallWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallQueuedReadMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_read", deltaKey, row.IoStallQueuedReadMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaStallQueuedWriteMs = context.Deltas.CalculateDelta(context.ServerId, "file_io_stall_queued_write", deltaKey, row.IoStallQueuedWriteMs, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.DatabaseName)

@@ -119,13 +119,13 @@ OPTION(RECOMPILE);";
             new object?[] { "SOS_SUSPEND_QUEUE", 100L, 5000L, 2.5, 10L, 3L, 1000L, 50000L, 100L, 30L },
             writer.Values);
 
-        /* Delta contract: group names, key = spinlock_name, host collection time, 300 s gap policy.
+        /* Delta contract: group names, key = spinlock_name, host collection time, the shared gap policy.
            No delta call for spins_per_collision — exactly four calls. */
         Assert.Equal(4, deltas.Calls.Count);
-        Assert.Equal(("spinlock_stats_collisions", "SOS_SUSPEND_QUEUE", 100L, context.CollectionTime, 300), deltas.Calls[0]);
-        Assert.Equal(("spinlock_stats_spins", "SOS_SUSPEND_QUEUE", 5000L, context.CollectionTime, 300), deltas.Calls[1]);
-        Assert.Equal(("spinlock_stats_sleep_time", "SOS_SUSPEND_QUEUE", 10L, context.CollectionTime, 300), deltas.Calls[2]);
-        Assert.Equal(("spinlock_stats_backoffs", "SOS_SUSPEND_QUEUE", 3L, context.CollectionTime, 300), deltas.Calls[3]);
+        Assert.Equal(("spinlock_stats_collisions", "SOS_SUSPEND_QUEUE", 100L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[0]);
+        Assert.Equal(("spinlock_stats_spins", "SOS_SUSPEND_QUEUE", 5000L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[1]);
+        Assert.Equal(("spinlock_stats_sleep_time", "SOS_SUSPEND_QUEUE", 10L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[2]);
+        Assert.Equal(("spinlock_stats_backoffs", "SOS_SUSPEND_QUEUE", 3L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[3]);
         Assert.All(deltas.Calls, _ => Assert.Equal(42, deltas.LastServerId));
     }
 }

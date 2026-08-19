@@ -1405,8 +1405,14 @@
                                     <DataGridTemplateColumn Header="Query Plan" Width="Auto" MinWidth="70">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
+                                                <!-- #2181/#2331: NO explicit Style. DarkButton IS a Viewer key, but it
+                                                     lives in MainWindow.xaml's window resources — a scope this
+                                                     UserControl's templates cannot see, because StaticResource resolves
+                                                     lexically at load, not through the runtime tree. Same uncatchable
+                                                     measure-time crash as Lite's #2114, hidden until the grid had rows
+                                                     to render a cell template for. Default chrome, like Lite's fix. -->
                                                 <Button Content="View" Click="ViewQueryStorePlanInline_Click"
-                                                        Style="{StaticResource DarkButton}" Padding="8,1" Margin="2"/>
+                                                        Padding="8,1" Margin="2"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -2777,6 +2783,30 @@
                                 <DataGridTextColumn Binding="{Binding ValueForSecondary}" Width="200">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueForSecondary" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value for Secondary" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </TabItem>
+                    <TabItem Header="Query Store">
+                        <DataGrid x:Name="QueryStoreHealthGrid" Style="{StaticResource DarkGrid}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Binding="{Binding DatabaseName}" Width="200">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding StateDisplay}" Width="200">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StateDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding ReadonlyReasonDisplay}" Width="190">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReadonlyReasonDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Read-Only Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                <DataGridTextColumn Header="Cap MB" Binding="{Binding MaxStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                <DataGridTextColumn Header="% of Cap" Binding="{Binding PercentOfCapDisplay}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                <DataGridTextColumn Binding="{Binding SizeBasedCleanupMode}" Width="130">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeBasedCleanupMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size Cleanup" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
+                                <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                <DataGridTextColumn Header="Interval Min" Binding="{Binding IntervalLengthMinutes}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>

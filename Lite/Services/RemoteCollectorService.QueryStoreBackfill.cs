@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -14,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
@@ -42,11 +44,33 @@ public partial class RemoteCollectorService
     /// retention default.</summary>
     private const int BackfillFallbackRetentionDays = 30;
 
+    /// <summary>#2148: per-server abandonment guards, the Darling loop's exact shape — keyed by server
+    /// id so one wedged server never blocks its neighbors, never pruned (one small object per server
+    /// ever monitored).</summary>
+    private readonly ConcurrentDictionary<string, AbandonableStep> _backfillSliceSteps = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #2165: per-server gates shared by the tick's Query Store collection and this backfill slice, so the two
+    /// never run heavy QS text extraction against one server at the same time. Keyed like
+    /// <see cref="_backfillSliceSteps"/> and likewise never pruned — one tiny object per server.
+    ///
+    /// <para>Both loops must resolve the SAME gate instance per server, which is why there is one dictionary
+    /// rather than one per loop. Pinned by a test for exactly that reason.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<string, QueryStoreServerGate> _queryStoreGates = new(StringComparer.Ordinal);
+
+    /// <summary>#2148: the hard ceiling ONE server's slice may hold the tick — a healthy slice is one
+    /// 30s-capped statement plus DuckDB writes, so this is a defect signal, never jitter. Per SERVER
+    /// deliberately (review catch, round 2): a shared tick-level deadline would both stall every
+    /// server's backfill behind one wedge AND false-trip as fleet size grows.</summary>
+    private static readonly TimeSpan BackfillSliceDeadline = TimeSpan.FromSeconds(180);
+
     /// <summary>
     /// Runs AT MOST one backfill slice per enabled server: the first database found with a pending
     /// hole or an undrained first-contact tail gets one byte-budgeted slice; everything else waits
-    /// for a later tick. Per-server failures log and skip — one unreachable server never stalls the
-    /// sweep. Called from CollectionBackgroundService on its own due-cadence.
+    /// for a later tick. Per-server failures log and skip, and per-server WEDGES are abandoned and
+    /// quarantined (#2148) — one stuck server never stalls the sweep in either failure mode. Called
+    /// from CollectionBackgroundService on its own due-cadence.
     /// </summary>
     public async Task RunQueryStoreBackfillTickAsync(CancellationToken cancellationToken)
     {
@@ -57,19 +81,102 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            try
+            /* #2165: the other half of the gate. Taken OUTSIDE the AbandonableStep on purpose — an
+               abandoned-but-still-wedged slice keeps the gate closed, which is right, because the statement
+               is genuinely still running on the monitored server and the tick must keep yielding to it. */
+            var gate = _queryStoreGates
+                .GetOrAdd(server.Id, static _ => new QueryStoreServerGate())
+                .TryAcquire();
+
+            if (gate is null)
             {
-                await RunQueryStoreBackfillSliceAsync(server, cancellationToken);
+                _logger?.LogInformation(
+                    "query_store backfill slice on '{Server}' deferred — the tick's Query Store collection is running (#2165)",
+                    server.DisplayName);
+                continue;
             }
-            catch (OperationCanceledException)
+
+            using var backfillGate = gate;
+
+            var step = _backfillSliceSteps.GetOrAdd(server.Id, static _ => new AbandonableStep());
+            var result = await step.RunAsync(
+                () => RunQueryStoreBackfillSliceAsync(server, cancellationToken),
+                BackfillSliceDeadline,
+                onLateFault: ex => _logger?.LogError(ex,
+                    "query_store backfill slice on '{Server}' faulted AFTER being abandoned — this is the wedge's own exception (#2148)",
+                    server.DisplayName),
+                cancellationToken: cancellationToken);
+
+            switch (result.Outcome)
             {
-                return;
+                case AbandonableStepOutcome.Cancelled:
+                    return;
+                case AbandonableStepOutcome.Faulted when result.Exception is OperationCanceledException:
+                    return;
+                case AbandonableStepOutcome.Faulted:
+                    _logger?.LogWarning("query_store backfill slice on '{Server}' failed: {Message}",
+                        server.DisplayName, result.Exception!.Message);
+                    break;
+                case AbandonableStepOutcome.Abandoned:
+                    _logger?.LogError(
+                        "query_store backfill slice on '{Server}' exceeded {Deadline}s and was ABANDONED — " +
+                        "other servers' backfill continues; this server is quarantined until the wedged task " +
+                        "ends. Defect signal: report with this log (#2148).",
+                        server.DisplayName, (int)BackfillSliceDeadline.TotalSeconds);
+                    break;
+                case AbandonableStepOutcome.SkippedStillRunning:
+                    _logger?.LogError(
+                        "query_store backfill slice on '{Server}' skipped — a previously-abandoned slice is still wedged (#2148).",
+                        server.DisplayName);
+                    break;
             }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning("query_store backfill slice on '{Server}' failed: {Message}",
-                    server.DisplayName, ex.Message);
-            }
+        }
+    }
+
+    /// <summary>
+    /// When a server's live query_store collection last failed a per-database item — the yield-to-
+    /// live signal (#2111), stamped by the definition runner's item-error path and judged by
+    /// <see cref="QueryStoreBackfillState.ShouldYieldToLive"/>. In-memory on purpose — a restart
+    /// forgetting the stamps just means one backfill slice races one live cycle once.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
+
+    /// <summary>Consecutive live query_store failures per (server, database) — the adaptive-shrink
+    /// signal (#2111 promoted); see Darling's twin for the semantics. Reset on the database's next
+    /// successful item.</summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), int> _consecutiveQueryStoreItemFailures = new();
+
+    private int ConsecutiveQueryStoreItemFailures(int serverId, string database)
+        => _consecutiveQueryStoreItemFailures.TryGetValue((serverId, database), out var count) ? count : 0;
+
+    private void OnQueryStoreItemFailed(int serverId, string database)
+    {
+        _lastQueryStoreItemFailureUtc[serverId] = DateTime.UtcNow;
+        _consecutiveQueryStoreItemFailures.AddOrUpdate((serverId, database), 1, static (_, current) => current + 1);
+    }
+
+    private void OnQueryStoreItemSucceeded(int serverId, string database)
+        => _consecutiveQueryStoreItemFailures.TryRemove((serverId, database), out _);
+
+    /// <summary>Consecutive failed backfill slices per server — the shrink signal's backfill half;
+    /// any completed slice resets it.</summary>
+    private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
+
+    /// <summary>Runs one slice with the failure accounting wrapped around it — the caller's outer
+    /// catch still logs the throw exactly as before.</summary>
+    private async Task RunCountedBackfillSliceAsync(
+        ServerConnection server, int serverId, CollectorTargetInfo target, string databaseName,
+        DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunBackfillSliceAsync(server, serverId, target, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
+            _consecutiveSliceFailures.TryRemove(serverId, out _);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _consecutiveSliceFailures.AddOrUpdate(serverId, 1, static (_, current) => current + 1);
+            throw;
         }
     }
 
@@ -93,6 +200,20 @@ public partial class RemoteCollectorService
         }
 
         var serverId = GetDeterministicHashCode(GetServerNameForStorage(server));
+
+        /* #2111 yield-to-live: a backfill slice scans the same QS internal tables the live sweep
+           reads — when the live path is failing on this server, running a slice anyway is the
+           contention that keeps it failing. Skip the server this tick; the hole waits, live
+           recovers, backfill resumes. Same policy, same window as Darling's worker. */
+        if (QueryStoreBackfillState.ShouldYieldToLive(
+            _lastQueryStoreItemFailureUtc.TryGetValue(serverId, out var lastLiveFailure) ? lastLiveFailure : null,
+            DateTime.UtcNow))
+        {
+            _logger?.LogDebug(
+                "query_store backfill on '{Server}': yielding to the live path (recent live query_store failure)",
+                server.DisplayName);
+            return false;
+        }
         var state = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
         var databases = await GetBackfillCandidateDatabasesAsync(serverId, cancellationToken);
 
@@ -114,7 +235,7 @@ public partial class RemoteCollectorService
                 }
 
                 var holeFloor = holeFrom > floorLimit ? holeFrom : floorLimit;
-                await RunBackfillSliceAsync(server, serverId, target, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
+                await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
                 return true;
             }
 
@@ -142,7 +263,7 @@ public partial class RemoteCollectorService
                 continue;
             }
 
-            await RunBackfillSliceAsync(server, serverId, target, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
+            await RunCountedBackfillSliceAsync(server, serverId, target, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
             return true;
         }
 
@@ -163,6 +284,17 @@ public partial class RemoteCollectorService
         ServerConnection server, int serverId, CollectorTargetInfo target, string databaseName,
         DateTime floorUtc, DateTime ceilingUtc, bool isHole, CancellationToken cancellationToken)
     {
+        /* #2102: one slice queries at most the top MaxSliceSpan of the remaining range. The byte
+           budget bounds what SHIPS, not what the query aggregates and sorts — an unchunked wide
+           window on a big database times out at the command timeout every tick and the range never
+           drains, the same row-cap-is-not-a-cost-cap flaw that wedged the live path. */
+        /* #2111 adaptive shrink: after consecutive failed slices this server digs in narrower
+           chunks until one fits its command timeout; a completed slice resets to full width. */
+        var sliceSpan = QueryStoreBackfillState.AdaptiveSpan(
+            QueryStoreBackfillState.MaxSliceSpan,
+            _consecutiveSliceFailures.TryGetValue(serverId, out var recentFailures) ? recentFailures : 0);
+        var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
+
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
         {
@@ -183,7 +315,7 @@ public partial class RemoteCollectorService
             /* Azure arm: the window travels as command parameters on a per-database connection —
                same contract as Darling's, same shared BuildBackfillQuery. */
             context.CurrentDatabaseName = databaseName;
-            var azurePlan = definition.BuildBackfillQuery(context, floorUtc, ceilingUtc);
+            var azurePlan = definition.BuildBackfillQuery(context, sliceFloor, ceilingUtc);
             using var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
             using var dbCommand = new SqlCommand(azurePlan.Text, dbConnection) { CommandTimeout = timeout };
             AddCollectorParameters(dbCommand, azurePlan);
@@ -215,7 +347,7 @@ public partial class RemoteCollectorService
                 }
             }
 
-            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, floorUtc, ceilingUtc);
+            var plan = definition.BuildBackfillPerItemQuery(databaseName, context, sliceFloor, ceilingUtc);
             using var command = new SqlCommand(plan.Text, sqlConnection) { CommandTimeout = timeout };
             AddCollectorParameters(command, plan);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -224,6 +356,32 @@ public partial class RemoteCollectorService
 
         if (rows.Count == 0)
         {
+            if (sliceFloor > floorUtc)
+            {
+                /* Only this CHUNK is quiet — the range below it is unexplored, so this is an
+                   advance, not a terminal verdict (#2102). The persisted hole ceiling shrinks past
+                   the quiet chunk; a derived-boundary tail converts its remainder to a hole record,
+                   because MIN over stored rows cannot walk through quiet space (an empty chunk
+                   ships nothing, so the derived ceiling would re-ask the same chunk forever). The
+                   tail marks done in the same breath — the hole owns the rest of the dig, and the
+                   scan services holes first. */
+                var advance = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, sliceFloor)
+                };
+                if (!isHole)
+                {
+                    advance[QueryStoreBackfillState.DoneKeyPrefix + databaseName] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+                }
+
+                await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, advance, cancellationToken);
+
+                _logger?.LogInformation(
+                    "query_store backfill on '{Server}' [{Database}]: quiet chunk {Floor:o}..{Ceiling:o}, continuing below ({Range}).",
+                    server.DisplayName, databaseName, sliceFloor, ceilingUtc, isHole ? "hole" : "tail");
+                return;
+            }
+
             if (isHole)
             {
                 await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
@@ -255,7 +413,11 @@ public partial class RemoteCollectorService
         var boundary = context.PerItemShippedBoundary;
         if (isHole)
         {
-            if (boundary is null || boundary <= floorUtc)
+            /* A chunked slice's rows all sit at or above its own chunk floor, so a missing shipped
+               boundary falls back to the chunk floor rather than deleting (#2102) — deletion under
+               a bounded window would orphan the unexplored range below it. */
+            var shippedTo = boundary ?? sliceFloor;
+            if (shippedTo <= floorUtc)
             {
                 await DeleteCollectorStateKeyAsync(serverId, QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
             }
@@ -264,7 +426,7 @@ public partial class RemoteCollectorService
                 await SaveCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName,
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, boundary.Value)
+                        [QueryStoreBackfillState.HoleKeyPrefix + databaseName] = QueryStoreBackfillState.EncodeHole(floorUtc, shippedTo)
                     }, cancellationToken);
             }
         }
@@ -372,6 +534,177 @@ public partial class RemoteCollectorService
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Deleting collector state {Key} for {Collector} failed; next tick re-derives", stateKey, collectorName);
+        }
+    }
+
+    /// <summary>
+    /// Retires one collector's per-database <c>collector_state</c> rows for databases the server no longer
+    /// has (#2188) — the DuckDB twin of <c>DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql</c>,
+    /// same guards in DuckDB's dialect. <c>$1</c> server_id, <c>$2</c> collector_name, <c>$3</c> the key
+    /// prefix, which is also what reconstructs each live database's key for the anti-join.
+    ///
+    /// <para><b>The existence list is <c>database_states</c>, not query_store's enumeration.</b> The
+    /// enumeration is heavily filtered — ONLINE only, AG primaries only, the excluded-database filter, the
+    /// vendor-name screen, <c>HAS_DBACCESS</c>, and a per-database probe that can fail — so a database
+    /// missing from one cycle's items is far more often offline or unprobeable than dropped, and pruning on
+    /// that absence would delete LIVE state on exactly the servers that keep databases parked. database_states
+    /// is an unfiltered <c>SELECT ... FROM sys.databases</c>, which answers the only question asked here.
+    /// Lite already reads the newest snapshot this same way in
+    /// <c>LocalDataService.GetDatabaseStateDeviationsAsync</c>, which prunes auto-baselines for dropped
+    /// databases — this is that established idiom applied to collector_state.</para>
+    ///
+    /// <para><b>The snapshot must be NEWER than the row it judges</b> (<c>updated_at &lt; newest</c>).
+    /// Existing is not current: if database_states stops collecting, its newest snapshot freezes, and every
+    /// database created after that instant is missing from it while being perfectly alive — presence alone
+    /// would prune such a database's state on EVERY tick forever. A snapshot cannot judge a row written
+    /// after it was taken. Both stamps are the service clock's UTC (<c>collectionTime</c> and
+    /// <see cref="SaveCollectorStateAsync"/> both read <c>DateTime.UtcNow</c>). This also subsumes the
+    /// empty-snapshot case for free: <c>&lt;</c> against a NULL MAX is NULL, so a server that has never
+    /// collected database_states prunes nothing rather than everything.</para>
+    ///
+    /// <para><b>Which keys</b> comes from the SHARED <see cref="QueryStorePerDatabaseState.PrunableKeys"/>,
+    /// deliberately including <c>planwm:</c> that Lite never writes: running one no-op delete is what
+    /// guarantees that enabling plan capture here later cannot quietly create an orphan class this forgot
+    /// about. Best-effort like its siblings — a failed prune leaves the rows and the next tick retries.</para>
+    /// </summary>
+    private const string PruneOrphanedDatabaseStateKeysSql = @"
+DELETE FROM collector_state
+WHERE server_id = $1
+AND   collector_name = $2
+AND   starts_with(state_key, $3)
+AND   updated_at < (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+AND   NOT EXISTS
+      (
+          SELECT 1
+          FROM database_states ds
+          WHERE ds.server_id = $1
+          AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+          AND   collector_state.state_key = $3 || ds.database_name
+      )
+RETURNING state_key";
+
+    /// <summary>
+    /// The Azure SQL DB variant (#2191) — the DuckDB twin of
+    /// <c>DarlingCollectorRunner.PruneForeignDatabaseStateKeysSql</c>. Prunes every per-database state key
+    /// that is not the ONE database this registration names.
+    ///
+    /// <para>No snapshot and no freshness guard, and that is the difference rather than an omission: the
+    /// on-prem statement guards because a SNAPSHOT can be empty or stale, while the single legitimate name
+    /// here comes from the connection string's own catalog, which is current by construction. #2191 asked for
+    /// "an authoritative unfiltered sys.databases read from master, used only on the success path"; #2220
+    /// removed the need for any master read on this path, which is what makes it reachable now.</para>
+    /// </summary>
+    private const string PruneForeignDatabaseStateKeysSql = @"
+DELETE FROM collector_state
+WHERE server_id = $1
+AND   collector_name = $2
+AND   starts_with(state_key, $3)
+AND   state_key <> $3 || $4
+RETURNING state_key";
+
+    /// <summary>
+    /// Runs <see cref="PruneOrphanedDatabaseStateKeysSql"/> for every shared owner/prefix pair, once per
+    /// query_store cycle for one server — the same trigger and the same placement as Darling's, so the two
+    /// cannot drift on WHEN they prune either.
+    /// </summary>
+    protected async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            var pruned = new List<string>();
+
+            foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = PruneOrphanedDatabaseStateKeysSql;
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = owner });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = prefix });
+
+                /* RETURNING and a reader, not a rows-affected count (#2205). The only symptom of a WRONG
+                   delete here is a silent refetch, so a bare number leaves nothing to diagnose it with — on
+                   Lite you could see that three rows went without seeing WHICH databases' watermark and
+                   backfill state was retired. Correctness already matched Darling exactly (same anti-join,
+                   same freshness guard, pinned by the #2195 tests); this closes the FORENSICS gap. */
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
+            }
+
+            if (pruned.Count > 0)
+            {
+                /* Same shape and same fields as DarlingCollectorRunner's, so an operator reading either
+                   SKU's log sees the same sentence. */
+                _logger?.LogInformation(
+                    "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
+                    serverId, pruned.Count, string.Join(", ", pruned));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+        }
+    }
+
+    /// <summary>
+    /// The Azure SQL DB arm of the #2188 prune (#2191) — Darling's twin is
+    /// <c>PruneForeignQueryStoreDatabaseStateAsync</c>, same trigger, same placement, same shared
+    /// <see cref="QueryStorePerDatabaseState.PrunableKeys"/> set, so the two cannot drift on which prefixes
+    /// get pruned or when.
+    ///
+    /// <para>What it deletes today is mostly #2220's residue: before that fix each Azure registration swept
+    /// every sibling database on the logical server and wrote a watermark for each under its own server_id.
+    /// <c>collector_state</c> carries no retention, so unlike the collected rows those orphans would persist
+    /// indefinitely rather than ageing out.</para>
+    /// </summary>
+    /// <param name="ownDatabase">The registration's own database. Callers must only reach here when it is
+    /// non-empty — a registration naming none is a registration of the logical SERVER, and a single-name
+    /// prune there would delete every live watermark it legitimately has.</param>
+    protected async Task PruneForeignQueryStoreDatabaseStateAsync(
+        int serverId, string ownDatabase, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(ownDatabase))
+        {
+            return;
+        }
+
+        try
+        {
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            var pruned = new List<string>();
+
+            foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = PruneForeignDatabaseStateKeysSql;
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = owner });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = prefix });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = ownDatabase });
+
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
+            }
+
+            if (pruned.Count > 0)
+            {
+                /* Same sentence as Darling's twin, so an operator reading either SKU's log sees one wording. */
+                _logger?.LogInformation(
+                    "[server_id {ServerId}] pruned {Count} query_store state row(s) belonging to databases other than this registration's [{Database}]: {Keys}",
+                    serverId, pruned.Count, ownDatabase, string.Join(", ", pruned));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Pruning foreign query_store database state failed; next cycle retries");
         }
     }
 

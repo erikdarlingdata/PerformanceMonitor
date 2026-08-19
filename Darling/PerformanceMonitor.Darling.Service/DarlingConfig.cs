@@ -12,6 +12,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using PerformanceMonitor.Collectors;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
 
@@ -52,6 +53,58 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("capturePlans")]
     public bool CapturePlans { get; set; } = true;
+
+    /// <summary>
+    /// Whether the query_store backfill loop runs at all (#2167). Store-backed (config_service, V58) and
+    /// read live by the worker's loop, so an operator can stop a runaway drain (a freshly restored catalog
+    /// against a cross-region server) without a restart and without touching plan capture. Default on.
+    /// </summary>
+    [JsonPropertyName("queryStoreBackfillEnabled")]
+    public bool QueryStoreBackfillEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Per-database text byte budget for the query_store collector, in MEGABYTES (#2164). Store-backed
+    /// (config_service, V59), clamped [4,256] on read, default 64 = the previous compile-time constant.
+    /// Lower it when the monitored fleet is a network hop away: the budget bounds memory, but it also
+    /// sets how long one collector query holds the monitored server open draining to this client, which
+    /// over a cross-region link is the tenant-visible cost. A cut is always resumable (#1960), so a
+    /// smaller budget trades catch-up latency for shorter statements — never data.
+    /// </summary>
+    [JsonPropertyName("queryStoreTextBudgetMb")]
+    public int QueryStoreTextBudgetMb { get; set; } = 64;
+
+    /// <summary>
+    /// #2316: how many days a stored plan XML outlives its last sighting before the dimension GC may
+    /// take it — the bound the fact-coupled horizon cannot provide on a store younger than the fact
+    /// retention (measured: 127 GB of parameter-sniffing plan churn in the dim's first 22 days, with
+    /// the coupled GC unable to fire until a month after projected disk-full). Facts keep their full
+    /// retention; a plan older than this renders as a missing plan, which every reader handles.
+    /// 0 disables (fact-coupled horizon alone); enabled values clamp to [7,365] on read.
+    /// </summary>
+    [JsonPropertyName("planContentRetentionDays")]
+    public int PlanContentRetentionDays { get; set; } = 21;
+
+    /// <summary>
+    /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or
+    /// 'none' on read. 'gzip' (default, unchanged): plans live as gzip bytes in query_plan_gz - 14.0x
+    /// measured, readable only through the apps/MCP. 'none': plans written as plain text into
+    /// query_plan_xml - lz4 TOAST compresses ~8.9x, and anything reading the store directly over SQL
+    /// (Grafana, report tooling) gets plan XML back with no extension and no UDF. Flipping it affects
+    /// NEW rows only; the readers' text-first-else-gz resolution covers every mix. The dimension is
+    /// content-addressed either way, so the digest and dedup are codec-independent.
+    /// </summary>
+    [JsonPropertyName("planXmlCompression")]
+    public string PlanXmlCompression { get; set; } = "gzip";
+
+    /// <summary>
+    /// How many per-server collection bodies may hold a SQL connection at once (#2170) — the #1553 fleet
+    /// gate, previously hardcoded to 4. Store-backed (config_service, V59), clamped [1,16], default 4.
+    /// Raise it on a host with headroom watching a large fleet, where 4-wide serialization is what makes
+    /// sweeps queue and the Fleet Health screen report staleness while every collector is healthy.
+    /// Peak transient memory is roughly this × <see cref="QueryStoreTextBudgetMb"/>.
+    /// </summary>
+    [JsonPropertyName("maxConcurrentSweeps")]
+    public int MaxConcurrentSweeps { get; set; } = 4;
 
     /// <summary>
     /// Whether the default_trace_events collector records Object:Created/Altered/Deleted schema-change
@@ -240,6 +293,23 @@ public sealed class DarlingConfig
             else if (!string.Equals(server.Auth, "integrated", StringComparison.OrdinalIgnoreCase))
             {
                 problems.Add($"{label}: auth must be 'integrated' or 'sql' (got '{server.Auth}').");
+            }
+
+            /* Caught here, in the pre-flight, rather than only where the connection string is built.
+               MonitoredServerConnection throws on this too — it has to, since it is what actually
+               knows the driver can't honour it — but that throw happens at first connect, which for a
+               service means the misconfiguration surfaces in a log after deployment instead of in
+               --test-connection before it. */
+            if (server.IsPostgres && !server.UsesSqlAuth)
+            {
+                problems.Add(
+                    $"{label}: a PostgreSQL target requires auth 'sql' with a username and password " +
+                    "(integrated/Kerberos auth is not supported for PostgreSQL targets).");
+            }
+
+            if (server.Port is not 0 && server.Port is < 1 or > 65535)
+            {
+                problems.Add($"{label}: port must be between 1 and 65535 (got {server.Port}).");
             }
         }
 
@@ -433,6 +503,41 @@ public sealed class AlertsConfig
     /// databases at a high percent never page (0 removes the floor) (#1984).</summary>
     [JsonPropertyName("pvsFloorGb")]
     public int PvsFloorGb { get; set; } = 1;
+
+    /// <summary>#2107: the store volume's self-alert warning percent (was a compile-time 10.0;
+    /// 0 disables the check — percent is its only trigger).</summary>
+    [JsonPropertyName("selfDiskFreeWarnPercent")]
+    public int SelfDiskFreeWarnPercent { get; set; } = 10;
+
+    /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
+    /// Running fire (was a compile-time 30 minutes).</summary>
+    [JsonPropertyName("collectionStaleMinutes")]
+    public int CollectionStaleMinutes { get; set; } = 30;
+
+    /// <summary>#2107: the Collection Stopped fast path — consecutive failures with zero successes
+    /// that fire without waiting out the staleness window (was a compile-time 10).</summary>
+    [JsonPropertyName("collectionFailureThreshold")]
+    public int CollectionFailureThreshold { get; set; } = 10;
+
+    /// <summary>#2107: the low-disk CRITICAL severity tier's percent floor (#1136 — grades the
+    /// target-volume alert; was a compile-time 3.0).</summary>
+    [JsonPropertyName("diskCriticalFreePercent")]
+    public int DiskCriticalFreePercent { get; set; } = 3;
+
+    /// <summary>#2107: the low-disk CRITICAL severity tier's GB floor (was a compile-time 2.0).</summary>
+    [JsonPropertyName("diskCriticalFreeGb")]
+    public int DiskCriticalFreeGb { get; set; } = 2;
+
+    /// <summary>#2107: the analysis notification cooldown — the shared engine clamps [30, 10080]
+    /// and Lite always passed a configured value through; Darling hardcoded 360.</summary>
+    [JsonPropertyName("analysisNotifyCooldownMinutes")]
+    public int AnalysisNotifyCooldownMinutes { get; set; } = 360;
+
+    /// <summary>#2136: the Store Job Over Cadence warning threshold — a store background job whose
+    /// last run reaches this percent of its own schedule interval fires the Warning tier. The
+    /// Critical tier is fixed at 100 (a job outrunning its cadence compounds refresh lag).</summary>
+    [JsonPropertyName("storeJobCadenceWarnPercent")]
+    public int StoreJobCadenceWarnPercent { get; set; } = 25;
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
@@ -974,8 +1079,28 @@ public sealed class MonitoredServer
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
 
+    /// <summary>
+    /// Which database engine this target runs: <c>"sqlserver"</c> (default) or <c>"postgres"</c>
+    /// (accepted spellings: postgres, postgresql, pg, aurora-postgresql).
+    /// <para>This is configuration rather than something probed, because it has to be known BEFORE
+    /// connecting — it decides which driver builds the connection string and which detection query
+    /// runs. An omitted or unrecognized value means SQL Server, so every existing darling.json keeps
+    /// its exact present behaviour.</para>
+    /// </summary>
+    [JsonPropertyName("engine")]
+    public string Engine { get; set; } = "sqlserver";
+
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";
+
+    /// <summary>
+    /// TCP port, for PostgreSQL targets on a non-default port. <c>0</c> (the default) means "use the
+    /// driver's default", which is 5432.
+    /// <para>Unused for SQL Server, which carries a non-default port in the host itself as
+    /// <c>host,1433</c> — that convention is left alone rather than migrated.</para>
+    /// </summary>
+    [JsonPropertyName("port")]
+    public int Port { get; set; }
 
     /// <summary>Azure SQL Database: the one database this entry monitors (feeds the storage-name identity).</summary>
     [JsonPropertyName("database")]
@@ -1036,14 +1161,74 @@ public sealed class MonitoredServer
     [JsonIgnore]
     public bool UsesSqlAuth => string.Equals(Auth, "sql", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// <see cref="Engine"/> parsed. Anything unrecognized resolves to
+    /// <see cref="CollectorTargetEngine.SqlServer"/> rather than throwing: a typo in one server entry
+    /// must not stop the service from starting and monitoring everything else. The mismatch surfaces
+    /// immediately anyway — the SQL Server detection query fails against a Postgres target.
+    /// </summary>
+    [JsonIgnore]
+    public CollectorTargetEngine TargetEngine => Engine?.Trim().ToLowerInvariant() switch
+    {
+        "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => CollectorTargetEngine.PostgreSql,
+        _ => CollectorTargetEngine.SqlServer,
+    };
+
+    /// <summary>True when this entry targets PostgreSQL, so the SQL Server-only config is inapplicable.</summary>
+    [JsonIgnore]
+    public bool IsPostgres => TargetEngine == CollectorTargetEngine.PostgreSql;
+
     /// <summary>Display name falls back to the host.</summary>
     [JsonIgnore]
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? Host : Name;
 
     /// <summary>
-    /// The canonical storage identity (host[:database][:RO]) — hashed to server_id via the shared
-    /// ServerIdHelper, so this Darling entry derives the same id Lite would for the same server.
+    /// The canonical storage identity (<c>host[:database][:pg][:port][:RO]</c>) — hashed to server_id via the
+    /// shared ServerIdHelper, so this Darling entry derives the same id Lite would for the same server.
+    ///
+    /// <para>#2218: engine and port are passed so a PostgreSQL instance cannot collide with a SQL Server on the
+    /// same host, and two PostgreSQL instances on one host cannot collide with each other. Both are inert for a
+    /// SQL Server entry and the resulting name is byte-identical to what it was before — <c>Engine</c> folds to
+    /// no token for SQL Server, and <c>Port</c> is a PostgreSQL-only field that stays 0 there, because SQL
+    /// Server carries a non-default port inside <c>Host</c> as <c>host,1433</c> and is therefore already
+    /// discriminated by the host string. That is why no conditional is needed here: the defaults ARE the
+    /// backwards-compatible case.</para>
     /// </summary>
     [JsonIgnore]
-    public string StorageName => PerformanceMonitor.Common.ServerIdHelper.BuildStorageName(Host, Database, ReadOnlyIntent);
+    public string StorageName => PerformanceMonitor.Common.ServerIdHelper.BuildStorageName(
+        Host, Database, ReadOnlyIntent, Engine, Port);
+
+    /// <summary>
+    /// <c>config_monitored_servers.server_id</c> as READ FROM THE STORE, or null for an entry that has no
+    /// store row yet — a <c>darling.json</c> bootstrap entry before the first seed.
+    ///
+    /// <para><b>Not settable from the file</b> (<see cref="JsonIgnore"/>) on purpose. The registry is
+    /// authoritative for identity once seeded, so letting an operator pin a <c>server_id</c> in
+    /// <c>darling.json</c> would create a second authority that could disagree with it — and disagree
+    /// silently, since nothing downstream re-checks.</para>
+    /// </summary>
+    [JsonIgnore]
+    public int? StoredServerId { get; set; }
+
+    /// <summary>
+    /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from
+    /// <see cref="StorageName"/>.
+    ///
+    /// <para><b>This is the single place a monitored server's identity is decided</b> (#2218, #2158). It used
+    /// to be recomputed at twelve call sites — every operator-command lookup, the reconcile, the self-alert
+    /// stamps, the schedule resolution — which is what makes identity-derived-from-mutable-config expensive
+    /// to change: a stored surrogate is only useful if nothing re-derives it behind the store's back.</para>
+    ///
+    /// <para><b>Today the two are always equal</b>, because the seed and the Viewer both write exactly this
+    /// hash, so reading the stored value changes no behaviour and no data moves. The point is that the
+    /// FALLBACK is now the only derivation: when identity stops being derivable, this property is what
+    /// changes, and the twelve call sites do not.</para>
+    ///
+    /// <para>The store is preferred over the derivation rather than merely agreeing with it, because that is
+    /// the ordering that makes a stored id which no longer matches its host keep working — which is the
+    /// whole point of storing it.</para>
+    /// </summary>
+    [JsonIgnore]
+    public int ServerId =>
+        StoredServerId ?? PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(StorageName);
 }

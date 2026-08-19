@@ -328,15 +328,17 @@ public sealed class DarlingMcpToolsTests
                     "finding_id", "analysis_time", "severity", "confidence", "category",
                     "root_fact", "leaf_fact", "story_path", "story_path_hash", "fact_count",
                     "incident_id", "occurrences", "first_seen", "last_seen", "peak_severity",
-                    "co_fired", "time_range", "advice", "remediation_command"
+                    "co_fired", "time_range", "advice", "remediation_command", "structured_remediation"
                 })
                 {
                     Assert.True(finding.TryGetProperty(field, out _), $"envelope field '{field}' missing");
                 }
 
                 /* This planted finding has no persisted RemediationAction, so its copy-paste command
-                   is present-but-null (JsonOptions does not ignore nulls). */
+                   and its #2138 machine-first projection are both present-but-null (JsonOptions does
+                   not ignore nulls). */
                 Assert.Equal(JsonValueKind.Null, finding.GetProperty("remediation_command").ValueKind);
+                Assert.Equal(JsonValueKind.Null, finding.GetProperty("structured_remediation").ValueKind);
 
                 Assert.Equal(TestStoryHash, finding.GetProperty("story_path_hash").GetString());
                 Assert.Equal(2.5, finding.GetProperty("severity").GetDouble());

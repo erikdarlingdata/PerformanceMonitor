@@ -287,7 +287,45 @@ LIMIT 5";
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
-WITH deduped AS
+WITH psp_signature AS
+(
+    -- #2138 gap 3: the PARAMETER_SENSITIVITY detector's EXACT firing signature (same floors, same
+    -- ratio, same analysis window) reduced to the (database, query_hash) set it would report. Using
+    -- the detector's own thresholds is what keeps the flag honest: a query flagged here IS one the
+    -- detector counts when it fires, never a looser lookalike. Grant/spill divergence stay metadata
+    -- on the PSP side — they do not fire the detector alone, so they do not fire this flag alone.
+    SELECT DISTINCT
+        database_name,
+        query_hash
+    FROM
+    (
+        SELECT
+            database_name,
+            query_hash,
+            query_plan_hash,
+            execution_count,
+            creation_time,
+            min_worker_time,
+            max_worker_time,
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY database_name, query_hash, query_plan_hash
+                ORDER BY collection_time DESC
+            ) AS rn
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $3
+        AND   collection_time <= $4
+        AND   delta_execution_count > 0
+    ) AS latest_cache
+    WHERE rn = 1
+    AND   min_worker_time >= 10000
+    AND   max_worker_time >= 250000
+    AND   execution_count >= 20
+    AND   creation_time <= $3
+    AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+),
+deduped AS
 (
     -- #1850: replica_role is part of the interval's identity, not a passenger.
     -- sys.query_store_runtime_stats is keyed by (plan_id, interval, execution_type, replica_group), and
@@ -305,6 +343,7 @@ WITH deduped AS
         plan_id,
         replica_role,
         query_plan_hash,
+        query_hash,
         execution_count,
         avg_cpu_time_us,
         avg_duration_us,
@@ -332,6 +371,7 @@ plan_agg AS
         plan_id,
         replica_role,
         any_value(query_plan_hash) AS query_plan_hash,
+        any_value(query_hash) AS query_hash,
         any_value(query_text) AS query_text,
         SUM(execution_count) AS execs,
         SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
@@ -352,6 +392,7 @@ plan_dedup AS
         replica_role,
         query_plan_hash,
         MAX(plan_id) AS plan_id,
+        any_value(query_hash) AS query_hash,
         any_value(query_text) AS query_text,
         SUM(execs) AS execs,
         SUM(cpu_per_exec * execs) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
@@ -388,12 +429,28 @@ compared AS
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
         l.query_text,
-        GREATEST
+        -- #2138: the SAME CPU-primary scoring as the PLAN_REGRESSION fact (DuckDbFactCollector.QueryPerf.cs,
+        -- where the rationale lives). The drill-down must agree with the fact that displays it: under the
+        -- old GREATEST a duration-only regression could appear here that the fact never counted.
+        CASE
+            WHEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 2
+                THEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0)
+            WHEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) >= 4
+             AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
+                THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
+        END AS regression_factor,
+        l.replica_role,
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
+        -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
+        -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
+        EXISTS
         (
-            l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0),
-            l.dur_per_exec / NULLIF(b.dur_per_exec, 0)
-        ) AS regression_factor,
-        l.replica_role
+            SELECT 1
+            FROM psp_signature AS p
+            WHERE p.database_name = l.database_name
+            AND   p.query_hash = l.query_hash
+        ) AS parameter_sensitivity_cofired
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -415,14 +472,21 @@ SELECT
     best_dur,
     regression_factor,
     LEFT(query_text, 500) AS query_text,
-    replica_role
+    replica_role,
+    parameter_sensitivity_cofired
 FROM compared
 WHERE regression_factor >= 2
+AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
 LIMIT 5";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
+        /* $3/$4: the STANDARD analysis window for the psp_signature CTE — deliberately not the 14-day
+           comparison window above, so the flag matches what the PARAMETER_SENSITIVITY detector itself
+           would report for this run. */
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync();
@@ -445,8 +509,11 @@ LIMIT 5";
                    standalone/non-AG/pre-2022 server, which is the overwhelming majority; it is only
                    populated on an AG primary with Query Store for secondary replicas enabled, where two
                    rows for the same query are now legitimately distinct rather than one silently dropped.
-                   Last in the row so the existing reader ordinals are untouched. */
-                replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11)
+                   Appended after the older columns so the existing reader ordinals are untouched. */
+                replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11),
+                /* #2138 gap 3: the plan-cache PSP signature co-fired for this query's hash. Steers the
+                   force-plan caution text; the future bot never auto-forces a flagged target. */
+                parameter_sensitivity_cofired = !reader.IsDBNull(12) && Convert.ToBoolean(reader.GetValue(12))
             });
         }
 

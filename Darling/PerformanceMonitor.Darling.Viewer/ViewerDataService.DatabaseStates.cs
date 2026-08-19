@@ -27,17 +27,43 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /* Matches the service alert read's seed: effective state (STANDBY for a log-shipping secondary, else
-       state_desc), and a critical effective state is NOT baselined so it stays pending — otherwise opening
-       the editor mid-outage would baseline SUSPECT and silence the alert. */
-    private const string DatabaseStateSeedSql = @"
+       state_desc), and an integrity or transient effective state is NOT baselined so it stays pending —
+       otherwise opening the editor mid-outage would baseline SUSPECT and silence the alert, or opening it
+       mid-restore would baseline RESTORING and invert it (#2189). The state list is shared with the service
+       rather than spelled twice: this project cannot reference the service's, and two hand-kept copies of
+       "what must never be learned" is the drift that would let the editor seed what the alert refuses to. */
+    private const string DatabaseStateSeedSql = $@"
 INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
 SELECT $1, ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END, false, (now() AT TIME ZONE 'UTC')
 FROM database_states ds
 WHERE ds.server_id = $1
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
 AND   ds.state_desc IS NOT NULL
-AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ('SUSPECT', 'RECOVERY_PENDING', 'EMERGENCY')
+AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})
 ON CONFLICT (server_id, database_name) DO NOTHING";
+
+    /* The service adapter's #2189 heal, run for the same reason the seed is: the editor must not SHOW a
+       stale auto-baseline the alert has already stopped honouring, and a viewer seat pointed at a store
+       whose service is down would otherwise display — and keep — an expectation the database outgrew.
+       Auto-baselines only, and only ones recording a state the seed would refuse to learn: a user override
+       is the operator's declaration, and OFFLINE/STANDBY are steady states whose departure is real news. */
+    private const string DatabaseStateHealToOnlineSql = $@"
+UPDATE config.database_state_expected e
+SET expected_state = 'ONLINE',
+    updated_at = (now() AT TIME ZONE 'UTC'),
+    last_alerted_state = NULL,
+    last_alerted_at = NULL
+WHERE e.server_id = $1
+AND   e.is_user_override = false
+AND   e.expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})
+AND   EXISTS (
+    SELECT 1
+    FROM database_states ds
+    WHERE ds.server_id = $1
+    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   ds.database_name = e.database_name
+    AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) = 'ONLINE'
+)";
 
     private const string DatabaseStateExpectationsSql = @"
 WITH latest AS (
@@ -80,6 +106,10 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false
             await using var seed = _dataSource.CreateCommand(DatabaseStateSeedSql);
             seed.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             await seed.ExecuteNonQueryAsync(cancellationToken);
+
+            await using var heal = _dataSource.CreateCommand(DatabaseStateHealToOnlineSql);
+            heal.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await heal.ExecuteNonQueryAsync(cancellationToken);
         }
 
         var rows = new List<DatabaseStateExpectedRow>();

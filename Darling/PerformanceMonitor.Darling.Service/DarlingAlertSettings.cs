@@ -49,6 +49,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool PvsEnabled => _config.Alerts.PvsEnabled;
     public bool DatabaseStateEnabled => _config.Alerts.DatabaseStateEnabled;
 
+    /* #2157: ON with no store column yet — see AppAlertEngineSettings for the reasoning, including why a
+       darling.json-only flag would not survive a store reload (ApplyToConfig swaps Alerts wholesale). */
+    public bool ForcePlanFailureEnabled => true;
+
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
     public int BlockingCountThreshold => _config.Alerts.BlockingCountThreshold;
 
@@ -61,6 +65,21 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);
     public int LowDiskThresholdGb => Math.Max(0, _config.Alerts.LowDiskThresholdGb);
+
+    /* #2107: the previously-hardcoded thresholds, clamped on read like their siblings so a
+       hand-edited store value can't drive a nonsense threshold. The critical floors keep low-disk's
+       0-100 percent clamp and 0-floor GB shape; the staleness window and failure fast-path get
+       floors that keep the self-alerts meaningful (a 0-minute window would fire on every sweep). */
+    public int DiskCriticalFreePercent => Math.Clamp(_config.Alerts.DiskCriticalFreePercent, 0, 100);
+    public int DiskCriticalFreeGb => Math.Max(0, _config.Alerts.DiskCriticalFreeGb);
+    public int SelfDiskFreeWarnPercent => Math.Clamp(_config.Alerts.SelfDiskFreeWarnPercent, 0, 100);
+    public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
+
+    /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100] — below 5 would fire
+    /// on healthy jobs (the production worst runs ~7% of cadence), and at 100 the Warning tier merges
+    /// into the fixed Critical tier, so higher values would only disable the warning silently.</summary>
+    public int StoreJobCadenceWarnPercent => Math.Clamp(_config.Alerts.StoreJobCadenceWarnPercent, 5, 100);
+    public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 
     /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike
        the percent it has no meaningful upper bound. */
@@ -209,5 +228,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
        1) read through the by-reference config seam — a store reload reflects it immediately; clamped
        0–2 like Lite/Dashboard. The re-notify cooldown stays Lite's hardcoded default (not a knob). */
     public double AnalysisNotifySeverity => Math.Clamp(_config.Analysis.NotifySeverity, 0.0, 2.0);
-    public int AnalysisNotifyCooldownMinutes => 360;
+    /* #2107: was a hardcoded 360 while the shared engine accepts a clamped [30, 10080] value and
+       Lite always passed a configured one through — the Darling parity gap gotqn called out. */
+    public int AnalysisNotifyCooldownMinutes => Math.Clamp(_config.Alerts.AnalysisNotifyCooldownMinutes, 30, 10080);
 }

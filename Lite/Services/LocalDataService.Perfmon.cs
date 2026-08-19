@@ -96,7 +96,8 @@ ORDER BY counter_name";
 SELECT
     collection_time,
     SUM(cntr_value) AS cntr_value,
-    SUM(delta_cntr_value) AS delta_cntr_value
+    SUM(delta_cntr_value) AS delta_cntr_value,
+    MAX(sample_interval_seconds) AS sample_interval_seconds
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   counter_name = $2
@@ -118,7 +119,8 @@ ORDER BY collection_time";
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                DeltaValue = reader.IsDBNull(2) ? 0 : reader.GetInt64(2)
+                DeltaValue = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                SampleIntervalSeconds = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3))
             });
         }
 
@@ -146,7 +148,8 @@ SELECT
     counter_name,
     collection_time,
     SUM(cntr_value) AS cntr_value,
-    SUM(delta_cntr_value) AS delta_cntr_value
+    SUM(delta_cntr_value) AS delta_cntr_value,
+    MAX(sample_interval_seconds) AS sample_interval_seconds
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -174,7 +177,8 @@ ORDER BY counter_name, collection_time";
             {
                 CollectionTime = reader.GetDateTime(1),
                 Value = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3)
+                DeltaValue = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                SampleIntervalSeconds = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4))
             });
         }
 
@@ -196,4 +200,11 @@ public class PerfmonTrendPoint
     public DateTime CollectionTime { get; set; }
     public long Value { get; set; }
     public long DeltaValue { get; set; }
+
+    /// <summary>The wall-clock seconds <see cref="DeltaValue"/> covers, and the only thing that makes a
+    /// zero delta readable: the collector reports 0 in exactly the cases where no delta was knowable
+    /// (first sighting, counter reset, gap past the policy), so (0, 0) is "unknown" while (0, n) is
+    /// "genuinely idle" (#2234). MAX, never SUM, across a counter's instance rows — it is one measured
+    /// sweep gap repeated per instance, and Transactions/sec carries a median of 12 of them.</summary>
+    public long SampleIntervalSeconds { get; set; }
 }

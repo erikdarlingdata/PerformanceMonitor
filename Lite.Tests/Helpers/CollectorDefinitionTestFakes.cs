@@ -125,6 +125,11 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
 
     public int LastServerId { get; private set; }
 
+    /// <summary>What <see cref="CalculateDeltaWithInterval"/> hands back. Left at 0 so every existing
+    /// pin is unaffected; set it to something distinctive to prove a collector writes the MEASURED
+    /// interval rather than a constant of its own (#2234, where perfmon wrote a literal 60).</summary>
+    public int ReportedInterval { get; set; }
+
     public long CalculateDelta(int serverId, string collectorName, string key, long currentValue,
         DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
@@ -136,7 +141,25 @@ internal sealed class RecordingCollectorDeltaCalculator : ICollectorDeltaCalcula
     public long CalculateDeltaWithInterval(int serverId, string collectorName, string key, long currentValue,
         out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
     {
-        intervalSeconds = 0;
+        intervalSeconds = ReportedInterval;
         return CalculateDelta(serverId, collectorName, key, currentValue, collectionTime, maxGapSeconds);
+    }
+
+    /// <summary>
+    /// Series ages seen by <see cref="CalculateDeltaWithSeriesAge"/> (#2235), in call order.
+    ///
+    /// <para>Overridden rather than left to the interface's default implementation on purpose: the default
+    /// forwards to <see cref="CalculateDeltaWithInterval"/> and DROPS the age, so a collector that stopped
+    /// passing it would keep every existing pin green. Recording it here is what makes that regression
+    /// visible.</para>
+    /// </summary>
+    public List<int?> SeriesAges { get; } = new();
+
+    public long CalculateDeltaWithSeriesAge(int serverId, string collectorName, string key, long currentValue,
+        int? seriesAgeSeconds, out int intervalSeconds, DateTime? collectionTime = null, int maxGapSeconds = 0)
+    {
+        SeriesAges.Add(seriesAgeSeconds);
+        return CalculateDeltaWithInterval(serverId, collectorName, key, currentValue, out intervalSeconds,
+            collectionTime, maxGapSeconds);
     }
 }

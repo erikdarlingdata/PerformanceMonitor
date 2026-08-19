@@ -21,7 +21,7 @@
     <!-- ActualPlanExecutor RE-EXECUTES a query against the target to capture its ACTUAL plan (SET STATISTICS
          XML), so it needs the SqlClient runtime connection surface. Version matches Lite/Dashboard/the Darling
          service (7.0.1) so there is no transitive version skew. -->
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
   </ItemGroup>
 
   <ItemGroup>

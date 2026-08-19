@@ -425,13 +425,13 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
         /* Delta key: plan_handle to prevent cross-contamination when multiple plans exist for the
            same object; the db.schema.object fallback and the seven group names are the parity contract. */
         var deltaKey = row.PlanHandle ?? $"{row.DatabaseName}.{row.SchemaName}.{row.ObjectName}";
-        var deltaExec = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_exec", deltaKey, row.ExecutionCount, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaWorker = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_worker", deltaKey, row.TotalWorkerTime, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaElapsed = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_elapsed", deltaKey, row.TotalElapsedTime, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaReads = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_reads", deltaKey, row.TotalLogicalReads, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaWrites = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_writes", deltaKey, row.TotalLogicalWrites, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaPhysReads = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_phys_reads", deltaKey, row.TotalPhysicalReads, collectionTime: context.CollectionTime, maxGapSeconds: 300);
-        var deltaSpills = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_spills", deltaKey, row.TotalSpills, collectionTime: context.CollectionTime, maxGapSeconds: 300);
+        var deltaExec = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_exec", deltaKey, row.ExecutionCount, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWorker = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_worker", deltaKey, row.TotalWorkerTime, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsed = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_elapsed", deltaKey, row.TotalElapsedTime, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReads = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_reads", deltaKey, row.TotalLogicalReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWrites = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_writes", deltaKey, row.TotalLogicalWrites, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaPhysReads = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_phys_reads", deltaKey, row.TotalPhysicalReads, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpills = context.Deltas.CalculateDelta(context.ServerId, "proc_stats_spills", deltaKey, row.TotalSpills, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         writer
             .Value(row.DatabaseName)

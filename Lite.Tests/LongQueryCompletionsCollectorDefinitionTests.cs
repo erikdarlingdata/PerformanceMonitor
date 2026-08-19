@@ -255,10 +255,15 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         /* The duration predicate fires on the two COMPLETED events (twice), never on attention. */
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "WHERE duration >= 2000000").Count);
 
-        /* Customizable text/object columns must be turned on or they arrive NULL. */
+        /* Customizable text columns must be turned on or they arrive NULL. */
         Assert.Contains("collect_statement = 1", sql, StringComparison.Ordinal);
-        Assert.Contains("collect_object_name = 1", sql, StringComparison.Ordinal);
         Assert.Contains("collect_batch_text = 1", sql, StringComparison.Ordinal);
+
+        /* #2129 — the field failure this pin used to ENFORCE: rpc_completed has no customizable
+           collect_object_name attribute (that one is sp_statement_completed's), so SETting it failed
+           the CREATE on every server and the session never existed. object_name is one of
+           rpc_completed's default data fields and arrives with no SET at all. */
+        Assert.DoesNotContain("collect_object_name", sql, StringComparison.Ordinal);
 
         /* All 9 QuickSessionStandard actions, including nt_username server-scoped + package0.event_sequence. */
         Assert.Contains("sqlserver.nt_username", sql, StringComparison.Ordinal);

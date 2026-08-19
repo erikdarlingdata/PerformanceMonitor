@@ -526,6 +526,7 @@ public partial class SettingsWindow : Window
         };
         LogAlertDismissalsCheckBox.IsChecked = App.LogAlertDismissals;
         AnalysisEnabledCheckBox.IsChecked = App.AnalysisEnabled;
+        QueryStoreBackfillCheckBox.IsChecked = App.QueryStoreBackfillEnabled;
         AnalysisNotificationsCheckBox.IsChecked = App.AnalysisNotificationsEnabled;
         AnalysisIntervalBox.Text = App.AnalysisIntervalMinutes.ToString();
         AnalysisNotifySeverityBox.Text = App.AnalysisNotifySeverity.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
@@ -617,6 +618,7 @@ public partial class SettingsWindow : Window
         App.MuteRuleDefaultExpiration = (MuteRuleDefaultExpirationCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "24 hours";
         App.LogAlertDismissals = LogAlertDismissalsCheckBox.IsChecked == true;
         App.AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true;
+        App.QueryStoreBackfillEnabled = QueryStoreBackfillCheckBox.IsChecked == true;
         App.AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true;
         if (int.TryParse(AnalysisIntervalBox.Text, out var analysisInterval) && analysisInterval >= 5 && analysisInterval <= 360)
             App.AnalysisIntervalMinutes = analysisInterval;
@@ -677,6 +679,8 @@ public partial class SettingsWindow : Window
             root["alert_low_disk_enabled"] = App.AlertLowDiskEnabled;
             root["alert_low_disk_threshold_percent"] = App.AlertLowDiskThresholdPercent;
             root["alert_low_disk_threshold_gb"] = App.AlertLowDiskThresholdGb;
+            root["alert_disk_critical_free_percent"] = App.AlertDiskCriticalFreePercent;
+            root["alert_disk_critical_free_gb"] = App.AlertDiskCriticalFreeGb;
             root["alert_pvs_enabled"] = App.AlertPvsEnabled;
             root["alert_pvs_threshold_percent"] = App.AlertPvsThresholdPercent;
             root["alert_pvs_floor_gb"] = App.AlertPvsFloorGb;
@@ -691,6 +695,7 @@ public partial class SettingsWindow : Window
             root["mute_rule_default_expiration"] = App.MuteRuleDefaultExpiration;
             root["log_alert_dismissals"] = App.LogAlertDismissals;
             root["analysis_enabled"] = App.AnalysisEnabled;
+            root["query_store_backfill_enabled"] = App.QueryStoreBackfillEnabled;
             root["analysis_notifications_enabled"] = App.AnalysisNotificationsEnabled;
             root["analysis_interval_minutes"] = App.AnalysisIntervalMinutes;
             root["analysis_notify_severity"] = App.AnalysisNotifySeverity;

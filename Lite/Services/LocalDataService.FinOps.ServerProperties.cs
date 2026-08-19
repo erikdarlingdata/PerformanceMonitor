@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -207,9 +208,12 @@ WITH cpu_24h AS (
     WHERE server_id = $1
     AND   collection_time >= $2
 ),
+/* Only the worker counts are consumed now: memory_ratio used to feed this read's own CASE, and that
+   CASE was the #2246 bug. The verdict comes from ProvisioningVerdict, so the division would be dead. */
 mem_latest AS (
     SELECT
-        CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0) AS memory_ratio
+        max_workers_count,
+        current_workers_count
     FROM v_memory_stats
     WHERE server_id = $1
     AND   (server_id, collection_time) IN (
@@ -218,6 +222,19 @@ mem_latest AS (
         WHERE server_id = $1
         GROUP BY server_id
     )
+),
+/* Same workspace-memory pressure signals as the drill-down read, so the INVENTORY GRID cannot classify a
+   server by a rule the drill-down no longer uses (#2246 — this grid is the screen the field report was
+   looking at). */
+grants AS (
+    SELECT
+        MAX(waiter_count) AS max_grant_waiters,
+        SUM(COALESCE(timeout_error_count_delta, 0)) AS grant_timeouts,
+        SUM(COALESCE(forced_grant_count_delta, 0)) AS forced_grants,
+        MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
+    FROM v_memory_grant_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
 ),
 storage_totals AS (
     SELECT
@@ -257,18 +274,20 @@ SELECT
     c.avg_cpu_pct,
     st.total_storage_gb,
     id.idle_db_count,
-    CASE
-        WHEN c.avg_cpu_pct < 15 AND c.max_cpu_pct < 40 AND COALESCE(m.memory_ratio, 0) < 0.5
-        THEN 'OVER_PROVISIONED'
-        WHEN c.p95_cpu_pct > 85 OR COALESCE(m.memory_ratio, 0) > 0.95
-        THEN 'UNDER_PROVISIONED'
-        ELSE 'RIGHT_SIZED'
-    END AS provisioning_status
+    c.max_cpu_pct,
+    c.p95_cpu_pct,
+    COALESCE(m.max_workers_count, 0),
+    COALESCE(m.current_workers_count, 0),
+    COALESCE(g.max_grant_waiters, 0),
+    COALESCE(g.grant_timeouts, 0),
+    COALESCE(g.forced_grants, 0),
+    COALESCE(g.grant_utilization_pct, 0)
 FROM (SELECT 1) AS anchor
 LEFT JOIN cpu_24h c ON true
 LEFT JOIN mem_latest m ON true
 LEFT JOIN storage_totals st ON true
-LEFT JOIN idle_dbs id ON true";
+LEFT JOIN idle_dbs id ON true
+LEFT JOIN grants g ON true";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cpuCutoff });
@@ -277,11 +296,25 @@ LEFT JOIN idle_dbs id ON true";
         using var reader = await command.ExecuteReaderAsync();
         if (await reader.ReadAsync())
         {
+            /* The verdict is computed HERE rather than as a SQL CASE, so this grid and the drill-down cannot
+               disagree — they now call the same predicate. The old inline CASE was copies 5 and 6 of the
+               ratio bug, on the screen the field report was actually looking at (#2246). */
+            var status = ProvisioningVerdict.Evaluate(
+                avgCpuPercent: reader.IsDBNull(0) ? 0m : Convert.ToDecimal(reader.GetValue(0)),
+                maxCpuPercent: reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                p95CpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                maxGrantWaiters: reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7)),
+                grantTimeouts: reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8)),
+                forcedGrants: reader.IsDBNull(9) ? 0L : ToInt64(reader.GetValue(9)),
+                grantUtilizationPercent: reader.IsDBNull(10) ? 0m : Convert.ToDecimal(reader.GetValue(10)),
+                maxWorkers: reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5)),
+                currentWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)));
+
             return (
                 reader.IsDBNull(0) ? null : Convert.ToDecimal(reader.GetValue(0)),
                 reader.IsDBNull(1) ? null : Convert.ToDecimal(reader.GetValue(1)),
                 reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2)),
-                reader.IsDBNull(3) ? null : reader.GetString(3)
+                status
             );
         }
 

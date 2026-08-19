@@ -189,6 +189,16 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetDatabaseStateDeviationsAsync(serverId), cancellationToken);
     }
 
+    /// <summary>
+    /// #2157. Off the WPF dispatcher via Task.Run for the same reason as its siblings here (#1202).
+    /// </summary>
+    public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetForcePlanFailuresAsync(serverId), cancellationToken);
+    }
+
     private int ResolveRunningJobsCadence(int serverId) =>
         ResolveCadence(_runningJobsCadenceMinutes, serverId, "running_jobs");
 

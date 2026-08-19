@@ -46,9 +46,16 @@ internal static class DarlingTrendReader
         DateTime CollectionTime, double TotalServerMemoryMb, double TargetServerMemoryMb,
         double BufferPoolMb, double PlanCacheMb);
 
-    /// <summary>One perfmon-trend point for a single counter: the counter value and per-interval delta,
-    /// both summed across the counter's instances at that collection (Lite's <c>PerfmonTrendPoint</c>).</summary>
-    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long DeltaValue);
+    /// <summary>One perfmon-trend point for a single counter: the counter value, the per-interval delta,
+    /// and the wall-clock seconds that delta covers, all summed across the counter's instances at that
+    /// collection (Lite's <c>PerfmonTrendPoint</c>, plus the interval Lite does not carry).
+    /// <para><c>SampleIntervalSeconds</c> is what makes a zero readable: the collector reports 0 in
+    /// exactly the cases where no delta was knowable (first sighting, counter reset, gap past the
+    /// policy), so (0, 0) is "unknown" while (0, n) is "genuinely idle". Without it the two are the same
+    /// number and a fabricated zero reads as quiet (#2234).</para>
+    /// <para>Rows written before that fix carry a hard-coded 60 regardless of the real gap, so a rate
+    /// derived over a window spanning the upgrade is only as good as its newest rows.</para></summary>
+    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long DeltaValue, long SampleIntervalSeconds);
 
     /// <summary>One file I/O-latency-trend point: average read/write latency (stall-ms / op) per collection
     /// for one (database, file) — the tool surfaces database_name + latencies, mirroring Lite's
@@ -116,12 +123,22 @@ internal static class DarlingTrendReader
     /// viewer's perfmon read: SUM the counter's instances per collection. Postgres <c>SUM(bigint)</c> is
     /// numeric, so both SUMs CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql
     /// makes the same cast). $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
+    /// <para>The interval is MAX, not SUM, and that distinction is load-bearing. cntr_value and
+    /// delta_cntr_value are additive across a counter's instance rows — summing Transactions/sec over
+    /// every database is a meaningful total — but the interval is the same measured sweep gap repeated
+    /// once per instance, so summing it multiplies the denominator by the instance count. Measured on
+    /// the fleet: Transactions/sec, Log Flushes/sec and Log Bytes Flushed/sec carry a median of 12 and
+    /// up to 17 rows per collection_time, so a summed denominator would report rates 12-17x too LOW —
+    /// the same silent corruption this read exists to expose, pointed the other way. MAX also ignores a
+    /// 0 from an instance seen for the first time, while still reporting 0 when every instance is
+    /// unknown.</para>
     /// </summary>
     public const string PerfmonTrendSql = """
         SELECT
             collection_time,
             CAST(SUM(cntr_value) AS bigint) AS cntr_value,
-            CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value
+            CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
+            CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   counter_name = $2
@@ -146,7 +163,8 @@ internal static class DarlingTrendReader
             items.Add(new PerfmonTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
         }
 
         return items;

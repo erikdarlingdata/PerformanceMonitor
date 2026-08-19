@@ -56,7 +56,7 @@ public partial class RemoteCollectorService
 
         /* Some collectors don't exist on some targets (e.g. ring buffers on Azure SQL DB) —
            skip the cycle entirely, matching the original hand-rolled collectors. */
-        if (!definition.AppliesTo(target))
+        if (!CollectorCatalog.AppliesTo(definition, target))
         {
             return 0;
         }
@@ -89,6 +89,66 @@ public partial class RemoteCollectorService
         var collectorState = definition.StateKeys.Count == 0
             ? null
             : await GetCollectorStateAsync(serverId, definition.Name, cancellationToken);
+
+        /* #2312: the open-interval refresh stamps, HOST-owned under their own state owner — the same
+           pattern as Darling's plan/text watermarks: the definition cannot declare these keys (one per
+           DATABASE, only known at runtime). Read unconditionally for query_store and merged into the
+           same flat State; a store predating this owner has no rows, and absent keys read as "include
+           the open interval", which is today's behavior exactly. */
+        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+        {
+            var openIntervalState = await GetCollectorStateAsync(
+                serverId, QueryStoreOpenIntervalState.StateCollectorName, cancellationToken);
+
+            if (openIntervalState is { Count: > 0 })
+            {
+                var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+                if (collectorState is not null)
+                {
+                    foreach (var entry in collectorState)
+                    {
+                        merged[entry.Key] = entry.Value;
+                    }
+                }
+
+                foreach (var entry in openIntervalState)
+                {
+                    merged[entry.Key] = entry.Value;
+                }
+
+                collectorState = merged;
+            }
+        }
+
+        /* #2188: retire the per-database state rows of databases that no longer exist. Lite's backfill
+           worker writes done: and hole: per database and only ever deletes a hole it SERVICES or expires,
+           so a dropped database's markers were kept forever — the same defect as Darling's watermark rows,
+           in Lite's own collector_state. Same trigger and same placement as Darling's, before the state
+           load, so the two hosts cannot drift on when they prune.
+
+           Gated on the SAME AppliesTo that decides whether database_states is collected at all: on Azure
+           SQL DB there is no snapshot by design, so this would otherwise be a guaranteed no-op every cycle
+           and #2191's boundary would be emergent rather than stated. */
+        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+            && DatabaseStateCollector.Instance.AppliesTo(target))
+        {
+            await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken);
+        }
+        else if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                 && target.IsAzureSqlDb)
+        {
+            /* #2191's boundary, now crossable. Azure SQL DB has no database_states snapshot by design, which
+               is why the arm above states it as a no-op — but after #2220 a registration that names a database
+               sweeps only that database, so its one legitimate key is the connection string's own catalog. A
+               registration naming NO database is still skipped: it is a registration of the logical SERVER,
+               and a single-name prune there would delete every live watermark it has. */
+            var ownDatabase = new SqlConnectionStringBuilder(
+                _serverManager.CredentialResolver.GetConnectionString(server)).InitialCatalog;
+            if (AzureSweepScope.OwnDatabaseOrEmpty(ownDatabase).Count > 0)
+            {
+                await PruneForeignQueryStoreDatabaseStateAsync(serverId, ownDatabase, cancellationToken);
+            }
+        }
 
         var context = new CollectorContext
         {
@@ -149,6 +209,20 @@ public partial class RemoteCollectorService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 attempted++;
+
+                /* #2150: THE path the field report is on — Azure SQL DB collects query_store per database
+                   here, not through the enumerated driver, so the wall-clock ceiling has to be applied on
+                   both. Null for every collector that declares none, in which case dbToken IS
+                   cancellationToken and this loop is byte-for-byte what it was. Darling's twin is the same
+                   shape in DarlingCollectorRunner. */
+                using var dbBudget = EnumeratedCollectorDriver.StartItemBudget(
+                    definition.PerItemWallClockBudget, cancellationToken);
+                var dbToken = dbBudget?.Token ?? cancellationToken;
+
+                /* #2312: this database's open-interval stamp, staged at decision time and landed only
+                   after its read and flush succeed — per iteration, so a fault cannot leak a stamp
+                   into a sibling database's landing. Mirrors Darling. */
+                string? stagedOpenIntervalStamp = null;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
@@ -166,9 +240,66 @@ public partial class RemoteCollectorService
                            branch on Azure SQL DB (#1836) and does need the bound, so it applies
                            WatermarkPolicy.ClampCatchup inside its own cutoff computation: the clamp
                            travels with the collector that needs it instead of with the path. */
+                    /* dbToken throughout this branch (#2150 review catch): the interface contract says the
+                       budget covers "the watermark refresh, the command, and the whole drain", and the
+                       enumerated path's perItemWatermark delegate already honours that. Leaving these three
+                       store round-trips on cancellationToken made THIS loop — the one the field report is
+                       actually on — the only place the promise was not kept, and a store that has stopped
+                       answering is exactly the stall the budget exists to bound. Safe for the hole records
+                       specifically: a budget expiry abandons the whole pass, so the watermark does not
+                       advance, the clamp is re-derived next cycle, and the hole is re-recorded (merged wider
+                       with any already pending) rather than lost. */
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             serverId, definition.TargetTable, definition.WatermarkColumn!,
-                            definition.PerDatabaseWatermarkColumn!, databaseName, cancellationToken);
+                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken);
+
+                        /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
+                           definition's own clamp only floors OLDER watermarks, so a tighter one
+                           passes through untouched; the skipped range rides the backfill hole. */
+                        var azureFailures = ConsecutiveQueryStoreItemFailures(serverId, databaseName);
+                        if (azureFailures > 0
+                            && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            var adaptiveSpan = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, azureFailures);
+                            var tighterFloor = collectionTime - adaptiveSpan;
+                            if (context.Watermark is DateTime azureRaw)
+                            {
+                                if (azureRaw < tighterFloor)
+                                {
+                                    _logger?.LogWarning(
+                                        "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                        server.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
+                                    await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, azureRaw, tighterFloor, dbToken);
+                                    context.Watermark = tighterFloor;
+                                }
+                            }
+                            else
+                            {
+                                /* Never-succeeded database: tighten the first-run fallback too (the
+                                   review catch); no hole — pre-watermark history is the tail's job. */
+                                _logger?.LogWarning(
+                                    "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
+                                    server.DisplayName, databaseName, azureFailures, adaptiveSpan.TotalMinutes);
+                                context.Watermark = tighterFloor;
+                            }
+                        }
+
+                        /* #2312, Azure arm: same per-database open-interval decision as the enumerated
+                           delegate, BEFORE BuildQuery bakes the predicate. Staged into the local, landed
+                           only in the post-flush success block below — a per-database fault this loop
+                           tolerates must re-include next cycle, not spend the refresh window. Mirrors
+                           Darling. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
+                                context.State, databaseName, collectionTime);
+                            context.IncludeOpenInterval = includeOpen;
+                            if (includeOpen)
+                            {
+                                stagedOpenIntervalStamp = QueryStoreOpenIntervalState.Format(collectionTime);
+                            }
+                        }
+
                         dbPlan = definition.BuildQuery(context);
 
                         /* The definition clamped its own cutoff — surface the same WARNING the
@@ -190,18 +321,21 @@ public partial class RemoteCollectorService
                                 && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
-                                await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, context.Watermark.Value, azureClampedFloor, cancellationToken);
+                                await RecordQueryStoreBackfillHoleAsync(serverId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
                             }
                         }
                     }
 
                     var sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
-                    using (var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken))
+                    /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
+                       budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
+                       write already in flight would trade a slow cycle for a partially-written one. */
+                    using (var dbConnection = await OpenAzureDatabaseConnectionAsync(server, databaseName, dbToken))
                     using (var dbCommand = CreateCollectorCommand(dbPlan, dbConnection, commandTimeout))
-                    using (var dbReader = await dbCommand.ExecuteReaderAsync(cancellationToken))
+                    using (var dbReader = await dbCommand.ExecuteReaderAsync(dbToken))
                     {
-                        batch = await definition.ReadAsync(dbReader, context, cancellationToken);
+                        batch = await definition.ReadAsync(dbReader, context, dbToken);
 
                         /* #1875: the payload path's probe-failure contract, on the path that used to
                            ignore it. blocked_process_report is the declaring collector that also runs per
@@ -212,7 +346,7 @@ public partial class RemoteCollectorService
                         if (definition.EmitsProbeFailures)
                         {
                             cycleProbeFailures.Add(
-                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, cancellationToken));
+                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
                     sqlMs += sqlSlice.ElapsedMilliseconds;
@@ -233,6 +367,18 @@ public partial class RemoteCollectorService
                        shipped boundary rather than dropping it — this log is how a long catch-up
                        stays observable. Read after the flush, as on the other path: the context
                        signal stays this database's until the next read resets it. */
+                    /* #2111: success resets the adaptive-shrink count on the Azure arm too. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        OnQueryStoreItemSucceeded(serverId, databaseName);
+
+                        /* #2312: read and flush both landed — the staged open-interval stamp may too. */
+                        if (stagedOpenIntervalStamp is not null)
+                        {
+                            context.PendingState[QueryStoreOpenIntervalState.KeyFor(databaseName)] = stagedOpenIntervalStamp;
+                        }
+                    }
+
                     var capHit = definition.PerItemRowCountWarnThreshold is int cap && batch.Count >= cap;
                     if (capHit || context.PerItemTextBudgetExceeded)
                     {
@@ -244,12 +390,62 @@ public partial class RemoteCollectorService
                             context.PerItemShippedBoundary?.ToString("o") ?? "n/a");
                     }
                 }
+                catch (OutOfMemoryException)
+                {
+                    /* AHEAD of the budget arm, because ItemBudgetExpired classifies on the TOKENS and never
+                       looks at the exception type (review catch). Without this, an OOM thrown while the
+                       budget's timer had already fired — materializing a large batch, or inside the store
+                       write — would be caught by that arm and logged as a routine per-database timeout,
+                       silently breaking the invariant the generic catch below states outright. The shared
+                       EnumeratedCollectorDriver already orders it this way; these two loops did not. */
+                    throw;
+                }
+                catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(dbBudget, cancellationToken))
+                {
+                    /* #2150: this database ran out of wall clock. Counted as a per-database failure so the
+                       cycle moves on — one database must not be able to starve the rest, which is the harm
+                       the field report describes, and it bites hardest on Lite because its live collectors
+                       run strictly one after another. Ahead of the generic catch because a cancelled command
+                       does not reliably arrive as an OperationCanceledException, so that filter cannot be
+                       trusted to claim it; the token check is what keeps a real shutdown out of this arm. */
+                    _ = ex;
+                    var budgetFailure = EnumeratedCollectorDriver.ItemBudgetException(
+                        definition.PerItemWallClockBudget!.Value);
+                    failed++;
+                    firstFailure ??= budgetFailure;
+
+                    /* Same #2111 stamp the generic arm makes, and it MATTERS more here: this is what turns
+                       the bound from a cut that repeats forever into one that converges. The consecutive
+                       count narrows this database's next catch-up window, so a database that cannot finish
+                       in the budget keeps halving until it can. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        OnQueryStoreItemFailed(serverId, databaseName);
+                    }
+
+                    /* WARNING, not Debug, unlike the routine per-database skip beside it: an offline
+                       database is ordinary and this is a collector that could not finish its work. */
+                    _logger?.LogWarning(
+                        "{Collector} on '{Server}' database [{Database}] {Message}",
+                        definition.Name, server.DisplayName, databaseName, budgetFailure.Message);
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
                     /* OOM is filtered OUT of this per-database skip and propagates: it is fatal, not a
                        routine one-database miss. */
                     failed++;
                     firstFailure ??= ex;
+
+                    /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
+                       arm — query_store reaches THIS per-database loop there, not the enumeration
+                       path's onItemError, and without the stamp the backfill worker would never
+                       yield on an Azure target (the review catch on #2112). Same query_store-only
+                       guard as the hole recording above. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        OnQueryStoreItemFailed(serverId, databaseName);
+                    }
+
                     _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
                 }
             }
@@ -347,6 +543,12 @@ public partial class RemoteCollectorService
                 using var duckConnection = _duckDb.CreateConnection();
                 await duckConnection.OpenAsync(cancellationToken);
 
+                /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
+                   into PendingState only from onItemComplete — after the item's read AND flush succeeded.
+                   A per-item fault the driver tolerates must re-include next cycle, not spend the
+                   15-minute refresh window on a cycle that captured nothing. Mirrors Darling. */
+                var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
+
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
                     /* Per-database watermark refresh + the 24h catch-up clamp, computed INSIDE the loop —
@@ -376,7 +578,58 @@ public partial class RemoteCollectorService
                                     await RecordQueryStoreBackfillHoleAsync(serverId, item, raw.Value, clamped.Value, ct);
                                 }
                             }
+
+                            /* #2111 adaptive shrink — see Darling's twin; the skipped range rides the
+                               same hole records the clamp writes, deferred to the trickle, never
+                               dropped. Success resets the count via onItemComplete. */
+                            var failures = ConsecutiveQueryStoreItemFailures(serverId, item);
+                            if (failures > 0
+                                && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                            {
+                                var span = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, failures);
+                                var tighterFloor = collectionTime - span;
+                                if (clamped is DateTime current)
+                                {
+                                    if (current < tighterFloor)
+                                    {
+                                        _logger?.LogWarning(
+                                            "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                            server.DisplayName, item, failures, span.TotalMinutes);
+                                        await RecordQueryStoreBackfillHoleAsync(serverId, item, current, tighterFloor, ct);
+                                        clamped = tighterFloor;
+                                    }
+                                }
+                                else
+                                {
+                                    /* Never-succeeded database (null watermark): tighten the 60-minute
+                                       first-run fallback the same way — the review catch; see Darling's
+                                       twin. No hole: pre-watermark history is the tail's job. */
+                                    _logger?.LogWarning(
+                                        "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
+                                        server.DisplayName, item, failures, span.TotalMinutes);
+                                    clamped = tighterFloor;
+                                }
+                            }
+
                             context.Watermark = clamped;
+
+                            /* #2312: decide per database whether this cycle reads the OPEN interval. The
+                               stamp is only STAGED here — it lands in PendingState from onItemComplete,
+                               after this item's read and flush actually succeeded, so a per-item fault
+                               (which this driver swallows by design) re-includes next time instead of
+                               spending the refresh window on a cycle that captured nothing. Mirrors
+                               Darling. */
+                            if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                            {
+                                var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
+                                    context.State, item, collectionTime);
+                                context.IncludeOpenInterval = includeOpen;
+                                if (includeOpen)
+                                {
+                                    stagedOpenIntervalStamps[QueryStoreOpenIntervalState.KeyFor(item)] =
+                                        QueryStoreOpenIntervalState.Format(collectionTime);
+                                }
+                            }
                         },
                     readItem: async (item, ct) =>
                     {
@@ -389,6 +642,21 @@ public partial class RemoteCollectorService
                     writeBatch: (batch, ct) => Task.FromResult(WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context)),
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
+                        /* #2111: a completed item resets the adaptive-shrink count — recovery returns
+                           the member to the full catch-up width on its next cycle. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            OnQueryStoreItemSucceeded(serverId, item);
+
+                            /* #2312: NOW the open-interval stamp may land — this hook only fires after
+                               the item's read and flush both succeeded. Remove, not read: a stamp left
+                               staged (read faulted) must not leak into a later run's landing. */
+                            if (stagedOpenIntervalStamps.Remove(QueryStoreOpenIntervalState.KeyFor(item), out var landedStamp))
+                            {
+                                context.PendingState[QueryStoreOpenIntervalState.KeyFor(item)] = landedStamp;
+                            }
+                        }
+
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, hiding a single busy database's burst behind
                            quiet siblings. Quiet databases (0 rows) stay silent. */
@@ -410,9 +678,22 @@ public partial class RemoteCollectorService
                         }
                     },
                     onItemError: (item, ex) =>
+                    {
+                        /* #2111: stamp the yield-to-live signal (any database's live failure vouches
+                           for the whole replica being contended) + the per-database adaptive-shrink
+                           count. */
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            OnQueryStoreItemFailed(serverId, item);
+                        }
+
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
-                            definition.Name, item, server.DisplayName, ex.Message),
-                    cancellationToken);
+                            definition.Name, item, server.DisplayName, ex.Message);
+                    },
+                    cancellationToken,
+                    /* #2150: the per-database wall-clock ceiling. Null for every collector but
+                       query_store, so this argument leaves every other cycle untouched. */
+                    perItemBudget: definition.PerItemWallClockBudget);
 
                 rowsWritten = driverResult.Rows;
                 sqlMs += driverResult.SqlMs;
@@ -482,7 +763,32 @@ public partial class RemoteCollectorService
            path. Outside the storage-phase timer: this is host bookkeeping, not collected data. */
         if (context.PendingState.Count > 0)
         {
-            await SaveCollectorStateAsync(serverId, definition.Name, context.PendingState, cancellationToken);
+            /* #2312: the open-interval stamps belong to their OWN state owner, not the definition's name
+               — a row written under "query_store" would load back (nothing reads that owner here) but the
+               shared prune set pairs qsowm: with query_store_open_interval, and a prefix pruned under the
+               wrong owner deletes nothing. Split by prefix on the way out, like Darling's runner. */
+            var openIntervalKeys = context.PendingState
+                .Where(entry => entry.Key.StartsWith(QueryStoreOpenIntervalState.WatermarkKeyPrefix, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+
+            if (openIntervalKeys.Count > 0)
+            {
+                var others = context.PendingState
+                    .Where(entry => !openIntervalKeys.ContainsKey(entry.Key))
+                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+
+                await SaveCollectorStateAsync(
+                    serverId, QueryStoreOpenIntervalState.StateCollectorName, openIntervalKeys, cancellationToken);
+
+                if (others.Count > 0)
+                {
+                    await SaveCollectorStateAsync(serverId, definition.Name, others, cancellationToken);
+                }
+            }
+            else
+            {
+                await SaveCollectorStateAsync(serverId, definition.Name, context.PendingState, cancellationToken);
+            }
         }
 
         telemetry.SqlMs = sqlMs;

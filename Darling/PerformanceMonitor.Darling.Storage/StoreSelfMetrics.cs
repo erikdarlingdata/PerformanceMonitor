@@ -52,6 +52,23 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class StoreSelfMetrics
 {
+    /// <summary>
+    /// Per-statement command timeout for the sweep (#2317) — and, at the worker's call site, the
+    /// budget for the WHOLE sweep via a linked CTS (see SweepStoreSelfMetricsAsync: this sweep is
+    /// awaited on the main loop, so five sequential per-statement timeouts must not stack). The
+    /// sizing queries call <c>hypertable_detailed_size</c> across every hypertable (whose inner
+    /// <c>hypertable_local_size</c> is the frame the server log names when it cancels) and
+    /// <c>pg_database_size</c> over the whole
+    /// store, and on the dogfood fleet (141 objects, a 100+ GB dimension) they outgrew Npgsql's default
+    /// 30 seconds ~5x/day under load — surfacing as "Exception while reading from stream" (Npgsql
+    /// cancels the statement; the server logs 'canceling statement due to user request'; the client
+    /// holds a torn stream), an ERROR that reads as a network fault and pollutes the count every health
+    /// check watches. Five minutes matches DarlingRetention's destructive-statement budget: this sweep
+    /// runs hourly on its own connection, so a slow sizing pass costs patience, not correctness — and a
+    /// sweep that cannot finish in five minutes should skip the tick (one-hour series gap, self-healing)
+    /// rather than retry into the same load.
+    /// </summary>
+    public const int SweepTimeoutSeconds = 300;
     /// <summary>How long the series is kept — 400 days, so a year-over-year forecast always has a full
     /// prior year plus headroom. Enforced by the sweep's own DELETE, not a retention policy.</summary>
     public const int RetentionDays = 400;
@@ -86,6 +103,35 @@ LEFT JOIN LATERAL (
         sum(after_compression_total_bytes)::bigint AS after_bytes
     FROM chunk_compression_stats(format('%I.%I', h.hypertable_schema, h.hypertable_name)::regclass)
 ) c ON true";
+
+    /// <summary>
+    /// The background-job rows (#2136) — TimescaleDB stores only, like the hypertable arm (the
+    /// timescaledb_information views do not exist on plain PostgreSQL). The store's own background jobs
+    /// (CAGG refreshes, compression, retention) are its heaviest recurring work, their runtimes scale
+    /// SERIALLY with raw volume (the finalize hash-aggregate runs in one process — measured in #2136:
+    /// the four most expensive jobs are all the query_store_stats family, compression at 157s and the
+    /// interval_hourly refresh at 96s on a 52-server store), and a job that outgrows its own schedule
+    /// interval compounds refresh lag silently. One row per job per sweep makes that a queryable series:
+    /// object_name is <c>proc_name</c> plus the hypertable/CAGG it serves (the telemetry job has
+    /// neither) plus a <c>[job_id]</c> suffix — the uniqueness guarantee (review catch): two user-added
+    /// jobs sharing a proc_name, or two hypertable-less jobs, would otherwise collide into one
+    /// object_name and the readers' DISTINCT ON would silently drop one job's telemetry. job_id is
+    /// stable for a job's lifetime, so per-job series continuity holds. <c>schedule_interval_ms</c>
+    /// rides along so "duration vs cadence" — the honest tripwire — is one division. $1 metric_time.
+    /// </summary>
+    public const string BackgroundJobInsertSql = @"
+INSERT INTO collect.store_metrics
+    (metric_time, object_name, object_kind, last_run_duration_ms, schedule_interval_ms, total_runs, total_failures)
+SELECT
+    $1,
+    j.proc_name || coalesce(' ' || j.hypertable_name, '') || ' [' || j.job_id || ']',
+    'background_job',
+    (EXTRACT(EPOCH FROM js.last_run_duration) * 1000)::bigint,
+    (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint,
+    js.total_runs,
+    js.total_failures
+FROM timescaledb_information.job_stats AS js
+JOIN timescaledb_information.jobs AS j USING (job_id)";
 
     /// <summary>
     /// The payload dimension rows — every store shape (the dims are plain tables everywhere). Table names
@@ -158,24 +204,28 @@ WHERE metric_time < $1";
 
         if (timescaleAvailable)
         {
-            using var hypertables = new NpgsqlCommand(HypertableInsertSql, connection);
+            using var hypertables = new NpgsqlCommand(HypertableInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
             hypertables.Parameters.AddWithValue(metricTime);
             written += await hypertables.ExecuteNonQueryAsync(cancellationToken);
+
+            using var jobs = new NpgsqlCommand(BackgroundJobInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+            jobs.Parameters.AddWithValue(metricTime);
+            written += await jobs.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var dimensions = new NpgsqlCommand(DimensionInsertSql, connection))
+        using (var dimensions = new NpgsqlCommand(DimensionInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             dimensions.Parameters.AddWithValue(metricTime);
             written += await dimensions.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var store = new NpgsqlCommand(StoreInsertSql, connection))
+        using (var store = new NpgsqlCommand(StoreInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             store.Parameters.AddWithValue(metricTime);
             written += await store.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var retention = new NpgsqlCommand(RetentionDeleteSql, connection))
+        using (var retention = new NpgsqlCommand(RetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             retention.Parameters.AddWithValue(metricTime.AddDays(-RetentionDays));
             await retention.ExecuteNonQueryAsync(cancellationToken);

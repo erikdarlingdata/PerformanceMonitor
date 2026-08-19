@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Database;
 using Xunit;
 
 namespace Lite.Tests;
@@ -58,7 +59,11 @@ public sealed class CollectorViewerCoverageTests
         var readerText = ReaderLayerText();
 
         var uncovered = new List<string>();
-        foreach (var definition in CollectorCatalog.All)
+        /* StoredCollectors, not CollectorCatalog.All: the shared catalog is engine-mixed, and Lite neither
+           collects nor creates a table for the PostgreSQL definitions — it has no PostgreSQL target and the
+           engine gate means it can never dispatch one. A reader for a table this SKU does not have would be
+           dead code, so they are out of scope here rather than allow-listed exceptions. */
+        foreach (var definition in DuckDbSchemaGenerator.StoredCollectors)
         {
             var table = definition.TargetTable;
             if (ReferencedIn(readerText, table))

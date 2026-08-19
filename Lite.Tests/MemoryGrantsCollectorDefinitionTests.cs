@@ -17,7 +17,7 @@ namespace Lite.Tests;
 
 /// <summary>
 /// Pins the parity contract of the extracted memory_grant_stats definition: column mapping,
-/// the composite "{pool}_{semaphore}" delta key, the two delta groups with the 300 s gap
+/// the composite "{pool}_{semaphore}" delta key, the two delta groups with the shared gap
 /// policy, and the payload order matching the memory_grant_stats schema.
 /// </summary>
 public sealed class MemoryGrantsCollectorDefinitionTests
@@ -84,9 +84,9 @@ public sealed class MemoryGrantsCollectorDefinitionTests
             new object?[] { (short)1, 2, 100.5m, 200.5m, 90.25m, 80.75m, 10.5m, 8.25m, 3, 4, 5L, 6L, 50L, 60L },
             writer.Values);
 
-        /* Delta contract: composite key "{pool}_{semaphore}", both groups, 300 s gap policy. */
+        /* Delta contract: composite key "{pool}_{semaphore}", both groups, the shared gap policy. */
         Assert.Equal(2, deltas.Calls.Count);
-        Assert.Equal(("memory_grants_timeouts", "2_1", 5L, context.CollectionTime, 300), deltas.Calls[0]);
-        Assert.Equal(("memory_grants_forced", "2_1", 6L, context.CollectionTime, 300), deltas.Calls[1]);
+        Assert.Equal(("memory_grants_timeouts", "2_1", 5L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[0]);
+        Assert.Equal(("memory_grants_forced", "2_1", 6L, context.CollectionTime, CollectorDeltaCalculator.DefaultMaxGapSeconds), deltas.Calls[1]);
     }
 }
