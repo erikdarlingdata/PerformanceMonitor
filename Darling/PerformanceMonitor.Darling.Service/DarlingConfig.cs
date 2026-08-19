@@ -1297,7 +1297,31 @@ public sealed class PeersConfig
     public static IReadOnlyList<string> Validate(PeersConfig? peers)
     {
         var problems = new List<string>();
-        if (peers?.Stores is null)
+        if (peers is null)
+        {
+            return problems;
+        }
+
+        /* thisStoreCovers is checked FIRST, before anything can short-circuit. It used to live after the
+           per-peer loop behind an early `peers?.Stores is null` return, which meant an explicit
+           `"stores": null` in the JSON (System.Text.Json assigns null over the property initializer, unlike
+           an omitted key) skipped the credential guard on the one field that is still disclosed in that
+           config — instructions, list_servers' this_store_covers, and every resolution miss. Caught in
+           review on #2339. Ordering, not an extra check, is the fix: an unconditional guard cannot be
+           bypassed by a shape nobody thought to enumerate. */
+        var selfText = peers.ThisStoreCovers ?? "";
+        var selfOffending = CredentialShapedTokens.FirstOrDefault(
+            t => selfText.Contains(t, StringComparison.OrdinalIgnoreCase));
+
+        if (selfOffending is not null)
+        {
+            problems.Add(
+                $"peers.thisStoreCovers contains '{selfOffending}'. The peers block is DISCLOSURE ONLY — its text " +
+                "is sent verbatim to every connected MCP client — so it must carry no connection string and no " +
+                "credential.");
+        }
+
+        if (peers.Stores is null)
         {
             return problems;
         }
@@ -1333,19 +1357,6 @@ public sealed class PeersConfig
                     break;
                 }
             }
-        }
-
-        /* peers.thisStoreCovers is disclosed the same way, so it gets the same guard. */
-        var selfText = peers.ThisStoreCovers ?? "";
-        var selfOffending = CredentialShapedTokens.FirstOrDefault(
-            t => selfText.Contains(t, StringComparison.OrdinalIgnoreCase));
-
-        if (selfOffending is not null)
-        {
-            problems.Add(
-                $"peers.thisStoreCovers contains '{selfOffending}'. The peers block is DISCLOSURE ONLY — its text " +
-                "is sent verbatim to every connected MCP client — so it must carry no connection string and no " +
-                "credential.");
         }
 
         return problems;

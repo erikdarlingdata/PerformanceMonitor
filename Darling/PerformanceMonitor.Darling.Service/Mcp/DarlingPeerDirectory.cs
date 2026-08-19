@@ -85,15 +85,48 @@ internal static class DarlingPeerDirectory
     internal static Snapshot Current => s_current;
 
     /// <summary>
-    /// Publishes the declared coverage from config, returning the snapshot so the caller can render the
-    /// MCP instructions from the same value it just installed. Idempotent by design: the worker and the
-    /// MCP host both load darling.json and both publish, because either may reach its config first and
-    /// neither should have to wait on the other to make the disclosure available.
+    /// What a <see cref="Publish"/> installed, and why it installed nothing if it refused. One value rather
+    /// than a snapshot plus an out-parameter, so a caller cannot take the snapshot and drop the reason.
     /// </summary>
-    internal static Snapshot Publish(PeersConfig? config)
+    internal readonly record struct PublishResult(Snapshot Snapshot, IReadOnlyList<string> RefusedProblems)
     {
+        /// <summary>True when the config failed validation and NOTHING was published.</summary>
+        public bool Refused => RefusedProblems.Count > 0;
+    }
+
+    /// <summary>
+    /// Publishes the declared coverage from config, returning what was installed so the caller can render
+    /// the MCP instructions from the same value. Idempotent by design: the worker and the MCP host both load
+    /// darling.json and both publish, because either may reach its config first and neither should have to
+    /// wait on the other to make the disclosure available.
+    ///
+    /// <para><b>Fail-closed HERE, not at the callers (review finding on #2339).</b> The credential guard
+    /// originally lived only in <see cref="DarlingConfig.Validate"/>, which the worker runs — but the
+    /// worker's abort is a <c>return</c> from its own hosted service, not a process exit, and the MCP host
+    /// loads its own copy of the config and deliberately never calls <c>Validate</c> (its network-exposure
+    /// checks are host-local for exactly that reason). So the one path that actually broadcasts peer text to
+    /// clients was the one path the guard never covered. Validating inside <c>Publish</c> makes it
+    /// structural: the ambient snapshot can only be written through here, so a future third publish site
+    /// cannot reintroduce the hole.</para>
+    ///
+    /// <para>A refusal publishes <see cref="Snapshot.Empty"/> — the WHOLE block, not the valid subset. A
+    /// peers block that failed validation is one the operator has not finished, and half a disclosure is
+    /// worse than none: it would state coverage that may be wrong while the log says the config is broken.
+    /// The cost is that the fleet split goes undisclosed until it is fixed, which the <c>peer_note</c>
+    /// already reports honestly ("this server cannot tell those apart"), and the caller logs the problems at
+    /// CRITICAL. Leaking a credential is not recoverable; losing disclosure for one restart is.</para>
+    /// </summary>
+    internal static PublishResult Publish(PeersConfig? config)
+    {
+        var problems = PeersConfig.Validate(config);
+        if (problems.Count > 0)
+        {
+            s_current = Snapshot.Empty;
+            return new PublishResult(Snapshot.Empty, problems);
+        }
+
         s_current = FromConfig(config);
-        return s_current;
+        return new PublishResult(s_current, Array.Empty<string>());
     }
 
     /// <summary>Resets the ambient snapshot — for tests, which must not leak declared peers into each other.</summary>
@@ -200,13 +233,21 @@ internal static class DarlingPeerDirectory
         var matching = named ? snapshot.PeersCovering(requestedName) : Array.Empty<Peer>();
         if (matching.Count > 0)
         {
+            /* Two peers can legitimately both claim a name (overlapping `matches`, e.g. "use1" and
+               "prod-pos"), so the follow-on sentence agrees in number rather than saying "That is a SEPARATE
+               store" about a list of two. */
+            var single = matching.Count == 1;
             text.Append(subject)
                 .Append(" is not monitored HERE, and it matches the declared coverage of ")
-                .Append(matching.Count == 1 ? "peer store " : "these peer stores: ")
+                .Append(single ? "peer store " : "these peer stores: ")
                 .Append(string.Join("; ", matching.Select(Describe)))
-                .Append(". That is a SEPARATE Darling store with its own MCP endpoint; this server cannot read it, " +
-                        "so point the client at that endpoint (or tell your operator which store answers for this " +
-                        "server) rather than concluding the server is unmonitored.");
+                .Append(single
+                    ? ". That is a SEPARATE Darling store with its own MCP endpoint; this server cannot read it, " +
+                      "so point the client at that endpoint (or tell your operator which store answers for this " +
+                      "server) rather than concluding the server is unmonitored."
+                    : ". Those are SEPARATE Darling stores, each with its own MCP endpoint; this server cannot read " +
+                      "them, so point the client at whichever one owns this server (or ask your operator) rather " +
+                      "than concluding the server is unmonitored.");
         }
         else
         {

@@ -167,6 +167,94 @@ public sealed class DarlingPeerDisclosureTests
     }
 
     [Fact]
+    public void Validate_ChecksThisStoreCovers_EvenWhenStoresIsExplicitJsonNull()
+    {
+        /* Review finding on #2339. System.Text.Json assigns null OVER the property initializer for an
+           explicit "stores": null (an omitted key leaves the default empty list), and the thisStoreCovers
+           guard used to sit after the per-peer loop behind an early `Stores is null` return — so this exact
+           config validated clean and then broadcast the credential through the instructions,
+           list_servers' this_store_covers, and every resolution miss. */
+        var config = DarlingConfig.Parse("""
+            {
+              "postgres": { "connectionString": "Host=localhost;Database=darling" },
+              "servers": [ { "host": "SQL2022" } ],
+              "peers": { "thisStoreCovers": "internal db, see Password=hunter2", "stores": null }
+            }
+            """);
+
+        Assert.Null(config.Peers.Stores);
+        Assert.Contains(
+            PeersConfig.Validate(config.Peers),
+            p => p.Contains("DISCLOSURE ONLY", StringComparison.Ordinal));
+        Assert.Contains(config.Validate(), p => p.Contains("DISCLOSURE ONLY", StringComparison.Ordinal));
+
+        /* And nothing reaches the ambient snapshot, so no surface can disclose it. */
+        try
+        {
+            var published = DarlingPeerDirectory.Publish(config.Peers);
+            Assert.True(published.Refused);
+            Assert.True(published.Snapshot.IsEmpty);
+            Assert.True(DarlingPeerDirectory.Current.IsEmpty);
+        }
+        finally
+        {
+            DarlingPeerDirectory.Reset();
+        }
+    }
+
+    [Fact]
+    public void Publish_RefusesTheWholeBlockOnAnyValidationProblem()
+    {
+        /* Review finding on #2339: the credential guard lived only in DarlingConfig.Validate, which the
+           WORKER runs — but the worker's abort is a return from its own hosted service, not a process exit,
+           and the MCP host loads its own config and deliberately never calls Validate. So the one path that
+           actually broadcasts peer text was the one path the guard never covered. Validating inside Publish
+           makes it structural: the ambient snapshot can only be written through here. */
+        try
+        {
+            var leak = DarlingPeerDirectory.Publish(new PeersConfig
+            {
+                ThisStoreCovers = Use1Covers,
+                Stores =
+                {
+                    new PeerStoreConfig { Name = "good", Covers = "the replicas", Matches = { "use2" } },
+                    new PeerStoreConfig { Name = "bad", Covers = "Host=x;Password=hunter2" },
+                },
+            });
+
+            Assert.True(leak.Refused);
+            Assert.Contains(leak.RefusedProblems, p => p.Contains("DISCLOSURE ONLY", StringComparison.Ordinal));
+
+            /* The WHOLE block, not the valid subset: a peers block that failed validation is one the
+               operator has not finished, and half a disclosure would state coverage that may be wrong while
+               the log says the config is broken. */
+            Assert.True(leak.Snapshot.IsEmpty);
+            Assert.True(DarlingPeerDirectory.Current.IsEmpty);
+
+            /* A nameless peer is not a secret, but it is still an unfinished block — same refusal. */
+            Assert.True(DarlingPeerDirectory
+                .Publish(new PeersConfig { Stores = { new PeerStoreConfig { Covers = "the replicas" } } })
+                .Refused);
+            Assert.True(DarlingPeerDirectory.Current.IsEmpty);
+
+            /* A valid block publishes, and reports no problems. */
+            var ok = DarlingPeerDirectory.Publish(new PeersConfig
+            {
+                ThisStoreCovers = Use1Covers,
+                Stores = { new PeerStoreConfig { Name = "box2", Covers = "the replicas" } },
+            });
+
+            Assert.False(ok.Refused);
+            Assert.Empty(ok.RefusedProblems);
+            Assert.Same(ok.Snapshot, DarlingPeerDirectory.Current);
+        }
+        finally
+        {
+            DarlingPeerDirectory.Reset();
+        }
+    }
+
+    [Fact]
     public void Validate_PeerProblemsSurfaceThroughTheWholeConfigValidate()
     {
         /* Reported even on a config with no servers — the peers check runs BEFORE that early return. */
@@ -382,6 +470,7 @@ public sealed class DarlingPeerDisclosureTests
 
         Assert.Contains("'prod-pos-use2-ayr-01' is not monitored HERE", error, StringComparison.Ordinal);
         Assert.Contains("matches the declared coverage of peer store prod-pos-use2-monitor-01", error, StringComparison.Ordinal);
+        Assert.Contains("That is a SEPARATE Darling store", error, StringComparison.Ordinal);
         Assert.Contains("this server cannot read it", error, StringComparison.Ordinal);
         Assert.Contains($"This store covers: {Use1Covers}.", error, StringComparison.Ordinal);
 
@@ -405,6 +494,29 @@ public sealed class DarlingPeerDisclosureTests
            registry, so "no pattern matched" is not evidence the server is unmonitored. */
         Assert.Contains("prod-pos-use2-monitor-01", error, StringComparison.Ordinal);
         Assert.Contains("prod-pos-pg-monitor-01", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResolutionMiss_WithTwoPeersClaimingTheName_AgreesInNumber()
+    {
+        /* Two peers can legitimately both claim a name through overlapping `matches`, so the follow-on
+           sentence must not say "That is a SEPARATE store" about a list of two. */
+        var overlapping = DarlingPeerDirectory.FromConfig(new PeersConfig
+        {
+            Stores =
+            {
+                new PeerStoreConfig { Name = "box2", Covers = "the replicas", Matches = { "use2" } },
+                new PeerStoreConfig { Name = "box3", Covers = "the archive replicas", Matches = { "prod-pos" } },
+            },
+        });
+
+        var (_, error) = DarlingServerResolver.ResolveOrError(
+            new[] { Registered("prod-pos-use1-ayr-01") }, "prod-pos-use2-ayr-01", overlapping);
+
+        Assert.NotNull(error);
+        Assert.Contains("these peer stores: box2 — the replicas; box3 — the archive replicas", error, StringComparison.Ordinal);
+        Assert.Contains("Those are SEPARATE Darling stores", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("That is a SEPARATE Darling store", error, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -436,8 +548,9 @@ public sealed class DarlingPeerDisclosureTests
                 Stores = { new PeerStoreConfig { Name = "box2", Covers = "the replicas", Matches = { "use2" } } },
             });
 
-            Assert.False(published.IsEmpty);
-            Assert.Same(published, DarlingPeerDirectory.Current);
+            Assert.False(published.Refused);
+            Assert.False(published.Snapshot.IsEmpty);
+            Assert.Same(published.Snapshot, DarlingPeerDirectory.Current);
 
             var (_, error) = DarlingServerResolver.ResolveOrError(
                 new[] { Registered("prod-pos-use1-ayr-01") },
