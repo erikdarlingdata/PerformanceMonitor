@@ -15,7 +15,10 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One statement's text as the fetch returned it.</summary>
-public readonly record struct FetchedQueryText(long QueryId, string? QueryText);
+/// <param name="QueryHash">SQL Server's <c>query_hash</c>, the renumbering detector (#2312): query_id is
+/// only unique until a Query Store reset, so the stored hash is what lets the probe see that an id now
+/// names a DIFFERENT statement and refetch its text.</param>
+public readonly record struct FetchedQueryText(long QueryId, string? QueryText, string? QueryHash);
 
 /// <summary>
 /// Lands what the query-text fetch returned into <see cref="QueryStoreTextStore"/> (#2150).
@@ -29,16 +32,13 @@ public static class QueryStoreTextWriter
 {
     /// <summary>
     /// Lands a fetch's statement text for one database, returning the <c>query_id</c>s that stored, in the
-    /// order supplied — which is what the caller feeds to
-    /// <see cref="PerformanceMonitor.Collectors.QueryStoreTextState.AdvanceWatermark"/>. The watermark must
-    /// reflect what LANDED rather than what was selected, or a torn pass advances past text that never
-    /// arrived.
+    /// order supplied — the caller uses them to clear its budget-carry-over set, since anything landed is
+    /// no longer missing (#2312).
     ///
     /// <para>Rows with null text are stored as null rather than skipped. Query Store does not produce them
     /// in practice, so this is about not having a special case to get wrong: a null in this store means "we
     /// fetched and there was nothing", the readers already <c>COALESCE</c> onto the fact row's own column,
-    /// and the watermark advances either way — stalling on a statement whose text will never exist is the
-    /// failure the budget predicate had to be fixed for twice on the plan side.</para>
+    /// and the stored row is what stops the probe from re-selecting the id as missing forever.</para>
     /// </summary>
     public static async Task<IReadOnlyList<long>> WriteAsync(
         NpgsqlConnection connection,
@@ -68,6 +68,7 @@ public static class QueryStoreTextWriter
         var databases = new string[texts.Count];
         var queryIds = new long[texts.Count];
         var bodies = new string?[texts.Count];
+        var hashes = new string?[texts.Count];
         var stamps = new DateTime[texts.Count];
 
         /* Naive() on the stamp, not the raw UTC value: last_seen is a ::timestamp parameter, and Npgsql
@@ -85,6 +86,7 @@ public static class QueryStoreTextWriter
             databases[i] = databaseName;
             queryIds[i] = text.QueryId;
             bodies[i] = text.QueryText;
+            hashes[i] = text.QueryHash;
             stamps[i] = stamp;
         }
 
@@ -93,6 +95,7 @@ public static class QueryStoreTextWriter
         upsert.Parameters.AddWithValue(databases);
         upsert.Parameters.AddWithValue(queryIds);
         upsert.Parameters.AddWithValue(bodies);
+        upsert.Parameters.AddWithValue(hashes);
         upsert.Parameters.AddWithValue(stamps);
         await upsert.ExecuteNonQueryAsync(cancellationToken);
 

@@ -156,6 +156,10 @@ public partial class App : Application
     public static bool AlertPvsEnabled { get; set; } = true;            // #1984 ADR persistent version store pressure
     public static int AlertPvsThresholdPercent { get; set; } = 40;      // Alert when an ADR database's PVS >= X% of its data files (0 disables this check)
     public static int AlertPvsFloorGb { get; set; } = 1;                // AND-qualifier: the PVS must also be >= X GB (0 removes the floor)
+    public static bool AlertFileGrowthEnabled { get; set; }             // #2349 database file growth -- OFF by default
+    public static int AlertFileGrowthRiseMb { get; set; } = 10240;      // RISE gate: a file grew >= X MB in the window (0 disables this gate)
+    public static int AlertFileGrowthVolumePercent { get; set; } = 60;  // LEVEL gate: a file is >= X% of its volume (0 disables this gate)
+    public static int AlertFileGrowthLookbackMinutes { get; set; } = 60;// how far back the rise is measured
     public static bool AlertLongRunningJobEnabled { get; set; } = true;
     public static int AlertLongRunningJobMultiplier { get; set; } = 3;
     public static bool AlertFailedJobEnabled { get; set; } = true;
@@ -738,6 +742,10 @@ public partial class App : Application
             if (root.TryGetProperty("alert_disk_critical_free_gb", out v)) AlertDiskCriticalFreeGb = (int)Math.Max(0, v.GetInt64());
             if (root.TryGetProperty("alert_pvs_enabled", out v)) AlertPvsEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_pvs_threshold_percent", out v)) AlertPvsThresholdPercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
+            if (root.TryGetProperty("alert_file_growth_enabled", out v)) AlertFileGrowthEnabled = v.GetBoolean();
+            if (root.TryGetProperty("alert_file_growth_rise_mb", out v)) AlertFileGrowthRiseMb = (int)Math.Max(0, v.GetInt64());
+            if (root.TryGetProperty("alert_file_growth_volume_percent", out v)) AlertFileGrowthVolumePercent = (int)Math.Clamp(v.GetInt64(), 0, 100);
+            if (root.TryGetProperty("alert_file_growth_lookback_minutes", out v)) AlertFileGrowthLookbackMinutes = (int)Math.Clamp(v.GetInt64(), 5, 1440);
             if (root.TryGetProperty("alert_pvs_floor_gb", out v)) AlertPvsFloorGb = (int)Math.Max(0, v.GetInt64());
             if (root.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.GetBoolean();
             if (root.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.GetInt32();

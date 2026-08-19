@@ -85,6 +85,15 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
        the percent it has no meaningful upper bound. */
     public int PvsThresholdPercent => Math.Clamp(_config.Alerts.PvsThresholdPercent, 0, 100);
     public int PvsFloorGb => Math.Max(0, _config.Alerts.PvsFloorGb);
+
+    /* #2349: the file-growth gates. Clamped the same way the neighbours are -- a negative threshold would
+       make the comparison always true, which for a gate whose whole job is to be quiet until something moves
+       is the worst possible default. A ZERO is meaningful here rather than nonsense: it disables that one
+       gate, so an operator can run rise-only or level-only without a second switch. */
+    public bool FileGrowthEnabled => _config.Alerts.FileGrowthEnabled;
+    public int FileGrowthRiseMb => Math.Max(0, _config.Alerts.FileGrowthRiseMb);
+    public int FileGrowthVolumePercent => Math.Clamp(_config.Alerts.FileGrowthVolumePercent, 0, 100);
+    public int FileGrowthLookbackMinutes => Math.Clamp(_config.Alerts.FileGrowthLookbackMinutes, 5, 1440);
     public int LongRunningJobMultiplier => _config.Alerts.LongRunningJobMultiplier;
     public int FailedJobLookbackMinutes => Math.Clamp(_config.Alerts.FailedJobLookbackMinutes, 1, 1440);
     public int CooldownMinutes => Math.Clamp(_config.Alerts.CooldownMinutes, 1, 120);

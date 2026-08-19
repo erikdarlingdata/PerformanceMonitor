@@ -124,8 +124,10 @@ public class DarlingInstallLocationTests
         Assert.Contains("ProfilesDirectory", script, StringComparison.Ordinal);
 
         /* And the current user's own profile is checked as well: a profile redirected outside
-           ProfilesDirectory is still a profile, and it is the one whose owner is most likely running this. */
-        Assert.Contains("Test-PathIsAtOrUnder $root $env:USERPROFILE", script, StringComparison.Ordinal);
+           ProfilesDirectory is still a profile, and it is the one whose owner is most likely running this.
+           Against $classifyRoot since #2348 — the normalized spelling, so the extended-length form of a
+           profile path is caught too. */
+        Assert.Contains("Test-PathIsAtOrUnder $classifyRoot $env:USERPROFILE", script, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -219,6 +221,12 @@ public class DarlingInstallLocationTests
     /// <summary>
     /// The network half, also executed. <c>\\?\C:\...</c> is the long-path prefix on a LOCAL path, not a
     /// server name, and treating it as a share would refuse a perfectly ordinary install root.
+    ///
+    /// <para>The probe composes <c>Convert-ExtendedLengthPath</c> ahead of <c>Get-NetworkPathKind</c> because
+    /// that is what the script itself does (<c>$classifyRoot = Convert-ExtendedLengthPath $root</c>). Calling
+    /// the kind function on a RAW path would be testing a contract the installer does not use: since #2348 it
+    /// classifies normalized paths, so it no longer carries a <c>\\?\</c> carve-out of its own and would call a
+    /// bare <c>\\?\C:\...</c> a share. Keeping the composition here is the point — the pair is the unit.</para>
     /// </summary>
     [Fact]
     public void GetNetworkPathKind_SeparatesAShareFromAnExtendedLengthLocalPath_AsShipped()
@@ -230,13 +238,21 @@ public class DarlingInstallLocationTests
             (@"C:\PerformanceMonitorDarling", "<none>"),
             (@"C:\Users\bob\Desktop\PerformanceMonitorDarling", "<none>"),
             ("", "<none>"),
+
+            /* #2348: the extended-length spelling of a REAL share is a share. Previously the wholesale \\?\
+               exclusion waved all three of these through as "<none>". */
+            (@"\\?\UNC\fileserver\share\PerformanceMonitorDarling", "UNC"),
+            (@"\\?\unc\fileserver\share\PerformanceMonitorDarling", "UNC"),
+            (@"\\?\UNC\fileserver\share", "UNC"),
         };
 
         var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Convert-ExtendedLengthPath"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-NetworkPathKind"));
         foreach (var (path, _) in cases)
         {
-            probe.AppendLine($"$k = Get-NetworkPathKind '{path}'; if ($null -eq $k) {{ '<none>' }} else {{ $k }}");
+            probe.AppendLine(
+                $"$k = Get-NetworkPathKind (Convert-ExtendedLengthPath '{path}'); if ($null -eq $k) {{ '<none>' }} else {{ $k }}");
         }
 
         var answers = RunWindowsPowerShell(probe.ToString());
@@ -245,6 +261,48 @@ public class DarlingInstallLocationTests
         for (var i = 0; i < cases.Length; i++)
         {
             Assert.Equal(cases[i].Expected, answers[i]);
+        }
+    }
+
+    /// <summary>
+    /// #2348, the normalization itself, executed as shipped. It is the one place in either implementation that
+    /// knows the <c>\\?\</c> prefix exists, so every rule downstream can be written against real paths.
+    ///
+    /// <para>The lowercase case is not padding: Windows accepts <c>\\?\unc\</c>, so an ordinal match on
+    /// <c>UNC</c> would leave a share spelled that way looking like the local path <c>unc\server\share</c> —
+    /// re-opening exactly the hole this closes, for the operator least likely to be checked on.</para>
+    /// </summary>
+    [Fact]
+    public void ConvertExtendedLengthPath_RewritesBothSpellings_AsShipped()
+    {
+        var cases = new (string Path, string Expected)[]
+        {
+            (@"\\?\UNC\fileserver\share\dir", @"\\fileserver\share\dir"),
+            (@"\\?\unc\fileserver\share\dir", @"\\fileserver\share\dir"),
+            (@"\\?\C:\PerformanceMonitorDarling", @"C:\PerformanceMonitorDarling"),
+            (@"\\?\C:\Users\bob\dir", @"C:\Users\bob\dir"),
+
+            /* Untouched: an ordinary local path, an ordinary share, and a path that merely CONTAINS the
+               characters without leading with them. */
+            (@"C:\PerformanceMonitorDarling", @"C:\PerformanceMonitorDarling"),
+            (@"\\fileserver\share\dir", @"\\fileserver\share\dir"),
+            ("", ""),
+        };
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Convert-ExtendedLengthPath"));
+        foreach (var (path, _) in cases)
+        {
+            probe.AppendLine($"$v = Convert-ExtendedLengthPath '{path}'; if ([string]::IsNullOrEmpty($v)) {{ '<empty>' }} else {{ $v }}");
+        }
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Equal(cases.Length, answers.Count);
+
+        for (var i = 0; i < cases.Length; i++)
+        {
+            var expected = cases[i].Expected.Length == 0 ? "<empty>" : cases[i].Expected;
+            Assert.Equal(expected, answers[i]);
         }
     }
 
@@ -332,6 +390,146 @@ function Get-PSDrive {
                 $"case {i} (wmi={wmi}, DisplayRoot='{displayRoot}'): expected {expected}, got " +
                 $"{answers[0]} — {because}");
         }
+    }
+
+    /// <summary>
+    /// The installer's verdict and the SERVICE's verdict must be the same verdict (#2185).
+    ///
+    /// <para><b>Why this test exists.</b> #2187 put the rule in PowerShell, where only installs that go
+    /// through the script can benefit; #2185 needed the service to reach the same conclusion by itself, for
+    /// the README's manual <c>sc create</c> path and for anyone who registers the exe by hand. That is two
+    /// implementations of one rule in two languages, and the one that drifted would be the one nobody was
+    /// reading. So both are run over ONE table — <see cref="DarlingServiceInstallLocationTests.Cases"/> — and
+    /// disagreement is a failure regardless of which side is "right".</para>
+    ///
+    /// <para><b>What is really being executed.</b> The PowerShell side is the shipped file: both helper
+    /// functions are extracted whole, and the two lines that COMPOSE them into a verdict are lifted verbatim
+    /// out of the script rather than retyped. Only the environment is injected — the profile root, the
+    /// operator's profile, and the drive type — which is exactly what the C# side takes as parameters.</para>
+    ///
+    /// <para>Windows-only in practice, like every test in this class: it shells out to
+    /// <c>powershell.exe</c>.</para>
+    /// </summary>
+    [Fact]
+    public void TheInstallerAndTheService_ReachTheSameVerdict_OverOneTable()
+    {
+        const string ProfileRoot = @"C:\Users";
+        const string UserProfile = @"C:\Users\installer";
+
+        var script = InstallScript;
+        var cases = DarlingServiceInstallLocationTests.Cases;
+
+        var probe = new StringBuilder();
+
+        /* The environment, injected. Get-ProfilesDirectory reads HKLM and $env:USERPROFILE is the box's own,
+           and a parity test that took either from the machine it runs on would compare the two rules against
+           two different environments. */
+        probe.AppendLine($"$env:USERPROFILE = '{UserProfile}'");
+        probe.AppendLine($"function Get-ProfilesDirectory {{ '{ProfileRoot}' }}");
+
+        /* Z: is a mapped share and every other letter is a local fixed disk. A definite WMI answer is what the
+           shipped function trusts, so no Get-PSDrive shadow is needed - that fallback is #2201's territory and
+           is pinned on its own above. */
+        probe.AppendLine(@"
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+    if (($Rest -join ' ') -match ""DeviceID='[Zz]:'"") { return [pscustomobject]@{ DriveType = 4 } }
+    return [pscustomobject]@{ DriveType = 3 }
+}");
+
+        probe.AppendLine(ExtractFunction(script, "Convert-ExtendedLengthPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine(ExtractFunction(script, "Get-NetworkPathKind"));
+
+        /* The composition, quoted out of the shipped script. The normalization line (#2348) is part of it:
+           both rules classify $classifyRoot, never the raw $root, and lifting only the two rule lines would
+           quietly test a composition the installer does not perform. */
+        var normalizeLine = ExtractLine(script, "$classifyRoot = Convert-ExtendedLengthPath $root");
+        var networkLine = ExtractLine(script, "$networkKind = Get-NetworkPathKind $classifyRoot");
+        var profileLine = ExtractLine(script, "$underProfile = (Test-PathIsAtOrUnder $classifyRoot (Get-ProfilesDirectory))");
+
+        foreach (var (directory, _, _) in cases)
+        {
+            probe.AppendLine($"$root = '{directory}'");
+            probe.AppendLine(normalizeLine);
+            probe.AppendLine(networkLine);
+            probe.AppendLine(profileLine);
+            /* The script's own precedence: the profile message is chosen first when a path is somehow both
+               (the 'if ($underProfile)' arm inside the guard block), and the guard fires on either. */
+            probe.AppendLine("if ($underProfile) { 'UserProfile' } elseif ($networkKind -eq 'UNC') { 'UncPath' } elseif ($networkKind) { 'MappedDrive' } else { 'None' }");
+        }
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Equal(cases.Count, answers.Count);
+
+        var disagreements = new List<string>();
+        for (var i = 0; i < cases.Count; i++)
+        {
+            var (directory, expected, because) = cases[i];
+
+            /* The C# side, with the same injected environment. Z: is the table's mapped drive. */
+            var service = PerformanceMonitor.Darling.Service.DarlingInstallLocation.Classify(
+                directory, ProfileRoot, UserProfile,
+                static qualifier => string.Equals(qualifier, "Z:", StringComparison.OrdinalIgnoreCase));
+
+            /* Both sides are also checked against the table's own expectation, so a mutual mistake cannot pass
+               as agreement. */
+            if (!string.Equals(answers[i], expected.ToString(), StringComparison.Ordinal) || service != expected)
+            {
+                disagreements.Add(
+                    $"'{directory}': install-darling.ps1 said {answers[i]}, the service said {service}, the table says {expected} ({because})");
+            }
+        }
+
+        Assert.True(disagreements.Count == 0,
+            "the installer and the service disagree about which install locations cannot work (#2185):\n  " +
+            string.Join("\n  ", disagreements));
+    }
+
+    /// <summary>
+    /// The two rules must also agree about WHERE the profile root comes from, not just what they do with it
+    /// (review catch on #2185).
+    ///
+    /// <para><b>The blind spot this closes.</b> The table-parity test above injects the profile root into both
+    /// implementations, which is what makes the table comparable — and means neither side's own lookup is ever
+    /// exercised. The first C# version derived the root from <c>%PUBLIC%</c>'s parent on the belief that Windows
+    /// keeps <c>PUBLIC</c> in step with <c>ProfilesDirectory</c>; they are two INDEPENDENT values under one key
+    /// that merely default to the same tree. On a box where profiles were relocated without moving Public, the
+    /// installer would have refused an install the service waved through — a false negative on the exact case
+    /// #2185 exists to catch, invisible to every test that supplies the root itself.</para>
+    ///
+    /// <para>So this one supplies nothing: it runs the installer's <c>Get-ProfilesDirectory</c> as shipped and
+    /// requires <see cref="DarlingInstallLocation.MachineProfileRoot"/> to answer the same, on whatever box the
+    /// tests are running on. It passes trivially on an unrelocated box, which is fine — its job is to fail the
+    /// moment the two stop reading the same thing.</para>
+    /// </summary>
+    [Fact]
+    public void TheInstallerAndTheService_ReadTheProfileRoot_FromTheSamePlace()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-ProfilesDirectory"));
+        probe.AppendLine("Get-ProfilesDirectory");
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Single(answers);
+
+        var installer = answers[0].TrimEnd('\\');
+        var service = PerformanceMonitor.Darling.Service.DarlingInstallLocation.MachineProfileRoot().TrimEnd('\\');
+
+        Assert.Equal(installer, service, ignoreCase: true);
+    }
+
+    /// <summary>Returns the single line of <paramref name="script"/> containing <paramref name="marker"/>,
+    /// verbatim — so a composition can be executed as shipped instead of retyped into a probe.</summary>
+    private static string ExtractLine(string script, string marker)
+    {
+        var at = script.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"install-darling.ps1 no longer contains '{marker}' (#2185)");
+
+        var start = script.LastIndexOf('\n', at) + 1;
+        var end = script.IndexOf('\n', at);
+        return (end < 0 ? script.Substring(start) : script.Substring(start, end - start)).Trim();
     }
 
     /// <summary>Runs <paramref name="script"/> under Windows PowerShell 5.1 and returns its non-empty output

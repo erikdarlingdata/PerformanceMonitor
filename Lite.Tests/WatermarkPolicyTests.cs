@@ -83,4 +83,52 @@ public sealed class WatermarkPolicyTests
         Assert.Equal(TimeSpan.FromHours(1), WatermarkPolicy.MaxCatchup);
         Assert.Equal(QueryStoreBackfillState.MaxSliceSpan, WatermarkPolicy.MaxCatchup);
     }
+
+    /// <summary>
+    /// #2344: the read floor must sit STRICTLY OLDER than the clamp horizon, because that ordering is the
+    /// whole safety argument. A floor at or newer than the horizon could hide a row the clamp would have
+    /// honoured; older by any margin cannot, since every outcome is max(stored, now - MaxCatchup) and a row
+    /// below the horizon produces the same answer found or not.
+    /// </summary>
+    [Fact]
+    public void ReadFloor_SitsStrictlyOlderThanTheClampHorizon()
+    {
+        var floor = WatermarkPolicy.ReadFloor(Now);
+
+        Assert.NotNull(floor);
+        Assert.True(floor < Now - WatermarkPolicy.MaxCatchup,
+            "the read floor must be older than the clamp horizon, or the bound could hide a row the clamp would honour");
+        Assert.Equal(Now - WatermarkPolicy.MaxCatchup - WatermarkPolicy.ReadFloorMargin, floor);
+    }
+
+    /// <summary>
+    /// The equivalence the bound rests on, stated as a test rather than a comment: for any watermark at or
+    /// below the read floor, the CLAMPED result is the horizon — identical to what the caller derives when
+    /// the bounded read returns nothing at all (null falls back to query_store's 60-minute window, which is
+    /// the same instant as the horizon). So bounding the read cannot change a single caller's outcome.
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(6)]
+    [InlineData(48)]
+    [InlineData(24 * 90)]
+    public void AnyWatermarkBelowTheReadFloor_ClampsToTheSameInstantAsFindingNothing(int hoursOld)
+    {
+        var floor = WatermarkPolicy.ReadFloor(Now)!.Value;
+        var buried = Now.AddHours(-hoursOld);
+        Assert.True(buried <= floor, "fixture must sit at or below the read floor");
+
+        /* Found-but-old and not-found-at-all reach the same place. */
+        var clampedIfFound = WatermarkPolicy.ClampCatchup(buried, Now);
+        Assert.Equal(Now - WatermarkPolicy.MaxCatchup, clampedIfFound);
+        Assert.Equal(Now.AddMinutes(-60), clampedIfFound);
+        Assert.Null(WatermarkPolicy.ClampCatchup(null, Now));
+    }
+
+    /// <summary>A default input yields no floor — callers pass it straight through as "unbounded".</summary>
+    [Fact]
+    public void ReadFloor_OnDefault_IsNull()
+    {
+        Assert.Null(WatermarkPolicy.ReadFloor(default));
+    }
 }

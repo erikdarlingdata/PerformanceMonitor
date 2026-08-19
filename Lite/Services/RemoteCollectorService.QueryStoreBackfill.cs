@@ -563,7 +563,7 @@ public partial class RemoteCollectorService
     /// collected database_states prunes nothing rather than everything.</para>
     ///
     /// <para><b>Which keys</b> comes from the SHARED <see cref="QueryStorePerDatabaseState.PrunableKeys"/>,
-    /// deliberately including <c>planwm:</c> that Lite never writes: running one no-op delete is what
+    /// deliberately including prefixes Lite never writes: running one no-op delete is what
     /// guarantees that enabling plan capture here later cannot quietly create an orphan class this forgot
     /// about. Best-effort like its siblings — a failed prune leaves the rows and the next tick retries.</para>
     /// </summary>

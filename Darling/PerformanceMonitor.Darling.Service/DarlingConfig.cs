@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
@@ -83,6 +84,17 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("planContentRetentionDays")]
     public int PlanContentRetentionDays { get; set; } = 21;
+
+    /// <summary>
+    /// The per-session <c>statement_timeout</c> applied to the viewer and mcp roles — the hard backstop a
+    /// composed query can never exceed (#2357). Seeds <c>config_service.compose_statement_timeout_seconds</c>;
+    /// the store is authoritative afterwards, like every other value here.
+    ///
+    /// <para>15 preserves the constant it replaces. It is a judgement about store size and disk speed, which
+    /// this product cannot make for someone else's deployment — a fleet-wide aggregate over a wide window on a
+    /// large store can exceed 15s with nothing wrong.</para>
+    /// </summary>
+    public int ComposeStatementTimeoutSeconds { get; set; } = 15;
 
     /// <summary>
     /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or
@@ -178,6 +190,14 @@ public sealed class DarlingConfig
     [JsonPropertyName("web")]
     public WebConfig Web { get; set; } = new();
 
+    /// <summary>
+    /// Declared PEER STORES (#2339): what this store covers, and which sibling Darling stores cover the
+    /// rest of the fleet. Pure disclosure — see <see cref="PeersConfig"/>. Optional; omit it entirely on a
+    /// single-store deployment and every surface behaves exactly as it did before.
+    /// </summary>
+    [JsonPropertyName("peers")]
+    public PeersConfig Peers { get; set; } = new();
+
     public static string ResolveConfigPath(string? explicitPath = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
@@ -261,6 +281,10 @@ public sealed class DarlingConfig
         {
             problems.Add("postgres.connectionString is required (or set postgres.managed = true to run the bundled server).");
         }
+
+        /* Peer-disclosure problems are checked BEFORE the servers early-return so a broken peers block is
+           reported even on a config that has no servers yet. */
+        problems.AddRange(PeersConfig.Validate(Peers));
 
         if (Servers is null || Servers.Count == 0)
         {
@@ -503,6 +527,13 @@ public sealed class AlertsConfig
     /// databases at a high percent never page (0 removes the floor) (#1984).</summary>
     [JsonPropertyName("pvsFloorGb")]
     public int PvsFloorGb { get; set; } = 1;
+
+    /* #2349: the database file-growth alert. Ships OFF -- a new alert that starts firing on upgrade is a bad
+       citizen, and the right thresholds are a property of the fleet rather than of the product. */
+    public bool FileGrowthEnabled { get; set; }
+    public int FileGrowthRiseMb { get; set; } = 10240;
+    public int FileGrowthVolumePercent { get; set; } = 60;
+    public int FileGrowthLookbackMinutes { get; set; } = 60;
 
     /// <summary>#2107: the store volume's self-alert warning percent (was a compile-time 10.0;
     /// 0 disables the check — percent is its only trigger).</summary>
@@ -1231,4 +1262,165 @@ public sealed class MonitoredServer
     [JsonIgnore]
     public int ServerId =>
         StoredServerId ?? PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(StorageName);
+}
+
+/// <summary>
+/// Declared peer stores (#2339, tier 1) — the <c>peers</c> block. A fleet split across several boxes gives
+/// every box a Darling store that knows only its own slice, so an agent asking the wrong endpoint about a
+/// server gets a not-found that is indistinguishable from "nobody monitors it". Declaring the siblings here
+/// makes the split legible in the MCP instructions, in <c>list_servers</c>, and in the server-resolution
+/// miss message.
+///
+/// <para><b>Disclosure only — there are no credentials in this block and there is no connectivity behind
+/// it.</b> A peer is a NAME and a sentence; this service never contacts one, cannot read one's data, and
+/// cannot tell whether one is even running. Deliberately so: cross-store reads (auth between stores,
+/// latency, partial failures) are a much larger surface and may never be worth building if disclosure alone
+/// makes the split legible. <see cref="Validate"/> therefore REFUSES text that looks like a connection
+/// string or credential, because everything here is sent verbatim to every connected MCP client.</para>
+///
+/// <para>A file-only block (not seeded into the control-plane store): it describes the DEPLOYMENT TOPOLOGY of
+/// the box this config sits on, which is exactly the kind of thing that must not be editable from a peer's
+/// Viewer. An edit takes effect on the next service restart.</para>
+/// </summary>
+public sealed class PeersConfig
+{
+    /// <summary>
+    /// One sentence naming what THIS store monitors — the anchor everything else is relative to
+    /// ("the 42 us-east-1 SQL Server primaries"). Optional; omit it and the peer list is still disclosed.
+    /// </summary>
+    [JsonPropertyName("thisStoreCovers")]
+    public string ThisStoreCovers { get; set; } = "";
+
+    /// <summary>The sibling Darling stores. Empty (the default) = nothing declared, and every surface behaves as before.</summary>
+    [JsonPropertyName("stores")]
+    public List<PeerStoreConfig> Stores { get; set; } = new();
+
+    /* Substrings that mean the operator pasted a credential or a whole connection string into a field whose
+       entire purpose is to be broadcast. Matched case-insensitively against every peer string. Deliberately
+       a short, high-signal list rather than a secret detector: it catches the realistic mistake (copying a
+       peer's connectionString in as its description) without pretending to be a scanner. */
+    private static readonly string[] CredentialShapedTokens =
+    {
+        "password=", "pwd=", "connectionstring", "integrated security=", "accountkey=", "secretaccesskey",
+    };
+
+    /// <summary>
+    /// Validates a peers block; returns human-readable problems (empty = valid). Fatal, like the rest of
+    /// <see cref="DarlingConfig.Validate"/>, for exactly two shapes: a peer that cannot be NAMED (an agent
+    /// told "some other store has it" with no name to point a human at is no better off than before), and
+    /// any peer text that looks like it carries a secret (failing open there would broadcast it).
+    /// A peer with a name but no <c>covers</c> sentence is allowed — half a disclosure still names an
+    /// endpoint — and renders as just the name.
+    /// </summary>
+    public static IReadOnlyList<string> Validate(PeersConfig? peers)
+    {
+        var problems = new List<string>();
+        if (peers is null)
+        {
+            return problems;
+        }
+
+        /* thisStoreCovers is checked FIRST, before anything can short-circuit. It used to live after the
+           per-peer loop behind an early `peers?.Stores is null` return, which meant an explicit
+           `"stores": null` in the JSON (System.Text.Json assigns null over the property initializer, unlike
+           an omitted key) skipped the credential guard on the one field that is still disclosed in that
+           config — instructions, list_servers' this_store_covers, and every resolution miss. Caught in
+           review on #2339. Ordering, not an extra check, is the fix: an unconditional guard cannot be
+           bypassed by a shape nobody thought to enumerate. */
+        var selfText = peers.ThisStoreCovers ?? "";
+        var selfOffending = CredentialShapedTokens.FirstOrDefault(
+            t => selfText.Contains(t, StringComparison.OrdinalIgnoreCase));
+
+        if (selfOffending is not null)
+        {
+            problems.Add(
+                $"peers.thisStoreCovers contains '{selfOffending}'. The peers block is DISCLOSURE ONLY — its text " +
+                "is sent verbatim to every connected MCP client — so it must carry no connection string and no " +
+                "credential.");
+        }
+
+        if (peers.Stores is null)
+        {
+            return problems;
+        }
+
+        for (int i = 0; i < peers.Stores.Count; i++)
+        {
+            var peer = peers.Stores[i];
+            if (peer is null)
+            {
+                continue;
+            }
+
+            var label = string.IsNullOrWhiteSpace(peer.Name) ? $"peers.stores[{i}]" : $"peer '{peer.Name.Trim()}'";
+
+            if (string.IsNullOrWhiteSpace(peer.Name))
+            {
+                problems.Add(
+                    $"{label}: name is required — it is what an agent tells its human to point at, so a peer " +
+                    "with only a description cannot be acted on.");
+            }
+
+            foreach (var value in PeerStrings(peer))
+            {
+                var offending = CredentialShapedTokens.FirstOrDefault(
+                    t => value.Contains(t, StringComparison.OrdinalIgnoreCase));
+
+                if (offending is not null)
+                {
+                    problems.Add(
+                        $"{label}: peer text contains '{offending}'. The peers block is DISCLOSURE ONLY — its " +
+                        "text is sent verbatim to every connected MCP client — so it must carry no connection " +
+                        "string and no credential. Describe what the peer monitors, not how to reach it.");
+                    break;
+                }
+            }
+        }
+
+        return problems;
+    }
+
+    private static IEnumerable<string> PeerStrings(PeerStoreConfig peer)
+    {
+        yield return peer.Name ?? "";
+        yield return peer.Covers ?? "";
+
+        foreach (var match in peer.Matches ?? new List<string>())
+        {
+            yield return match ?? "";
+        }
+    }
+}
+
+/// <summary>
+/// One declared peer store: what to call it, what it covers in prose, and optionally which server names it
+/// owns. No address and no credential by design — see <see cref="PeersConfig"/>.
+/// </summary>
+public sealed class PeerStoreConfig
+{
+    /// <summary>
+    /// What to call this store — whatever an operator would recognize (the box name, "the use1 store").
+    /// Required: it is the actionable half of the disclosure.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    /// <summary>
+    /// A short sentence naming what that store monitors ("the readable replicas of the use1 primaries, from
+    /// us-east-2"). Human prose — never parsed, only shown.
+    /// </summary>
+    [JsonPropertyName("covers")]
+    public string Covers { get; set; } = "";
+
+    /// <summary>
+    /// Optional server-name substrings this peer declares it monitors (<c>"use1"</c>, <c>"-replica"</c>),
+    /// matched case-insensitively. This is the ONLY machine-checked field: it is what lets a resolution miss
+    /// name the specific peer that owns the server instead of listing them all. Blank entries are dropped —
+    /// an empty substring matches every name, which would make one peer claim the whole fleet. No globbing
+    /// and no regex on purpose: a pattern language is a config surface with its own failure modes, and a
+    /// substring answers the question actually being asked (which region/role does this name belong to?).
+    /// A peer that declares none is still disclosed everywhere; it just cannot be singled out on a miss.
+    /// </summary>
+    [JsonPropertyName("matches")]
+    public List<string> Matches { get; set; } = new();
 }

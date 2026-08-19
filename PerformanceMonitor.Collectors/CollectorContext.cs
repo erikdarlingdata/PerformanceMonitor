@@ -127,7 +127,7 @@ public sealed class CollectorContext
 
     /// <summary>
     /// When true, the query_store payload leaves <c>query_sql_text</c> NULL and the host is responsible
-    /// for resolving statement text through <see cref="QueryStoreCollector.BuildTextFetchQuery"/> instead
+    /// for resolving statement text through <see cref="QueryStoreCollector.BuildTextFetchByIdsQuery"/> instead
     /// (#2150). Default false, which keeps the text inline exactly as it ships today.
     ///
     /// <para><b>Why the text has to leave that projection.</b> The payload selects it inside a

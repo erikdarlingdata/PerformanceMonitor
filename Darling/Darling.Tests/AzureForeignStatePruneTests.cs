@@ -125,17 +125,15 @@ public sealed class AzureForeignStatePruneTests
     [Fact]
     public void BothArmsPruneEveryPerDatabasePrefix()
     {
-        Assert.Equal(5, QueryStorePerDatabaseState.PrunableKeys.Count);
-        Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
-            k => k.Prefix == QueryStorePlanXmlState.WatermarkKeyPrefix);
+        /* #2312 shrank this from five to three: the planwm:/textwm: watermark families retired with the
+           watermarks themselves (the fetches are activity-driven against the store now), and V77 deleted
+           their orphaned rows wholesale — a dropped-database prune has nothing left to own there. */
+        Assert.Equal(3, QueryStorePerDatabaseState.PrunableKeys.Count);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.DoneKeyPrefix);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.HoleKeyPrefix);
-        /* #2150: the text watermark, keyed prefix + databaseName exactly like the plan watermark. */
-        Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
-            k => k.Prefix == QueryStoreTextState.WatermarkKeyPrefix);
-        /* #2312: the open-interval refresh stamp, the fifth per-database prefix. */
+        /* #2312: the open-interval refresh stamp. */
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreOpenIntervalState.WatermarkKeyPrefix);
 

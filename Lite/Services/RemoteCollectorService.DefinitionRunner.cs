@@ -249,9 +249,14 @@ public partial class RemoteCollectorService
                        specifically: a budget expiry abandons the whole pass, so the watermark does not
                        advance, the clamp is re-derived next cycle, and the hole is re-recorded (merged wider
                        with any already pending) rather than lost. */
+                        /* #2344: same bound as the enumerated arm, safe by the other route — this
+                           branch does not clamp itself, but query_store's BuildCutoffParameters does. */
+                        var azureReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                            ? WatermarkPolicy.ReadFloor(collectionTime)
+                            : null;
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             serverId, definition.TargetTable, definition.WatermarkColumn!,
-                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken);
+                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
 
                         /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
                            definition's own clamp only floors OLDER watermarks, so a tighter one
@@ -559,9 +564,16 @@ public partial class RemoteCollectorService
                         ? null
                         : async (item, ct) =>
                         {
+                            /* #2344: bound the read for the ONE collector whose value is clamped on the
+                               next line. Name-guarded rather than applied to every enumerating definition:
+                               a ring-buffer source whose legitimate catch-up spans days must keep reading
+                               its whole history, so the clamp and the bound travel together. */
+                            var readFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                                ? WatermarkPolicy.ReadFloor(collectionTime)
+                                : null;
                             var raw = await GetLastCollectedTimeForDatabaseAsync(
                                 serverId, definition.TargetTable, definition.WatermarkColumn!,
-                                definition.PerDatabaseWatermarkColumn!, item, ct);
+                                definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
                             var clamped = WatermarkPolicy.ClampCatchup(raw, collectionTime);
                             if (raw.HasValue && clamped != raw)
                             {

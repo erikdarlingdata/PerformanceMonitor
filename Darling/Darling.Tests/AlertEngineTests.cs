@@ -74,6 +74,12 @@ public sealed class AlertEngineTests
         /* #1984: DarlingConfig defaults (40% / 1 GB); enable stays the class's opt-in OFF. */
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;
+
+        /* #2349: OFF in the fakes so existing expectations are untouched. */
+        public bool FileGrowthEnabled { get; set; }
+        public int FileGrowthRiseMb { get; set; } = 10240;
+        public int FileGrowthVolumePercent { get; set; } = 60;
+        public int FileGrowthLookbackMinutes { get; set; } = 60;
         public int LongRunningJobMultiplier { get; set; } = 3;
         public int FailedJobLookbackMinutes { get; set; } = 60;
         public int CooldownMinutes { get; set; } = 5;
@@ -135,6 +141,12 @@ public sealed class AlertEngineTests
 
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>(Volumes));
+
+        /* #2349: empty on purpose. These tests exercise other alerts, and a fabricated file would
+           make the file-growth gate fire inside an unrelated scenario. */
+        public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<DatabaseFileGrowthInfo>());
 
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
@@ -1365,6 +1377,12 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
+
+        /* #2349: empty on purpose. These tests exercise other alerts, and a fabricated file would
+           make the file-growth gate fire inside an unrelated scenario. */
+        public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<DatabaseFileGrowthInfo>());
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>

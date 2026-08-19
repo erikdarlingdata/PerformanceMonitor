@@ -14,21 +14,20 @@ namespace PerformanceMonitor.Collectors;
 /// Every <c>collector_state</c> key query_store owns that is keyed by DATABASE NAME (#2188) — the set both
 /// hosts prune when a database is dropped or renamed.
 ///
-/// <para>Nothing ever retired these. The #2164 plan-XML watermark writes one <c>planwm:</c> row per database
-/// and the #2022/#2058 backfill worker writes <c>done:</c> and <c>hole:</c>, and while the worker deletes a
-/// hole when it SERVICES or expires it, a dropped database will never service one — its hole can never be
-/// dug and its tail can never drain. <c>collector_state</c> is a keyed registry rather than a hypertable
-/// (pinned by <c>CollectorStateContractTests</c>), so no retention policy caught them either.</para>
+/// <para>Nothing ever retired these. The #2022/#2058 backfill worker writes <c>done:</c> and <c>hole:</c>,
+/// and while the worker deletes a hole when it SERVICES or expires it, a dropped database will never
+/// service one — its hole can never be dug and its tail can never drain. <c>collector_state</c> is a keyed
+/// registry rather than a hypertable (pinned by <c>CollectorStateContractTests</c>), so no retention policy
+/// caught them either. (The #2164 <c>planwm:</c> and #2150 <c>textwm:</c> watermarks were members of this
+/// list until #2312 retired the watermarks themselves — the fetches are activity-driven now, the store is
+/// the watermark, and V77 deleted the orphaned rows once.)</para>
 ///
 /// <para><b>Shared rather than one list per host</b>, which is the whole reason this file exists. The two
 /// stores prune with different dialects (Postgres anti-join, DuckDB <c>NOT IN</c>) and the SKUs write
-/// different subsets — Lite never sets <c>CollectorContext.CapturePlanXml</c>, so it writes no
-/// <c>planwm:</c> at all, while both write the backfill pair. A per-host list would make a fourth prefix a
-/// two-place edit whose omission fails nothing: the rows would simply orphan on one SKU, invisibly, which is
-/// the drift this product keeps paying for. Both hosts iterate THIS, so a prefix is pruned everywhere or
-/// nowhere. Lite running the <c>planwm:</c> statement against rows it never writes costs one no-op delete
-/// and buys the guarantee that enabling plan capture there cannot quietly create an unpruned orphan
-/// class.</para>
+/// different subsets. A per-host list would make a new prefix a two-place edit whose omission fails
+/// nothing: the rows would simply orphan on one SKU, invisibly, which is the drift this product keeps
+/// paying for. Both hosts iterate THIS, so a prefix is pruned everywhere or nowhere — a no-op delete on
+/// the SKU that never writes a prefix is the cheap price of that guarantee.</para>
 ///
 /// <para>Membership is a real decision, not a listing of every key: a key must be
 /// <c>&lt;prefix&gt;&lt;databaseName&gt;</c>, because both prunes reconstruct it that way to test it against
@@ -45,16 +44,10 @@ public static class QueryStorePerDatabaseState
     /// </summary>
     public static readonly IReadOnlyList<(string Owner, string Prefix)> PrunableKeys = new[]
     {
-        (QueryStorePlanXmlState.StateCollectorName, QueryStorePlanXmlState.WatermarkKeyPrefix),
         (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.DoneKeyPrefix),
         (QueryStoreBackfillState.StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix),
-        /* #2150: the text watermark is keyed prefix + databaseName exactly like the plan watermark above,
-           so a dropped database's key must go with it. Paired with its OWN collector name rather than the
-           plan fetch's — the two watermarks are stored separately on purpose, and a prefix pruned under
-           the wrong owner silently deletes nothing. */
-        (QueryStoreTextState.StateCollectorName, QueryStoreTextState.WatermarkKeyPrefix),
-        /* #2312: the open-interval refresh stamp, per database like the three above, under its own owner
-           for the same never-prune-under-the-wrong-name reason. */
+        /* #2312: the open-interval refresh stamp, per database like the pair above, under its own owner
+           because a prefix pruned under the wrong collector name silently deletes nothing. */
         (QueryStoreOpenIntervalState.StateCollectorName, QueryStoreOpenIntervalState.WatermarkKeyPrefix),
     };
 

@@ -388,8 +388,8 @@ public sealed class DarlingAgReaderTests
 
         /* Severities serialize as NAMES (the JsonStringEnumConverter), not integers — the browser maps the name to
            a CSS class, so a numeric enum would silently break every color. */
-        Assert.Contains("\"severity\": \"Critical\"", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"severity\": 3", json, StringComparison.Ordinal);
+        JsonAssert.Contains("\"severity\": \"Critical\"", json);
+        JsonAssert.DoesNotContain("\"severity\": 3", json);
     }
 
     /* ─────────────────────────── SQL dialect pins ─────────────────────────── */

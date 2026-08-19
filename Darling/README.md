@@ -169,7 +169,7 @@ Extract to a local, machine-scoped path — `C:\PerformanceMonitorDarling` is th
 
 The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMonitor Darling`, never LocalSystem, because the bundled PostgreSQL refuses to run with administrative privileges. That account is not you, not SYSTEM, and not Administrators — and a user profile grants access to about those three and nobody else, so the service cannot read its own program files there. It installs cleanly and then fails: `initdb.exe` dies at `0xC0000135` (STATUS_DLL_NOT_FOUND) before it can report anything (#2185). A folder created under `C:\` inherits read + execute for `BUILTIN\Users` instead, which the virtual account is a member of, which is why the documented location works. Network paths fail for a related reason: a virtual account [reaches the network as the computer account](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/configure-windows-service-accounts-and-permissions#virtual-accounts) rather than as you, and a mapped drive letter belongs to your logon session, which a service does not share.
 
-`install-darling.ps1` refuses a fresh install in any of these locations rather than leaving you a service that cannot start. To move an existing install, stop the service, move the folder, and re-run `install-darling.ps1` from the new location — it updates the service's binPath in place and leaves your `darling.json`, store data, and credentials alone.
+`install-darling.ps1` refuses a fresh install in any of these locations rather than leaving you a service that cannot start. A service registered by hand instead — the manual `sc create` path below, which the installer never sees — gets the same diagnosis from the service itself: on start, ahead of reading `darling.json` and long before the store bootstrap, it logs one critical line naming the path, why its own account cannot read it, and where to move it, so the cause is above the failure rather than three messages downstream of it. To move an existing install, stop the service, move the folder, and re-run `install-darling.ps1` from the new location — it updates the service's binPath in place and leaves your `darling.json`, store data, and credentials alone.
 
 **Manual:** publish (or copy the build output) to a stable path, put `darling.json` next to the exe (or set `DARLING_CONFIG` as a machine environment variable), then register it:
 
@@ -413,7 +413,7 @@ The embedded MCP server, over Streamable HTTP bound to `localhost` by default (s
 - **Fifteen core data-read tools** — the diagnostic reads an assistant needs to investigate a server, each a stored read of the collected data (never a live query against the monitored server):
   - *Resource metrics* — `get_cpu_utilization`, `get_wait_stats`, `get_wait_trend`, `get_wait_types` (the distinct observed wait types, to pick one for `get_wait_trend`), `get_memory_stats`, `get_memory_clerks`, `get_file_io_stats`, `get_tempdb_trend`, `get_perfmon_stats`.
   - *Query performance* — `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top` (these hand back the `query_hash` / `sql_handle` / `query_id` + `plan_id` keys the plan-analysis tools consume).
-  - *Discovery / health* — `list_servers` (with collection-freshness status), `get_collection_health`, `get_server_properties`.
+  - *Discovery / health* — `list_servers` (with collection-freshness status, and the [declared peer stores](#peers) when the fleet is split across several Darling boxes), `get_collection_health`, `get_server_properties`.
 
   These are the tools the analysis findings' `next_tools` recommendations point at, so a client following a finding's advice resolves them on this same server. Result shapes match Lite's (the store is Lite's collector schema); where Lite and the Dashboard's shapes diverge, Darling follows Lite — the shape its collector-mirror store can serve faithfully.
 - **Twenty diagnostic-depth data-read tools** — deeper reads for a blocking / deadlock / session / configuration / storage investigation, each a stored read:
@@ -491,6 +491,47 @@ The embedded read-only **web dashboard** — a browser view of the monitoring st
 Once enabled, open `http://localhost:5153/` in a browser on the service host. Like the MCP server, `enabled`/`port` here are the file SEED; after first start they live in the control plane and the Viewer's Settings toggles them LIVE (the service starts/stops/rebinds the dashboard within seconds — no restart). If the port is already in use at startup, the web host logs an error and retries on a calm cadence; collection is unaffected.
 
 **What you see.** The dashboard opens on a **Fleet Overview**: a card per enabled server with a status dot, six per-metric health bands (CPU, threads, memory, blocking, deadlocks, collectors), and its last collection time — all banded server-side, so the browser only renders (a server that has never reported shows an amber "Awaiting first collection", never a red offline). Above the cards a worst-first "Needs attention" list surfaces the servers to look at, or an all-healthy line when there is nothing to chase. Click a card to **drill into one server**: an overview, wait stats with a trend for the heaviest wait, active queries, a CPU chart, memory and file-I/O trends, and collection health — the same collected data the viewer shows, over inline charts. A fleet-wide **Alert History** page (with a server filter box) rounds out phase 1. It is a read-only view — no settings, no write paths, no live-server queries — and refreshes every 60 seconds (pausing while the tab is hidden). The frontend ships fully self-contained (no CDN, no fonts, no remote anything), so it works on an air-gapped host with no internet access.
+
+### peers
+
+**Declared peer stores** — optional, and only relevant when the fleet is split across **several Darling boxes**, one store each (SQL Server primaries on one box, their readable replicas on another, PostgreSQL on a third). Each box's MCP server answers over **its own** store only, so a server monitored by a sibling resolves as not-found — which an agent cannot tell apart from *"nobody monitors this server."* Declaring the siblings fixes that at the three places an agent forms its picture of the fleet.
+
+**Disclosure only.** There is no address and no credential in this block, and nothing behind it: the service never contacts a peer, cannot read a peer's data, and cannot tell whether a peer is even running. A peer is a **name** plus a **sentence**, so an agent (or its human) can pick the right endpoint. Everything here is sent verbatim to every connected MCP client, so the service **refuses to start** if any peer text looks like a connection string or credential.
+
+| Key | Default | Notes |
+|---|---|---|
+| `thisStoreCovers` | `""` | One sentence naming what THIS store monitors — the anchor the peer list is relative to |
+| `stores[].name` | — | **Required.** Whatever an operator would recognize (the box name, "the use1 store") |
+| `stores[].covers` | `""` | A short sentence naming what that store monitors. Human prose — never parsed, only shown |
+| `stores[].matches` | `[]` | Optional server-name **substrings** that store monitors, case-insensitive. The only machine-checked field |
+
+```jsonc
+"peers": {
+  "thisStoreCovers": "the 42 us-east-1 SQL Server primaries",
+  "stores": [
+    {
+      "name": "prod-pos-use2-monitor-01",
+      "covers": "the readable replicas of those same 42 primaries, in-region from us-east-2",
+      "matches": ["use2"]
+    },
+    { "name": "prod-pos-pg-monitor-01", "covers": "the Aurora PostgreSQL clusters", "matches": ["-aurora-"] }
+  ]
+}
+```
+
+What it changes, with peers declared:
+
+- **The MCP instructions** gain a Fleet Coverage section, high enough that an agent reads which store it is talking to before it reads the tool census.
+- **`list_servers`** gains `this_store_covers`, a `peer_fleets` array, and a `peer_note`. Both are always present: an *empty* `peer_fleets` has two very different meanings (this really is the only store, or nobody declared the siblings) and the service cannot tell them apart, so `peer_note` says exactly that rather than letting an empty array read as "this is the whole fleet." An **empty registry** answers in prose rather than JSON, and carries the peer list too — a store with nothing registered is a fresh or just-restarted box, which is the worst place to drop the disclosure.
+- **The server-resolution miss** appends the disclosure to the existing "Could not resolve server. Available servers:" listing, naming the peer whose declared coverage matches — so *not monitored here* stops looking like *not monitored anywhere*.
+
+`matches` is deliberately plain substrings, no globbing and no regex: it exists to answer "which region/role prefix is this name?", and a pattern language would be a config surface with its own failure modes. Blank entries are dropped — an empty substring matches every name, which would make one peer claim the whole fleet. A peer with no `matches` is still disclosed everywhere; it just cannot be singled out on a miss, and the miss message says so instead of implying the server is unmonitored.
+
+A **file-only** block (not seeded into the control plane): it describes the deployment topology of *this* box, which must not be editable from a peer's Viewer. An edit takes effect on the next service restart. There is deliberately **no cross-store connectivity** here — actual federated reads (auth between stores, latency, partial failures) are a much larger surface, and may never be worth building if disclosure alone makes the split legible.
+
+**Declaring nothing changes nothing, with one exception worth knowing about on upgrade.** The instructions, the resolution-miss message, and `list_servers`' empty-registry sentence are byte-for-byte what they were. But `list_servers`' JSON envelope carries `this_store_covers`, `peer_fleets` and `peer_note` on *every* response, declared or not — so a script comparing that tool's exact shape sees three new keys even if you never write a `peers` block. That is deliberate: an empty `peer_fleets` means *either* "this is the only store" *or* "nobody declared the siblings", and a note that only appeared when peers were declared would say nothing in precisely the case that produces the wrong conclusion.
+
+**A `peers` block that fails validation is refused whole, and nothing is disclosed** — not the valid subset. An unfinished block that asserts coverage which may be wrong is worse than no block, and the service logs each problem at Critical. The check runs inside the publish rather than only in config validation, because the MCP host loads its own config and deliberately never validates it (its fail-closed checks are host-local), so validation alone would leave the one path that actually broadcasts uncovered.
 
 ### No Schedule Knobs, by Design
 
@@ -621,6 +662,7 @@ The notable rungs are below. For the **complete** current schema, read `Darling/
 | **V72** — Query Store plan map | `collect.query_store_plan_map` — `(server_id, database_name, plan_id)` → digest, so Query Store facts can reference plan XML they no longer carry once that content moves into the shared `query_plan_dim`. Plan XML was stored INLINE on `query_store_stats` at roughly 5x redundancy. Not a hypertable: one row per distinct plan per database, so it is dimension-shaped and pruned on `last_seen` rather than by `drop_chunks`. Its `last_seen` is load-bearing — the dimension GC sweeps on timestamps rather than counting references, so ending the re-shipping also ends the liveness signal that used to keep those dim rows alive |
 | **V73** — PostgreSQL statement text | `collect.pg_statement_text` — `(server_id, queryid)` → statement text, refreshed hourly, so `get_pg_top_queries` returns something readable (#2219). `pg_statement_stats` stores no text because `showtext` is a real per-collection cost and normalized text is highly repetitive; but `queryid` is NOT stable across a major version upgrade, so without this the stored history joins to nothing after one — a list of integers that used to be your slowest queries, unrecoverable because the live view no longer holds the old ids. Text is INLINE rather than a `query_text_dim` digest: the dimension route needs the GC liveness interlock whose failure mode is silently missing text, and inline cannot dangle. Not a hypertable and not a collector table, exactly like V72 — a bespoke upsert path, pruned on `last_seen` with a margin that makes text OUTLIVE the statistics referencing it |
 | **V76** — Query Store health | `collect.query_store_health` + its index + the `v_query_store_health` passthrough view — the #2319 per-database `sys.database_query_store_options` collector's store table: actual vs desired state (the cap-hit READ_ONLY transition and its readonly_reason), current vs max storage, cleanup thresholds, and the runtime-stats interval length. A fresh store gets the table from V1's generated schema; V76 is what an already-existing store gets |
+| **V77** — Activity-driven plan fetch | Three strokes behind #2312's reshape of the Query Store plan/text fetch: `query_store_plan_map.digest` goes **nullable** (a plan whose XML the engine cannot persist gets a NULL-digest map row — the content-less marker that stops the probe re-selecting it forever), `query_store_text` gains `query_hash` (the Query Store reset detector: an id whose stored hash differs from the live one names a DIFFERENT statement now and its text refetches within one cycle), and the retired `planwm:`/`textwm:` watermark state rows are deleted wholesale. The fetch itself no longer walks the plan catalog by watermark — the cycle's collected rows name their plans, the store answers which are missing, and only those are fetched |
 
 All timestamps in the store are **naive-UTC** `timestamp` columns — the product-wide cross-store contract (Lite's DuckDB does the same).
 

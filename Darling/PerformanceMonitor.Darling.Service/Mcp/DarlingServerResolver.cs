@@ -26,6 +26,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// case-insensitive) beats partial (Contains) match; a miss returns a ready-to-return error
 /// listing the available servers, with Lite's <c>[Read-Only]</c> tag derived from the
 /// storage-name <c>:RO</c> suffix (the registry's encoding of ReadOnlyIntent).
+///
+/// <para>One headless-only addition (#2339): the miss message also discloses the DECLARED PEER STORES, so a
+/// fleet split across several Darling boxes does not answer "unknown server" where the true answer is "the
+/// other box has that one." Purely additive — see the <see cref="ResolveOrError(IReadOnlyList{RegisteredServer}, string, DarlingPeerDirectory.Snapshot)"/>
+/// overload.</para>
 /// </summary>
 internal static class DarlingServerResolver
 {
@@ -72,16 +77,41 @@ ORDER BY server_name";
 
     /// <summary>
     /// The pure matching half — Lite's semantics over materialized registry rows, separated
-    /// from the Postgres read so the resolution rules unit-test without a live store.
+    /// from the Postgres read so the resolution rules unit-test without a live store. Reads the ambient
+    /// peer declaration (#2339) for the miss message; the overload below takes it explicitly.
     /// </summary>
     internal static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
         IReadOnlyList<RegisteredServer> servers,
-        string? serverName)
+        string? serverName) =>
+        ResolveOrError(servers, serverName, DarlingPeerDirectory.Current);
+
+    /// <summary>
+    /// The resolution rules over an EXPLICIT peer declaration — the pure form, so the miss message's peer
+    /// disclosure is testable without publishing process-wide state.
+    ///
+    /// <para><b>The miss message is additive on purpose (#2339).</b> A fleet split across several Darling
+    /// stores makes "not monitored here" the normal case rather than an edge, and the bare
+    /// "Could not resolve server" it produced is indistinguishable from "nobody monitors this server" — so
+    /// the peer disclosure is appended, naming the sibling store whose declared coverage matches. It is
+    /// APPENDED rather than substituted because the local server listing is still the right answer to the
+    /// commonest miss (a typo), and because the leading "Could not resolve server." is what callers key off.
+    /// With nothing declared the message is byte-for-byte what it was.</para>
+    /// </summary>
+    internal static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
+        IReadOnlyList<RegisteredServer> servers,
+        string? serverName,
+        DarlingPeerDirectory.Snapshot peers)
     {
         var resolved = Resolve(servers, serverName);
-        return resolved is null
-            ? (default, $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}")
-            : (resolved.Value, null);
+        if (resolved is not null)
+        {
+            return (resolved.Value, null);
+        }
+
+        var message = $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}";
+        var disclosure = DarlingPeerDirectory.ResolutionMissDisclosure(peers, serverName);
+
+        return (default, disclosure.Length == 0 ? message : $"{message}\n\n{disclosure}");
     }
 
     /// <summary>

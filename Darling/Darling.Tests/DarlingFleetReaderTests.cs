@@ -236,13 +236,13 @@ public sealed class DarlingFleetDtoJsonTests
         }
 
         /* Bands / severities serialize as strings, not ordinals — the frontend maps a name to a color. */
-        Assert.Contains("\"band\": \"Critical\"", json, StringComparison.Ordinal);
-        Assert.Contains("\"cpu_severity\": \"Critical\"", json, StringComparison.Ordinal);
-        Assert.Contains("\"threads_severity\": \"Unknown\"", json, StringComparison.Ordinal);
+        JsonAssert.Contains("\"band\": \"Critical\"", json);
+        JsonAssert.Contains("\"cpu_severity\": \"Critical\"", json);
+        JsonAssert.Contains("\"threads_severity\": \"Unknown\"", json);
         /* naive-UTC instants carry no zone suffix (localized in the browser). */
-        Assert.Contains("\"last_collection\": \"2026-07-18T03:30:00\"", json, StringComparison.Ordinal);
-        Assert.Contains("\"deadlock_last_seen\": \"2026-07-18T03:15:00\"", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"cpu_severity\": 3", json, StringComparison.Ordinal);
+        JsonAssert.Contains("\"last_collection\": \"2026-07-18T03:30:00\"", json);
+        JsonAssert.Contains("\"deadlock_last_seen\": \"2026-07-18T03:15:00\"", json);
+        JsonAssert.DoesNotContain("\"cpu_severity\": 3", json);
     }
 
     [Fact]
@@ -252,17 +252,17 @@ public sealed class DarlingFleetDtoJsonTests
            measure's appliesTo.azureSqlDb to auto-grey a measure that platform can't collect. */
         var azure = new FleetServerCard { ServerId = 1, DisplayName = "az-db", ServerName = "az-db", EngineEdition = 5, IsAzureSqlDb = true };
         var azureJson = JsonSerializer.Serialize(azure, DarlingFleetReader.JsonOptions);
-        Assert.Contains("\"engine_edition\": 5", azureJson, StringComparison.Ordinal);
-        Assert.Contains("\"is_azure_sql_db\": true", azureJson, StringComparison.Ordinal);
-        Assert.Contains("\"is_azure_mi\": false", azureJson, StringComparison.Ordinal);
+        JsonAssert.Contains("\"engine_edition\": 5", azureJson);
+        JsonAssert.Contains("\"is_azure_sql_db\": true", azureJson);
+        JsonAssert.Contains("\"is_azure_mi\": false", azureJson);
 
         /* A server that has not connected: null edition serializes as JSON null and both flags are false, so the
            frontend has no signal and keeps the measure badge rather than greying on a guess. */
         var unknown = new FleetServerCard { ServerId = 2, DisplayName = "new", ServerName = "new" };
         var unknownJson = JsonSerializer.Serialize(unknown, DarlingFleetReader.JsonOptions);
-        Assert.Contains("\"engine_edition\": null", unknownJson, StringComparison.Ordinal);
-        Assert.Contains("\"is_azure_sql_db\": false", unknownJson, StringComparison.Ordinal);
-        Assert.Contains("\"is_azure_mi\": false", unknownJson, StringComparison.Ordinal);
+        JsonAssert.Contains("\"engine_edition\": null", unknownJson);
+        JsonAssert.Contains("\"is_azure_sql_db\": false", unknownJson);
+        JsonAssert.Contains("\"is_azure_mi\": false", unknownJson);
     }
 
     [Fact]
@@ -306,7 +306,7 @@ public sealed class DarlingFleetDtoJsonTests
             Assert.Contains(field, json, StringComparison.Ordinal);
         }
 
-        Assert.Contains("\"band_label\": \"Critical\"", json, StringComparison.Ordinal);
+        JsonAssert.Contains("\"band_label\": \"Critical\"", json);
     }
 }
 

@@ -106,15 +106,33 @@ function Get-ProfilesDirectory {
     return (Join-Path $env:SystemDrive 'Users')
 }
 
+# Rewrites an extended-length path to its ordinary spelling (#2348), leaving anything else alone:
+# \\?\UNC\server\share -> \\server\share, and \\?\C:\dir -> C:\dir. The C# twin is
+# DarlingInstallLocation.StripExtendedLengthPrefix and the two must stay identical.
+#
+# The UNC form is tested FIRST because it is the longer, more specific prefix - checking \\?\ first would
+# strip four characters off a share and leave the nonsense UNC\server\share, which is neither a share nor a
+# local path. 'UNC' is matched case-insensitively because Windows accepts \\?\unc\ too, and a miss there
+# would silently re-open the hole this closes.
+function Convert-ExtendedLengthPath([string]$path) {
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    if ($path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { return '\\' + $path.Substring(8) }
+    if ($path.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $path.Substring(4) }
+    return $path
+}
+
 # 'UNC', 'mapped drive', or $null. Named separately from the profile case because the reason differs:
 # a virtual service account reaches the network as the COMPUTER account rather than as the operator who
 # typed the path, and a mapped drive letter belongs to one logon session, which a service never shares.
+#
+# Callers pass a path that Convert-ExtendedLengthPath has already normalized, so there is no \\?\ carve-out
+# here any more: an extended-length LOCAL root has become C:\... and cannot reach the UNC test, while an
+# extended-length SHARE has become \\server\share and correctly does (#2348 - the old wholesale exclusion
+# waved real shares through, because skipping the check is not the same as passing it).
 function Get-NetworkPathKind([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return $null }
 
-    # \\?\ is the long-path prefix on a LOCAL path, not a server name - excluded so an extended-length
-    # local path is not mistaken for a share.
-    if ($path.StartsWith('\\', [StringComparison]::Ordinal) -and -not $path.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+    if ($path.StartsWith('\\', [StringComparison]::Ordinal)) {
         return 'UNC'
     }
 
@@ -188,10 +206,15 @@ if (-not (Test-Path $serviceExe)) {
 # This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
 # nothing and leaves nothing behind.
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-$networkKind = Get-NetworkPathKind $root
+# Classify the NORMALIZED spelling, but keep installing to $root exactly as given (#2348). The \\?\ prefix
+# instructs the path parser and is not part of where the install lives, so stripping it for the decision
+# changes which rules see the path and nothing about where files land.
+$classifyRoot = Convert-ExtendedLengthPath $root
+
+$networkKind = Get-NetworkPathKind $classifyRoot
 # $env:USERPROFILE as well as the machine's profile root: a profile redirected outside ProfilesDirectory
 # is still a profile, and it is the profile whose owner is most likely to be running this script.
-$underProfile = (Test-PathIsAtOrUnder $root (Get-ProfilesDirectory)) -or (Test-PathIsAtOrUnder $root $env:USERPROFILE)
+$underProfile = (Test-PathIsAtOrUnder $classifyRoot (Get-ProfilesDirectory)) -or (Test-PathIsAtOrUnder $classifyRoot $env:USERPROFILE)
 
 if ($underProfile -or $networkKind) {
     if ($underProfile) {

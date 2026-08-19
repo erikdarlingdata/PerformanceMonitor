@@ -89,14 +89,20 @@ public static class AlertFingerprint
         string naturalKey,
         IReadOnlyList<string>? displayObjects = null,
         int occurrenceCount = 1,
-        string? waitRange = null)
+        string? waitRange = null,
+        /* #2361: the incident's database scope. Optional because most fingerprint kinds are not
+           database-scoped -- a disk or a job is not -- and a caller that has no database says so by omission
+           rather than by passing an empty string that would read as "no database" downstream. */
+        string? database = null)
     {
         var normalized = Normalize(naturalKey);
         if (normalized.Length == 0)
             return null;
 
         var key = Hash(BuildInput(serverName, incidentType, new[] { normalized }));
-        return new AlertIncident(key, displayObjects ?? Array.Empty<string>(), occurrenceCount, waitRange);
+        return new AlertIncident(
+            key, displayObjects ?? Array.Empty<string>(), occurrenceCount, waitRange,
+            Database: string.IsNullOrWhiteSpace(database) ? null : database);
     }
 
     /// <summary>SHA-256 of <paramref name="input"/> as lowercase hex (64 chars). Public for tests.</summary>

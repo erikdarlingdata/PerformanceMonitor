@@ -133,6 +133,9 @@ public static class PgMigrations
         new Migration(74, "query-store-text", V74Sql),
         new Migration(75, "plan-content-retention-knob", V75Sql),
         new Migration(76, "query-store-health", V76Sql),
+        new Migration(77, "activity-driven-plan-fetch", V77Sql),
+        new Migration(78, "compose-statement-timeout", V78Sql),
+        new Migration(79, "file-growth-alert", V79Sql),
     };
 
     /// <summary>
@@ -1690,6 +1693,85 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V79 — the database file-growth alert (#2349). Between <c>tempdb Space</c> and <c>Volume Free Space</c>
+    /// sits a file that has grown large but has not yet filled its disk, and neither existing alert can express
+    /// it: the first fires on reserved ÷ (reserved + unallocated), whose denominator GROWS with autogrowth so
+    /// the percentage FALLS as tempdb balloons; the second fires on the consequence, too late to act on and
+    /// unable to attribute the space to any one file.
+    ///
+    /// <para>Two gates, both graded per server so ONE global setting works across a heterogeneous fleet — the
+    /// constraint that shapes this, since <c>config_alert_settings</c> is a single global row and an absolute MB
+    /// threshold is unusable when normal tempdb sizes differ by an order of magnitude: set it low enough for the
+    /// small instances and the large ones alert constantly. The RISE gate is primary (this file grew N MB inside
+    /// the window), following #2157's reasoning that a level alone pages forever about a size that has been true
+    /// since Tuesday; the LEVEL gate is the file as a share of its VOLUME, which self-scales to each server's
+    /// disk layout whether or not the file has a dedicated one.</para>
+    ///
+    /// <para>Ships OFF. A new alert that starts firing on upgrade is a bad citizen, and the right thresholds are
+    /// a property of the fleet rather than of the product.</para>
+    /// </summary>
+    private const string V79Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS file_growth_enabled boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS file_growth_rise_mb integer NOT NULL DEFAULT 10240,
+    ADD COLUMN IF NOT EXISTS file_growth_volume_percent integer NOT NULL DEFAULT 60,
+    ADD COLUMN IF NOT EXISTS file_growth_lookback_minutes integer NOT NULL DEFAULT 60;";
+
+    /// <summary>
+    /// V78 — the compose statement-timeout knob (#2357). The per-session <c>statement_timeout</c> on the
+    /// viewer and mcp roles is the hard backstop a composed query can never exceed, and it shipped as a bare
+    /// 15-second constant. Fifteen seconds is a judgement about how big a store is and how fast its disk is,
+    /// and the product knows neither for anyone else's deployment: a fleet-wide aggregate over a wide window
+    /// on a large store can exceed it with nothing wrong.
+    ///
+    /// <para>Applied in the role PROVISIONING DDL rather than a migration, which is why the constant could
+    /// not simply be raised — an existing install already has the old value baked into its roles. The
+    /// provisioning SQL is re-run on every managed start ("idempotent + self-healing: re-run every managed
+    /// start, converging role state"), so a store picks this up on its next restart without any new
+    /// machinery.</para>
+    ///
+    /// <para>Default 15 preserves today's behaviour exactly for anyone who never touches it. Clamped on READ
+    /// like the V59/V75 knobs, so a hand-edited absurdity cannot remove the backstop the whole design leans
+    /// on — a LIMIT bounds output, a group-by scans and sorts before it, and something has to bound WORK.</para>
+    /// </summary>
+    private const string V78Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS compose_statement_timeout_seconds integer NOT NULL DEFAULT 15;";
+
+    /// <summary>
+    /// V77 — the activity-driven plan/text fetch (#2312 Finding 2). Three small strokes for one shape
+    /// change: the fetch stops walking the target's plan catalog by watermark and instead fetches exactly
+    /// the plans/texts the cycle's collected rows reference that the store does not hold, making the store
+    /// itself the watermark.
+    ///
+    /// <para><c>digest</c> goes nullable so a plan whose XML the engine cannot persist (too large, certain
+    /// forced-failure paths) gets a map row with a NULL digest — the content-less MARKER. Without it the
+    /// missing-set probe would re-select those plans on every cycle forever; with it, "seen, and the content
+    /// will never exist" is a stored fact. Readers are unaffected: a NULL digest joins to no dimension row,
+    /// which renders exactly like the absent content it records. DROP NOT NULL is metadata-only and
+    /// idempotent, so this rung stays instant on the largest maps.</para>
+    ///
+    /// <para><c>query_store_text.query_hash</c> is the reset detector: <c>query_id</c> is only unique until
+    /// a Query Store reset renumbers it, and the retired design's answer was a daily watermark expiry that
+    /// re-walked the whole catalog. The stored hash lets the per-cycle probe see that an id now names a
+    /// DIFFERENT statement and refetch just that text. Nullable and unbackfilled: legacy rows adopt the
+    /// live hash on their first touch, which converges the fleet with zero refetches.</para>
+    ///
+    /// <para>The DELETEs retire the <c>planwm:</c>/<c>textwm:</c> watermark state rows wholesale — the
+    /// machinery that wrote them is gone, <c>collector_state</c> has no retention (it is state, not facts),
+    /// and rows nobody will ever read again should not wait for a dropped-database prune that no longer
+    /// iterates their prefixes. Bare table name resolves via the migrate session's
+    /// <c>search_path = collect, config, public</c>, like every rung since V8.</para>
+    /// </summary>
+    private const string V77Sql = @"
+ALTER TABLE collect.query_store_plan_map ALTER COLUMN digest DROP NOT NULL;
+
+ALTER TABLE collect.query_store_text ADD COLUMN IF NOT EXISTS query_hash text;
+
+DELETE FROM collector_state WHERE collector_name = 'query_store_plan_xml' AND state_key LIKE 'planwm:%';
+DELETE FROM collector_state WHERE collector_name = 'query_store_text' AND state_key LIKE 'textwm:%';";
 
     /// <summary>
     /// V76 — the per-database Query Store health table (#2319): what database_config's single

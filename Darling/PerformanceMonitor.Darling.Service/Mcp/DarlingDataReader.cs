@@ -880,6 +880,41 @@ internal static class DarlingDataReader
     /* ─────────────────────────── query store ─────────────────────────── */
 
     /// <summary>
+    /// The oldest <c>collection_time</c> this server actually has inside the requested window (#2364).
+    ///
+    /// <para><b>Why a separate probe rather than reading the returned rows.</b> <see cref="QueryStoreTopSql"/>
+    /// returns the top N by COST, not by time, so the timestamps on those rows say nothing about how far back
+    /// the window reaches — the most expensive query in a month might have run this morning. The window floor is
+    /// a property of the tier, not of the result set, and has to be asked for separately.</para>
+    ///
+    /// <para>Bounded on both sides, so it prunes chunks and answers from an ordered scan that stops at the first
+    /// row rather than reading the window. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string QueryStoreWindowFloorSql = """
+        SELECT MIN(collection_time)
+        FROM query_store_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        """;
+
+    /// <summary>
+    /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the window holds nothing at all, which the caller
+    /// reports as "nothing was read" rather than as an absence of activity.
+    /// </summary>
+    public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(QueryStoreWindowFloorSql);
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime dt ? dt : null;
+    }
+
+    /// <summary>
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
     /// (database, query_id, plan_id, query_hash, replica_role), average the per-interval metrics, rank by total duration

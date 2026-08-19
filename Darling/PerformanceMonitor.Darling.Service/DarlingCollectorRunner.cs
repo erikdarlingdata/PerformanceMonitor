@@ -126,6 +126,32 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private readonly ConcurrentDictionary<(int ServerId, string Database), QueryStorePlanXmlState.PlanSizeEstimate> _observedPlanSize = new();
 
+    /// <summary>
+    /// Per-database ids the activity-driven fetch (#2312 Finding 2) still owes the store: probed missing in
+    /// an earlier cycle but deferred by the candidate cap or the byte budget. Carried IN MEMORY because the
+    /// probe's input is each cycle's batch references, and a plan referenced once — its delta rows shipped,
+    /// never executed again — would otherwise never re-enter the probe and never get its XML. The honest
+    /// costs of in-memory: a restart forgets the debt, and the ids re-enter only if their plans execute
+    /// again — for the literal-churn plans that dominate deferrals, XML nobody can reach from a fact is the
+    /// cheap thing to lose. Bounded: ids are 8 bytes and a first-contact backlog is one catalog's worth.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), long[]> _planFetchCarryover = new();
+
+    /// <summary>Text twin of <see cref="_planFetchCarryover"/> — same deferral contract, keyed by query_id.</summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), long[]> _textFetchCarryover = new();
+
+    /// <summary>
+    /// Ids per IN-list statement for the plan fetch. Small on purpose: each id in the list is a plan the
+    /// server will DECOMPRESS to run the budget's running total, so the statement size is never the real
+    /// bound — the candidate cap from <see cref="QueryStorePlanXmlState.CandidatePlanCount"/> is — and 400
+    /// keeps the SQL text itself a few KB.
+    /// </summary>
+    private const int PlanFetchIdsPerStatement = 400;
+
+    /// <summary>Ids per IN-list statement for the text fetch. Larger than the plan side because
+    /// DATALENGTH(query_sql_text) is cheap — no decompression — so the only cost is statement size.</summary>
+    private const int TextFetchIdsPerStatement = 1000;
+
     private static readonly TimeSpan AzureMasterRecheckInterval = TimeSpan.FromMinutes(15);
 
     public const int CommandTimeoutSeconds = 60;
@@ -229,56 +255,14 @@ public sealed class DarlingCollectorRunner
             }
         }
 
-        /* #2164: the per-database plan-XML watermarks, owned by the HOST under its own state collector name
-           rather than declared by the definition — the QueryStoreBackfillState seam. The definition cannot
-           declare these: the keys are one per DATABASE and only known at runtime, and declaring a prefix
-           would make query_store a second state-declaring collector, which is a two-host contract change
-           (CollectorStateContractTests) rather than the local one this is. Loaded only when plan capture is
-           on, because that is the only case where anything reads or writes them. */
-        if (collectorState is null
-            && string.Equals(definition.Name, "query_store", StringComparison.Ordinal)
-            && _capturePlans())
-        {
-            collectorState = await GetCollectorStateAsync(
-                server.ServerId, QueryStorePlanXmlState.StateCollectorName, cancellationToken);
-        }
+        /* #2312: the plan and text watermark reads that used to merge in here (the #2164/#2150 host-owned
+           state families) are GONE — the fetches are activity-driven against the store's own map/text
+           tables now, so there is no persisted resume point to load. V77 deleted the orphaned rows. */
 
-        /* #2150: the text watermark lives under its OWN state owner, so it is a second read merged into the
-           same dictionary — the two prefixes (planwm: / textwm:) cannot collide, and the definition still
-           sees one flat State. Read unconditionally for query_store rather than behind _capturePlans(),
-           because the text fetch is not gated on plan capture: a host that turned plans off still needs its
-           statement text. Merged rather than replacing, so a store that has plan state but no text state
-           yet (every store before this rung) keeps working. */
-        if (string.Equals(definition.Name, "query_store", StringComparison.Ordinal))
-        {
-            var textState = await GetCollectorStateAsync(
-                server.ServerId, QueryStoreTextState.StateCollectorName, cancellationToken);
-
-            if (textState is { Count: > 0 })
-            {
-                var merged = new Dictionary<string, string>(StringComparer.Ordinal);
-                if (collectorState is not null)
-                {
-                    foreach (var entry in collectorState)
-                    {
-                        merged[entry.Key] = entry.Value;
-                    }
-                }
-
-                foreach (var entry in textState)
-                {
-                    merged[entry.Key] = entry.Value;
-                }
-
-                collectorState = merged;
-            }
-        }
-
-        /* #2312: the open-interval refresh stamps, the third owner merged into the same flat State —
-           qsowm: cannot collide with planwm:/textwm:. Read unconditionally for query_store like the
-           text watermark (the skip applies regardless of plan capture), and merged the same way so a
+        /* #2312: the open-interval refresh stamps, merged into the flat State. Read unconditionally for
+           query_store (the skip applies regardless of plan capture), and merged rather than replacing so a
            store predating this state keeps working: absent keys read as "include the open interval",
-           which is today's behavior exactly. */
+           which is the conservative behavior. */
         if (string.Equals(definition.Name, "query_store", StringComparison.Ordinal))
         {
             var openIntervalState = await GetCollectorStateAsync(
@@ -446,9 +430,16 @@ public sealed class DarlingCollectorRunner
                        specifically: a budget expiry abandons the whole pass, so the watermark does not
                        advance, the clamp is re-derived next cycle, and the hole is re-recorded (merged wider
                        with any already pending) rather than lost. */
+                        /* #2344: same bound as the enumerated arm. Safe here for the same reason and
+                           by a different route — this branch does not clamp itself, but query_store's own
+                           BuildCutoffParameters does (the #1836 double-clamp the policy documents), so the
+                           value this read returns is clamped before anything uses it. */
+                        var azureReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                            ? WatermarkPolicy.ReadFloor(collectionTime)
+                            : null;
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken);
+                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
 
                         /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
                            definition's own clamp only floors OLDER watermarks, so a tighter one
@@ -761,9 +752,17 @@ public sealed class DarlingCollectorRunner
                                DrainMsFrom can subtract it; the whole point of the split is that each number
                                names one real phase. */
                             var watermarkWatch = Stopwatch.StartNew();
+                            /* #2344: bound the read for the ONE collector whose value is clamped right
+                               below. Name-guarded rather than applied to every enumerating definition,
+                               for the reason WatermarkPolicy's remarks give: a ring-buffer source whose
+                               legitimate catch-up spans days must keep reading its whole history, and the
+                               floor would silently truncate it. The clamp and the bound travel together. */
+                            var readFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                                ? WatermarkPolicy.ReadFloor(collectionTime)
+                                : null;
                             var raw = await GetLastCollectedTimeForDatabaseAsync(
                                 server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                                definition.PerDatabaseWatermarkColumn!, item, ct);
+                                definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
                             var clamped = WatermarkPolicy.ClampCatchup(raw, collectionTime);
                             if (raw.HasValue && clamped != raw)
                             {
@@ -882,7 +881,8 @@ public sealed class DarlingCollectorRunner
                                per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
                                blended sql: could not distinguish them. */
                             var planFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStorePlansAsync(planFetchConnection, server, item, context, itemTimeout, ct);
+                            await FetchAndStorePlansAsync(planFetchConnection,
+                                server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
                             context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
                         }
 
@@ -899,7 +899,8 @@ public sealed class DarlingCollectorRunner
                         {
                             /* #2312 investigation: same split as the plan fetch above. */
                             var textFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStoreQueryTextAsync(textFetchConnection, server, item, context, itemTimeout, ct);
+                            await FetchAndStoreQueryTextAsync(textFetchConnection,
+                                server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
                             context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
                         }
 
@@ -1053,52 +1054,32 @@ public sealed class DarlingCollectorRunner
            path. Outside the storage-phase timer: this is host bookkeeping, not collected data. */
         if (context.PendingState.Count > 0)
         {
-            /* #2164: query_store's pending state is the plan-XML watermark set, which belongs to the host's
-               own state owner, NOT to the definition's name — the definition declares no state keys, so a row
-               written under "query_store" would never be read back and the watermark would silently never
-               apply. Everything else keeps writing under its definition. */
-            var stateOwner = string.Equals(definition.Name, "query_store", StringComparison.Ordinal)
-                ? QueryStorePlanXmlState.StateCollectorName
-                : definition.Name;
-
-            /* #2150/#2312: query_store's pending state now carries THREE watermark families with three
-               owners, so it is split by prefix on the way out. Writing one under another's owner would
-               still read back (the load above merges all three), but it would then never be pruned: the
-               shared prune set pairs each prefix with its owner, and a prefix pruned under the wrong
-               owner deletes nothing — which is indistinguishable from having nothing to prune. */
-            var textKeys = context.PendingState
-                .Where(entry => entry.Key.StartsWith(QueryStoreTextState.WatermarkKeyPrefix, StringComparison.Ordinal))
-                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+            /* #2312: query_store's pending state is down to ONE family — the open-interval refresh stamps
+               (qsowm:), which belong to the host's own state owner rather than the definition's name (the
+               definition declares no state keys, so a row written under "query_store" would never be read
+               back). The plan/text watermark families that used to be split out here retired with the
+               watermarks themselves; the split-by-prefix survives only as the qsowm: extraction, so a
+               future fourth family cannot silently land under the wrong owner and become unprunable. */
             var openIntervalKeys = context.PendingState
                 .Where(entry => entry.Key.StartsWith(QueryStoreOpenIntervalState.WatermarkKeyPrefix, StringComparison.Ordinal))
                 .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
 
-            if (textKeys.Count > 0 || openIntervalKeys.Count > 0)
+            if (openIntervalKeys.Count > 0)
             {
+                await SaveCollectorStateAsync(
+                    server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, openIntervalKeys, cancellationToken);
+
                 var others = context.PendingState
-                    .Where(entry => !textKeys.ContainsKey(entry.Key) && !openIntervalKeys.ContainsKey(entry.Key))
+                    .Where(entry => !openIntervalKeys.ContainsKey(entry.Key))
                     .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
-
-                if (textKeys.Count > 0)
-                {
-                    await SaveCollectorStateAsync(
-                        server.ServerId, QueryStoreTextState.StateCollectorName, textKeys, cancellationToken);
-                }
-
-                if (openIntervalKeys.Count > 0)
-                {
-                    await SaveCollectorStateAsync(
-                        server.ServerId, QueryStoreOpenIntervalState.StateCollectorName, openIntervalKeys, cancellationToken);
-                }
-
                 if (others.Count > 0)
                 {
-                    await SaveCollectorStateAsync(server.ServerId, stateOwner, others, cancellationToken);
+                    await SaveCollectorStateAsync(server.ServerId, definition.Name, others, cancellationToken);
                 }
             }
             else
             {
-                await SaveCollectorStateAsync(server.ServerId, stateOwner, context.PendingState, cancellationToken);
+                await SaveCollectorStateAsync(server.ServerId, definition.Name, context.PendingState, cancellationToken);
             }
         }
 
@@ -1359,23 +1340,94 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// Fetches one database's un-stored plan XML in <c>plan_id</c> order, lands it into the shared plan dimension
-    /// plus the map, and advances that database's watermark to what actually LANDED (#2210).
+    /// The cycle's distinct referenced plans with their live hashes — the probe's whole input (#2312).
+    /// Generic because the dispatch loop is; any batch that is not query_store rows extracts nothing, and
+    /// the caller's <c>CapturePlanXml</c> gate means that never actually happens. When one plan appears in
+    /// several rows (several intervals), a non-null hash wins over a null one — the probe compares against
+    /// whatever the engine reported, and null only means the payload row predated the hash column.
+    /// </summary>
+    private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch)
+    {
+        if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
+        {
+            return Array.Empty<(long, string?)>();
+        }
+
+        var seen = new Dictionary<long, string?>();
+        foreach (var row in rows)
+        {
+            if (row.PlanId <= 0)
+            {
+                continue;
+            }
+
+            if (!seen.TryGetValue(row.PlanId, out var hash) || (hash is null && row.QueryPlanHash is not null))
+            {
+                seen[row.PlanId] = row.QueryPlanHash;
+            }
+        }
+
+        var references = new List<(long PlanId, string? PlanHash)>(seen.Count);
+        foreach (var entry in seen)
+        {
+            references.Add((entry.Key, entry.Value));
+        }
+
+        references.Sort((a, b) => a.PlanId.CompareTo(b.PlanId));
+        return references;
+    }
+
+    /// <summary>Text twin of <see cref="ExtractPlanReferences"/>, keyed by query_id with query_hash.</summary>
+    private static IReadOnlyList<(long QueryId, string? QueryHash)> ExtractTextReferences<TRow>(List<TRow> batch)
+    {
+        if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
+        {
+            return Array.Empty<(long, string?)>();
+        }
+
+        var seen = new Dictionary<long, string?>();
+        foreach (var row in rows)
+        {
+            if (row.QueryId <= 0)
+            {
+                continue;
+            }
+
+            if (!seen.TryGetValue(row.QueryId, out var hash) || (hash is null && row.QueryHash is not null))
+            {
+                seen[row.QueryId] = row.QueryHash;
+            }
+        }
+
+        var references = new List<(long QueryId, string? QueryHash)>(seen.Count);
+        foreach (var entry in seen)
+        {
+            references.Add((entry.Key, entry.Value));
+        }
+
+        references.Sort((a, b) => a.QueryId.CompareTo(b.QueryId));
+        return references;
+    }
+
+    /// <summary>
+    /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
+    /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
+    /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
+    /// id, budget-bounded, and land them into the shared dimension plus the map. The store is the
+    /// watermark: a caught-up database's missing set is EMPTY and no target query runs at all, which is the
+    /// property the retired catalog walk lacked (measured 23s per cycle to discover "nothing new").
     ///
-    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on top
-    /// of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It logs and
-    /// returns with the watermark untouched, which is safe by construction — the watermark only ever advances to
-    /// content already written, so the next pass simply re-selects the same plans.</para>
+    /// <para>Failure-isolated, and that is load-bearing rather than defensive: plan XML is an enrichment on
+    /// top of runtime statistics, so a fetch that throws must not cost the database its runtime stats. It
+    /// logs and returns; whatever did not land is still missing from the store, so the next cycle that
+    /// references it re-selects it by construction.</para>
     ///
-    /// <para>The candidate window is seeded conservatively rather than adapted, DELIBERATELY, and this is the one
-    /// piece of the ratified design not yet wired: the adaptive input is the previous pass's own
-    /// bytes-per-plan, and there is nowhere to keep it. <c>CollectorContext</c> is shared with Lite, so adding a
-    /// field is a two-host contract change — the same reasoning that put the watermark under its own state owner
-    /// rather than on the definition — and the state VALUE is a parsed <c>planId:stamp</c> pair that cannot carry
-    /// a third field without a format change and a migration for readers. Passing null means K comes from
-    /// <c>FirstContactAvgPlanBytes</c>, which over-estimates plan size and therefore under-sizes the window: it
-    /// fetches fewer plans per pass than it could, and never more than it should. Slower convergence, never
-    /// unsafe.</para>
+    /// <para>Budget-deferred and capped ids go to <see cref="_planFetchCarryover"/>, because the probe's
+    /// input is each cycle's batch references: a plan referenced ONCE whose fetch was deferred would
+    /// otherwise never re-enter the probe. Ids the target no longer has (Query Store cleanup took the plan
+    /// between reference and fetch) are dropped from the debt — but only on a pass that provably completed
+    /// uncut, because inside a cut pass "absent from the result" and "excluded by the budget predicate" are
+    /// indistinguishable from the client.</para>
     /// </summary>
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
@@ -1383,122 +1435,193 @@ public sealed class DarlingCollectorRunner
         string databaseName,
         CollectorContext context,
         int itemTimeout,
+        IReadOnlyList<(long PlanId, string? PlanHash)> references,
         CancellationToken cancellationToken)
     {
         try
         {
-            var watermark = QueryStorePlanXmlState.Resolve(context.State, databaseName, context.CollectionTime);
-            var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
-
-            /* #2312 Finding 1: size the window from THIS database's learned average instead of the
-               160KB seed every pass — zero AvgBytes means never learned, which is the seed's job. */
-            var estimate = _observedPlanSize.TryGetValue((server.ServerId, databaseName), out var carried)
-                ? carried
-                : default;
-            var candidates = QueryStorePlanXmlState.CandidatePlanCount(
-                estimate.AvgBytes > 0 ? estimate.AvgBytes : null, budget, estimate.CatchUpInProgress, out var clamped);
-
-            if (clamped)
+            var carryKey = (server.ServerId, databaseName);
+            var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
+            if (references.Count == 0 && !hasCarryover)
             {
-                _logger?.LogInformation(
-                    "query_store plan fetch on '{Server}' database [{Database}]: candidate window clamped to {K} — a bound sized this pass, not a measurement.",
-                    server.Config.DisplayName, databaseName, candidates);
+                /* The steady quiet cycle: nothing referenced, nothing owed. Zero store reads, zero target
+                   queries — the whole point of the reshape. */
+                return;
             }
 
-            var query = QueryStoreCollector.Instance.BuildPlanFetchQuery(
-                databaseName, context, watermark, candidates, budget);
+            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var fetched = new List<FetchedPlan>();
-            using (var command = CreateCollectorCommand(query, sqlConnection, itemTimeout))
-            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            var missing = new SortedSet<long>();
+            if (hasCarryover)
             {
-                while (await reader.ReadAsync(cancellationToken))
+                foreach (var id in carriedIds!)
                 {
-                    fetched.Add(new FetchedPlan(
-                        reader.GetInt64(0),
-                        reader.IsDBNull(1) ? null : reader.GetString(1),
-                        PlanHash: null));
+                    missing.Add(id);
                 }
             }
 
-            /* Learn from what this pass actually decompressed and shipped — BEFORE the empty-pass
-               early return, because an empty pass is the one that proves the walk caught up (nvarchar
-               length * 2 is DATALENGTH exactly, no server round-trip needed). NULL-XML rows count for
-               the window (they shipped, the watermark passes them) but not for the average's divisor
-               (they carried no bytes to average — the review catch). */
+            if (references.Count > 0)
+            {
+                var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
+                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, cancellationToken);
+                foreach (var verdict in verdicts)
+                {
+                    if (!verdict.Resolved || verdict.HashStale)
+                    {
+                        missing.Add(verdict.Id);
+                    }
+                    else
+                    {
+                        /* Resolved and current: if it was carried debt, it is paid. */
+                        missing.Remove(verdict.Id);
+                    }
+                }
+            }
+
+            if (missing.Count == 0)
+            {
+                _planFetchCarryover.TryRemove(carryKey, out _);
+                return;
+            }
+
+            var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
+
+            /* #2312 Finding 1 (#2322): cap the attempt from THIS database's learned average instead of the
+               160KB seed every pass — zero AvgBytes means never learned, which is the seed's job. The cap
+               bounds server-side DECOMPRESSION (the running total materializes every plan it measures), so
+               it stays load-bearing even though the walk it originally sized is gone. */
+            var estimate = _observedPlanSize.TryGetValue(carryKey, out var carriedEstimate)
+                ? carriedEstimate
+                : default;
+            var cap = QueryStorePlanXmlState.CandidatePlanCount(
+                estimate.AvgBytes > 0 ? estimate.AvgBytes : null, budget, estimate.CatchUpInProgress, out var clamped);
+            if (clamped)
+            {
+                _logger?.LogInformation(
+                    "query_store plan fetch on '{Server}' database [{Database}]: candidate cap clamped to {K} — a bound sized this pass, not a measurement.",
+                    server.Config.DisplayName, databaseName, cap);
+            }
+
+            /* Ascending ids (SortedSet order) so the budget's in-SQL cut and the cross-chunk break are
+               deterministic — the same debt is retried in the same order until paid. */
+            var attempt = missing.Take(cap).ToList();
+            var attempted = new List<long>(attempt.Count);
+            var fetched = new List<FetchedPlan>();
             var shippedBytes = 0L;
+            var brokeOnBudget = false;
+
+            foreach (var chunk in attempt.Chunk(PlanFetchIdsPerStatement))
+            {
+                if (shippedBytes >= budget)
+                {
+                    brokeOnBudget = true;
+                    break;
+                }
+
+                var query = QueryStoreCollector.Instance.BuildPlanFetchByIdsQuery(
+                    databaseName, context, chunk, budget - shippedBytes);
+
+                using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                attempted.AddRange(chunk);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var planXml = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    fetched.Add(new FetchedPlan(
+                        reader.GetInt64(0),
+                        planXml,
+                        reader.IsDBNull(1) ? null : reader.GetString(1)));
+                    if (planXml is not null)
+                    {
+                        /* nvarchar length * 2 is DATALENGTH exactly — no server round-trip needed. */
+                        shippedBytes += (long)planXml.Length * 2;
+                    }
+                }
+            }
+
+            /* NULL-XML rows count for the cap/catch-up comparison (they shipped, and the writer records
+               their content-less marker) but not for the average's divisor (they carried no bytes). */
             var plansMeasured = 0;
             foreach (var plan in fetched)
             {
                 if (plan.PlanXml is not null)
                 {
-                    shippedBytes += (long)plan.PlanXml.Length * 2;
                     plansMeasured++;
                 }
             }
-            _observedPlanSize[(server.ServerId, databaseName)] =
-                QueryStorePlanXmlState.Learn(estimate, shippedBytes, fetched.Count, plansMeasured, candidates, budget);
+            _observedPlanSize[carryKey] =
+                QueryStorePlanXmlState.Learn(estimate, shippedBytes, fetched.Count, plansMeasured, cap, budget);
 
-            if (fetched.Count == 0)
+            var returned = new HashSet<long>(fetched.Count);
+            if (fetched.Count > 0)
             {
-                return;
+                var landed = await QueryStorePlanWriter.WriteAsync(
+                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+                foreach (var id in landed)
+                {
+                    missing.Remove(id);
+                }
+
+                foreach (var plan in fetched)
+                {
+                    returned.Add(plan.PlanId);
+                }
             }
 
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var landed = await QueryStorePlanWriter.WriteAsync(
-                pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
-
-            var advance = QueryStorePlanXmlState.AdvanceWatermark(watermark, landed);
-            if (!advance.ArrivedInPlanIdOrder)
+            /* Target-side-gone cleanup, only when the pass provably completed UNCUT: every chunk issued
+               and the in-SQL predicate never fired (a fired cut leaves shipped at or past the remaining
+               budget by the oversized-admission arithmetic). On such a pass an attempted id with no
+               returned row does not exist in sys.query_store_plan any more — Query Store cleanup took it
+               between reference and fetch — and carrying it forever would be the content-less stall
+               wearing a new hat. */
+            if (!brokeOnBudget && shippedBytes < budget && attempted.Count == attempt.Count)
             {
-                /* Loud rather than swallowed: the fetch's ORDER BY is what makes a budget cut a suffix, so
-                   out-of-order arrival means that safety argument no longer holds and the pass earns nothing. */
-                _logger?.LogWarning(
-                    "query_store plan fetch on '{Server}' database [{Database}]: plans arrived OUT OF plan_id order — watermark held at {Watermark}. The ORDER BY is what makes a cut safe, so this pass earned no advance.",
-                    server.Config.DisplayName, databaseName, watermark);
-                return;
+                foreach (var id in attempted)
+                {
+                    if (!returned.Contains(id))
+                    {
+                        missing.Remove(id);
+                    }
+                }
             }
 
-            if (advance.Watermark > watermark)
+            if (missing.Count > 0)
             {
-                /* Same stamp discipline as the runtime write-back: carried FORWARD across an advance, stamped
-                   fresh only when the standing watermark was 0 (this pass WAS the full fetch). Re-stamping on
-                   every advance would push the sweep period out forever on any database that keeps compiling. */
-                var stamp = watermark > 0
-                    ? QueryStorePlanXmlState.ResolveStamp(context.State, databaseName) ?? context.CollectionTime
-                    : context.CollectionTime;
-
-                context.PendingState[QueryStorePlanXmlState.KeyFor(databaseName)] =
-                    QueryStorePlanXmlState.Format(advance.Watermark, stamp);
+                var owed = new long[missing.Count];
+                missing.CopyTo(owed);
+                _planFetchCarryover[carryKey] = owed;
+            }
+            else
+            {
+                _planFetchCarryover.TryRemove(carryKey, out _);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.LogWarning(ex,
-                "query_store plan fetch failed on '{Server}' database [{Database}] — runtime statistics are unaffected and the watermark is unchanged, so the next pass re-selects the same plans.",
+                "query_store plan fetch failed on '{Server}' database [{Database}] — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it.",
                 server.Config.DisplayName, databaseName);
         }
     }
 
     /// <summary>
-    /// One database's statement-text fetch (#2150), the sibling of <see cref="FetchAndStorePlansAsync"/>.
-    ///
-    /// <para>Exists because the runtime-stats payload stopped carrying <c>query_sql_text</c>: selecting it
-    /// inside the shipping <c>TOP ... ORDER BY</c> made a Top-N Sort materialize <c>nvarchar(max)</c> text
-    /// for the entire qualifying set before emitting row one (measured 4.67s against 0.45s
-    /// time-to-first-row, and neither the row cap nor the byte budget could bound it).</para>
+    /// One database's statement-text fetch, the sibling of <see cref="FetchAndStorePlansAsync"/> — the
+    /// #2150 split (text out of the runtime stream) driven the #2312 way (activity, not a watermark walk):
+    /// touch-and-probe <c>query_store_text</c> for the cycle's referenced query_ids, fetch exactly the
+    /// missing or hash-stale ones by id, land them. The hash-stale arm is the Query Store RESET detector —
+    /// ids renumber on a reset, so a stored hash differing from the live one means the id names a
+    /// different statement now, and its text is refetched within one cycle instead of waiting on the
+    /// retired daily re-walk.
     ///
     /// <para><b>A failure here is text-only.</b> Runtime statistics are already written by the time this
-    /// runs, and the watermark only advances on what LANDED — so a throw leaves the rows in place with their
-    /// text unresolved and the next pass re-selects the same statements. That is why this is a warning
-    /// rather than a failure of the collector.</para>
+    /// runs, and whatever did not land is still missing from the store — so a throw leaves the rows in
+    /// place with their text unresolved and the next cycle that references them re-selects them. That is
+    /// why this is a warning rather than a failure of the collector.</para>
     ///
-    /// <para><b>Known property of a first fill, stated rather than discovered.</b> The walk is ASCENDING by
-    /// <c>query_id</c>, because that is what makes a byte-budget cut a resumable suffix. On a store whose
-    /// watermark is still 0 that means the OLDEST statements resolve first, while the rows being collected
-    /// right now reference the newest ids — so a fresh store shows missing text for recent statements until
-    /// the walk catches up. Steady state is the opposite and is the case that matters: the watermark sits
-    /// near the top, so a newly-seen statement is fetched on the next pass.</para>
+    /// <para>Simpler than the plan fetch on purpose, in the same two ways the builders differ: no
+    /// candidate-cap estimator (DATALENGTH on text is cheap — no decompression to bound) and larger id
+    /// chunks. The budget, the carry-over debt, and the uncut-pass target-side-gone cleanup all work
+    /// exactly as the plan side documents.</para>
     /// </summary>
     private async Task FetchAndStoreQueryTextAsync(
         SqlConnection sqlConnection,
@@ -1506,67 +1629,136 @@ public sealed class DarlingCollectorRunner
         string databaseName,
         CollectorContext context,
         int itemTimeout,
+        IReadOnlyList<(long QueryId, string? QueryHash)> references,
         CancellationToken cancellationToken)
     {
         try
         {
-            var watermark = QueryStoreTextState.Resolve(context.State, databaseName, context.CollectionTime);
-            var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
-
-            var query = QueryStoreCollector.Instance.BuildTextFetchQuery(
-                databaseName, context, watermark, QueryStoreTextState.CandidateTexts, budget);
-
-            var fetched = new List<FetchedQueryText>();
-            using (var command = CreateCollectorCommand(query, sqlConnection, itemTimeout))
-            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
-            {
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    fetched.Add(new FetchedQueryText(
-                        reader.GetInt64(0),
-                        reader.IsDBNull(1) ? null : reader.GetString(1)));
-                }
-            }
-
-            if (fetched.Count == 0)
+            var carryKey = (server.ServerId, databaseName);
+            var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
+            if (references.Count == 0 && !hasCarryover)
             {
                 return;
             }
 
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var landed = await QueryStoreTextWriter.WriteAsync(
-                pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
 
-            var advance = QueryStoreTextState.AdvanceWatermark(watermark, landed);
-            if (!advance.ArrivedInQueryIdOrder)
+            var missing = new SortedSet<long>();
+            if (hasCarryover)
             {
-                /* Loud rather than swallowed, same as the plan fetch: the ORDER BY is what makes a budget cut
-                   a suffix, so out-of-order arrival means that safety argument no longer holds and the pass
-                   earns no advance. */
-                _logger?.LogWarning(
-                    "query_store text fetch on '{Server}' database [{Database}]: statements arrived OUT OF query_id order — watermark held at {Watermark}. The ORDER BY is what makes a cut safe, so this pass earned no advance.",
-                    server.Config.DisplayName, databaseName, watermark);
+                foreach (var id in carriedIds!)
+                {
+                    missing.Add(id);
+                }
+            }
+
+            if (references.Count > 0)
+            {
+                var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
+                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, cancellationToken);
+                foreach (var verdict in verdicts)
+                {
+                    if (!verdict.Resolved || verdict.HashStale)
+                    {
+                        missing.Add(verdict.Id);
+                    }
+                    else
+                    {
+                        missing.Remove(verdict.Id);
+                    }
+                }
+            }
+
+            if (missing.Count == 0)
+            {
+                _textFetchCarryover.TryRemove(carryKey, out _);
                 return;
             }
 
-            if (advance.Watermark > watermark)
+            var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
+            var attempt = new List<long>(missing.Count);
+            foreach (var id in missing)
             {
-                /* Stamp carried FORWARD across an advance and stamped fresh only when the standing watermark
-                   was 0 (this pass WAS the full walk). Re-stamping on every advance would push the refresh
-                   horizon out forever on any database that keeps seeing new statements — which is exactly
-                   where a Query Store reset, the thing the horizon exists to recover from, would hurt most. */
-                var stamp = watermark > 0
-                    ? QueryStoreTextState.ResolveStamp(context.State, databaseName) ?? context.CollectionTime
-                    : context.CollectionTime;
+                attempt.Add(id);
+            }
 
-                context.PendingState[QueryStoreTextState.KeyFor(databaseName)] =
-                    QueryStoreTextState.Format(advance.Watermark, stamp);
+            var attempted = new List<long>(attempt.Count);
+            var fetched = new List<FetchedQueryText>();
+            var shippedBytes = 0L;
+            var brokeOnBudget = false;
+
+            foreach (var chunk in attempt.Chunk(TextFetchIdsPerStatement))
+            {
+                if (shippedBytes >= budget)
+                {
+                    brokeOnBudget = true;
+                    break;
+                }
+
+                var query = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(
+                    databaseName, context, chunk, budget - shippedBytes);
+
+                using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                attempted.AddRange(chunk);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var text = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    fetched.Add(new FetchedQueryText(
+                        reader.GetInt64(0),
+                        text,
+                        reader.IsDBNull(1) ? null : reader.GetString(1)));
+                    if (text is not null)
+                    {
+                        shippedBytes += (long)text.Length * 2;
+                    }
+                }
+            }
+
+            var returned = new HashSet<long>(fetched.Count);
+            if (fetched.Count > 0)
+            {
+                var landed = await QueryStoreTextWriter.WriteAsync(
+                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+                foreach (var id in landed)
+                {
+                    missing.Remove(id);
+                }
+
+                foreach (var text in fetched)
+                {
+                    returned.Add(text.QueryId);
+                }
+            }
+
+            /* Same uncut-pass cleanup as the plan side: an id the target no longer serves must not become
+               permanent debt. */
+            if (!brokeOnBudget && shippedBytes < budget && attempted.Count == attempt.Count)
+            {
+                foreach (var id in attempted)
+                {
+                    if (!returned.Contains(id))
+                    {
+                        missing.Remove(id);
+                    }
+                }
+            }
+
+            if (missing.Count > 0)
+            {
+                var owed = new long[missing.Count];
+                missing.CopyTo(owed);
+                _textFetchCarryover[carryKey] = owed;
+            }
+            else
+            {
+                _textFetchCarryover.TryRemove(carryKey, out _);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.LogWarning(ex,
-                "query_store text fetch failed on '{Server}' database [{Database}] — runtime statistics are already written and the watermark is unchanged, so those rows keep unresolved text and the next pass re-selects the same statements.",
+                "query_store text fetch failed on '{Server}' database [{Database}] — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them.",
                 server.Config.DisplayName, databaseName);
         }
     }
@@ -1899,17 +2091,35 @@ RETURNING s.state_key";
     /// value for ONE database, for definitions with a PerDatabaseWatermarkColumn (Azure SQL DB
     /// per-database XE capture, #1535). Null on first run for that database or on failure — the
     /// caller falls back to the definition's documented window.
+    ///
+    /// <para><paramref name="collectedSince"/> bounds the read on <c>collection_time</c> — the
+    /// PARTITIONING column, so the bound actually prunes chunks (#2344). Null keeps the unbounded
+    /// behaviour, which is correct for any reader whose watermark is NOT clamped; pass
+    /// <see cref="WatermarkPolicy.ReadFloor"/> only from a caller whose value is, and read that method's
+    /// remarks for why the bound provably changes no answer. Unbounded, this is a <c>MAX</c> over a
+    /// non-partitioning column with no time predicate — every chunk in retention, per database, per
+    /// cycle, at a cost that grows with the store rather than the workload.</para>
     /// </summary>
     public async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
-        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        CancellationToken cancellationToken, DateTime? collectedSince = null)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2", connection);
+            var sql = collectedSince is null
+                ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
+                : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+            using var command = new NpgsqlCommand(sql, connection);
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);
+            if (collectedSince is DateTime floor)
+            {
+                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+                   timestamptz and Postgres would convert it into the session zone on the way in. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+            }
+
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime dt)
             {

@@ -566,55 +566,59 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     /// <summary>
-    /// #2150: the text fetch resumes from a <c>query_id</c> watermark, is cut by an exact byte budget, and
-    /// ships in <c>query_id</c> order — the ordering being what makes a budget cut a SUFFIX, so the highest
-    /// stored id resumes with no hole.
+    /// #2150's split, driven the #2312 way: the text fetch selects exactly the query_ids the caller names —
+    /// the cycle's collected rows whose text the store does not hold — cut by an exact byte budget in
+    /// <c>query_id</c> order. There is no watermark to resume from any more; the STORE answers what is
+    /// missing, and an empty missing set issues no query at all.
     /// </summary>
     [Fact]
-    public void TextFetch_ResumesFromTheWatermark_AndIsBudgetCutInQueryIdOrder()
+    public void TextFetchByIds_SelectsTheNamedIds_AndIsBudgetCutInQueryIdOrder()
     {
-        var sql = QueryStoreCollector.Instance.BuildTextFetchQuery(
-            "SO", MakeContext(fetchQueryTextSeparately: true), watermark: 4242,
-            candidateTexts: QueryStoreTextState.CandidateTexts, budgetBytes: 12 * 1024 * 1024).Text;
+        var sql = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(
+            "SO", MakeContext(fetchQueryTextSeparately: true), new long[] { 4242, 4243 },
+            budgetBytes: 12 * 1024 * 1024).Text;
 
         Assert.Contains("EXECUTE [SO].sys.sp_executesql", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE qsq.query_id > 4242", sql, StringComparison.Ordinal);
-        Assert.Contains($"TOP ({QueryStoreTextState.CandidateTexts})", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qsq.query_id", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE qsq.query_id IN (4242, 4243)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("qsq.query_id > ", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SELECT TOP", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY b.query_id", sql, StringComparison.Ordinal);
         Assert.Contains("b.running_bytes - b.text_bytes < 12582912", sql, StringComparison.Ordinal);
+        /* query_id is only unique until a Query Store reset renumbers it; the hash is the reset detector. */
+        Assert.Contains("query_hash = CONVERT(varchar(64), qsq.query_hash, 1)", sql, StringComparison.Ordinal);
         /* ROWS, not the RANGE default: RANGE tie-groups peers and forces a spool, and the frame has to be
            per-row because the cut falls BETWEEN two statements. */
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", sql, StringComparison.Ordinal);
-        /* It fetches text and nothing else — plan XML has its own fetch, with its own watermark. */
+        /* It fetches text and nothing else — plan XML has its own fetch. */
         Assert.DoesNotContain("query_plan", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// #2150: every input that would make the fetch ship nothing and silently stall the watermark throws
-    /// instead. A stalled watermark looks exactly like a quiet database, which is why these are exceptions
-    /// rather than no-ops — the plan fetch learned this the hard way from several directions.
+    /// Every input that would make the fetch ship nothing — and leave the ids missing forever — throws
+    /// instead. A permanent missing set looks exactly like a quiet database, which is why these are
+    /// exceptions rather than no-ops; the plan fetch learned this the hard way from several directions.
     /// </summary>
     [Fact]
-    public void TextFetch_RefusesInputsThatWouldStallTheWatermark()
+    public void TextFetchByIds_RefusesInputsThatWouldStall()
     {
         var enabled = MakeContext(fetchQueryTextSeparately: true);
+        var ids = new long[] { 1 };
 
         /* Issuing it while the host still ships text inline would fetch and store text nobody reads. */
         Assert.Throws<InvalidOperationException>(() =>
-            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", MakeContext(), 0, 5_000, 1024));
+            QueryStoreCollector.Instance.BuildTextFetchByIdsQuery("SO", MakeContext(), ids, 1024));
 
         /* `running_bytes - text_bytes < 0` excludes even the first candidate, so the pass ships nothing. */
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", enabled, 0, 5_000, 0));
+            QueryStoreCollector.Instance.BuildTextFetchByIdsQuery("SO", enabled, ids, 0));
 
-        /* TOP (0) returns no rows; a negative literal is a syntax error. */
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", enabled, 0, 0, 1024));
+        /* Empty means "nothing missing" — the caller must skip, not build IN (). */
+        Assert.Throws<ArgumentException>(() =>
+            QueryStoreCollector.Instance.BuildTextFetchByIdsQuery("SO", enabled, Array.Empty<long>(), 1024));
 
         Assert.Throws<ArgumentNullException>(() =>
-            QueryStoreCollector.Instance.BuildTextFetchQuery("SO", null!, 0, 5_000, 1024));
+            QueryStoreCollector.Instance.BuildTextFetchByIdsQuery("SO", null!, ids, 1024));
     }
 
     /// <summary>

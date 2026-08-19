@@ -121,6 +121,40 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
     }
 
     /// <summary>
+    /// Establishes the auto-baseline and does not return until it actually LANDED (#2374).
+    ///
+    /// <para>Same root cause as <see cref="SweepUntilAsync"/> and the same remedy, one step earlier: the seed
+    /// rides the best-effort maintenance block, so a single bare sweep can complete having written no
+    /// expectation at all. A test that then acts as though it has a baseline is asserting on a precondition it
+    /// never established — and it fails far from the cause, because the deviation read still succeeds and simply
+    /// returns nothing to deviate FROM. That is the whole of #2374: <c>Assert.Single</c> on an empty collection,
+    /// three lines after a sweep that quietly did nothing.</para>
+    ///
+    /// <para>Settling on the recorded STATE rather than on row count is load-bearing.
+    /// <see cref="LocalDataService.GetDatabaseStateExpectationsAsync"/> LEFT JOINs the newest snapshot, so every
+    /// current database comes back whether or not anything was ever seeded for it — an unseeded database is a
+    /// present row with an EMPTY expected state, and "did I get rows?" is therefore always true and never the
+    /// question. It re-runs the seed on its own ("reuse the seed/prune side-effect"), which is what makes
+    /// re-reading it a retry rather than just a re-check.</para>
+    ///
+    /// <para>It cannot mask a regression, for <see cref="SweepUntilAsync"/>'s reason: a seed that is genuinely
+    /// broken never records the state, every cycle runs, and the caller's own assertion fails on the same empty
+    /// result it sees today.</para>
+    /// </summary>
+    private static async Task BaselineAsync(
+        LocalDataService service, string database, string expectedState, int cycles = 5)
+    {
+        for (var attempt = 0; attempt < cycles; attempt++)
+        {
+            var rows = await service.GetDatabaseStateExpectationsAsync(ServerId);
+            if (rows.Any(r => r.DatabaseName == database && r.ExpectedState == expectedState))
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
     /// Writes an expectation row directly, bypassing the service's writers — the only way to reproduce a
     /// row the OLD seed wrote (#2189), since no current code path can produce one any more.
     /// </summary>
@@ -161,7 +195,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
     {
         await SeedSnapshotAsync(T0, ("App", "ONLINE", false));
         var service = new LocalDataService(_duckDb);
-        await service.GetDatabaseStateDeviationsAsync(ServerId); // baseline App = ONLINE
+        await BaselineAsync(service, "App", "ONLINE");
 
         // One OFFLINE sample (a transient — e.g. mid-restart) must NOT fire.
         await SeedSnapshotAsync(T0.AddMinutes(1), ("App", "OFFLINE", false));
@@ -180,7 +214,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
     private async Task DriveAppToStableStateAsync(LocalDataService service, string state)
     {
         await SeedSnapshotAsync(T0, ("App", "ONLINE", false));
-        await service.GetDatabaseStateDeviationsAsync(ServerId); // baseline ONLINE
+        await BaselineAsync(service, "App", "ONLINE");
         await SeedSnapshotAsync(T0.AddMinutes(1), ("App", state, false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("App", state, false));
     }
@@ -317,7 +351,12 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0,
             ("Restoring", "RESTORING", false), ("Recovering", "RECOVERING", false), ("Healthy", "ONLINE", false));
         var service = new LocalDataService(_duckDb);
-        await service.GetDatabaseStateDeviationsAsync(ServerId);
+
+        /* Settle on Healthy, and the two pending assertions below become meaningful. A skipped maintenance
+           block seeds NOTHING, which reads as all three being pending — so on a bare sweep the two ""
+           assertions pass for entirely the wrong reason and only Healthy reports the problem. Waiting for the
+           one database that MUST be learned proves the seed ran before asking what it declined to learn. */
+        await BaselineAsync(service, "Healthy", "ONLINE");
 
         var rows = await service.GetDatabaseStateExpectationsAsync(ServerId);
         Assert.Equal("", rows.Single(r => r.DatabaseName == "Restoring").ExpectedState);
@@ -401,7 +440,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
            is silence, and the baseline is the same one it started with. */
         await SeedSnapshotAsync(T0, ("Parked", "OFFLINE", false));
         var service = new LocalDataService(_duckDb);
-        await service.GetDatabaseStateDeviationsAsync(ServerId); // learns OFFLINE
+        await BaselineAsync(service, "Parked", "OFFLINE");
 
         await SeedSnapshotAsync(T0.AddMinutes(1), ("Parked", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("Parked", "ONLINE", false));
@@ -427,7 +466,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
            when the operator re-established standby, announcing the repair instead of the break. */
         await SeedSnapshotAsync(T0, ("LogShip", "ONLINE", true));
         var service = new LocalDataService(_duckDb);
-        await service.GetDatabaseStateDeviationsAsync(ServerId); // learns STANDBY
+        await BaselineAsync(service, "LogShip", "STANDBY");
 
         await SeedSnapshotAsync(T0.AddMinutes(1), ("LogShip", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("LogShip", "ONLINE", false));
@@ -499,7 +538,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
            database family #1986 works hardest to keep quiet. Matching the EFFECTIVE state is what prevents it. */
         await SeedSnapshotAsync(T0, ("LogShip", "ONLINE", true));
         var service = new LocalDataService(_duckDb);
-        await service.GetDatabaseStateDeviationsAsync(ServerId); // baselines STANDBY
+        await BaselineAsync(service, "LogShip", "STANDBY");
 
         await SeedSnapshotAsync(T0.AddMinutes(1), ("LogShip", "ONLINE", true));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("LogShip", "RESTORING", true));

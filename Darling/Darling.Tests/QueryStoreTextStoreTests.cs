@@ -208,21 +208,19 @@ public sealed class QueryStoreTextStoreTests
     }
 
     /// <summary>
-    /// The text watermark is saved under its OWN state owner. The load merges both owners into one
-    /// dictionary, so writing it under the plan fetch's owner would still READ back — and then never be
-    /// pruned, because the shared prune set pairs <c>textwm:</c> with <c>query_store_text</c> and a prefix
-    /// pruned under the wrong owner deletes nothing.
+    /// #2312: the text watermark retired with the plan one — the fetch is activity-driven against this
+    /// store's own rows now, so there is no textwm: family to save, and the shared prune set must not
+    /// claim it (a prefix listed there without a writer is a standing invitation to delete nothing and
+    /// call it hygiene). The V77 migration deleted the orphaned rows wholesale.
     /// </summary>
     [Fact]
-    public void TheTextWatermarkIsSavedUnderItsOwnOwner()
+    public void TheTextWatermarkFamilyIsRetired()
     {
         var source = ReadRunnerSource();
 
-        Assert.Contains("QueryStoreTextState.StateCollectorName, textKeys", source, StringComparison.Ordinal);
-        Assert.Contains("QueryStoreTextState.WatermarkKeyPrefix", source, StringComparison.Ordinal);
-        Assert.Contains(
-            (QueryStoreTextState.StateCollectorName, QueryStoreTextState.WatermarkKeyPrefix),
-            QueryStorePerDatabaseState.PrunableKeys);
+        Assert.DoesNotContain("textwm:", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStorePerDatabaseState.PrunableKeys,
+            k => k.Prefix == "textwm:");
     }
 
     /// <summary>
@@ -237,7 +235,13 @@ public sealed class QueryStoreTextStoreTests
 
         /* #2316 and #2319 appended parameters after this rung's — pass them FALSE so these facts keep
            exercising the V74/V73 arms rather than the newer ones. */
-        var args = leading.Concat(new object[] { hasQueryStoreText, false, false }).ToArray();
+        /* Parameters appended by LATER rungs are padded FALSE, so this fact keeps exercising its own
+           arm rather than a newer one. Derived from the method's arity rather than listed by hand, so
+           a future rung does not have to edit this file -- #2357 (V78) was the fourth that would have. */
+        var args = leading.Concat(new object[] { hasQueryStoreText }).ToArray();
+        args = args
+            .Concat(Enumerable.Repeat((object)false, method.GetParameters().Length - args.Length))
+            .ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;

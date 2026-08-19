@@ -73,6 +73,13 @@ public interface IAlertEngineSettings
     bool LongRunningJobEnabled { get; }
     bool FailedJobEnabled { get; }
     bool PvsEnabled { get; }
+
+    /// <summary>
+    /// The database file-growth alert (#2349) — OFF by default. It sits between <c>tempdb Space</c>, whose
+    /// denominator grows with autogrowth so its percentage FALLS as tempdb balloons, and <c>Volume Free
+    /// Space</c>, which fires on the consequence and cannot attribute it to a file.
+    /// </summary>
+    bool FileGrowthEnabled { get; }
     bool DatabaseStateEnabled { get; }
 
     /// <summary>
@@ -187,6 +194,24 @@ public interface IAlertEngineSettings
     /// alone decides).
     /// </summary>
     int PvsFloorGb { get; }
+
+    /// <summary>
+    /// The RISE gate: a file that grew at least this many MB inside the lookback window (#2349). Primary
+    /// rather than the level, for #2157's reason — a level alone re-pages every cooldown about a size that has
+    /// been true for a week, which trains people to mute it, while a rise is an event.
+    /// </summary>
+    int FileGrowthRiseMb { get; }
+
+    /// <summary>
+    /// The LEVEL gate: a file occupying at least this share of its volume (#2349). Self-scaling, which is what
+    /// makes ONE global setting usable across a fleet whose servers have very different normal sizes — an
+    /// absolute MB threshold cannot be set low enough for the small instances without deafening the large ones.
+    /// </summary>
+    int FileGrowthVolumePercent { get; }
+
+    /// <summary>How far back the rise is measured (#2349). The window is MEASURED from the samples rather than
+    /// assumed, so a gap in collection cannot make a slow rise look fast.</summary>
+    int FileGrowthLookbackMinutes { get; }
 
     /// <summary>Fire when a running job exceeds this multiple of its historical average duration.</summary>
     int LongRunningJobMultiplier { get; }

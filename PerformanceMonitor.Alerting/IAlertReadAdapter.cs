@@ -115,6 +115,17 @@ public interface IAlertReadAdapter
         string serverKey, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Per-file size, growth over <paramref name="lookbackMinutes"/>, and the volume each file sits on (#2349).
+    ///
+    /// <para>One read serves both gates the file-growth alert applies — a RISE (this file grew N MB) and a
+    /// LEVEL (this file is N% of its volume) — because the store already holds the time series and computing
+    /// the rise there costs one more join rather than per-file state the engine would have to keep, persist
+    /// and expire.</para>
+    /// </summary>
+    Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// The latest tempdb space snapshot, or null when the store has none for this server.
     /// Threshold evaluation (UsedPercent) stays engine-side.
     /// </summary>

@@ -17,9 +17,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>One plan the plan-XML fetch landed, before it has been given a content digest.</summary>
 /// <param name="PlanId">The Query Store plan id, unique within its database.</param>
 /// <param name="PlanXml">The plan XML, or null — a plan too large to persist reads NULL and still ships, so the
-/// watermark can advance past a plan whose content will never exist.</param>
-/// <param name="PlanHash">SQL Server's <c>query_plan_hash</c>, readable without decompressing the plan, which is
-/// what lets the re-verify cursor detect in-place rewrites on cheap columns alone.</param>
+/// store can record the content-less marker instead of re-selecting the plan as missing forever (#2312).</param>
+/// <param name="PlanHash">SQL Server's <c>query_plan_hash</c>, readable without decompressing the plan — the
+/// stored baseline <c>QueryStorePlanMap.TouchAndProbeSql</c> compares live hashes against to catch in-place
+/// rewrites on cheap columns alone.</param>
 public readonly record struct FetchedPlan(long PlanId, string? PlanXml, string? PlanHash);
 
 /// <summary>
@@ -41,15 +42,17 @@ public readonly record struct FetchedPlan(long PlanId, string? PlanXml, string? 
 public static class QueryStorePlanWriter
 {
     /// <summary>
-    /// Lands a fetch's plans for one database. Returns the plan_ids whose content actually stored, in the order
-    /// they were supplied, which is what the caller feeds to
-    /// <c>QueryStorePlanXmlState.AdvanceWatermark</c> — the watermark must reflect what LANDED, not what was
-    /// selected, or a torn pass advances past content that never arrived.
+    /// Lands a fetch's plans for one database. Returns the plan_ids that landed, in the order they were
+    /// supplied — the caller uses them to clear its budget-carry-over set, since anything landed is no
+    /// longer missing.
     ///
-    /// <para>A plan with NULL XML counts as landed and gets NO dimension row and NO map row: there is no content
-    /// to key, and inventing a digest for absent content would make the map point at nothing. The watermark
-    /// still advances past it, which is correct — that plan's XML will never exist, and stalling on it forever is
-    /// the failure the budget predicate already had to be fixed for twice.</para>
+    /// <para>A plan with NULL XML gets NO dimension row (there is no content to key, and inventing a digest
+    /// for absent content would make the map point at nothing) but it DOES get a map row with a NULL digest
+    /// — the #2312 content-less marker. Under store-as-watermark the map row IS the fact that the plan was
+    /// fetched and the engine had nothing to give: without it the probe reads the plan as missing and the
+    /// fetch re-selects it every cycle forever, which is the old oversized-plan stall reborn through the
+    /// probe. Readers are unaffected — a NULL digest joins to no dimension row, which renders exactly like
+    /// the absent content it records.</para>
     /// </summary>
     public static async Task<IReadOnlyList<long>> WriteAsync(
         NpgsqlConnection connection,
@@ -79,7 +82,7 @@ public static class QueryStorePlanWriter
         var mapServerIds = new List<int>(plans.Count);
         var mapDatabases = new List<string>(plans.Count);
         var mapPlanIds = new List<long>(plans.Count);
-        var mapDigests = new List<byte[]>(plans.Count);
+        var mapDigests = new List<byte[]?>(plans.Count);
         var mapHashes = new List<string?>(plans.Count);
 
         /* Naive() on the stamp, not the raw UTC value: these are ::timestamp parameters, and Npgsql would infer
@@ -92,24 +95,18 @@ public static class QueryStorePlanWriter
         {
             landed.Add(plan.PlanId);
 
-            if (string.IsNullOrEmpty(plan.PlanXml))
+            byte[]? digest = null;
+            if (!string.IsNullOrEmpty(plan.PlanXml))
             {
-                continue;
+                digest = PayloadDimensions.Digest(plan.PlanXml!);
+                batch.Add(PayloadDimensions.QueryPlanDimTable, digest, plan.PlanXml!);
             }
-
-            var digest = PayloadDimensions.Digest(plan.PlanXml!);
-            batch.Add(PayloadDimensions.QueryPlanDimTable, digest, plan.PlanXml!);
 
             mapServerIds.Add(serverId);
             mapDatabases.Add(databaseName);
             mapPlanIds.Add(plan.PlanId);
             mapDigests.Add(digest);
             mapHashes.Add(plan.PlanHash);
-        }
-
-        if (mapPlanIds.Count == 0)
-        {
-            return landed;
         }
 
         using var transaction = await connection.BeginTransactionAsync(cancellationToken);

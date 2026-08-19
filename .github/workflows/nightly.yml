@@ -117,7 +117,7 @@ jobs:
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
 
       - name: Run tests
-        run: dotnet test Lite.Tests/Lite.Tests.csproj -c Release --verbosity normal
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release
 
       - name: Publish Lite
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -o publish/Lite
@@ -376,7 +376,7 @@ jobs:
           # sees a FRESH store, so nothing else can catch an upgrade path that breaks.
           DARLING_TEST_PGRUNTIME_OLD: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\old\pg-runtime
           DARLING_TEST_PGRUNTIME_NEWZIP: ${{ github.workspace }}\Darling\artifacts\pg-runtime.zip
-        run: dotnet test Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build --verbosity normal --logger "trx;LogFileName=darling-nightly.trx" --results-directory TestResults
+        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trx TestResults/darling-nightly.trx
 
       - name: Stop PostgreSQL
         if: always()

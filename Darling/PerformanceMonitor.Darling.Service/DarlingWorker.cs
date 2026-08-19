@@ -19,6 +19,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Targets;
@@ -543,6 +544,26 @@ public sealed class DarlingWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        /* #2185: an install directory the service account cannot read is diagnosed HERE — first, ahead of
+           reading darling.json, and a long way ahead of the managed-Postgres bootstrap. Order is the whole
+           point. Every message the reporter saw was downstream of this one: an unreadable tree takes out
+           darling.json ("Cannot load configuration") and the bundled PostgreSQL's initdb (an empty Output:
+           and a bare loader status) before anything says WHERE the install is. Stated first, it is the line
+           above the failure in the log an operator is reading bottom-up.
+
+           Diagnose and continue, deliberately, rather than refuse to start — see DarlingInstallLocation for
+           why (the installer asks rather than refuses on an upgrade for the same reason, and a service has
+           nobody to ask). Silent unless this process really is running as a Windows service: a console
+           test-drive from a Desktop folder runs as the profile owner, reads the tree fine, and is something
+           the README suggests doing. */
+        if (OperatingSystem.IsWindows())
+        {
+            DarlingInstallLocation.Report(
+                AppContext.BaseDirectory,
+                WindowsServiceHelpers.IsWindowsService(),
+                _logger);
+        }
+
         DarlingConfig config;
         string configPath;
         try
@@ -571,6 +592,21 @@ public sealed class DarlingWorker : BackgroundService
                 _logger.LogCritical("Configuration problem: {Problem}", problem);
             }
             return;
+        }
+
+        /* #2339: publish the declared peer stores as soon as a VALIDATED config is in hand, so the web
+           dashboard's read dispatch (which reuses the MCP tool methods) discloses the same peers even when
+           the MCP endpoint is disabled. The MCP host publishes the identical snapshot from its own load;
+           whichever runs first wins and they cannot disagree, both reading darling.json.
+
+           Publish re-validates and refuses rather than trusting the Validate() above: it cannot fire here
+           (we already returned on any problem), but the check belongs to the publish, not to this call site,
+           because the MCP host reaches Publish WITHOUT ever calling Validate. Logged if it ever does, rather
+           than discarded, so an impossible state cannot become a silent one. */
+        var peerPublish = DarlingPeerDirectory.Publish(config.Peers);
+        foreach (var problem in peerPublish.RefusedProblems)
+        {
+            _logger.LogCritical("Peer disclosure refused (nothing published): {Problem}", problem);
         }
 
         /* Network-endpoint caller warnings (darling-network-endpoints, D-BYO / D7) — emitted AFTER

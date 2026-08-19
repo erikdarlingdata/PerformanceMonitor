@@ -222,9 +222,26 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingTrendReader.GetQueryHistoryAsync(postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now);
+            var history = await DarlingTrendReader.GetQueryHistoryAsync(postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now);
+            var rows = history.Points;
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
+            {
+                /* #2353: say what was READ, never what happened. This message used to assert "no history in the
+                   last N hours" over a span the read never covered — for a query whose history had aged out of
+                   the raw tier that is a false statement, not an incomplete one, and an agent acts on it by
+                   concluding the query did not run. */
+                return McpHelpers.Status(
+                    "empty",
+                    $"No history found for query_hash '{query_hash}' in database '{database_name}' in the " +
+                    $"{history.Source} tier over the last {hours_back} hours. This means nothing was recorded " +
+                    "for that query_hash in that window in the tier searched — confirm the hash and database " +
+                    "with get_top_queries_by_cpu before concluding the query did not run.");
+            }
+
+            /* The hourly rollup keeps executions, CPU and elapsed and nothing else. Those columns arrive as
+               NULL and the mapper floors them to 0, so they are emitted as null HERE rather than as zero: on an
+               aggregate row a zero would read as "none observed", which is a measurement we did not make. */
+            var aggregated = history.Source != "raw";
 
             var result = rows.Select(r => new
             {
@@ -234,14 +251,14 @@ public sealed class DarlingMcpTrendTools
                 elapsed_ms = Math.Round(r.DeltaElapsedUs / 1000.0, 2),
                 avg_cpu_ms = Math.Round(r.DeltaExecutions > 0 ? r.DeltaCpuUs / 1000.0 / r.DeltaExecutions : 0, 2),
                 avg_elapsed_ms = Math.Round(r.DeltaExecutions > 0 ? r.DeltaElapsedUs / 1000.0 / r.DeltaExecutions : 0, 2),
-                logical_reads = r.DeltaLogicalReads,
-                logical_writes = r.DeltaLogicalWrites,
-                physical_reads = r.DeltaPhysicalReads,
-                rows = r.DeltaRows,
-                spills = r.DeltaSpills,
-                min_dop = r.MinDop,
-                max_dop = r.MaxDop,
-                query_plan_hash = r.QueryPlanHash
+                logical_reads = aggregated ? (long?)null : r.DeltaLogicalReads,
+                logical_writes = aggregated ? (long?)null : r.DeltaLogicalWrites,
+                physical_reads = aggregated ? (long?)null : r.DeltaPhysicalReads,
+                rows = aggregated ? (long?)null : r.DeltaRows,
+                spills = aggregated ? (long?)null : r.DeltaSpills,
+                min_dop = aggregated ? (int?)null : r.MinDop,
+                max_dop = aggregated ? (int?)null : r.MaxDop,
+                query_plan_hash = aggregated ? null : r.QueryPlanHash
             });
 
             return JsonSerializer.Serialize(new
@@ -250,6 +267,19 @@ public sealed class DarlingMcpTrendTools
                 database_name,
                 query_hash,
                 hours_back,
+                /* #2353: what was actually served, alongside what was asked for. hours_back on its own was a
+                   request echoed back as if it were a description of the data. */
+                source = history.Source,
+                effective_start = history.EffectiveStartUtc.ToString("o"),
+                effective_hours_back = Math.Round((now - history.EffectiveStartUtc).TotalHours, 1),
+                truncated = history.Truncated,
+                bucket = history.Source == "raw" ? "per-collection" : "1 hour",
+                aggregate_note = aggregated
+                    ? "Served from the hourly rollup because the requested window reaches past the raw tier's "
+                      + "4-day retention. Executions, CPU and elapsed time are summed per hour; logical_reads, "
+                      + "logical_writes, physical_reads, rows, spills, min_dop, max_dop and query_plan_hash are "
+                      + "null because the rollup does not carry them - null means not measured, not zero."
+                    : null,
                 data_points = rows.Count,
                 trend = result
             }, McpHelpers.JsonOptions);

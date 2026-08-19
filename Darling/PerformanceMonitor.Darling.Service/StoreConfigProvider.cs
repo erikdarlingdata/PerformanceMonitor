@@ -334,7 +334,7 @@ public sealed class StoreConfigProvider
         /* config_version starts at 0; the four desired-state seed writes below bump it via the trigger,
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
-INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, config_version, updated_at, updated_by)
+INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version, updated_at, updated_by)
 VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(config.CapturePlans);
@@ -352,6 +352,7 @@ ON CONFLICT (id) DO NOTHING", connection);
            the seed is the last step of first contact, and a cosmetic casing choice must not fail it. */
         command.Parameters.AddWithValue(NormalizePlanXmlCompression(config.PlanXmlCompression));
         command.Parameters.AddWithValue(ClampPlanContentRetentionDays(config.PlanContentRetentionDays));
+        command.Parameters.AddWithValue(ClampComposeStatementTimeoutSeconds(config.ComposeStatementTimeoutSeconds));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -377,10 +378,12 @@ INSERT INTO config_alert_settings (
     pvs_floor_gb, modified_at, database_state_enabled,
     self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
     disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
-    store_job_cadence_warn_percent)
+    store_job_cadence_warn_percent,
+    /* #2349 appended LAST so no existing placeholder ordinal moves. */
+    file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -447,6 +450,11 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.DiskCriticalFreeGb);
         command.Parameters.AddWithValue(a.AnalysisNotifyCooldownMinutes);
         command.Parameters.AddWithValue(a.StoreJobCadenceWarnPercent);
+        /* #2349, bound in the same order the columns were appended. */
+        command.Parameters.AddWithValue(a.FileGrowthEnabled);
+        command.Parameters.AddWithValue(a.FileGrowthRiseMb);
+        command.Parameters.AddWithValue(a.FileGrowthVolumePercent);
+        command.Parameters.AddWithValue(a.FileGrowthLookbackMinutes);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -542,7 +550,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
             /* The notification row is the ONLY read here that touches secret columns — the SMTP password and
@@ -569,6 +577,7 @@ ON CONFLICT (server_id) DO NOTHING", connection);
                 QueryStoreBackfillEnabled = backfillEnabled,
                 QueryStoreTextBudgetMb = textBudgetMb,
                 PlanContentRetentionDays = planContentRetentionDays,
+                ComposeStatementTimeoutSeconds = composeStatementTimeoutSeconds,
                 MaxConcurrentSweeps = maxSweeps,
                 PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
@@ -610,6 +619,15 @@ ON CONFLICT (server_id) DO NOTHING", connection);
     internal static int ClampPlanContentRetentionDays(int value) =>
         value <= 0 ? 0 : Math.Clamp(value, MinPlanContentRetentionDays, MaxPlanContentRetentionDays);
 
+    /* #2357: the compose statement_timeout bounds WORK -- a LIMIT bounds output, a group-by scans and sorts
+       before it -- so it is clamped rather than trusted. A floor of 5s keeps the backstop meaningful; a
+       ceiling of 600s keeps a hand-edited absurdity from turning "hard backstop" into "no backstop". */
+    internal const int MinComposeStatementTimeoutSeconds = 5;
+    internal const int MaxComposeStatementTimeoutSeconds = 600;
+
+    internal static int ClampComposeStatementTimeoutSeconds(int value) =>
+        Math.Clamp(value <= 0 ? 15 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
+
     /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
     /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
     /// set DB-side, and this guard covers pre-constraint rows and direct writes with the constraint
@@ -617,18 +635,18 @@ ON CONFLICT (server_id) DO NOTHING", connection);
     internal static string NormalizePlanXmlCompression(string? value) =>
         string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, long ConfigVersion)>
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, config_version FROM config_service WHERE id = 1", connection);
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version FROM config_service WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
             /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, the memory
                knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep), and
                plan content keeps the V75 default 21-day horizon. */
-            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 0);
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, 0);
         }
 
         return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
@@ -636,7 +654,8 @@ ON CONFLICT (server_id) DO NOTHING", connection);
             NormalizePlanXmlCompression(reader.GetString(5)),
             reader.GetBoolean(6), reader.GetInt32(7),
             reader.GetBoolean(8), reader.GetInt32(9),
-            ClampPlanContentRetentionDays(reader.GetInt32(10)), reader.GetInt64(11));
+            ClampPlanContentRetentionDays(reader.GetInt32(10)),
+            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), reader.GetInt64(12));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -658,7 +677,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        pvs_floor_gb, database_state_enabled,
        self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
        disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
-       store_job_cadence_warn_percent
+       store_job_cadence_warn_percent,
+       file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -744,6 +764,15 @@ FROM config_alert_settings WHERE id = 1", connection);
                reachability rule as every appended knob above: ApplyToConfig replaces config.Alerts
                wholesale, so a column missing here would silently reset the knob on every worker start. */
             StoreJobCadenceWarnPercent = reader.GetInt32(53),
+
+            /* #2349 file-growth knobs appended (V79) at ordinals 54-57, with the same reachability rule as
+               every appended knob above: ApplyToConfig replaces config.Alerts wholesale, so a column read
+               here but not selected -- or selected but not read -- silently resets the knob on every worker
+               start rather than failing. */
+            FileGrowthEnabled = reader.GetBoolean(54),
+            FileGrowthRiseMb = reader.GetInt32(55),
+            FileGrowthVolumePercent = reader.GetInt32(56),
+            FileGrowthLookbackMinutes = reader.GetInt32(57),
         };
         var analysis = new AnalysisConfig
         {
@@ -1072,6 +1101,13 @@ public sealed class StoreConfigView
     /// <summary>The V75 plan-content horizon (#2316): days a stored plan XML outlives its last sighting.
     /// 0 = disabled (the fact-coupled dimension horizon stands alone).</summary>
     public int PlanContentRetentionDays { get; init; } = 21;
+
+    /// <summary>
+    /// The per-session <c>statement_timeout</c> for the viewer and mcp roles, in seconds (#2357). Read
+    /// clamped to [5,600]; 15 reproduces the constant it replaced. The provisioning DDL applies it, and that
+    /// DDL re-runs on every managed start, so a change here reaches an existing install on its next restart.
+    /// </summary>
+    public int ComposeStatementTimeoutSeconds { get; init; } = 15;
 
     /// <summary>
     /// The #2171 plan-XML storage codec (config_service, V62), already normalized to 'gzip' or 'none'.

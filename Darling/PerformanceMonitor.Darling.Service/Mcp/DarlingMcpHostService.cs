@@ -445,6 +445,39 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
             builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger));
 
+            /* #2339: publish the declared peer stores before the instructions are rendered, so the same
+               snapshot feeds the instructions section, list_servers' peer_fleets block, and the
+               server-resolution miss message. Publishing here as well as in the worker is deliberate: either
+               may reach its config first, the value is identical (both read darling.json), and the disclosure
+               should not depend on which one won. An empty declaration is Snapshot.Empty, which leaves every
+               one of those three surfaces exactly as it was.
+
+               THIS host never calls DarlingConfig.Validate (see the class doc: its fail-closed checks are
+               host-local, because the worker's abort is a return from the worker and would not stop this
+               server). Publish therefore validates the peers block itself and refuses the whole thing on any
+               problem — the same host-local fail-closed posture as ResolveMcpBind, and the reason a
+               credential pasted into a peer description cannot reach a client from here. Reported at CRITICAL
+               because it is a configuration defect that silently costs the operator their disclosure. */
+            var peerPublish = DarlingPeerDirectory.Publish(config.Peers);
+            var declaredPeers = peerPublish.Snapshot;
+
+            if (peerPublish.Refused)
+            {
+                foreach (var problem in peerPublish.RefusedProblems)
+                {
+                    _logger.LogCritical(
+                        "MCP peer disclosure REFUSED (nothing published; peers are not disclosed until this is fixed): {Problem}",
+                        problem);
+                }
+            }
+            else if (!declaredPeers.IsEmpty)
+            {
+                _logger.LogInformation(
+                    "MCP peer disclosure active: {PeerCount} declared peer store(s){Coverage}. Disclosure only — this service never contacts a peer.",
+                    declaredPeers.Peers.Count,
+                    declaredPeers.ThisStoreCovers.Length > 0 ? $"; this store covers {declaredPeers.ThisStoreCovers}" : "");
+            }
+
             /* Register MCP server with the analysis tool class. */
             builder.Services
                 .AddMcpServer(options =>
@@ -454,7 +487,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                         Name = "PerformanceMonitorDarling",
                         Version = "1.0.0"
                     };
-                    options.ServerInstructions = DarlingMcpInstructions.Text;
+                    options.ServerInstructions = DarlingMcpInstructions.Build(declaredPeers);
                 })
                 /* Stateless mode: each request is self-contained (no Mcp-Session-Id round-trip).
                    Required for clients like Google Antigravity that don't echo the session id,

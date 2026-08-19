@@ -36,7 +36,7 @@ public sealed class QueryStoreStatePruneLivePostgresTests
     /// <summary>Distinctive fake ids — a real server_id is a storage-name hash, never these.</summary>
     private const int LiveServerId = -218800;
     private const int NeighborServerId = -218801;
-    private const string ServerName = "PLANWM-PRUNE-SRV";
+    private const string ServerName = "QSOWM-PRUNE-SRV";
 
     /// <summary>The snapshot's collection_time in every case below; state rows are dated relative to it.</summary>
     private static readonly DateTime Newest = new(2026, 8, 11, 9, 0, 0, DateTimeKind.Unspecified);
@@ -44,7 +44,7 @@ public sealed class QueryStoreStatePruneLivePostgresTests
     /// <summary>Old enough to be judged by <see cref="Newest"/> — the ordinary case for a real state row.</summary>
     private static readonly DateTime BeforeNewest = Newest.AddHours(-1);
 
-    private static string Planwm(string database) => QueryStorePlanXmlState.WatermarkKeyPrefix + database;
+    private static string Qsowm(string database) => QueryStoreOpenIntervalState.WatermarkKeyPrefix + database;
     private static string Done(string database) => QueryStoreBackfillState.DoneKeyPrefix + database;
     private static string Hole(string database) => QueryStoreBackfillState.HoleKeyPrefix + database;
 
@@ -82,7 +82,7 @@ public sealed class QueryStoreStatePruneLivePostgresTests
 
                "App" is present and "AppArchive" is not, which is the name-shape trap: writing the anti-join
                as starts_with(state_key, prefix || ds.database_name) instead of an equality is a very
-               plausible variant, and it would spare planwm:AppArchive forever because "planwm:App" is a
+               plausible variant, and it would spare qsowm:AppArchive forever because "qsowm:App" is a
                prefix of it. For an issue whose subject is database name churn, that case has to be here. */
             await SnapshotAsync(connection, ct, Newest, "Live", "Parked", "App");
 
@@ -90,11 +90,11 @@ public sealed class QueryStoreStatePruneLivePostgresTests
                newest, nothing would ever be retired. */
             await SnapshotAsync(connection, ct, Newest.AddMinutes(-15), "Live", "Parked", "App", "Dropped", "AppArchive");
 
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Live"), "900000:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Parked"), "800000:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Dropped"), "700000:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("App"), "500000:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("AppArchive"), "400000:1786449600");
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Live"), "900000:1786449600");
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Parked"), "800000:1786449600");
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Dropped"), "700000:1786449600");
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("App"), "500000:1786449600");
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("AppArchive"), "400000:1786449600");
 
             /* The backfill worker's per-database keys, which orphan identically. Both prefixes get a
                survivor as well as a casualty: with only a delete case, a statement that deleted
@@ -112,34 +112,34 @@ public sealed class QueryStoreStatePruneLivePostgresTests
                here — server scoping is the difference between pruning one server and pruning the fleet. */
             await StateAsync(connection, ct, LiveServerId, DefaultTraceEventsCollector.Instance.Name,
                 DefaultTraceEventsCollector.LastTraceFilePathStateKey, @"S:\MSSQL\Log\log_766.trc");
-            await StateAsync(connection, ct, NeighborServerId, QueryStorePlanXmlState.StateCollectorName,
-                Planwm("Dropped"), "600000:1786449600");
+            await StateAsync(connection, ct, NeighborServerId, QueryStoreOpenIntervalState.StateCollectorName,
+                Qsowm("Dropped"), "600000:1786449600");
 
             await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
 
             /* Retired: gone from the newest snapshot, on every prefix it could have left behind. */
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Dropped")));
+            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Dropped")));
             Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Done("Dropped")));
             Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Hole("Dropped")));
 
             /* Retired even though a LIVE database's name is a prefix of it. */
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("AppArchive")));
+            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("AppArchive")));
 
             /* Kept: still collected. */
             Assert.Equal("900000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Live")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Live")));
             Assert.Equal("500000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("App")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("App")));
             Assert.Equal("2026-08-11T09:00:00.0000000Z",
                 await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Done("Live")));
             Assert.Equal(EncodedHole(),
                 await ValueAsync(connection, ct, LiveServerId, QueryStoreBackfillState.StateCollectorName, Hole("Live")));
 
             /* Kept, and this is the assertion the change exists for: present in sys.databases, absent from
-               every enumeration query_store runs. Pruning it costs a full plan-XML refetch of a database that
-               never went anywhere, on precisely the servers that keep databases parked. */
+               every enumeration query_store runs. Pruning it costs re-including the open interval for a
+               database that never went anywhere, on precisely the servers that keep databases parked. */
             Assert.Equal("800000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Parked")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Parked")));
 
             /* Kept: not database-keyed, not this collector, not this server. */
             Assert.Equal("keep me",
@@ -148,7 +148,7 @@ public sealed class QueryStoreStatePruneLivePostgresTests
                 await ValueAsync(connection, ct, LiveServerId, DefaultTraceEventsCollector.Instance.Name,
                     DefaultTraceEventsCollector.LastTraceFilePathStateKey));
             Assert.Equal("600000:1786449600",
-                await ValueAsync(connection, ct, NeighborServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Dropped")));
+                await ValueAsync(connection, ct, NeighborServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Dropped")));
 
             /* The DIAGNOSTIC, which is the only thing that could ever make a wrong delete visible — the other
                symptom is a silent refetch. It comes from the statement's RETURNING clause, so if that ever
@@ -159,7 +159,7 @@ public sealed class QueryStoreStatePruneLivePostgresTests
             Assert.DoesNotContain("Parked", logger.Joined, StringComparison.Ordinal);
 
             /* Idempotent — it runs on every query_store cycle of every server, so a second pass over a clean
-               store must touch nothing. Seven survivors: planwm for Live, Parked and App; done and hole for
+               store must touch nothing. Seven survivors: qsowm for Live, Parked and App; done and hole for
                Live; the non-database-keyed bookkeeping row; and the other collector's key. */
             await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
             Assert.Equal(7, await CountAsync(connection, ct, LiveServerId));
@@ -179,8 +179,8 @@ public sealed class QueryStoreStatePruneLivePostgresTests
     /// <para>A snapshot that EXISTS is not a snapshot that is CURRENT. If database_states stops collecting
     /// for a server, its newest snapshot freezes, and every database created after that instant is missing
     /// from it while being perfectly alive. Pruning on presence alone would delete such a database's
-    /// watermark on every cycle forever — paying a full plan-XML refetch each time, which is the exact cost
-    /// #2164 exists to remove, while logging that a live database is gone. A snapshot cannot judge a row
+    /// state on every cycle forever — re-deriving what the stamp existed to skip, while logging that a
+    /// live database is gone. A snapshot cannot judge a row
     /// written after it was taken.</para>
     /// </summary>
     [Fact]
@@ -206,22 +206,22 @@ public sealed class QueryStoreStatePruneLivePostgresTests
             await SnapshotAsync(connection, ct, Newest, "OldDb");
 
             /* Created after the snapshot froze — absent from it, and entirely alive. */
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName,
-                Planwm("BornAfterTheSnapshot"), "10:1786449600", updatedAt: Newest.AddMinutes(30));
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName,
+                Qsowm("BornAfterTheSnapshot"), "10:1786449600", updatedAt: Newest.AddMinutes(30));
 
             /* Dropped before the snapshot froze: absent from it, and its last state write PRECEDES it, which
                is what still makes it prunable. Without this the test would pass for a prune that had simply
                stopped working. */
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName,
-                Planwm("DroppedLongAgo"), "20:1786449600", updatedAt: BeforeNewest);
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName,
+                Qsowm("DroppedLongAgo"), "20:1786449600", updatedAt: BeforeNewest);
 
             await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
 
             Assert.Equal("10:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName,
-                    Planwm("BornAfterTheSnapshot")));
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName,
-                Planwm("DroppedLongAgo")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName,
+                    Qsowm("BornAfterTheSnapshot")));
+            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName,
+                Qsowm("DroppedLongAgo")));
 
             bodySucceeded = true;
         }
@@ -262,15 +262,15 @@ public sealed class QueryStoreStatePruneLivePostgresTests
                so a prune that forgot to scope the snapshot read by server would wipe every row here. */
             await SnapshotAsync(connection, ct, Newest, NeighborServerId, "SomeOtherServersDatabase");
 
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Alpha"), "1:1786449600");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Beta"), "2:1786449600");
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Alpha"), "1:1786449600");
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Beta"), "2:1786449600");
 
             await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
 
             Assert.Equal("1:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Alpha")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Alpha")));
             Assert.Equal("2:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Beta")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Beta")));
 
             bodySucceeded = true;
         }
@@ -314,32 +314,32 @@ public sealed class QueryStoreStatePruneLivePostgresTests
             /* A snapshot that does NOT name Racer, and a state row old enough to be judged by it — the
                adversarial setup, since neither is true of a real live database. */
             await SnapshotAsync(connection, ct, Newest, "Live");
-            await StateAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName,
-                Planwm("Racer"), "900000:1786449600", updatedAt: BeforeNewest);
+            await StateAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName,
+                Qsowm("Racer"), "900000:1786449600", updatedAt: BeforeNewest);
 
             /* Cycle start: the collection pass reads its state. */
-            var loaded = await runner.GetCollectorStateAsync(LiveServerId, QueryStorePlanXmlState.StateCollectorName, ct);
-            Assert.Equal("900000:1786449600", Assert.Contains(Planwm("Racer"), loaded));
+            var loaded = await runner.GetCollectorStateAsync(LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, ct);
+            Assert.Equal("900000:1786449600", Assert.Contains(Qsowm("Racer"), loaded));
 
             /* Mid-flight: the prune fires and takes the row this cycle is still working from. */
             await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
-            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Racer")));
+            Assert.Null(await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Racer")));
 
             /* Cycle end: the write-back is an INSERT ... ON CONFLICT, so it restores rather than failing on
                a row that is no longer there. The database keeps collecting; the delete cost nothing. */
             await runner.SaveCollectorStateAsync(
-                LiveServerId, QueryStorePlanXmlState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [Planwm("Racer")] = "950000:1786449600" },
+                LiveServerId, QueryStoreOpenIntervalState.StateCollectorName,
+                new Dictionary<string, string>(StringComparer.Ordinal) { [Qsowm("Racer")] = "950000:1786449600" },
                 ct);
 
             Assert.Equal("950000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Racer")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Racer")));
 
             /* And it stays: the restored row is stamped NOW, which is after the snapshot, so the freshness
                guard keeps the next cycle's prune off it too. Without that the two would fight forever. */
             await runner.PruneOrphanedQueryStoreDatabaseStateAsync(LiveServerId, ct);
             Assert.Equal("950000:1786449600",
-                await ValueAsync(connection, ct, LiveServerId, QueryStorePlanXmlState.StateCollectorName, Planwm("Racer")));
+                await ValueAsync(connection, ct, LiveServerId, QueryStoreOpenIntervalState.StateCollectorName, Qsowm("Racer")));
 
             bodySucceeded = true;
         }

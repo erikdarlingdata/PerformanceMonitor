@@ -721,7 +721,7 @@ public static class DarlingRetention
     /// renders "not collected" and self-corrects; content pruned while a map row survives is a live fact
     /// resolving to absent XML, silently. The coupled pair keeps that gap at ChunkIntervalDays; the
     /// dedicated pair keeps it at one day (map at knob, dim at knob + 1 — the same one-day stamp-skew
-    /// margin as everywhere else, because <c>TouchSql</c> refreshes the map's stamp eagerly while the
+    /// margin as everywhere else, because <c>TouchAndProbeSql</c> refreshes the map's stamp eagerly while the
     /// dim's refresh is hourly-guarded, so the dim's stamp can trail). Both components are strictly
     /// ordered, so the max-of-newer composition preserves the ordering under every knob value —
     /// pinned in PlanContentRetentionTests across the full age sweep.

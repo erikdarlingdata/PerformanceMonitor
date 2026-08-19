@@ -305,32 +305,50 @@ FROM collect.store_metrics", connection);
     /* ---------------- #2136 synthetic scale test ---------------- */
 
     /// <summary>
-    /// The #2136 capacity claim, proven end to end rather than asserted from one production observation:
-    /// job runtimes scale with raw volume, the V56 telemetry RECORDS that growth, and the #2141 alert
-    /// FIRES from real store readings. One throwaway hypertable with a compression policy that is PARKED
-    /// except when a measurement deliberately arms it (created parked in one transaction — the #1888
-    /// discipline — so no background tick ever races a measurement, the #2143 class), driven at 1x and
-    /// then 10x row volume:
+    /// The #2136 capacity claim, proven end to end rather than asserted from one production observation.
+    /// One throwaway hypertable with a compression policy that is PARKED except when a measurement
+    /// deliberately arms it (created parked in one transaction — the #1888 discipline — so no background
+    /// tick ever races a measurement, the #2143 class), driven at 1x and then 10x row volume:
     /// <list type="number">
-    /// <item>a scheduler-driven run at each scale (arm, poll total_runs, park — foreground run_job does
-    /// NOT update this accounting, CI-proved); job_stats.last_run_duration must be measurable (the
-    /// premise the whole telemetry stands on) and must GROW with volume;</item>
+    /// <item>a scheduler-driven run at each scale (arm, poll last_successful_finish, park — foreground
+    /// run_job does NOT update this accounting, CI-proved). Each run must COMPRESS THE CHUNK ITS SEED
+    /// CREATED, and that chunk must hold exactly the seeded row count, so the escalation is real work at
+    /// two genuinely different scales rather than two no-ops; and job_stats.last_run_duration must be
+    /// measurable at BOTH scales — the premise the whole telemetry stands on;</item>
     /// <item>a self-metrics sweep after each run; the store_metrics series must carry both readings, in
-    /// order, growing — this is the series an operator (and the cadence alert's detail text) trends;</item>
+    /// order — this is the series an operator (and the cadence alert's detail text) trends;</item>
     /// <item>alter_job shrinks the schedule interval to half the measured 10x duration, and the REAL
     /// evaluator, fed by the REAL <see cref="TimescaleSupport.ReadJobCadenceReadingsAsync"/> against this
     /// store, must fire the Critical tier under the storejob: key.</item>
     /// </list>
-    /// Volumes (50k vs 500k rows in one closed chunk each, after a discarded warm-up run) are chosen so
-    /// the big run does strictly more compression work than the 1x run by a margin no runner jitter
-    /// plausibly inverts; the assertion is monotonicity, not a ratio, for exactly that reason. The
-    /// margin is a full order of magnitude because 4x was NOT enough (#2160): a fast runner's fixed
-    /// per-run cost plus cache warmth accumulating across the two measured runs inverted 50k-vs-200k
-    /// in the field (d1=279ms, d4=217ms).
-    /// Seeds are midday-anchored (#1972) so a run near midnight cannot split a chunk.
+    /// Seeds are midday-anchored (#1972) so a run near midnight cannot split a chunk. Ordering the
+    /// per-day counts ascending is safe across a midnight rollover too: the anchors are re-evaluated per
+    /// seed, so warm-up stays the oldest day and 10x the newest whichever side of midnight each lands on.
+    ///
+    /// <para><b>#2266: there is deliberately NO assertion that the 10x run took LONGER than the 1x run,
+    /// and one must not be reintroduced.</b> That assertion was the flake, and it is unfixable by tuning
+    /// because it is a benchmark of TimescaleDB's compression throughput on shared CI hardware, not a
+    /// claim about this product. Measured on a rig (TimescaleDB 2.29 / PG17, 15 consecutive runs of this
+    /// exact sequence): d1 lands at 24–39 ms and d10 at 109–167 ms, so a 10x volume increase buys only
+    /// ~3.2x the duration — about <b>85 ms</b> of absolute signal, because compression cost is largely
+    /// fixed per run. CI's observed baseline for the same pair is 690–970 ms, i.e. roughly twenty times
+    /// that fixed cost, so the volume-dependent component there is ~10% of the measurement's own
+    /// magnitude and sits comfortably inside the run-to-run variance of launching a background worker on
+    /// Windows. Both reported failures are exactly that: d1=970/d10=863 and then d1=689/d10=689. The
+    /// earlier reading of the byte-identical pair as proof of a mechanism (both runs compressing nothing)
+    /// is refuted by the rig — chunk counts go 1, 2, 3 and the per-day counts are exactly
+    /// 2000/50000/500000 on all 15 runs — and it was never as improbable as it looked, because the pair
+    /// is only ever read when the test FAILS, which selects for differences already near zero.
+    /// Raising the volumes cannot rescue it either: at ~0.19 ms per thousand rows it would take millions
+    /// of rows per chunk to clear a variance nobody has measured on the platform that actually fails.
+    /// What the product owns is that a real duration is measured, recorded in order, and drives the
+    /// cadence alert — all three asserted below, deterministically. What TimescaleDB owns is how long
+    /// compressing a chunk takes, and this suite is not the place to police it. #2160's 4x-was-not-enough
+    /// finding (d1=279ms, d4=217ms) was the same signal being read as a volume problem; 10x did not fix
+    /// it and no multiple would have.</para>
     /// </summary>
     [Fact]
-    public async Task ScaleTest_JobDurationGrowsWithVolume_TelemetryRecordsIt_AndTheAlertFires_AgainstDevPostgres()
+    public async Task ScaleTest_EachRunCompressesItsOwnChunk_TelemetryRecordsBothRuns_AndTheAlertFires_AgainstDevPostgres()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -377,9 +395,11 @@ WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
 AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection).ExecuteScalarAsync(ct))!);
 
         /* Warm-up: the first run of a policy pays one-time costs (worker spin-up, catalog warm-up) that
-           would inflate d1 and could invert the monotonicity assertion. Run once on a token chunk and
-           discard the measurement. Doubles as the canary that this scratch database HAS a scheduler:
-           if it never runs, the arm-and-poll below fails with its own diagnosis rather than a mystery. */
+           would swamp d1. Run once on a token chunk and discard the measurement. Doubles as the canary
+           that this scratch database HAS a scheduler: if it never runs, the arm-and-poll below fails with
+           its own diagnosis rather than a mystery. It also establishes the compressed-chunk baseline the
+           two measured runs are counted against, so a warm-up that silently compressed nothing shows up
+           as a wrong count after 1x rather than as a mystery duration. */
         await SeedTickRowsAsync(connection, Table, daysBack: 12, rows: 2_000, ct);
         await RunJobViaSchedulerAsync(connection, jobId, ct);
 
@@ -387,42 +407,69 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await SeedTickRowsAsync(connection, Table, daysBack: 10, rows: 50_000, ct);
         await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d1 = await ReadJobDurationMsAsync(connection, jobId, ct);
-        var work1 = await DescribeJobWorkAsync(connection, Table, jobId, ct);   /* #2266 */
-        Assert.True(d1 > 0,
-            "a scheduler-driven run left job_stats.last_run_duration unmeasurable — the premise the " +
-            "V56 telemetry and the #2141 alert both stand on. (Foreground run_job is already known " +
-            "not to update this accounting — CI proved that on this test's first version — which is " +
-            "why the runs go through the real scheduler.)");
+        var work1 = await ReadCompressionWorkAsync(connection, Table, ct);
+        /* Branch rather than pass the describe call into Assert.True's message: that argument is a plain
+           string, so it is evaluated eagerly and would spend two live catalog queries on every PASSING run
+           to build a message nobody reads (review catch). The helper exists to explain a failure, so it
+           should only run when there is one. */
+        if (d1 <= 0)
+        {
+            Assert.Fail(
+                "a scheduler-driven run left job_stats.last_run_duration unmeasurable — the premise the " +
+                "V56 telemetry and the #2141 alert both stand on. (Foreground run_job is already known " +
+                "not to update this accounting — CI proved that on this test's first version — which is " +
+                "why the runs go through the real scheduler.)" +
+                $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
+        }
+
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
 
         /* 10x: one closed chunk, 500k rows. */
         await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 500_000, ct);
         await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d10 = await ReadJobDurationMsAsync(connection, jobId, ct);
-        var work10 = await DescribeJobWorkAsync(connection, Table, jobId, ct);   /* #2266 */
+        var work10 = await ReadCompressionWorkAsync(connection, Table, ct);
+        if (d10 <= 0)
+        {
+            /* Same eager-evaluation reason as the d1 branch above. */
+            Assert.Fail(
+                "the 10x run left job_stats.last_run_duration unmeasurable. Asserted separately from d1 " +
+                "(#2266): ReadJobDurationMsAsync maps a NULL duration to 0, and the telemetry check below " +
+                "compares the series against these same variables, so an unmeasurable 10x run used to " +
+                "satisfy 0 == 0 and pass." +
+                $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
+        }
+
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
 
-        /* 1. The capacity claim itself: more volume, longer run. Monotonicity, not a ratio — runner
-           jitter owns the constant factor, the direction is ours.
+        /* 1. The escalation is REAL WORK at two different scales — asserted on rows and chunks, which are
+           exact, instead of on the two durations, which are a benchmark of somebody else's compression
+           engine (see the #2266 block in the summary for the measurements that settle that). Each measured
+           run must have compressed the chunk its own seed created, and that chunk must hold exactly the
+           seeded row count. Per-day counts double as the "one chunk per seed" check: 1-day chunks make day
+           groups and chunks the same thing, so a seed that straddled midnight would show up as an extra
+           group rather than as a quietly halved workload.
 
-           #2266: the failure message now reports what the job DID, not only how long it took. This test
-           has failed intermittently on diffs that cannot reach it, and the reading that mattered was
-           d1=689ms / d10=689ms — BYTE-IDENTICAL. Two independent sub-second timings of different
-           workloads do not land on the same millisecond by chance, so the earlier "runner jitter"
-           explanation cannot be right; something is making both runs do the same work. The scheduler
-           helper already rules out a stale read (it waits for last_successful_finish to ADVANCE), which
-           leaves "both runs compressed the same amount, plausibly none" — and that is invisible from a
-           duration alone. Chunk counts make it visible the first time it recurs, without a rig. */
-        Assert.True(d10 > d1,
-            $"10x volume did not run longer than 1x (d1={d1}ms, d10={d10}ms) — job runtime is not " +
-            "scaling with volume, which invalidates the #2136 capacity model." +
-            $"\n  after 1x  ({50_000} rows seeded): {work1}" +
-            $"\n  after 10x ({500_000} rows seeded): {work10}" +
-            "\n  If the compressed-chunk counts are EQUAL, the two runs did the same work and this " +
-            "assertion was never measuring the capacity model — the volumes are not producing " +
-            "compressible chunks, which is a fixture defect rather than a timing tolerance one (#2266).");
+           This is the assertion the durations were standing in for, and it is strictly stronger: the
+           hypothesis the intermittent failures raised — that both runs compressed nothing and the whole
+           cost was fixed overhead — is a hard failure here, at the step where it happens, instead of
+           being invisible behind a timing comparison that fails for two unrelated reasons. */
+        Assert.Equal(new long[] { 2_000, 50_000 }, work1.RowsPerDay);
+        Assert.Equal(2, work1.ChunksTotal);
+        Assert.True(work1.ChunksCompressed == 2,
+            $"the 1x run did not leave both chunks compressed ({work1}) — the 50k seed did not become " +
+            "compressible work, so this test would be measuring fixed overhead twice rather than the " +
+            $"#2136 capacity model (#2266). d1={d1}ms.");
 
-        /* 2. The telemetry recorded the growth: two series points for this job, in order, growing. */
+        Assert.Equal(new long[] { 2_000, 50_000, 500_000 }, work10.RowsPerDay);
+        Assert.Equal(3, work10.ChunksTotal);
+        Assert.True(work10.ChunksCompressed == 3,
+            $"the 10x run did not leave all three chunks compressed ({work10}) — the 500k seed did not " +
+            $"become compressible work (#2266). d1={d1}ms, d10={d10}ms.");
+
+        /* 2. The telemetry recorded both runs: two series points for this job, in order, carrying the
+           durations the job actually reported. This is the product's half of #2136 — whatever duration
+           TimescaleDB took, the V56 series has it, in order, ready for the cadence comparison in step 3. */
         await using (var series = new NpgsqlCommand(@"
 SELECT last_run_duration_ms
 FROM collect.store_metrics
@@ -515,6 +562,62 @@ FROM generate_series(1, {rows}) AS g", ct);
         await ExecAsync(connection, $"SELECT alter_job({jobId}::integer, scheduled => false)", ct);
     }
 
+    /// <summary>
+    /// What the compression job measurably ACHIEVED, as exact counts the scale test asserts on (#2266) —
+    /// as opposed to <see cref="DescribeJobWorkAsync"/>, which is a best-effort string for explaining a
+    /// failure and deliberately swallows its own faults. This one THROWS, because a Timescale view that
+    /// stopped answering is a real failure of the thing being asserted rather than a cosmetic gap in a
+    /// message.
+    ///
+    /// <para><c>RowsPerDay</c> is ordered by day ascending, which — with the 1-day chunk interval this
+    /// hypertable is created at — makes it both the per-chunk row census and the "each seed produced
+    /// exactly one chunk" check. Counting rows through the hypertable rather than reading a compression
+    /// stats view is deliberate: compressed chunks stay transparently queryable, so a plain
+    /// <c>count(*)</c> is exact and needs none of the pre/post-2.18 columnstore-vs-compression view
+    /// vocabulary the rest of this file has to hedge on.</para>
+    /// </summary>
+    private sealed record CompressionWork(long ChunksTotal, long ChunksCompressed, long[] RowsPerDay)
+    {
+        public override string ToString() =>
+            $"chunks={ChunksTotal} compressed={ChunksCompressed} rowsPerDay=[{string.Join(", ", RowsPerDay)}]";
+    }
+
+    private static async Task<CompressionWork> ReadCompressionWorkAsync(
+        NpgsqlConnection connection, string table, CancellationToken ct)
+    {
+        long total;
+        long compressed;
+        await using (var chunks = new NpgsqlCommand(@"
+SELECT
+    count(*) AS chunks_total,
+    count(*) FILTER (WHERE is_compressed) AS chunks_compressed
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect' AND hypertable_name = $1", connection))
+        {
+            chunks.Parameters.AddWithValue(table);
+            await using var reader = await chunks.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct), "timescaledb_information.chunks returned no row");
+            total = reader.GetInt64(0);
+            compressed = reader.GetInt64(1);
+        }
+
+        var rowsPerDay = new List<long>();
+        await using (var perDay = new NpgsqlCommand($@"
+SELECT count(*) AS row_count
+FROM collect.{table}
+GROUP BY date_trunc('day', collection_time)
+ORDER BY date_trunc('day', collection_time)", connection))
+        {
+            await using var reader = await perDay.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rowsPerDay.Add(reader.GetInt64(0));
+            }
+        }
+
+        return new CompressionWork(total, compressed, rowsPerDay.ToArray());
+    }
+
     private static async Task<DateTime> ReadLastSuccessfulFinishAsync(NpgsqlConnection connection, long jobId, CancellationToken ct)
     {
         /* -infinity (never finished) maps to DateTime.MinValue via Npgsql, which orders below every real
@@ -528,12 +631,14 @@ FROM generate_series(1, {rows}) AS g", ct);
     }
 
     /// <summary>
-    /// What the compression job actually DID, as one line for a failure message (#2266).
+    /// What the compression job actually DID, as one line for a failure message (#2266) — the job-side
+    /// context (<c>total_runs</c>, <c>last_run_status</c>, <c>last_successful_finish</c>) that says whether a
+    /// run happened at all and whether it succeeded. Attached to the two duration-measurability assertions,
+    /// which are the ones where "did the run even complete" is the question a reader has next.
     ///
-    /// <para>Added because a duration alone cannot distinguish "this run compressed ten times as much and the
-    /// machine was noisy" from "both runs compressed nothing and the cost is all fixed overhead" — and the
-    /// intermittent failures of this test have produced BYTE-IDENTICAL durations, which only the second story
-    /// explains. Reporting chunk counts turns the next recurrence into a diagnosis instead of another re-run.</para>
+    /// <para>Distinct from <see cref="ReadCompressionWorkAsync"/>, which returns exact counts the test
+    /// ASSERTS on. The split is the point: this one is prose for a human reading a failure, so it must never
+    /// throw, and that same property makes it unfit to assert against.</para>
     ///
     /// <para>Deliberately best-effort and never throwing: it exists to explain a failure, so a fault here must
     /// not replace the assertion's own message with its own — that is the #1902 mistake in miniature. A missing
@@ -650,6 +755,12 @@ SELECT
         public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;
+
+        /* #2349: OFF in the fakes so existing expectations are untouched. */
+        public bool FileGrowthEnabled { get; set; }
+        public int FileGrowthRiseMb { get; set; } = 10240;
+        public int FileGrowthVolumePercent { get; set; } = 60;
+        public int FileGrowthLookbackMinutes { get; set; } = 60;
         public int LongRunningJobMultiplier { get; set; } = 3;
         public int FailedJobLookbackMinutes { get; set; } = 60;
         public int CooldownMinutes { get; set; } = 5;

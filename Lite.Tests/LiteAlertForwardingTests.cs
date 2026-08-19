@@ -134,6 +134,12 @@ public class LiteAlertForwardingTests : IDisposable
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>(Volumes));
 
+        /* #2349: empty on purpose. These tests exercise other alerts, and a fabricated file would
+           make the file-growth gate fire inside an unrelated scenario. */
+        public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<DatabaseFileGrowthInfo>());
+
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(TempDb);
 
