@@ -250,7 +250,8 @@ public static class AlertContextBuilders
         /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
         return queries
             .Select(q => AlertFingerprint.ForKey(serverName, AlertFingerprint.Query, q.QueryHash ?? "",
-                string.IsNullOrEmpty(q.DatabaseName) ? Array.Empty<string>() : new[] { q.DatabaseName }))
+                string.IsNullOrEmpty(q.DatabaseName) ? Array.Empty<string>() : new[] { q.DatabaseName },
+                database: q.DatabaseName))
             .Where(i => i is not null).Select(i => i!).ToList();
     }
 
@@ -273,7 +274,8 @@ public static class AlertContextBuilders
         if (databases is null || databases.Count == 0) return Array.Empty<AlertIncident>();
 
         return databases
-            .Select(d => AlertFingerprint.ForKey(serverName, AlertFingerprint.Database, d.DatabaseName, new[] { d.DatabaseName }))
+            .Select(d => AlertFingerprint.ForKey(serverName, AlertFingerprint.Database, d.DatabaseName, new[] { d.DatabaseName },
+                database: d.DatabaseName))
             .Where(i => i is not null).Select(i => i!).ToList();
     }
 

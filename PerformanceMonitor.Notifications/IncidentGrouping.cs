@@ -295,7 +295,16 @@ public static class BlockingIncidentGrouper
 
             // #1141: carry the chain's forensic detail on the incident so per-event cards keep it
             // (Summary already shows it via the builder's items; this travels for the per-event split).
-            var enriched = incident with { DetailFields = BlockingDetail(representative) };
+            /* #2361: the group already knows its database, so the incident carries it rather than leaving a
+               consumer to string-search Details[] for it. Attached at the `with` so both the ForObjects and
+               ForKey branches above get it from one place. UnknownDatabase is ContentiousObjectLabel's sentinel for
+               "the row had none" and becomes null here -- a literal "unknown" in a Database field reads as a
+               database actually called that. */
+            var enriched = incident with
+            {
+                DetailFields = BlockingDetail(representative),
+                Database = IncidentDatabaseHelpers.NormalizeDatabase(representative.Database),
+            };
 
             groups.Add(new BlockingGroup(
                 representative.Database, representative.ContentiousObject,
@@ -354,6 +363,43 @@ public static class BlockingIncidentGrouper
     private static string Truncate(string s) => s.Length <= 300 ? s : s.Substring(0, 300) + "…";
 }
 
+internal static class IncidentDatabaseHelpers
+{
+    /// <summary>
+    /// The grouper's <c>UnknownDatabase</c> sentinel means "the row carried none" (#2361). It is fine as a
+    /// display string and wrong as a data member: a consumer routing on <c>Database</c> would file tickets
+    /// against a database literally named "unknown".
+    /// </summary>
+    internal static string? NormalizeDatabase(string? database) =>
+        string.IsNullOrWhiteSpace(database)
+        || string.Equals(database, ContentiousObjectLabel.UnknownDatabase, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : database;
+
+    /// <summary>
+    /// Pulls the #2109 <c>Database</c> fact off an incident's detail fields (#2361) — the value a consumer was
+    /// otherwise string-searching the payload for. Label match is case-insensitive; the first wins, because a
+    /// deadlock graph spanning several databases already ships them as one CSV rather than repeated fields.
+    /// </summary>
+    internal static string? DatabaseFromFields(IReadOnlyList<AlertIncidentField>? fields)
+    {
+        if (fields is null)
+        {
+            return null;
+        }
+
+        foreach (var field in fields)
+        {
+            if (string.Equals(field.Label, "Database", StringComparison.OrdinalIgnoreCase))
+            {
+                return NormalizeDatabase(field.Value);
+            }
+        }
+
+        return null;
+    }
+}
+
 /// <summary>
 /// Groups deadlock events by the sorted set of fully-qualified objects involved (#1140). One
 /// deadlock spanning multiple databases/objects is a single incident listing them all; recurrences
@@ -408,7 +454,15 @@ public static class DeadlockIncidentGrouper
             var count = counts[key];
             var baseIncident = incidents[key];
             // Re-stamp the occurrence count + carry the representative's forensic detail (#1141).
-            var incident = baseIncident with { OccurrenceCount = count, DetailFields = details[key] };
+            /* #2361: deadlocks carry their database as a #2109 discrete fact on the representative's detail
+               fields (a CSV when the graph spans several). Reading it here is the same lookup a consumer was
+               doing by hand downstream -- done once, in the projection, where it is exact. */
+            var incident = baseIncident with
+            {
+                OccurrenceCount = count,
+                DetailFields = details[key],
+                Database = IncidentDatabaseHelpers.DatabaseFromFields(details[key]),
+            };
             groups.Add(new DeadlockGroup(incident.InvolvedObjects, count, incident));
         }
 

@@ -630,6 +630,11 @@ public sealed class AlertEngine
                         {
                             TotalOccurrences = state.TotalOccurrences,
                             IncidentStartedUtc = state.IncidentStartedUtc,
+                            /* #2361: LastObservedUtc already exists on the state -- it is the value the
+                               staleness horizon compares against so a flat incident does not expire itself.
+                               It simply never reached the incident. This is a projection, not a new
+                               measurement, which is why it rides the same hook as the two above it. */
+                            LastEventUtc = state.LastObservedUtc,
                         }
                         : incident!);
             }

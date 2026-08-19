@@ -74,7 +74,22 @@ public sealed record AlertIncident(
     string? WaitRange = null,
     IReadOnlyList<AlertIncidentField>? DetailFields = null,
     long? TotalOccurrences = null,
-    DateTime? IncidentStartedUtc = null);
+    DateTime? IncidentStartedUtc = null,
+    /* #2361: the incident's database scope, as a discrete member rather than something a consumer has to
+       string-search Details[] for. That search is exact only for deadlocks -- they are self-contained, built
+       with includeDetailFields: true -- while every other fingerprinted alert appends a BARE Incident item
+       beside its data item, so the incident's own section carries no Database at all and the fallback becomes
+       "any Database anywhere in the payload". On a multi-incident alert spanning databases that is not an
+       approximation, it is the wrong value with nothing marking it wrong.
+
+       Distinct from InvolvedObjects, which is what the incident is ABOUT (tables, mount points, job names).
+       This is where it lives. Null when the alert is not database-scoped -- a volume or a job is not. */
+    string? Database = null,
+    /* #2361: the newest event in this incident, the counterpart to IncidentStartedUtc. Populated from
+       IncidentOccurrenceState.LastObservedUtc, which the accumulator already computes and persists as the
+       value its staleness horizon compares against -- so this is a projection of something that existed, not
+       a new measurement. Null on any alert the accumulator does not run for. */
+    DateTime? LastEventUtc = null);
 
 /// <summary>
 /// A forensic label/value pair carried on an <see cref="AlertIncident"/> for #1141 Per-event delivery
@@ -148,7 +163,11 @@ public record AlertIncidentDto(
     int OccurrenceCount = 1,
     string? WaitRange = null,
     long? TotalOccurrences = null,
-    DateTime? IncidentStartedUtc = null);
+    DateTime? IncidentStartedUtc = null,
+    /* #2361. Trailing and optional for the same reason the rest of this DTO is: legacy contextJson written
+       before these existed deserializes them to null rather than failing the round trip. */
+    string? Database = null,
+    DateTime? LastEventUtc = null);
 
 /// <summary>
 /// JSON mirror of <see cref="RemediationAction"/> / <see cref="ForcePlanTarget"/>
@@ -356,7 +375,9 @@ public static class AlertContextSerializer
             i.OccurrenceCount,
             i.WaitRange,
             i.TotalOccurrences,
-            i.IncidentStartedUtc));
+            i.IncidentStartedUtc,
+            i.Database,
+            i.LastEventUtc));
 
     /// <summary>
     /// Serializes a single <see cref="RemediationAction"/> to JSON for persistence on a
