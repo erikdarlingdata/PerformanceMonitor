@@ -79,6 +79,12 @@ public sealed class DarlingSelfAlertTests
         public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;
+
+        /* #2349: OFF in the fakes so existing expectations are untouched. */
+        public bool FileGrowthEnabled { get; set; }
+        public int FileGrowthRiseMb { get; set; } = 10240;
+        public int FileGrowthVolumePercent { get; set; } = 60;
+        public int FileGrowthLookbackMinutes { get; set; } = 60;
         public int LongRunningJobMultiplier { get; set; } = 3;
         public int FailedJobLookbackMinutes { get; set; } = 60;
         public int CooldownMinutes { get; set; } = 5;
@@ -2020,6 +2026,12 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<LongRunningQueryInfo>());
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>());
+
+        /* #2349: empty on purpose. These tests exercise other alerts, and a fabricated file would
+           make the file-growth gate fire inside an unrelated scenario. */
+        public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+            string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<DatabaseFileGrowthInfo>());
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult<TempDbSpaceInfo?>(null);
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>

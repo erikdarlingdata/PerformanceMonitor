@@ -141,6 +141,15 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetVolumeFreeSpaceAsync(serverId), cancellationToken);
     }
 
+    /// <summary>#2349: the file-growth read, delegated like every other adapter member so the alert engine
+    /// stays free of DuckDB.</summary>
+    public async Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetDatabaseFileGrowthAsync(serverId, lookbackMinutes), cancellationToken);
+    }
+
     public async Task<List<PvsPressureInfo>> GetPvsPressureAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {

@@ -135,6 +135,7 @@ public static class PgMigrations
         new Migration(76, "query-store-health", V76Sql),
         new Migration(77, "activity-driven-plan-fetch", V77Sql),
         new Migration(78, "compose-statement-timeout", V78Sql),
+        new Migration(79, "file-growth-alert", V79Sql),
     };
 
     /// <summary>
@@ -1692,6 +1693,31 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V79 — the database file-growth alert (#2349). Between <c>tempdb Space</c> and <c>Volume Free Space</c>
+    /// sits a file that has grown large but has not yet filled its disk, and neither existing alert can express
+    /// it: the first fires on reserved ÷ (reserved + unallocated), whose denominator GROWS with autogrowth so
+    /// the percentage FALLS as tempdb balloons; the second fires on the consequence, too late to act on and
+    /// unable to attribute the space to any one file.
+    ///
+    /// <para>Two gates, both graded per server so ONE global setting works across a heterogeneous fleet — the
+    /// constraint that shapes this, since <c>config_alert_settings</c> is a single global row and an absolute MB
+    /// threshold is unusable when normal tempdb sizes differ by an order of magnitude: set it low enough for the
+    /// small instances and the large ones alert constantly. The RISE gate is primary (this file grew N MB inside
+    /// the window), following #2157's reasoning that a level alone pages forever about a size that has been true
+    /// since Tuesday; the LEVEL gate is the file as a share of its VOLUME, which self-scales to each server's
+    /// disk layout whether or not the file has a dedicated one.</para>
+    ///
+    /// <para>Ships OFF. A new alert that starts firing on upgrade is a bad citizen, and the right thresholds are
+    /// a property of the fleet rather than of the product.</para>
+    /// </summary>
+    private const string V79Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS file_growth_enabled boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS file_growth_rise_mb integer NOT NULL DEFAULT 10240,
+    ADD COLUMN IF NOT EXISTS file_growth_volume_percent integer NOT NULL DEFAULT 60,
+    ADD COLUMN IF NOT EXISTS file_growth_lookback_minutes integer NOT NULL DEFAULT 60;";
 
     /// <summary>
     /// V78 — the compose statement-timeout knob (#2357). The per-session <c>statement_timeout</c> on the

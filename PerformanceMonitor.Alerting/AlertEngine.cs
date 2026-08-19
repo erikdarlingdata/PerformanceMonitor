@@ -74,6 +74,7 @@ public sealed class AlertEngine
     public const string LongRunningQueryWatermarkMetric = "Long-Running Query";
     public const string VolumeFreeSpaceWatermarkMetric = "Volume Free Space";
     public const string PvsWatermarkMetric = "Version Store (PVS)";
+    public const string FileGrowthWatermarkMetric = "Database File Growth";
     public const string AnomalousJobWatermarkMetric = "Long-Running Job";
     public const string FailedJobWatermarkMetric = "Failed Agent Job";
 
@@ -144,6 +145,8 @@ public sealed class AlertEngine
        for the resolved transition, and the PvsAlertGate worsening watermark. */
     private readonly ConcurrentDictionary<string, DateTime> _lastPvsAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activePvsAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastFileGrowthAlert = new();
+    private readonly ConcurrentDictionary<string, bool> _activeFileGrowthAlert = new();
     private readonly ConcurrentDictionary<string, double> _lastAlertedPvsPercent = new();
 
     /* Rolling-count edge-trigger watermarks (#1091) — Lite's MainWindow.xaml.cs:103-104;
@@ -272,6 +275,7 @@ public sealed class AlertEngine
         await CheckTempDbSpaceAsync(key, serverName, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, now, alertCooldown, suppressed, ct);
         await CheckPvsPressureAsync(key, serverName, now, alertCooldown, suppressed, ct);
+        await CheckFileGrowthAsync(key, serverName, now, alertCooldown, suppressed, ct);
         await CheckAnomalousJobsAsync(key, serverName, now, alertCooldown, suppressed, ct);
         bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
         await CheckDatabaseStateAsync(key, serverName, now, alertCooldown, suppressed, ct);
@@ -1226,6 +1230,104 @@ public sealed class AlertEngine
         catch (Exception ex)
         {
             _logger?.LogError("Failed to check PVS pressure for {Server}: {Message}", serverName, ex.Message);
+        }
+    }
+
+    /* ---------------- database file growth (#2349) ---------------- */
+
+    /// <summary>
+    /// The gap between <c>tempdb Space</c> and <c>Volume Free Space</c>: a file that has grown large but has
+    /// not yet filled its disk.
+    ///
+    /// <para><b>Why neither existing alert can express it.</b> <c>tempdb Space</c> fires on
+    /// reserved ÷ (reserved + unallocated) — autogrowth adds unallocated extents, so the denominator grows with
+    /// the file and the percentage FALLS as tempdb balloons. It answers "is tempdb internally full right now",
+    /// which is a real question and structurally not this one. <c>Volume Free Space</c> fires on the
+    /// consequence, by which point a restart is already overdue, and cannot attribute the space to one file.</para>
+    ///
+    /// <para><b>Two gates, both graded per server.</b> <c>config_alert_settings</c> is a single global row, so
+    /// an absolute MB threshold is unusable across a fleet whose normal tempdb sizes differ by an order of
+    /// magnitude. The RISE gate is the event (#2157's reasoning: a level alone re-pages every cooldown about a
+    /// size that has been true since Tuesday, which trains people to mute it); the LEVEL gate is the file as a
+    /// share of its volume, which self-scales to each server's disk layout.</para>
+    ///
+    /// <para>Observation sits OUTSIDE the fire branch, like blocking's (#2216/#2362): counting only at delivery
+    /// lets a file that stops breaching during a cooldown mask the next one.</para>
+    /// </summary>
+    private async Task CheckFileGrowthAsync(
+        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.FileGrowthEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var files = await _readAdapter.GetDatabaseFileGrowthAsync(
+                key, _settings.FileGrowthLookbackMinutes, ct);
+
+            var breached = AlertContextBuilders.GetBreachedFiles(
+                files, _settings.FileGrowthRiseMb, _settings.FileGrowthVolumePercent);
+
+            var fileGrowthOccurrences = await ObserveOccurrencesAsync(
+                key, FileGrowthWatermarkMetric,
+                AlertContextBuilders.FileGrowthIncidents(serverName, breached), now);
+
+            if (breached.Count > 0)
+            {
+                var worst = breached[0];
+                _activeFileGrowthAlert[key] = true;
+
+                if (!suppressed && CooldownElapsed(_lastFileGrowthAlert, key, now, alertCooldown))
+                {
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Database File Growth" };
+                    bool isMuted = _isAlertMuted(muteCtx);
+                    _lastFileGrowthAlert[key] = now;
+
+                    var context = AlertContextBuilders.BuildFileGrowthContext(
+                        serverName, breached, fileGrowthOccurrences.Decorate);
+                    var detailText = AlertContextBuilders.ContextToDetailText(context);
+
+                    /* The headline names the file, its size and its share of the volume — the three facts that
+                       decide whether this is worth getting up for. The rise is in the card. */
+                    var headline =
+                        $"{worst.DatabaseName}.{worst.FileName} is {worst.TotalSizeGb:F1} GB "
+                        + $"({worst.VolumePercent:F0}% of {worst.VolumeMountPoint}), "
+                        + $"grew {worst.GrowthGb:F1} GB in {worst.GrowthWindowMinutes:F0} min";
+
+                    await FireAsync(new AlertOutcome(
+                        key, serverName, "Database File Growth",
+                        headline,
+                        $"rise ≥ {_settings.FileGrowthRiseMb} MB or file ≥ {_settings.FileGrowthVolumePercent}% of volume",
+                        context, detailText,
+                        NumericCurrentValue: worst.VolumePercent,
+                        NumericThresholdValue: _settings.FileGrowthVolumePercent,
+                        Muted: isMuted, Severity: null,
+                        ShortMessage: headline), ct);
+                }
+            }
+            else if (_activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
+            {
+                _activeFileGrowthAlert[key] = false;
+                await ClearOccurrencesAsync(key, FileGrowthWatermarkMetric);
+
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, "Database File Growth",
+                        "Database File Growth Resolved",
+                        $"{serverName}: no file is growing past the threshold or filling its volume"), ct);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to check database file growth for {Server}: {Message}", serverName, ex.Message);
         }
     }
 

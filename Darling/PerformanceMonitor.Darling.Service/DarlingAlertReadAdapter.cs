@@ -443,6 +443,102 @@ LIMIT $3";
         return items;
     }
 
+    /* ---------------- database file growth (#2349) ---------------- */
+
+    /// <summary>
+    /// Per-file current size, growth over the lookback window, and the file's volume.
+    ///
+    /// <para><b>Newest per file, and a baseline from the window's far edge.</b> <c>DISTINCT ON</c> takes the
+    /// current row per (database, file); the baseline join takes the OLDEST sample inside the window for the
+    /// same key. Growth is the difference, and is 0 when the window holds a single sample — which reads as "no
+    /// rise observed" rather than as a rise of the whole file, the wrong answer for a server that just started
+    /// collecting.</para>
+    ///
+    /// <para>Both sides are bounded on <c>collection_time</c>, the partitioning column, so the window prunes
+    /// chunks rather than scanning retention. The reported window width is measured rather than assumed, so a
+    /// gap in collection cannot make a slow rise look fast.</para>
+    ///
+    /// <para>$1 server_id, $2 window start (naive UTC).</para>
+    /// </summary>
+    public const string DatabaseFileGrowthSql = @"
+WITH current_files AS (
+    SELECT DISTINCT ON (database_name, file_name)
+        database_name, file_name, physical_name, file_type_desc, collection_time,
+        total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb,
+        volume_mount_point, volume_total_mb, volume_free_mb
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    ORDER BY database_name, file_name, collection_time DESC
+),
+baseline AS (
+    SELECT DISTINCT ON (database_name, file_name)
+        database_name, file_name, collection_time, total_size_mb
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    ORDER BY database_name, file_name, collection_time ASC
+)
+SELECT
+    c.database_name,
+    c.file_name,
+    COALESCE(c.physical_name, '') AS physical_name,
+    COALESCE(c.file_type_desc, '') AS file_type_desc,
+    COALESCE(c.total_size_mb, 0) AS total_size_mb,
+    COALESCE(c.total_size_mb, 0) - COALESCE(b.total_size_mb, c.total_size_mb, 0) AS growth_mb,
+    COALESCE(EXTRACT(EPOCH FROM (c.collection_time - b.collection_time)) / 60.0, 0) AS growth_window_minutes,
+    COALESCE(c.volume_mount_point, '') AS volume_mount_point,
+    COALESCE(c.volume_total_mb, 0) AS volume_total_mb,
+    COALESCE(c.volume_free_mb, 0) AS volume_free_mb,
+    c.auto_growth_mb,
+    COALESCE(c.is_percent_growth, false) AS is_percent_growth,
+    c.growth_pct,
+    c.max_size_mb
+FROM current_files c
+LEFT JOIN baseline b
+  ON  b.database_name = c.database_name
+  AND b.file_name = c.file_name
+WHERE c.total_size_mb IS NOT NULL
+ORDER BY c.database_name, c.file_name";
+
+    public async Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        var windowStart = DateTime.SpecifyKind(
+            DateTime.UtcNow.AddMinutes(-Math.Max(1, lookbackMinutes)), DateTimeKind.Unspecified);
+
+        var items = new List<DatabaseFileGrowthInfo>();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(DatabaseFileGrowthSql, connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(windowStart);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new DatabaseFileGrowthInfo
+            {
+                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                FileName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                PhysicalName = reader.GetString(2),
+                FileTypeDesc = reader.GetString(3),
+                TotalSizeMb = Convert.ToDouble(reader.GetValue(4)),
+                GrowthMb = Convert.ToDouble(reader.GetValue(5)),
+                GrowthWindowMinutes = Convert.ToDouble(reader.GetValue(6)),
+                VolumeMountPoint = reader.GetString(7),
+                VolumeTotalMb = Convert.ToDouble(reader.GetValue(8)),
+                VolumeFreeMb = Convert.ToDouble(reader.GetValue(9)),
+                AutoGrowthMb = reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
+                IsPercentGrowth = !reader.IsDBNull(11) && reader.GetBoolean(11),
+                GrowthPct = reader.IsDBNull(12) ? null : Convert.ToDouble(reader.GetValue(12)),
+                MaxSizeMb = reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+            });
+        }
+
+        return items;
+    }
+
     /* ---------------- volume free space ---------------- */
 
     /// <summary>Lite's per-volume free-space read verbatim (database_size_stats table).</summary>

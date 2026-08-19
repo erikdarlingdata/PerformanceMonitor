@@ -35,9 +35,11 @@ public class ComposeStatementTimeoutStoreTests
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
+        /* #2349 added V79, so this rung is no longer the top -- the "I am the top" claim moves to the newest
+           rung's own test (FileGrowthAlertStoreTests). What stays true: it is PRESENT, the ladder is ordered
+           and dense, and the build's schema version tracks the maximum. */
         Assert.Equal("compose-statement-timeout", PgMigrations.Scripts.Single(s => s.Version == 78).Name);
-        Assert.Equal(78, versions.Max());
-        Assert.Equal(78, StorageVersion.SchemaVersion);
+        Assert.Contains(78, versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
 
         /* Ordered, and dense above the one sanctioned historical hole at V45. */
@@ -86,19 +88,23 @@ public class ComposeStatementTimeoutStoreTests
     /// through — the invariant that keeps the version banner from reporting a mismatch on a current store.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreTo78()
+    public void TheProbeMapsAStoreAtExactly78To78()
     {
-        Assert.Equal(78, StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        var all = Enumerable.Repeat(true, arity - 1).Cast<object>().ToArray();
+        /* Every parameter appended by a LATER rung is padded FALSE, derived from arity so a future rung does
+           not have to edit this file -- the lesson from #2357, where four older rung tests broke at once. */
+        object[] Args(bool ownFlag) => Enumerable.Repeat(true, arity - 2).Cast<object>()
+            .Concat(new object[] { ownFlag })
+            .Concat(Enumerable.Repeat((object)false, 1))
+            .ToArray();
 
-        Assert.Equal(78, (int)method.Invoke(null, all.Concat(new object[] { true }).ToArray())!);
-        Assert.Equal(77, (int)method.Invoke(null, all.Concat(new object[] { false }).ToArray())!);
+        Assert.Equal(78, (int)method.Invoke(null, Args(true))!);
+        Assert.Equal(77, (int)method.Invoke(null, Args(false))!);
     }
 
     /// <summary>

@@ -302,6 +302,101 @@ public static class AlertContextBuilders
             .Where(i => i is not null).Select(i => i!).ToList();
     }
 
+    /// <summary>
+    /// #2349: the file-growth observation list. UNCAPPED, like every other <c>*Incidents</c> builder and for
+    /// the reason #2362 established — the card renders a capped subset, and observing only what is displayed
+    /// resets the total of any file that fell out of the top N.
+    ///
+    /// <para>Fingerprinted on the FILE, not the database: a database with eight tempdb data files that all grow
+    /// together is eight files and one problem, but a log file that runs away while its data files sit still is
+    /// a different incident from its neighbours, and collapsing them on database name would merge the two.</para>
+    /// </summary>
+    public static IReadOnlyList<AlertIncident> FileGrowthIncidents(
+        string serverName, IReadOnlyList<DatabaseFileGrowthInfo>? files)
+    {
+        if (files is null || files.Count == 0) return Array.Empty<AlertIncident>();
+
+        return files
+            .Select(f => AlertFingerprint.ForKey(
+                serverName, AlertFingerprint.Disk, $"{f.DatabaseName}|{f.FileName}",
+                new[] { $"{f.DatabaseName}.{f.FileName}" },
+                database: f.DatabaseName))
+            .Where(i => i is not null).Select(i => i!).ToList();
+    }
+
+    /// <summary>
+    /// #2349: the files breaching either gate, worst first. Both gates are applied HERE rather than in the
+    /// engine so the render path, the observation path and the decision can never disagree about which files
+    /// are involved.
+    ///
+    /// <para>Ordered by how much of its volume the file occupies, because that is the one number that says how
+    /// close this is to becoming a <c>Volume Free Space</c> page — a 40 GB rise on a 4 TB volume is less urgent
+    /// than a 10 GB file that is now 80% of a small one.</para>
+    /// </summary>
+    public static List<DatabaseFileGrowthInfo> GetBreachedFiles(
+        IReadOnlyList<DatabaseFileGrowthInfo>? files, int riseMb, int volumePercent)
+    {
+        if (files is null || files.Count == 0) return new List<DatabaseFileGrowthInfo>();
+
+        var breached = files
+            .Where(f =>
+                (riseMb > 0 && f.GrowthMb >= riseMb)
+                || (volumePercent > 0 && f.VolumeTotalMb > 0 && f.VolumePercent >= volumePercent))
+            .OrderByDescending(f => f.VolumePercent)
+            .ThenByDescending(f => f.GrowthMb)
+            .ToList();
+
+        return breached;
+    }
+
+    /// <summary>#2349: the alert card. Renders the top few by the same order <see cref="GetBreachedFiles"/>
+    /// produced, and names the fields an operator needs to act without opening the Viewer — including
+    /// <c>is_percent_growth</c>, which surfaces a percent-autogrowth misconfiguration for free.</summary>
+    public static AlertContext? BuildFileGrowthContext(
+        string serverName, List<DatabaseFileGrowthInfo> files,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
+    {
+        if (files.Count == 0) return null;
+
+        var context = new AlertContext();
+        var shown = files.GetRange(0, Math.Min(5, files.Count));
+        foreach (var f in shown)
+        {
+            var fields = new List<(string, string)>
+            {
+                /* #2109: the database as a discrete fact, not only in the heading. */
+                ("Database", f.DatabaseName),
+                ("File", f.FileName),
+                ("Physical Name", f.PhysicalName),
+                ("Size", $"{f.TotalSizeGb:F1} GB"),
+                ("Growth", $"{f.GrowthGb:F1} GB in {f.GrowthWindowMinutes:F0} min ({f.GrowthMbPerHour:F0} MB/hr)"),
+                ("Volume", string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint),
+                ("Volume Free", $"{f.VolumeFreeMb / 1024.0:F1} GB"),
+                ("File % of Volume", $"{f.VolumePercent:F0}%"),
+                /* A percent autogrowth on a large file is its own finding: each growth is bigger than the last,
+                   which is exactly how a file gets away from someone. WS3 knows about the pattern and does not
+                   alert on it. */
+                ("Autogrowth", f.IsPercentGrowth
+                    ? $"{f.GrowthPct:F0}% (percent growth)"
+                    : f.AutoGrowthMb is double mb ? $"{mb:F0} MB" : "(unknown)"),
+            };
+
+            if (f.MaxSizeMb is double max)
+            {
+                fields.Add(("Max Size", max < 0 ? "Unlimited" : $"{max / 1024.0:F1} GB"));
+            }
+
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({f.VolumePercent:F0}% of {f.VolumeMountPoint})",
+                Fields = fields
+            });
+        }
+
+        AlertIncidentRenderer.Apply(context, Decorate(FileGrowthIncidents(serverName, shown).ToList(), decorateIncidents));
+        return context;
+    }
+
     /* Excluded databases drop their rows; rows with no database always pass. Shared by the render path and
        #2216's observation path so the two can never disagree about which rows exist. */
     private static IReadOnlyList<BlockedProcessAlertRow> FilterBlocking(

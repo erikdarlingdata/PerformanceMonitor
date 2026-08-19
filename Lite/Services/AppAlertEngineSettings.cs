@@ -83,6 +83,14 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int CollectionFailureThreshold => 10;
     public int PvsThresholdPercent => App.AlertPvsThresholdPercent;
     public int PvsFloorGb => App.AlertPvsFloorGb;
+
+    /* #2349: the file-growth gates, same clamps as Darling's adapter so the two SKUs cannot disagree about
+       what a threshold means. Zero disables one gate rather than being nonsense, so rise-only or level-only
+       needs no second switch. */
+    public bool FileGrowthEnabled => App.AlertFileGrowthEnabled;
+    public int FileGrowthRiseMb => Math.Max(0, App.AlertFileGrowthRiseMb);
+    public int FileGrowthVolumePercent => Math.Clamp(App.AlertFileGrowthVolumePercent, 0, 100);
+    public int FileGrowthLookbackMinutes => Math.Clamp(App.AlertFileGrowthLookbackMinutes, 5, 1440);
     public int LongRunningJobMultiplier => App.AlertLongRunningJobMultiplier;
     public int FailedJobLookbackMinutes => App.AlertFailedJobLookbackMinutes;
     public int CooldownMinutes => App.AlertCooldownMinutes;

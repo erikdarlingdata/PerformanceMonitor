@@ -95,6 +95,12 @@ public sealed class AlertStoredValueTests
         public int CollectionFailureThreshold { get; set; } = 10;
         public int PvsThresholdPercent { get; set; } = 40;
         public int PvsFloorGb { get; set; } = 1;
+
+        /* #2349: OFF in the fakes so existing expectations are untouched. */
+        public bool FileGrowthEnabled { get; set; }
+        public int FileGrowthRiseMb { get; set; } = 10240;
+        public int FileGrowthVolumePercent { get; set; } = 60;
+        public int FileGrowthLookbackMinutes { get; set; } = 60;
         public int LongRunningJobMultiplier { get; set; } = 3;
         public int FailedJobLookbackMinutes { get; set; } = 60;
         public int CooldownMinutes { get; set; } = 5;

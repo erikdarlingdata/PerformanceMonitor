@@ -378,10 +378,12 @@ INSERT INTO config_alert_settings (
     pvs_floor_gb, modified_at, database_state_enabled,
     self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
     disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
-    store_job_cadence_warn_percent)
+    store_job_cadence_warn_percent,
+    /* #2349 appended LAST so no existing placeholder ordinal moves. */
+    file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59)
 ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -448,6 +450,11 @@ ON CONFLICT (id) DO NOTHING", connection);
         command.Parameters.AddWithValue(a.DiskCriticalFreeGb);
         command.Parameters.AddWithValue(a.AnalysisNotifyCooldownMinutes);
         command.Parameters.AddWithValue(a.StoreJobCadenceWarnPercent);
+        /* #2349, bound in the same order the columns were appended. */
+        command.Parameters.AddWithValue(a.FileGrowthEnabled);
+        command.Parameters.AddWithValue(a.FileGrowthRiseMb);
+        command.Parameters.AddWithValue(a.FileGrowthVolumePercent);
+        command.Parameters.AddWithValue(a.FileGrowthLookbackMinutes);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -670,7 +677,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        pvs_floor_gb, database_state_enabled,
        self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
        disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
-       store_job_cadence_warn_percent
+       store_job_cadence_warn_percent,
+       file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes
 FROM config_alert_settings WHERE id = 1", connection);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -756,6 +764,15 @@ FROM config_alert_settings WHERE id = 1", connection);
                reachability rule as every appended knob above: ApplyToConfig replaces config.Alerts
                wholesale, so a column missing here would silently reset the knob on every worker start. */
             StoreJobCadenceWarnPercent = reader.GetInt32(53),
+
+            /* #2349 file-growth knobs appended (V79) at ordinals 54-57, with the same reachability rule as
+               every appended knob above: ApplyToConfig replaces config.Alerts wholesale, so a column read
+               here but not selected -- or selected but not read -- silently resets the knob on every worker
+               start rather than failing. */
+            FileGrowthEnabled = reader.GetBoolean(54),
+            FileGrowthRiseMb = reader.GetInt32(55),
+            FileGrowthVolumePercent = reader.GetInt32(56),
+            FileGrowthLookbackMinutes = reader.GetInt32(57),
         };
         var analysis = new AnalysisConfig
         {
