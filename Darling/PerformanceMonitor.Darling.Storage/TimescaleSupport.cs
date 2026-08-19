@@ -253,10 +253,55 @@ public static class TimescaleSupport
         return EnableCompressionSql(schema.TargetTable);
     }
 
+    /// <summary>
+    /// Tables whose compression ORDER-BY is set explicitly, leading with the row's own identity rather than
+    /// with time (#2316 Finding 2). Absent tables keep the default — the partition time column descending —
+    /// so this changes nothing for anything not named here.
+    ///
+    /// <para><b>Why identity-first, measured rather than reasoned.</b> Compression delta-encodes each column
+    /// down a batch of rows. The default order is time descending, and <c>query_store_stats</c> writes
+    /// THOUSANDS of distinct queries at a single collection time — so consecutive rows in a batch are
+    /// unrelated queries, and the encoder differences one query's metrics against a different query's. That is
+    /// noise, and it is why the widest metric row in the store compresses worst.</para>
+    ///
+    /// <para>Measured on TimescaleDB 2.28.1 / PG 18.4 — the deployed pair, not a newer local one — over 240,000
+    /// rows of the real 41-bigint shape at 594 bytes/row: <b>2.36x today, 6.89x with this order-by</b>, 57 MB
+    /// down to 20 MB. The control that matters is a TIME-first order-by, which scores 2.43x: restating the
+    /// default buys nothing, so the effect is entirely about making one query's successive measurements
+    /// contiguous. Adding <c>plan_id</c> (6.88x) or a second segment-by column (6.90x) adds nothing, so the
+    /// minimum is also the maximum.</para>
+    ///
+    /// <para><b>Only the one table, deliberately.</b> <c>query_stats</c> keys on <c>query_hash</c> and
+    /// <c>procedure_stats</c> on <c>sql_handle</c> — neither has <c>query_id</c> — and both already compress
+    /// near 9.5x. They are plausible candidates and they are NOT here, because the measurement above covers
+    /// one row shape and extrapolating it to a different one is the guess this finding replaced.</para>
+    ///
+    /// <para>Settings bind FUTURE compressions only: on 2.28.1 the re-applied ALTER against a store with
+    /// already-compressed chunks is a NOTICE and succeeds (verified — it is re-run on every managed start, so
+    /// an error there would take out every existing install), old chunks keep their layout and stay readable,
+    /// and the next chunk compresses under the new order. Recompressing the backlog is
+    /// <c>compress_chunk(chunk, recompress => true)</c> and is deliberately not automatic.</para>
+    /// </summary>
+    private static readonly Dictionary<string, string> CompressionOrderBy = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["query_store_stats"] = "query_id, collection_time DESC",
+    };
+
     /// <summary>The raw-name compression-enable overload — the collection_log path (see
     /// <see cref="CreateHypertableSql(string, string)"/>).</summary>
     public static string EnableCompressionSql(string table)
-        => $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')";
+    {
+        var settings = "timescaledb.compress, timescaledb.compress_segmentby = 'server_id'";
+
+        /* Match on the bare table name so a schema-qualified caller resolves the same entry. */
+        var bare = table?.Split('.')[^1].Trim('"') ?? string.Empty;
+        if (CompressionOrderBy.TryGetValue(bare, out var orderBy))
+        {
+            settings += $", timescaledb.compress_orderby = '{orderBy}'";
+        }
+
+        return $"ALTER TABLE {table} SET ({settings})";
+    }
 
     /// <summary>
     /// One collector table's background compression policy — chunks older than
