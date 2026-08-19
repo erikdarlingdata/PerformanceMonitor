@@ -156,6 +156,24 @@ if (args.Length > 0 && DarlingCliCommands.IsConfigureFirewallVerb(args[0]))
     return await DarlingCliCommands.ConfigureFirewallAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: re-apply the secret-file ACLs, elevated (#2352). The running service computes the correct DACL and
+   detects when the real one is wrong, but cannot apply it — re-ACLing a file it does not own needs WRITE_DAC and
+   taking ownership needs a privilege a virtual service account is not granted — so it logs the remedy and carries
+   on. This is the actor with the authority. Verifies every target after the attempt and exits non-zero if
+   anything is still readable, so it is usable in a provisioning script. Windows-only: ACLs.
+   Optional second arg = an explicit config path. */
+if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--harden-files requires Windows (NTFS ACLs).");
+        return 1;
+    }
+
+    var configPath = args.Length > 1 ? args[1] : null;
+    return DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);
+}
+
 /* CLI verbs: enable/disable the embedded MCP + web-dashboard endpoints on a HEADLESS managed deployment. Each
    flips the live switch in config.config_service (mcp_enabled/web_enabled — the store is authoritative after the
    first run; darling.json's enabled is only the seed) via a targeted UPDATE whose self-bump trigger makes the

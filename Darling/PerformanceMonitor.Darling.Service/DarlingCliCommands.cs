@@ -91,6 +91,13 @@ public static class DarlingCliCommands
     public static bool IsConfigureFirewallVerb(string arg) =>
         string.Equals(arg, "--configure-firewall", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="HardenFiles"/> handles — re-apply the secret-file ACLs from an elevated
+    /// prompt (#2352). The running service knows the correct ACL and cannot apply it: re-ACLing a file it does
+    /// not own needs WRITE_DAC, and taking ownership needs a privilege a virtual service account is not
+    /// granted, so it can only log the remedy. This is the actor that carries it out.</summary>
+    public static bool IsHardenFilesVerb(string arg) =>
+        string.Equals(arg, "--harden-files", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="EnableMcpAsync"/> handles — enable the MCP endpoint in the store (+ firewall).</summary>
     public static bool IsEnableMcpVerb(string arg) =>
         string.Equals(arg, "--enable-mcp", StringComparison.OrdinalIgnoreCase);
@@ -154,6 +161,7 @@ public static class DarlingCliCommands
         || IsExportViewerConfigVerb(arg)
         || IsConfigureNetworkVerb(arg)
         || IsConfigureFirewallVerb(arg)
+        || IsHardenFilesVerb(arg)
         || IsEnableMcpVerb(arg)
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
@@ -227,6 +235,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json and the store credentials (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -2739,6 +2748,176 @@ public static class DarlingCliCommands
                 $"{section}.network is set but postgres.managed = false; LAN exposure is managed-mode only and is ignored",
             _ => null,
         };
+
+    /// <summary>
+    /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
+    /// Requires elevation (that is the entire point of the verb) and is idempotent — safe to re-run on every
+    /// upgrade, which is exactly how install-darling.ps1 uses it. Returns 0 when the firewall ends up matching
+    /// the config, 1 when it could not be made to.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    /// <summary>
+    /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it,
+    /// and what it is called in the report. Kept as data so the list is readable as a policy rather than as
+    /// control flow — which file gets INTERACTIVE read is the only judgement in this verb, and it should be
+    /// visible at a glance.
+    /// </summary>
+    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
+
+    /// <summary>
+    /// Re-applies the secret-file ACLs, elevated (#2352).
+    ///
+    /// <para><b>Why this exists as a verb.</b> The service already computes the correct DACL
+    /// (<see cref="DarlingFileSecurity.HardenFile"/>) and already detects when the real one is wrong
+    /// (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). What it lacks is authority: re-ACLing a
+    /// file it does not own needs WRITE_DAC, and taking ownership needs a privilege a virtual service account is
+    /// not granted, so it can only log the remedy and continue. Until now the only thing that ever APPLIED the
+    /// rule to an existing install was <c>install-darling.ps1</c>, which leaves anyone who registered the exe by
+    /// hand — the README's own <c>sc create</c> path — typing three <c>icacls</c> lines out of a log message.</para>
+    ///
+    /// <para><b>It verifies rather than claims.</b> Every target is re-read after the attempt and reported as
+    /// SECURED or STILL READABLE, and the exit code is 1 if anything is still exposed. "We tried" is not the
+    /// same statement as "the secret is not readable" — a distinction <see cref="TryHardenExportedSecret"/>'s own
+    /// contract already makes, and the reason a permissions call that silently did nothing was able to hide.</para>
+    ///
+    /// <para>Idempotent, so it is safe on a healthy box and can simply live in a runbook. Missing targets are
+    /// skipped quietly: a BYO-Postgres install has no managed credential files, and their absence is not a
+    /// fault.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int HardenFiles(string? configPath, TextWriter output, TextWriter error)
+    {
+        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath);
+
+        /* The managed store's directory is derived from config when it loads, but this verb has to work when
+           darling.json is exactly what is unreadable — that is the failure it exists to repair. So a config that
+           will not load is a warning, not a stop: the config file itself is still hardened, and the store
+           targets fall back to the documented default location. */
+        string? dataDirectory = null;
+        try
+        {
+            var config = DarlingConfig.Load(configPath);
+            dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+        }
+        catch (Exception ex)
+        {
+            output.WriteLine($"NOTE: could not load {resolvedConfig} ({ex.Message}).");
+            output.WriteLine("      Continuing with the documented default store location — hardening darling.json");
+            output.WriteLine("      is very often what makes it loadable again.");
+            dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "PerformanceMonitorDarling", "pg");
+        }
+
+        var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
+        var targets = new List<HardenTarget>
+        {
+            /* INTERACTIVE read, alone in this list: the Viewer (ViewerSettings.ResolveConfigPath) and the CLI
+               verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
+            new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
+        };
+
+        foreach (var backup in SafeEnumerate(Path.GetDirectoryName(resolvedConfig), "darling.json.bak-*"))
+        {
+            targets.Add(new(backup, AllowInteractive: false, IsDirectory: false, "a config backup"));
+        }
+
+        if (!string.IsNullOrEmpty(storeRoot))
+        {
+            targets.Add(new(storeRoot, AllowInteractive: false, IsDirectory: true, "the store directory"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
+        }
+
+        output.WriteLine($"Hardening for service account: {DarlingFileSecurity.ServiceAccountDisplayName}");
+        output.WriteLine();
+
+        var exposed = 0;
+        var touched = 0;
+
+        foreach (var target in targets)
+        {
+            var exists = target.IsDirectory ? Directory.Exists(target.Path) : File.Exists(target.Path);
+            if (!exists)
+            {
+                continue;
+            }
+
+            touched++;
+
+            try
+            {
+                if (target.IsDirectory)
+                {
+                    /* Traverse, not read: the operator's Viewer needs to walk to the config, never to read the
+                       credential blobs sitting in here. Mirrors DarlingManagedPostgres' own call. */
+                    DarlingFileSecurity.HardenDirectory(target.Path, allowInteractiveTraverse: true);
+                }
+                else
+                {
+                    DarlingFileSecurity.HardenFile(target.Path, target.AllowInteractive);
+                }
+            }
+            catch (Exception ex)
+            {
+                error.WriteLine($"  FAILED   {target.Path} ({target.What}): {ex.Message}");
+                error.WriteLine($"           {DarlingFileSecurity.DescribeOwnerAndExposure(target.Path)}");
+                exposed++;
+                continue;
+            }
+
+            /* The claim is the re-read, not the call that returned without throwing. */
+            if (DarlingFileSecurity.IsReadableByOrdinaryUsers(target.Path))
+            {
+                error.WriteLine($"  STILL READABLE  {target.Path} ({target.What})");
+                error.WriteLine($"           {DarlingFileSecurity.DescribeOwnerAndExposure(target.Path)}");
+                exposed++;
+            }
+            else
+            {
+                output.WriteLine($"  SECURED  {target.Path} ({target.What})");
+            }
+        }
+
+        output.WriteLine();
+
+        if (touched == 0)
+        {
+            error.WriteLine("Nothing to harden: no config and no store files were found at the expected paths.");
+            error.WriteLine($"Looked for the config at {resolvedConfig}. Pass an explicit path as the second argument.");
+            return 1;
+        }
+
+        if (exposed > 0)
+        {
+            error.WriteLine($"{exposed} of {touched} item(s) are STILL readable by ordinary users.");
+            error.WriteLine("Run this from an ELEVATED prompt. If it was already elevated, the owner is the");
+            error.WriteLine("problem: ownership carries WRITE_DAC, so take ownership first, then re-run.");
+            return 1;
+        }
+
+        output.WriteLine($"All {touched} item(s) secured. The service re-asserts these ACLs at every start.");
+        return 0;
+    }
+
+    /// <summary>Directory enumeration that treats an unreadable or missing folder as empty — this verb runs
+    /// precisely when permissions are broken, so a throw here would defeat its purpose.</summary>
+    private static IEnumerable<string> SafeEnumerate(string? directory, string pattern)
+    {
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            return Directory.EnumerateFiles(directory, pattern).ToList();
+        }
+        catch (Exception)
+        {
+            return Array.Empty<string>();
+        }
+    }
 
     /// <summary>
     /// Creates or removes every scoped Darling firewall rule so the live firewall matches darling.json.
