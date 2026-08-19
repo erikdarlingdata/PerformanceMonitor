@@ -408,12 +408,20 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d1 = await ReadJobDurationMsAsync(connection, jobId, ct);
         var work1 = await ReadCompressionWorkAsync(connection, Table, ct);
-        Assert.True(d1 > 0,
-            "a scheduler-driven run left job_stats.last_run_duration unmeasurable — the premise the " +
-            "V56 telemetry and the #2141 alert both stand on. (Foreground run_job is already known " +
-            "not to update this accounting — CI proved that on this test's first version — which is " +
-            "why the runs go through the real scheduler.)" +
-            $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
+        /* Branch rather than pass the describe call into Assert.True's message: that argument is a plain
+           string, so it is evaluated eagerly and would spend two live catalog queries on every PASSING run
+           to build a message nobody reads (review catch). The helper exists to explain a failure, so it
+           should only run when there is one. */
+        if (d1 <= 0)
+        {
+            Assert.Fail(
+                "a scheduler-driven run left job_stats.last_run_duration unmeasurable — the premise the " +
+                "V56 telemetry and the #2141 alert both stand on. (Foreground run_job is already known " +
+                "not to update this accounting — CI proved that on this test's first version — which is " +
+                "why the runs go through the real scheduler.)" +
+                $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
+        }
+
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
 
         /* 10x: one closed chunk, 500k rows. */
@@ -421,12 +429,17 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await RunJobViaSchedulerAsync(connection, jobId, ct);
         long d10 = await ReadJobDurationMsAsync(connection, jobId, ct);
         var work10 = await ReadCompressionWorkAsync(connection, Table, ct);
-        Assert.True(d10 > 0,
-            "the 10x run left job_stats.last_run_duration unmeasurable. Asserted separately from d1 " +
-            "(#2266): ReadJobDurationMsAsync maps a NULL duration to 0, and the telemetry check below " +
-            "compares the series against these same variables, so an unmeasurable 10x run used to " +
-            "satisfy 0 == 0 and pass." +
-            $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
+        if (d10 <= 0)
+        {
+            /* Same eager-evaluation reason as the d1 branch above. */
+            Assert.Fail(
+                "the 10x run left job_stats.last_run_duration unmeasurable. Asserted separately from d1 " +
+                "(#2266): ReadJobDurationMsAsync maps a NULL duration to 0, and the telemetry check below " +
+                "compares the series against these same variables, so an unmeasurable 10x run used to " +
+                "satisfy 0 == 0 and pass." +
+                $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
+        }
+
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
 
         /* 1. The escalation is REAL WORK at two different scales — asserted on rows and chunks, which are
