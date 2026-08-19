@@ -228,6 +228,78 @@ public static class AlertContextBuilders
         return GroupDeadlocks(serverName, filtered).Select(g => g.Incident).ToList();
     }
 
+    /// <summary>
+    /// #2362: the observation lists for the five remaining fingerprinted alerts, mirroring
+    /// <see cref="BlockingIncidents"/> and <see cref="DeadlockIncidents"/>.
+    ///
+    /// <para><b>Uncapped, and that is the whole point.</b> Each context builder renders a capped subset
+    /// (3 for long-running queries and anomalous jobs, 5 for the rest) because a card with fifty entries
+    /// helps nobody. The render cap is a display budget; a fingerprint outside it still has a live incident,
+    /// and observing only the displayed subset would reset the total of anything that fell out of the top N —
+    /// a subtler version of the undercount #2216 exists to fix, reintroduced by the fix for it.</para>
+    ///
+    /// <para>Each is a pure function of a list, so the same builder serves both callers: the check passes the
+    /// FULL list to observe, the context builder passes its capped <c>shown</c> to render. One grouping rule,
+    /// two inputs, no way for the two to disagree about what a fingerprint is.</para>
+    /// </summary>
+    public static IReadOnlyList<AlertIncident> LongRunningQueryIncidents(
+        string serverName, IReadOnlyList<LongRunningQueryInfo>? queries)
+    {
+        if (queries is null || queries.Count == 0) return Array.Empty<AlertIncident>();
+
+        /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
+        return queries
+            .Select(q => AlertFingerprint.ForKey(serverName, AlertFingerprint.Query, q.QueryHash ?? "",
+                string.IsNullOrEmpty(q.DatabaseName) ? Array.Empty<string>() : new[] { q.DatabaseName }))
+            .Where(i => i is not null).Select(i => i!).ToList();
+    }
+
+    /// <inheritdoc cref="LongRunningQueryIncidents"/>
+    public static IReadOnlyList<AlertIncident> VolumeFreeSpaceIncidents(
+        string serverName, IReadOnlyList<VolumeFreeSpaceInfo>? volumes)
+    {
+        if (volumes is null || volumes.Count == 0) return Array.Empty<AlertIncident>();
+
+        /* #1140: dedup key per volume (the drive/mount point). */
+        return volumes
+            .Select(v => AlertFingerprint.ForKey(serverName, AlertFingerprint.Disk, v.MountPoint, new[] { v.MountPoint }))
+            .Where(i => i is not null).Select(i => i!).ToList();
+    }
+
+    /// <inheritdoc cref="LongRunningQueryIncidents"/>
+    public static IReadOnlyList<AlertIncident> PvsPressureIncidents(
+        string serverName, IReadOnlyList<PvsPressureInfo>? databases)
+    {
+        if (databases is null || databases.Count == 0) return Array.Empty<AlertIncident>();
+
+        return databases
+            .Select(d => AlertFingerprint.ForKey(serverName, AlertFingerprint.Database, d.DatabaseName, new[] { d.DatabaseName }))
+            .Where(i => i is not null).Select(i => i!).ToList();
+    }
+
+    /// <inheritdoc cref="LongRunningQueryIncidents"/>
+    public static IReadOnlyList<AlertIncident> AnomalousJobIncidents(
+        string serverName, IReadOnlyList<AnomalousJobInfo>? jobs)
+    {
+        if (jobs is null || jobs.Count == 0) return Array.Empty<AlertIncident>();
+
+        /* #1140: dedup key per job (job name, scoped to the instance via serverName). */
+        return jobs
+            .Select(j => AlertFingerprint.ForKey(serverName, AlertFingerprint.Job, j.JobName, new[] { j.JobName }))
+            .Where(i => i is not null).Select(i => i!).ToList();
+    }
+
+    /// <inheritdoc cref="LongRunningQueryIncidents"/>
+    public static IReadOnlyList<AlertIncident> FailedJobIncidents(
+        string serverName, IReadOnlyList<FailedJobInfo>? jobs)
+    {
+        if (jobs is null || jobs.Count == 0) return Array.Empty<AlertIncident>();
+
+        return jobs
+            .Select(j => AlertFingerprint.ForKey(serverName, AlertFingerprint.Job, j.JobName, new[] { j.JobName }))
+            .Where(i => i is not null).Select(i => i!).ToList();
+    }
+
     /* Excluded databases drop their rows; rows with no database always pass. Shared by the render path and
        #2216's observation path so the two can never disagree about which rows exist. */
     private static IReadOnlyList<BlockedProcessAlertRow> FilterBlocking(
@@ -368,7 +440,9 @@ public static class AlertContextBuilders
         return context;
     }
 
-    public static AlertContext? BuildLongRunningQueryContext(string serverName, List<LongRunningQueryInfo> queries)
+    public static AlertContext? BuildLongRunningQueryContext(
+        string serverName, List<LongRunningQueryInfo> queries,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (queries.Count == 0) return null;
 
@@ -400,10 +474,7 @@ public static class AlertContextBuilders
         }
 
         /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
-        AlertIncidentRenderer.Apply(context, shown
-            .Select(q => AlertFingerprint.ForKey(serverName, AlertFingerprint.Query, q.QueryHash ?? "",
-                string.IsNullOrEmpty(q.DatabaseName) ? System.Array.Empty<string>() : new[] { q.DatabaseName }))
-            .Where(i => i is not null).Select(i => i!).ToList());
+        AlertIncidentRenderer.Apply(context, Decorate(LongRunningQueryIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
     }
 
@@ -427,7 +498,9 @@ public static class AlertContextBuilders
         return parts.Count > 0 ? string.Join(" / ", parts) : "—";
     }
 
-    public static AlertContext? BuildVolumeFreeSpaceContext(string serverName, List<VolumeFreeSpaceInfo> volumes)
+    public static AlertContext? BuildVolumeFreeSpaceContext(
+        string serverName, List<VolumeFreeSpaceInfo> volumes,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (volumes.Count == 0) return null;
 
@@ -448,9 +521,7 @@ public static class AlertContextBuilders
         }
 
         /* #1140: dedup key per volume (the drive/mount point). */
-        AlertIncidentRenderer.Apply(context, shown
-            .Select(v => AlertFingerprint.ForKey(serverName, AlertFingerprint.Disk, v.MountPoint, new[] { v.MountPoint }))
-            .Where(i => i is not null).Select(i => i!).ToList());
+        AlertIncidentRenderer.Apply(context, Decorate(VolumeFreeSpaceIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
     }
 
@@ -476,7 +547,9 @@ public static class AlertContextBuilders
             : $"{thresholdPercent}% of database";
     }
 
-    public static AlertContext? BuildPvsPressureContext(string serverName, List<PvsPressureInfo> databases)
+    public static AlertContext? BuildPvsPressureContext(
+        string serverName, List<PvsPressureInfo> databases,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (databases.Count == 0) return null;
 
@@ -508,9 +581,7 @@ public static class AlertContextBuilders
             });
         }
 
-        AlertIncidentRenderer.Apply(context, shown
-            .Select(d => AlertFingerprint.ForKey(serverName, AlertFingerprint.Database, d.DatabaseName, new[] { d.DatabaseName }))
-            .Where(i => i is not null).Select(i => i!).ToList());
+        AlertIncidentRenderer.Apply(context, Decorate(PvsPressureIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
     }
 
@@ -535,7 +606,9 @@ public static class AlertContextBuilders
         return context;
     }
 
-    public static AlertContext? BuildAnomalousJobContext(string serverName, List<AnomalousJobInfo> jobs)
+    public static AlertContext? BuildAnomalousJobContext(
+        string serverName, List<AnomalousJobInfo> jobs,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (jobs.Count == 0) return null;
 
@@ -558,13 +631,13 @@ public static class AlertContextBuilders
         }
 
         /* #1140: dedup key per job (job name, scoped to the instance via serverName). */
-        AlertIncidentRenderer.Apply(context, shown
-            .Select(j => AlertFingerprint.ForKey(serverName, AlertFingerprint.Job, j.JobName, new[] { j.JobName }))
-            .Where(i => i is not null).Select(i => i!).ToList());
+        AlertIncidentRenderer.Apply(context, Decorate(AnomalousJobIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
     }
 
-    public static AlertContext? BuildFailedJobContext(string serverName, List<FailedJobInfo> jobs)
+    public static AlertContext? BuildFailedJobContext(
+        string serverName, List<FailedJobInfo> jobs,
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
     {
         if (jobs.Count == 0) return null;
 
@@ -585,9 +658,7 @@ public static class AlertContextBuilders
         /* #1140: dedup key per job (job name, scoped to the instance via serverName) — mirrors
            BuildAnomalousJobContext so two distinct failed jobs are distinct incidents under the
            #1154 per-fingerprint cooldown instead of coalescing on the metric key. */
-        AlertIncidentRenderer.Apply(context, shown
-            .Select(j => AlertFingerprint.ForKey(serverName, AlertFingerprint.Job, j.JobName, new[] { j.JobName }))
-            .Where(i => i is not null).Select(i => i!).ToList());
+        AlertIncidentRenderer.Apply(context, Decorate(FailedJobIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
     }
 

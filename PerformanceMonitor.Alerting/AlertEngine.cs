@@ -67,6 +67,16 @@ public sealed class AlertEngine
     public const string BlockingWatermarkMetric = "Blocking Detected";
     public const string DeadlockWatermarkMetric = "Deadlocks Detected";
 
+    /* #2362: the remaining fingerprinted alerts. Same names their FireAsync/mute contexts use, so the
+       accumulator's per-fingerprint state lives under the metric an operator already knows. Forced Plan
+       Failing is deliberately absent: it builds a bare context and never calls AlertIncidentRenderer.Apply,
+       so it carries no dedup keys for the accumulator to key on. */
+    public const string LongRunningQueryWatermarkMetric = "Long-Running Query";
+    public const string VolumeFreeSpaceWatermarkMetric = "Volume Free Space";
+    public const string PvsWatermarkMetric = "Version Store (PVS)";
+    public const string AnomalousJobWatermarkMetric = "Long-Running Job";
+    public const string FailedJobWatermarkMetric = "Failed Agent Job";
+
     /// <summary>
     /// The rolling window both count gates read, in hours (#1091's "in the last hour"). Named because
     /// #2216's occurrence accumulator has to agree with it: its staleness horizon is what stops a row
@@ -913,6 +923,12 @@ public sealed class AlertEngine
                 _settings.ExcludedDatabases,
                 ct);
 
+            /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
+               identically here: counting only at delivery lets an event that ages out during a cooldown mask
+               an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
+               displayed top N keeps its total instead of restarting. */
+            var lrqOccurrences = await ObserveOccurrencesAsync(
+                key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(serverName, longRunning), now);
             if (longRunning.Count > 0)
             {
                 _activeLongRunningQueryAlert[key] = true;                           /* :350 */
@@ -934,7 +950,7 @@ public sealed class AlertEngine
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :365 */
                     _lastLongRunningQueryAlert[key] = now;                          /* :366 */
 
-                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning); /* :379 */
+                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate); /* :379 */
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
@@ -951,7 +967,8 @@ public sealed class AlertEngine
             }
             else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning) /* :395 */
             {
-                _activeLongRunningQueryAlert[key] = false;                          /* :397 */
+                _activeLongRunningQueryAlert[key] = false;
+                await ClearOccurrencesAsync(key, LongRunningQueryWatermarkMetric);                          /* :397 */
                 if (!suppressed)                                                    /* :398 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
@@ -1054,6 +1071,12 @@ public sealed class AlertEngine
             var breached = AlertContextBuilders.GetBreachedVolumes(volumes, _settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 
+            /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
+               identically here: counting only at delivery lets an event that ages out during a cooldown mask
+               an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
+               displayed top N keeps its total instead of restarting. */
+            var lowDiskOccurrences = await ObserveOccurrencesAsync(
+                key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(serverName, breached), now);
             if (breached.Count > 0)
             {
                 var worst = breached[0];                                            /* :489 */
@@ -1070,7 +1093,7 @@ public sealed class AlertEngine
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
 
-                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(serverName, breached); /* :515 */
+                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(serverName, breached, lowDiskOccurrences.Decorate); /* :515 */
                     /* :516-522 — #1136: grade WARNING normally, CRITICAL when critically low. */
                     if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(
                         worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb))
@@ -1093,7 +1116,8 @@ public sealed class AlertEngine
             }
             else if (_activeLowDiskAlert.TryGetValue(key, out var wasLowDisk) && wasLowDisk) /* :538 */
             {
-                _activeLowDiskAlert[key] = false;                                   /* :540 */
+                _activeLowDiskAlert[key] = false;
+                await ClearOccurrencesAsync(key, VolumeFreeSpaceWatermarkMetric);                                   /* :540 */
                 _lastAlertedLowDiskPercent.TryRemove(key, out _);                   /* :541 */
                 if (!suppressed)                                                    /* :542 */
                 {
@@ -1141,6 +1165,12 @@ public sealed class AlertEngine
             var databases = await _readAdapter.GetPvsPressureAsync(key, ct);
             var breached = AlertContextBuilders.GetBreachedPvsDatabases(databases, _settings.PvsThresholdPercent, _settings.PvsFloorGb);
 
+            /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
+               identically here: counting only at delivery lets an event that ages out during a cooldown mask
+               an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
+               displayed top N keeps its total instead of restarting. */
+            var pvsOccurrences = await ObserveOccurrencesAsync(
+                key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(serverName, breached), now);
             if (breached.Count > 0)
             {
                 var worst = breached[0];
@@ -1156,7 +1186,7 @@ public sealed class AlertEngine
                     _lastPvsAlert[key] = now;
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
 
-                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(serverName, breached);
+                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(serverName, breached, pvsOccurrences.Decorate);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
                     await FireAsync(new AlertOutcome(
@@ -1173,6 +1203,7 @@ public sealed class AlertEngine
             else if (_activePvsAlert.TryGetValue(key, out var wasPvs) && wasPvs)
             {
                 _activePvsAlert[key] = false;
+                await ClearOccurrencesAsync(key, PvsWatermarkMetric);
                 _lastAlertedPvsPercent.TryRemove(key, out _);
                 if (!suppressed)
                 {
@@ -1230,6 +1261,12 @@ public sealed class AlertEngine
                 _lastLongRunningJobAlert.TryRemove(staleJobKey, out _);
             }
 
+            /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
+               identically here: counting only at delivery lets an event that ages out during a cooldown mask
+               an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
+               displayed top N keeps its total instead of restarting. */
+            var jobOccurrences = await ObserveOccurrencesAsync(
+                key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(serverName, anomalousJobs), now);
             if (anomalousJobs.Count > 0)
             {
                 _activeLongRunningJobAlert[key] = true;                             /* :577 */
@@ -1243,7 +1280,7 @@ public sealed class AlertEngine
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :586 */
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
-                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(serverName, anomalousJobs); /* :600 */
+                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(serverName, anomalousJobs, jobOccurrences.Decorate); /* :600 */
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
@@ -1260,7 +1297,8 @@ public sealed class AlertEngine
             }
             else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob) /* :616 */
             {
-                _activeLongRunningJobAlert[key] = false;                            /* :618 */
+                _activeLongRunningJobAlert[key] = false;
+                await ClearOccurrencesAsync(key, AnomalousJobWatermarkMetric);                            /* :618 */
                 if (!suppressed)                                                    /* :619 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
@@ -1313,6 +1351,17 @@ public sealed class AlertEngine
             var failedJobs = await _failedJobsFetcher(key, _settings.FailedJobLookbackMinutes, ct); /* :657 */
             conditionPresent = failedJobs.Count > 0;                                /* :663 — feeds the sweep result */
 
+            /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
+               identically here: counting only at delivery lets an event that ages out during a cooldown mask
+               an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
+               displayed top N keeps its total instead of restarting. */
+            var failedJobOccurrences = await ObserveOccurrencesAsync(
+                key, FailedJobWatermarkMetric, AlertContextBuilders.FailedJobIncidents(serverName, failedJobs), now);
+
+            /* No ClearOccurrencesAsync counterpart, and that is not an omission: a failed job is an EVENT,
+               not a condition that resolves, so this check has no else-branch to clear from. The accumulator's
+               staleness horizon is the cleanup path here -- a fingerprint whose gauge stops moving for longer
+               than the horizon expires itself, which is exactly the shape an event stream needs. */
             if (failedJobs.Count > 0)
             {
                 var newestFailure = failedJobs.Max(j => j.RunDateTime);             /* :665 */
@@ -1332,7 +1381,7 @@ public sealed class AlertEngine
                     /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
                     await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
 
-                    var failedJobContext = AlertContextBuilders.BuildFailedJobContext(serverName, failedJobs); /* :695 */
+                    var failedJobContext = AlertContextBuilders.BuildFailedJobContext(serverName, failedJobs, failedJobOccurrences.Decorate); /* :695 */
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 
                     /* :698-708. ShortMessage = the toast body of :690. */
