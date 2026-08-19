@@ -445,6 +445,21 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
             builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger));
 
+            /* #2339: publish the declared peer stores before the instructions are rendered, so the same
+               snapshot feeds the instructions section, list_servers' peer_fleets block, and the
+               server-resolution miss message. Publishing here as well as in the worker is deliberate: either
+               may reach its config first, the value is identical (both read darling.json), and the disclosure
+               should not depend on which one won. An empty declaration is Snapshot.Empty, which leaves every
+               one of those three surfaces exactly as it was. */
+            var declaredPeers = DarlingPeerDirectory.Publish(config.Peers);
+            if (!declaredPeers.IsEmpty)
+            {
+                _logger.LogInformation(
+                    "MCP peer disclosure active: {PeerCount} declared peer store(s){Coverage}. Disclosure only — this service never contacts a peer.",
+                    declaredPeers.Peers.Count,
+                    declaredPeers.ThisStoreCovers.Length > 0 ? $"; this store covers {declaredPeers.ThisStoreCovers}" : "");
+            }
+
             /* Register MCP server with the analysis tool class. */
             builder.Services
                 .AddMcpServer(options =>
@@ -454,7 +469,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                         Name = "PerformanceMonitorDarling",
                         Version = "1.0.0"
                     };
-                    options.ServerInstructions = DarlingMcpInstructions.Text;
+                    options.ServerInstructions = DarlingMcpInstructions.Build(declaredPeers);
                 })
                 /* Stateless mode: each request is self-contained (no Mcp-Session-Id round-trip).
                    Required for clients like Google Antigravity that don't echo the session id,

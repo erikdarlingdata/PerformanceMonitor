@@ -260,5 +260,50 @@
     //   "allowFrom": "192.168.1.0/24",                 // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).
     //   "encryptedToken": "<output of --encrypt-password>"  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
     // }
+  },
+
+  // DECLARED PEER STORES (optional, off by default) -- for a fleet split across SEVERAL Darling boxes,
+  // one store each: SQL Server primaries on one box, their readable replicas on another, PostgreSQL on a
+  // third. Each box's MCP server answers over ITS OWN store only, so a server monitored by a sibling
+  // resolves as not-found -- which an agent cannot tell apart from "nobody monitors this server". Declaring
+  // the siblings here fixes that at the three places an agent forms its picture of the fleet: the MCP
+  // instructions gain a coverage paragraph, list_servers gains a "peer_fleets" block, and the
+  // server-resolution miss message names the peer whose declared coverage matches instead of just failing.
+  //
+  // DISCLOSURE ONLY -- there is NO address and NO credential in this block, and nothing behind it. This
+  // service never contacts a peer, cannot read a peer's data, and cannot tell whether a peer is even
+  // running: a peer is a NAME plus a sentence, so an agent (or its human) can pick the right endpoint.
+  // Everything here is sent VERBATIM to every connected MCP client, so the service REFUSES to start if any
+  // peer text looks like a connection string or credential ("password=", "connectionString", ...).
+  //
+  //   "name"     REQUIRED. Whatever an operator would recognize -- the box name, "the use1 store".
+  //   "covers"   A short sentence naming what that store monitors. Human prose; never parsed, only shown.
+  //   "matches"  OPTIONAL server-name substrings that store monitors, matched case-insensitively. The only
+  //              machine-checked field: it is what lets a resolution miss name the ONE peer that owns the
+  //              server instead of listing them all. No globbing, no regex -- plain substrings. Blank
+  //              entries are dropped (an empty substring would match every name). A peer with no "matches"
+  //              is still disclosed everywhere; it just cannot be singled out on a miss.
+  //
+  // A file-only block (not seeded into the control plane): it describes the deployment topology of THIS
+  // box, which must not be editable from a peer's Viewer. An edit takes effect on the next service restart.
+  //
+  // "peers": {
+  //   "thisStoreCovers": "the 42 us-east-1 SQL Server primaries",
+  //   "stores": [
+  //     {
+  //       "name": "prod-pos-use2-monitor-01",
+  //       "covers": "the readable replicas of those same 42 primaries, in-region from us-east-2",
+  //       "matches": ["use2"]
+  //     },
+  //     {
+  //       "name": "prod-pos-pg-monitor-01",
+  //       "covers": "the Aurora PostgreSQL clusters",
+  //       "matches": ["-aurora-", ".cluster-"]
+  //     }
+  //   ]
+  // }
+  "peers": {
+    "thisStoreCovers": "",
+    "stores": []
   }
 }

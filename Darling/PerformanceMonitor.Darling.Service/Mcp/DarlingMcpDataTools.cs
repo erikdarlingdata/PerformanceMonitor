@@ -704,7 +704,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 
-    [McpServerTool(Name = "list_servers"), Description("Lists all monitored SQL Server instances with their collection freshness status and last collection time. Use this first to see available servers before calling other tools. The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection).")]
+    [McpServerTool(Name = "list_servers"), Description("Lists all monitored SQL Server instances with their collection freshness status and last collection time. Use this first to see available servers before calling other tools. The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove.")]
     public static async Task<string> ListServers(
         NpgsqlDataSource postgres)
     {
@@ -723,27 +723,55 @@ public sealed class DarlingMcpDataTools
             if (servers.Count == 0)
                 return "No servers are registered yet. The service registers each monitored server on its first successful connection.";
 
-            var now = DateTime.UtcNow;
-            var result = servers.Select(s => new
-            {
-                server_name = s.ServerName,
-                display_name = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName,
-                sql_version = SqlVersionLabel(s.SqlMajorVersion),
-                status = FreshnessStatus(s.LastCollection, now),
-                read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
-                last_collection = s.LastCollection?.ToString("o")
-            });
-
-            return JsonSerializer.Serialize(new
-            {
-                server_count = servers.Count,
-                servers = result
-            }, McpHelpers.JsonOptions);
+            return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("list_servers", ex);
         }
+    }
+
+    /// <summary>
+    /// The <c>list_servers</c> envelope, pure over (registry rows, now, declared peers) — separated from the
+    /// store read so the response SHAPE, including the #2339 peer disclosure, pins without a live store.
+    ///
+    /// <para><b>Why the peer block lives on THIS tool.</b> <c>list_servers</c> is the discovery read: it is
+    /// where an agent forms its model of "who is monitored", so it is where the fact that SIBLING stores hold
+    /// the rest of a split fleet has to appear. <c>peer_fleets</c> is therefore always present and
+    /// <c>peer_note</c> is always populated — an EMPTY peer list has two very different meanings (this really
+    /// is the only store, or the operator never declared its siblings) and this server cannot tell them
+    /// apart, so it says so rather than letting an empty array read as "this is the whole fleet".</para>
+    /// </summary>
+    internal static string RenderServerList(
+        IReadOnlyList<DarlingDataReader.ServerListRow> servers,
+        DateTime nowUtc,
+        DarlingPeerDirectory.Snapshot peers)
+    {
+        var result = servers.Select(s => new
+        {
+            server_name = s.ServerName,
+            display_name = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName,
+            sql_version = SqlVersionLabel(s.SqlMajorVersion),
+            status = FreshnessStatus(s.LastCollection, nowUtc),
+            read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
+            last_collection = s.LastCollection?.ToString("o")
+        });
+
+        return JsonSerializer.Serialize(new
+        {
+            server_count = servers.Count,
+            this_store_covers = peers.ThisStoreCovers.Length == 0 ? null : peers.ThisStoreCovers,
+            peer_fleets = peers.Peers.Select(p => new
+            {
+                name = p.Name,
+                covers = p.Covers,
+                matches = p.Matches
+            }),
+            peer_note = peers.Peers.Count == 0
+                ? DarlingPeerDirectory.NoPeersDeclaredNote
+                : DarlingPeerDirectory.PeersDeclaredNote,
+            servers = result
+        }, McpHelpers.JsonOptions);
     }
 
     [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes.")]

@@ -492,6 +492,43 @@ Once enabled, open `http://localhost:5153/` in a browser on the service host. Li
 
 **What you see.** The dashboard opens on a **Fleet Overview**: a card per enabled server with a status dot, six per-metric health bands (CPU, threads, memory, blocking, deadlocks, collectors), and its last collection time — all banded server-side, so the browser only renders (a server that has never reported shows an amber "Awaiting first collection", never a red offline). Above the cards a worst-first "Needs attention" list surfaces the servers to look at, or an all-healthy line when there is nothing to chase. Click a card to **drill into one server**: an overview, wait stats with a trend for the heaviest wait, active queries, a CPU chart, memory and file-I/O trends, and collection health — the same collected data the viewer shows, over inline charts. A fleet-wide **Alert History** page (with a server filter box) rounds out phase 1. It is a read-only view — no settings, no write paths, no live-server queries — and refreshes every 60 seconds (pausing while the tab is hidden). The frontend ships fully self-contained (no CDN, no fonts, no remote anything), so it works on an air-gapped host with no internet access.
 
+### peers
+
+**Declared peer stores** — optional, and only relevant when the fleet is split across **several Darling boxes**, one store each (SQL Server primaries on one box, their readable replicas on another, PostgreSQL on a third). Each box's MCP server answers over **its own** store only, so a server monitored by a sibling resolves as not-found — which an agent cannot tell apart from *"nobody monitors this server."* Declaring the siblings fixes that at the three places an agent forms its picture of the fleet.
+
+**Disclosure only.** There is no address and no credential in this block, and nothing behind it: the service never contacts a peer, cannot read a peer's data, and cannot tell whether a peer is even running. A peer is a **name** plus a **sentence**, so an agent (or its human) can pick the right endpoint. Everything here is sent verbatim to every connected MCP client, so the service **refuses to start** if any peer text looks like a connection string or credential.
+
+| Key | Default | Notes |
+|---|---|---|
+| `thisStoreCovers` | `""` | One sentence naming what THIS store monitors — the anchor the peer list is relative to |
+| `stores[].name` | — | **Required.** Whatever an operator would recognize (the box name, "the use1 store") |
+| `stores[].covers` | `""` | A short sentence naming what that store monitors. Human prose — never parsed, only shown |
+| `stores[].matches` | `[]` | Optional server-name **substrings** that store monitors, case-insensitive. The only machine-checked field |
+
+```jsonc
+"peers": {
+  "thisStoreCovers": "the 42 us-east-1 SQL Server primaries",
+  "stores": [
+    {
+      "name": "prod-pos-use2-monitor-01",
+      "covers": "the readable replicas of those same 42 primaries, in-region from us-east-2",
+      "matches": ["use2"]
+    },
+    { "name": "prod-pos-pg-monitor-01", "covers": "the Aurora PostgreSQL clusters", "matches": ["-aurora-"] }
+  ]
+}
+```
+
+What it changes, with peers declared:
+
+- **The MCP instructions** gain a Fleet Coverage section, high enough that an agent reads which store it is talking to before it reads the tool census.
+- **`list_servers`** gains `this_store_covers`, a `peer_fleets` array, and a `peer_note`. Both are always present: an *empty* `peer_fleets` has two very different meanings (this really is the only store, or nobody declared the siblings) and the service cannot tell them apart, so `peer_note` says exactly that rather than letting an empty array read as "this is the whole fleet."
+- **The server-resolution miss** appends the disclosure to the existing "Could not resolve server. Available servers:" listing, naming the peer whose declared coverage matches — so *not monitored here* stops looking like *not monitored anywhere*.
+
+`matches` is deliberately plain substrings, no globbing and no regex: it exists to answer "which region/role prefix is this name?", and a pattern language would be a config surface with its own failure modes. Blank entries are dropped — an empty substring matches every name, which would make one peer claim the whole fleet. A peer with no `matches` is still disclosed everywhere; it just cannot be singled out on a miss, and the miss message says so instead of implying the server is unmonitored.
+
+A **file-only** block (not seeded into the control plane): it describes the deployment topology of *this* box, which must not be editable from a peer's Viewer. An edit takes effect on the next service restart. There is deliberately **no cross-store connectivity** here — actual federated reads (auth between stores, latency, partial failures) are a much larger surface, and may never be worth building if disclosure alone makes the split legible.
+
 ### No Schedule Knobs, by Design
 
 There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.

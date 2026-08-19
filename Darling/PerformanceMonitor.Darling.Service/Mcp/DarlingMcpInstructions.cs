@@ -16,7 +16,26 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingMcpInstructions
 {
-    public const string Text = """
+    /// <summary>
+    /// The instructions with NO peer disclosure — a single-store deployment's text, byte-for-byte what this
+    /// server sent before #2339. Composed from <see cref="Preamble"/> + <see cref="Body"/>; the split exists
+    /// only so <see cref="Build"/> can put the fleet-coverage section between them, high enough that an
+    /// agent reads which store it is talking to before it reads the tool census.
+    /// </summary>
+    public static readonly string Text = Preamble + "\n\n" + Body;
+
+    /// <summary>
+    /// Renders the instructions for THIS store, inserting the declared fleet-coverage section (#2339) when
+    /// the operator declared any. Returns <see cref="Text"/> unchanged for an empty declaration, so nothing
+    /// about a single-store deployment moves.
+    /// </summary>
+    public static string Build(DarlingPeerDirectory.Snapshot peers)
+    {
+        var section = DarlingPeerDirectory.InstructionsSection(peers);
+        return section.Length == 0 ? Text : Preamble + "\n\n" + section + "\n\n" + Body;
+    }
+
+    private const string Preamble = """
         You are connected to a SQL Server performance monitoring tool via PerformanceMonitor Darling, the headless collector service.
 
         ## CRITICAL: Read-Only Access
@@ -29,7 +48,9 @@ internal static class DarlingMcpInstructions
         - Run any ad-hoc diagnostics beyond what the collectors have already captured
 
         The writes this server performs are all to the MONITORING store, never a monitored SQL Server: mute_analysis_finding records a mute rule, analyze_server persists its findings, the custom-view management tools (create_custom_view / update_custom_view / delete_custom_view) save user-authored dashboard/notebook definitions to config.custom_views, and the alert-tuning tools (update_alert_settings / create_mute_rule / delete_mute_rule) change the shared alert configuration the service delivers on (all the same store the web viewer / Settings window writes). None of these touches a monitored SQL Server or the collected performance data itself.
+        """;
 
+    private const string Body = """
         ## How Data Is Collected
 
         The Darling service collects from monitored SQL Server instances 24/7 and stores the data in a Postgres/TimescaleDB store. Data is collected in snapshots at regular intervals (typically every 1-15 minutes depending on the collector). This means:
@@ -84,7 +105,7 @@ internal static class DarlingMcpInstructions
         | `get_top_queries_by_cpu` | Expensive queries from query stats (plan cache) with query_hash / sql_handle; `cpu_attribution.attributed_cpu_ratio` says how much of the box's measured CPU the returned rows explain | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name`, `parallel_only`, `min_dop` |
         | `get_top_procedures_by_cpu` | Most expensive stored procedures by total CPU, with the same `cpu_attribution` disclosure | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
         | `get_query_store_top` | Expensive queries from Query Store with query_id / plan_id (survives restarts) | `server_name`, `hours_back` (default 24), `top` (default 20), `database_name` |
-        | `list_servers` | All monitored servers with collection-freshness status and last collection time | none |
+        | `list_servers` | All monitored servers with collection-freshness status and last collection time, plus `peer_fleets` — the declared SIBLING Darling stores and what each covers (disclosure only; this server cannot read them) and `peer_note`, which says what an EMPTY `peer_fleets` does and does not prove | none |
         | `get_collection_health` | Per-collector health (running / failing / stale) over the last 7 days, plus the server's sweep_pressure verdict (a SATURATED body collects at a multiple of its configured cadence with every collector healthy) | `server_name` |
         | `get_server_properties` | Instance properties: edition, version, CPU count, memory, socket/core topology, HADR | `server_name` |
 

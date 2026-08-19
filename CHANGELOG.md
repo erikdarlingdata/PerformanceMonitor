@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Declared peer stores: a Darling MCP server that names its siblings instead of answering "unknown server"** ([#2339]) - tier 1 of the multi-store fix, disclosure only. With the fleet split across several boxes (one store each: SQL Server primaries on one, their readable replicas on another, PostgreSQL on a third) every box's MCP server answered over ITS store alone, so a server monitored by a sibling resolved as not-found - indistinguishable from a server nobody monitors, which with a deliberately-split fleet is now the normal case rather than an edge. An optional `peers` block in darling.json (`thisStoreCovers`, plus per-peer `name` / `covers` / optional `matches` name-substrings) is disclosed at the three places an agent forms its picture of the fleet: the MCP instructions gain a Fleet Coverage section above the tool census, `list_servers` gains `this_store_covers` + `peer_fleets` + a `peer_note`, and the server-resolution miss appends "not monitored HERE - matches the declared coverage of <peer>" to the existing available-servers listing. There is NO credential, NO address and NO connectivity behind it: the service never contacts a peer and says so in every message, and it REFUSES to start if peer text looks like a connection string, since all of it is sent verbatim to every connected MCP client. An empty `peer_fleets` carries its own note - "this may be the only store, or nobody declared the siblings, and this server cannot tell those apart" - so absence never reads as "you are looking at the whole fleet". With nothing declared all four surfaces are byte-for-byte unchanged; Lite has no peers concept and gets no twin. Federated cross-store reads stay unbuilt on purpose
+
 ## [3.5.0] - 2026-08-19
 
 ### Added
@@ -2807,6 +2810,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2181]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2181
 [#2317]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2317
 [#2320]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2320
+[#2339]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2339
 [#2316]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2316
 [#2324]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2324
 [#2300]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2300
