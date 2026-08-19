@@ -444,7 +444,7 @@ internal static class DarlingTrendReader
     /// look recent and routes it to a tier that dropped those rows six days earlier.</para>
     /// </summary>
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
-        NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default, DateTime? nowUtc = null)
+        NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc, DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
         var useRaw = ShouldUseRawTier(startUtc, nowUtc ?? DateTime.UtcNow);
 
