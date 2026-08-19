@@ -265,7 +265,14 @@ internal static class DarlingInstallLocation
                 break;
         }
 
-        message.Append(" The bundled PostgreSQL bootstrap is what fails first: initdb.exe dies at exit code -1073741515 (0xC0000135, STATUS_DLL_NOT_FOUND) in the Windows loader, before it can write a word of output. Everything after that is downstream of THIS and is not the fault — a missing pg-admin-credential.dpapi, and advice to start the service once, which starting the service again will not satisfy (#2185).")
+        /* WHAT fails next depends on postgres.managed, and this message is built BEFORE darling.json is read
+           (deliberately - an unreadable tree takes the config out too), so it cannot know which. Naming both
+           costs two sentences and is the difference between a diagnosis and a confident guess: an operator on
+           bring-your-own Postgres has no initdb to fail, and telling them to go looking for one would spend
+           the credibility this message exists to have (review catch on #2185). */
+        message.Append(" What fails next depends on how this service is configured, and the location is the cause either way.")
+            .Append(" With the shipped managed store (postgres.managed = true, the default) it is the bundled PostgreSQL bootstrap: initdb.exe dies at exit code -1073741515 (0xC0000135, STATUS_DLL_NOT_FOUND) in the Windows loader, before it can write a word of output — and the messages after it are downstream of THIS rather than faults of their own, including a missing pg-admin-credential.dpapi and advice to start the service once, which starting the service again will not satisfy (#2185).")
+            .Append(" Pointed at your own PostgreSQL (postgres.managed = false) there is no initdb to fail, and the unreadability surfaces wherever the service next reads this folder instead — \"Cannot load configuration\", from a darling.json sitting right here that it cannot open, is the usual one.")
             .Append(" FIX: stop the service, move the install to a machine-scoped local path — ")
             .Append(DocumentedInstallDirectory)
             .Append(" is the documented one, and a folder created there inherits read + execute for BUILTIN\\Users, which the service account is a member of — then re-run install-darling.ps1 from the new location. It updates the service in place; darling.json can move with the folder, and the store under %ProgramData%\\PerformanceMonitorDarling and its credentials stay exactly where they are.");

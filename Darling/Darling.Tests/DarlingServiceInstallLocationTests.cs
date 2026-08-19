@@ -284,6 +284,14 @@ public sealed class DarlingServiceInstallLocationTests
             Assert.Contains("0xC0000135", message, StringComparison.Ordinal);
             Assert.Contains("pg-admin-credential.dpapi", message, StringComparison.Ordinal);
             Assert.Contains("#2185", message, StringComparison.Ordinal);
+
+            /* BOTH store modes, because the message is built before darling.json is read and cannot know which
+               one is configured. The initdb narrative is the managed default's; an operator on
+               bring-your-own Postgres has no initdb to fail, and sending them to look for one would spend the
+               credibility this message exists to have (review catch on #2185). */
+            Assert.Contains("postgres.managed = true", message, StringComparison.Ordinal);
+            Assert.Contains("postgres.managed = false", message, StringComparison.Ordinal);
+            Assert.Contains("Cannot load configuration", message, StringComparison.Ordinal);
         }
     }
 
