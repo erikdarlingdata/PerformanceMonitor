@@ -229,14 +229,32 @@ public sealed class ServerPropertyRow
     public int? CoresPerSocket { get; set; }
     /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
     public DateTime? SqlServerStartTime { get; set; }
-    public DateTime? LastUpdated { get; set; }
+    /// <summary>
+    /// When this server's CONFIG SNAPSHOT was taken — not a freshness heartbeat (#2359).
+    ///
+    /// <para><c>server_properties</c> ships with <c>FrequencyMinutes 0</c>, which the schedule table defines as
+    /// "collect once on server load only (config snapshots)". So this is effectively the last time the service
+    /// loaded this server, and on an install that has been up for a week every actively-monitored server shows a
+    /// week-old value. It was called <c>LastUpdated</c>, which invited exactly the reading that made it a bug
+    /// report: an operator sees a days-old date and concludes collection is broken.</para>
+    ///
+    /// <para><see cref="LastCollected"/> is the value that answers the question people were actually asking.</para>
+    /// </summary>
+    public DateTime? InventoryAsOf { get; set; }
+
+    /// <summary>
+    /// The newest collection of ANY kind for this server — <c>MAX(collection_time)</c> across
+    /// <c>v_collection_log</c>, the same signal <c>list_servers</c> and the Overview cards use (#2359). This is
+    /// the real freshness heartbeat, and it moves every sweep.
+    /// </summary>
+    public DateTime? LastCollected { get; set; }
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";
 
     /// <summary>
     /// Whether this server is still being monitored (#2359). Server Inventory deliberately lists every
-    /// REGISTERED server, and a registered-but-disabled one keeps the <see cref="LastUpdated"/> it had when
+    /// REGISTERED server, and a registered-but-disabled one keeps the <see cref="InventoryAsOf"/> it had when
     /// monitoring stopped — accurate, and read by everyone as a broken freshness column.
     ///
     /// <para>Disabled rows are kept rather than filtered: this is the FinOps tab, and a decommissioned
@@ -246,7 +264,7 @@ public sealed class ServerPropertyRow
     public bool IsEnabled { get; set; } = true;
 
     /// <summary>What the grid shows for <see cref="IsEnabled"/> (#2359) — the one column that makes an old
-    /// <see cref="LastUpdated"/> legible. "Stopped" rather than "Disabled" because the operator's question is
+    /// <see cref="InventoryAsOf"/> legible. "Stopped" rather than "Disabled" because the operator's question is
     /// what happened to the data, not what state a config row is in.</summary>
     public string MonitoringStatus => IsEnabled ? "Active" : "Stopped";
 

@@ -57,17 +57,55 @@ public class ViewerServerInventoryEnabledTests
     /// <summary>
     /// <b>The ordinal shift, pinned.</b> Inserting a column mid-projection moves every ordinal after it, and a
     /// positional reader does not fail when that happens — it keeps reading, one column off, and turns a cost
-    /// into a boolean. That exact mistake shipped once already in the Aurora detection query, so the two
+    /// into a boolean. That exact mistake shipped once already in the Aurora detection query, so the
     /// neighbours are asserted by number rather than trusted.
+    ///
+    /// <para>#2359's <c>last_collection</c> was appended LAST for the same reason: at ordinal 19 it moves
+    /// nothing that came before it.</para>
     /// </summary>
     [Fact]
-    public void TheReader_ReadsIsEnabledAt17_AndMonthlyCostMovedTo18()
+    public void TheReader_ReadsIsEnabledAt17_MonthlyCostAt18_AndLastCollectedAt19()
     {
         Assert.Contains("IsEnabled = reader.IsDBNull(17)", InventorySource, StringComparison.Ordinal);
         Assert.Contains("MonthlyCost = reader.IsDBNull(18)", InventorySource, StringComparison.Ordinal);
+        Assert.Contains("LastCollected = reader.IsDBNull(19)", InventorySource, StringComparison.Ordinal);
 
         /* And nothing still reads the pre-shift position for the cost. */
         Assert.DoesNotContain("MonthlyCost = reader.IsDBNull(17)", InventorySource, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2359, the actual reported bug: <c>server_properties</c> ships with <c>FrequencyMinutes 0</c> — "collect
+    /// once on server load only" — so its timestamp is the last service start, not a heartbeat. Calling it
+    /// <c>Last Updated</c> made every actively-monitored server on a long-running install look stale.
+    ///
+    /// <para>The field is named for what it is, and the value people were actually asking for is carried
+    /// alongside it rather than instead of it — a decommissioned server still needs its snapshot time.</para>
+    /// </summary>
+    [Fact]
+    public void TheGrid_SeparatesTheConfigSnapshotFromRealFreshness()
+    {
+        var xaml = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml"));
+
+        Assert.Contains("{Binding InventoryAsOf", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"Inventory As Of\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("{Binding LastCollected", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"Last Collected\"", xaml, StringComparison.Ordinal);
+
+        /* The misleading label must not come back. */
+        Assert.DoesNotContain("Text=\"Last Updated\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("{Binding LastUpdated", xaml, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Freshness comes from the collection log, not from the properties snapshot — reading it off
+    /// <c>server_properties</c> would just reproduce the bug under a better column name.
+    /// </summary>
+    [Fact]
+    public void FreshnessComesFromTheCollectionLog()
+    {
+        Assert.Contains("FROM v_collection_log", InventorySource, StringComparison.Ordinal);
+        Assert.Contains("AS last_collection", InventorySource, StringComparison.Ordinal);
     }
 
     /// <summary>
