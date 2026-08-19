@@ -70,11 +70,12 @@ public sealed class ActivityDrivenPlanFetchStoreTests
            store migrated to EXACTLY 77 must answer 77 rather than falling through to 76. */
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
-        /* 52 positional sentinels, then V77 and V78 by name — the map takes 54 parameters. */
+        /* 52 positional sentinels, then this rung's own by name. Anything a LATER rung appends is padded
+           by InvokeMap from the method's arity, so this count stays fixed as the ladder grows. */
         var all = Enumerable.Repeat(true, 52).Cast<object>().ToArray();
 
-        Assert.Equal(77, InvokeMap(all, hasQueryStoreTextHash: true, hasComposeTimeoutKnob: false));
-        Assert.Equal(76, InvokeMap(all, hasQueryStoreTextHash: false, hasComposeTimeoutKnob: false));
+        Assert.Equal(77, InvokeMap(all, hasQueryStoreTextHash: true));
+        Assert.Equal(76, InvokeMap(all, hasQueryStoreTextHash: false));
     }
 
     [Fact]
@@ -98,13 +99,18 @@ public sealed class ActivityDrivenPlanFetchStoreTests
 
     /* ---------------- helpers ---------------- */
 
-    private static int InvokeMap(object[] leading, bool hasQueryStoreTextHash, bool hasComposeTimeoutKnob)
+    private static int InvokeMap(object[] leading, bool hasQueryStoreTextHash)
     {
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
-        var args = leading.Concat(new object[] { hasQueryStoreTextHash, hasComposeTimeoutKnob }).ToArray();
-        Assert.Equal(method.GetParameters().Length, args.Length);
+        /* Parameters appended by LATER rungs are padded FALSE, so this fact keeps exercising its own arm
+           rather than a newer one. Derived from the method's arity rather than named by hand: listing them
+           made every new rung break this file, which is exactly what V79 (#2349) did. */
+        var args = leading.Concat(new object[] { hasQueryStoreTextHash }).ToArray();
+        args = args
+            .Concat(Enumerable.Repeat((object)false, method.GetParameters().Length - args.Length))
+            .ToArray();
 
         return (int)method.Invoke(null, args)!;
     }

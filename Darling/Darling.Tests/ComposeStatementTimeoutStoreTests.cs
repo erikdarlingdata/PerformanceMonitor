@@ -97,10 +97,15 @@ public class ComposeStatementTimeoutStoreTests
         var arity = method.GetParameters().Length;
 
         /* Every parameter appended by a LATER rung is padded FALSE, derived from arity so a future rung does
-           not have to edit this file -- the lesson from #2357, where four older rung tests broke at once. */
-        object[] Args(bool ownFlag) => Enumerable.Repeat(true, arity - 2).Cast<object>()
+           not have to edit this file -- the lesson from #2357, where four older rung tests broke at once.
+
+           The LEADING count is fixed at this rung's own ordinal and must NOT be derived from arity: padding
+           that side instead would slide ownFlag one position right per new rung, so the assertion would drift
+           onto a newer arm while still passing. It read correctly with exactly one rung above it, which is
+           the only reason V79 did not catch it here too. */
+        object[] Args(bool ownFlag) => Enumerable.Repeat(true, 53).Cast<object>()
             .Concat(new object[] { ownFlag })
-            .Concat(Enumerable.Repeat((object)false, 1))
+            .Concat(Enumerable.Repeat((object)false, arity - 54))
             .ToArray();
 
         Assert.Equal(78, (int)method.Invoke(null, Args(true))!);

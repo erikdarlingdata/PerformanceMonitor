@@ -77,10 +77,18 @@ public class FileGrowthAlertStoreTests
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        var all = Enumerable.Repeat(true, arity - 1).Cast<object>().ToArray();
+        /* 54 positional sentinels, then this rung's own, then FALSE for anything a later rung appends. The
+           leading count is FIXED at this rung's ordinal deliberately: deriving it from arity (`arity - 1`)
+           reads identically while this is the top rung, then slides the flag one place right per new rung —
+           the assertion keeps passing while quietly testing a newer arm. */
+        var all = Enumerable.Repeat(true, 54).Cast<object>().ToArray();
+        object[] Args(bool ownFlag) => all
+            .Concat(new object[] { ownFlag })
+            .Concat(Enumerable.Repeat((object)false, arity - 55))
+            .ToArray();
 
-        Assert.Equal(79, (int)method.Invoke(null, all.Concat(new object[] { true }).ToArray())!);
-        Assert.Equal(78, (int)method.Invoke(null, all.Concat(new object[] { false }).ToArray())!);
+        Assert.Equal(79, (int)method.Invoke(null, Args(true))!);
+        Assert.Equal(78, (int)method.Invoke(null, Args(false))!);
     }
 
     /// <summary>
