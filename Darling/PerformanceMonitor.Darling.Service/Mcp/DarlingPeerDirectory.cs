@@ -233,6 +233,42 @@ internal static class DarlingPeerDirectory
     }
 
     /// <summary>
+    /// The disclosure appended when the registry itself is EMPTY (#2339) — <c>list_servers</c> answers that
+    /// case with prose rather than the JSON envelope, so it would otherwise be the one place the peer block
+    /// silently disappears.
+    ///
+    /// <para>That is the worst place to lose it: a store with nothing registered is a fresh or just-restarted
+    /// box, and "no servers here" plus no mention of the siblings is the strongest possible version of the
+    /// wrong conclusion this whole feature exists to prevent. Returns "" when nothing is declared, so the
+    /// single-store message is unchanged.</para>
+    /// </summary>
+    internal static string EmptyRegistryDisclosure(Snapshot snapshot)
+    {
+        if (snapshot.IsEmpty)
+        {
+            return "";
+        }
+
+        var text = new StringBuilder();
+
+        if (snapshot.Peers.Count > 0)
+        {
+            text.Append(" This store is one of SEVERAL monitoring this fleet, so an empty registry here says " +
+                        "nothing about what the others hold. Declared peer stores (separate Darling stores with " +
+                        "their own MCP endpoints; this server cannot read them): ")
+                .Append(string.Join("; ", snapshot.Peers.Select(Describe)))
+                .Append('.');
+        }
+
+        if (snapshot.ThisStoreCovers.Length > 0)
+        {
+            text.Append(" This store covers: ").Append(snapshot.ThisStoreCovers).Append('.');
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>
     /// The <c>peer_fleets</c> note <c>list_servers</c> carries when nothing is declared. An empty peer
     /// list has two very different meanings — this really is the only store, or the operator never
     /// declared the siblings — and this server cannot tell them apart, so it says so instead of letting

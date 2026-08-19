@@ -720,8 +720,14 @@ public sealed class DarlingMcpDataTools
                 return $"Could not read the servers registry from the Postgres store: {ex.Message}";
             }
 
+            /* #2339: the empty-registry answer is prose, not the JSON envelope, so it carries the peer
+               disclosure explicitly — otherwise it is the one path where the declaration silently vanishes,
+               and it is the worst one to lose it on: a store with nothing registered is a fresh or
+               just-restarted box, where "no servers here" with no mention of the siblings is the strongest
+               version of the wrong conclusion. */
             if (servers.Count == 0)
-                return "No servers are registered yet. The service registers each monitored server on its first successful connection.";
+                return "No servers are registered yet. The service registers each monitored server on its first successful connection."
+                    + DarlingPeerDirectory.EmptyRegistryDisclosure(DarlingPeerDirectory.Current);
 
             return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current);
         }

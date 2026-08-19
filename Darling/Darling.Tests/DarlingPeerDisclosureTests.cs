@@ -330,6 +330,24 @@ public sealed class DarlingPeerDisclosureTests
         Assert.Contains("not proof that nobody monitors it", note, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void EmptyRegistry_StillDisclosesThePeers()
+    {
+        /* list_servers answers an empty registry with prose, not the JSON envelope — so that path carries the
+           disclosure explicitly, or it becomes the one place the declaration silently vanishes. And it is the
+           worst one to lose: an empty registry is a fresh or just-restarted box, where "no servers here" with
+           no mention of the siblings is the strongest version of the wrong conclusion. */
+        var disclosure = DarlingPeerDirectory.EmptyRegistryDisclosure(TwoPeers());
+
+        Assert.Contains("one of SEVERAL monitoring this fleet", disclosure, StringComparison.Ordinal);
+        Assert.Contains("prod-pos-use2-monitor-01", disclosure, StringComparison.Ordinal);
+        Assert.Contains("prod-pos-pg-monitor-01", disclosure, StringComparison.Ordinal);
+        Assert.Contains($"This store covers: {Use1Covers}.", disclosure, StringComparison.Ordinal);
+
+        /* Unchanged with nothing declared, like every other surface. */
+        Assert.Equal("", DarlingPeerDirectory.EmptyRegistryDisclosure(DarlingPeerDirectory.Snapshot.Empty));
+    }
+
     /* ───────────────────────── the resolution miss ───────────────────────── */
 
     private const string MissWithoutPeers =
