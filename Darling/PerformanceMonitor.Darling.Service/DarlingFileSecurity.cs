@@ -60,9 +60,97 @@ public static class DarlingFileSecurity
         new(WellKnownSidType.WorldSid, null),
     ];
 
-    /// <summary>The account this process runs as — the service account when hosted as a service.</summary>
+    /* #2371: set by --harden-files to the account the SERVICE is registered under, because that verb is the
+       one caller that is deliberately NOT the service. Null everywhere else, so the in-service callers keep
+       resolving themselves exactly as before. */
+    private static SecurityIdentifier? _serviceAccountOverride;
+
+    /// <summary>
+    /// Harden FOR <paramref name="account"/> rather than for whoever is running this process (#2371).
+    ///
+    /// <para>Every original caller of this class runs INSIDE the service, so "the current identity" and "the
+    /// account the service runs as" were the same value and the distinction did not exist. <c>--harden-files</c>
+    /// breaks that: it exists precisely because a virtual service account cannot re-ACL a file it does not own,
+    /// so it is always run by somebody else — and resolving from the caller there grants the OPERATOR and drops
+    /// the service, which is a working install turned into one that fails on its next start.</para>
+    /// </summary>
+    public static void HardenForAccount(SecurityIdentifier account) => _serviceAccountOverride = account;
+
+    /// <summary>
+    /// The account the service is REGISTERED under, read from its SCM entry rather than from this process —
+    /// `ObjectName` is what the SCM logs the service on with. Returns null when the service is not registered
+    /// (a console run, or hardening a tree before install), leaving the caller to fall back.
+    ///
+    /// <para>Handles the well-known aliases the SCM stores unqualified: <c>LocalSystem</c> has no
+    /// <see cref="NTAccount"/> spelling to translate, while a virtual account (<c>NT SERVICE\…</c>), a domain
+    /// account and a gMSA all translate directly.</para>
+    /// </summary>
+    public static SecurityIdentifier? RegisteredServiceAccount(string serviceName)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                $@"SYSTEM\CurrentControlSet\Services\{serviceName}");
+
+            if (key?.GetValue("ObjectName") is not string account || string.IsNullOrWhiteSpace(account))
+            {
+                return null;
+            }
+
+            account = account.Trim();
+
+            return account.Equals("LocalSystem", StringComparison.OrdinalIgnoreCase)
+                ? new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)
+                : (SecurityIdentifier)new NTAccount(account).Translate(typeof(SecurityIdentifier));
+        }
+        catch (Exception)
+        {
+            /* Same reasoning as the display name below: a resolution failure must degrade to the old
+               behaviour, never take the harden down. */
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> still grants the account being hardened for. The harden's own check is
+    /// <see cref="IsReadableByOrdinaryUsers"/>, which asks whether anyone TOO MANY can read — this is the
+    /// other half, and the one #2371 needed: an ACL can be perfectly private and still lock the service out
+    /// of its own credentials.
+    /// </summary>
+    public static bool GrantsHardenedAccount(string path)
+    {
+        try
+        {
+            var target = ServiceAccount;
+            var rules = (Directory.Exists(path)
+                ? new DirectoryInfo(path).GetAccessControl().GetAccessRules(true, true, typeof(SecurityIdentifier))
+                : new FileInfo(path).GetAccessControl().GetAccessRules(true, true, typeof(SecurityIdentifier)));
+
+            foreach (FileSystemAccessRule rule in rules)
+            {
+                if (rule.AccessControlType == AccessControlType.Allow
+                    && rule.IdentityReference is SecurityIdentifier sid
+                    && sid.Equals(target)
+                    && (rule.FileSystemRights & FileSystemRights.Read) != 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception)
+        {
+            /* Unreadable ACL is not proof of absence, so do not report a lockout we cannot see. */
+            return true;
+        }
+    }
+
+    /// <summary>The account to harden FOR: the registered service account when
+    /// <see cref="HardenForAccount"/> named one, otherwise the account this process runs as.</summary>
     private static SecurityIdentifier ServiceAccount =>
-        WindowsIdentity.GetCurrent().User
+        _serviceAccountOverride
+            ?? WindowsIdentity.GetCurrent().User
             ?? throw new InvalidOperationException("Cannot resolve the current Windows identity for ACL hardening.");
 
     /// <summary>
@@ -79,7 +167,11 @@ public static class DarlingFileSecurity
         {
             try
             {
-                return WindowsIdentity.GetCurrent().Name;
+                /* #2371: when hardening for the REGISTERED account, name that one — printing the caller here
+                   would describe an ACL the harden is not writing. */
+                return _serviceAccountOverride is not null
+                    ? ((NTAccount)_serviceAccountOverride.Translate(typeof(NTAccount))).Value
+                    : WindowsIdentity.GetCurrent().Name;
             }
             catch (Exception)
             {

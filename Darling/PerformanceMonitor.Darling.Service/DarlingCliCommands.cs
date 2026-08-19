@@ -2829,7 +2829,26 @@ public static class DarlingCliCommands
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
         }
 
+        /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
+           documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
+           so the caller is never the service — and resolving from the caller granted the operator and stripped
+           the service, leaving an install that worked until its next restart. Falls back to the caller when
+           the service is not registered (a console run, or hardening a tree before install), which is the only
+           case where those two are legitimately the same account. */
+        var registered = DarlingFileSecurity.RegisteredServiceAccount(ServiceName);
+        if (registered is not null)
+        {
+            DarlingFileSecurity.HardenForAccount(registered);
+        }
+
         output.WriteLine($"Hardening for service account: {DarlingFileSecurity.ServiceAccountDisplayName}");
+        if (registered is null)
+        {
+            output.WriteLine(
+                $"  (the '{ServiceName}' service is not registered on this machine, so this is the account " +
+                "you are running as - install the service first if you expected its own account here)");
+        }
+
         output.WriteLine();
 
         var exposed = 0;
@@ -2871,6 +2890,17 @@ public static class DarlingCliCommands
             {
                 error.WriteLine($"  STILL READABLE  {target.Path} ({target.What})");
                 error.WriteLine($"           {DarlingFileSecurity.DescribeOwnerAndExposure(target.Path)}");
+                exposed++;
+            }
+            else if (!DarlingFileSecurity.GrantsHardenedAccount(target.Path))
+            {
+                /* #2371: private is only half of correct. An ACL that excludes ordinary users but also excludes
+                   the service is a locked-out install, and it reports as SECURED under the readability check
+                   alone — then fails on the next start, far enough away that nobody connects the two. */
+                error.WriteLine($"  LOCKED OUT  {target.Path} ({target.What})");
+                error.WriteLine(
+                    $"           secured, but {DarlingFileSecurity.ServiceAccountDisplayName} cannot read it - " +
+                    "the service would fail on its next start. Grant that account and re-run.");
                 exposed++;
             }
             else
