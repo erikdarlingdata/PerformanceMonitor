@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -74,6 +75,56 @@ internal static class DarlingTrendReader
         DateTime CollectionTime, long DeltaExecutions, long DeltaCpuUs, long DeltaElapsedUs,
         long DeltaLogicalReads, long DeltaLogicalWrites, long DeltaPhysicalReads, long DeltaRows,
         long DeltaSpills, int MinDop, int MaxDop, string QueryPlanHash);
+
+    /// <summary>
+    /// Which physical tier answered a query-history read, and over what window (#2353).
+    ///
+    /// <para><c>raw</c> is the per-collection <c>query_stats</c> table and carries every column.
+    /// <c>hourly</c> is the <c>query_stats_hourly</c> continuous aggregate: hour buckets, and only the measures
+    /// the rollup keeps — executions, CPU and elapsed. The columns it does not keep are reported as NULL rather
+    /// than zero, because zero is a claim and NULL is the absence of one.</para>
+    ///
+    /// <para><see cref="EffectiveStartUtc"/> is what was actually read, which can be LATER than the start the
+    /// caller asked for when even the aggregate does not reach that far back. It exists so the tool can say so
+    /// instead of returning a short array under the requested window's label.</para>
+    /// </summary>
+    public sealed record QueryHistoryResult(
+        List<QueryHistoryPoint> Points, string Source, DateTime EffectiveStartUtc, bool Truncated);
+
+    /// <summary>
+    /// The aggregate twin of <see cref="QueryHistorySql"/>, reading the hourly continuous aggregate (#2353).
+    ///
+    /// <para>Shaped to the SAME reader ordinals as the raw query so one mapper serves both. The eight columns
+    /// the rollup does not carry — reads, writes, physical reads, rows, spills, the DOP pair and the plan hash —
+    /// are selected as typed NULLs and surface as NULL in the payload. That is the honest answer: an hour bucket
+    /// has no single plan hash and no single DOP, and inventing a zero would read as "none observed".</para>
+    ///
+    /// <para>What survives the rollup is exactly what a trend is usually asked for: executions, CPU and elapsed
+    /// time. <c>bucket</c> is projected as <c>collection_time</c> so the series column name does not change
+    /// underneath a caller that got a raw answer last time.</para>
+    /// </summary>
+    public const string QueryHistoryHourlySql = """
+        SELECT
+            bucket AS collection_time,
+            execution_count_sum AS delta_execution_count,
+            worker_time_sum AS delta_worker_time,
+            elapsed_time_sum AS delta_elapsed_time,
+            CAST(NULL AS bigint) AS delta_logical_reads,
+            CAST(NULL AS bigint) AS delta_logical_writes,
+            CAST(NULL AS bigint) AS delta_physical_reads,
+            CAST(NULL AS bigint) AS delta_rows,
+            CAST(NULL AS bigint) AS delta_spills,
+            CAST(NULL AS int) AS min_dop,
+            CAST(NULL AS int) AS max_dop,
+            CAST(NULL AS text) AS query_plan_hash
+        FROM query_stats_hourly
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_hash = $3
+        AND   bucket >= $4
+        AND   bucket <= $5
+        ORDER BY bucket
+        """;
 
     /* ─────────────────────────── memory trend ─────────────────────────── */
 
@@ -345,11 +396,78 @@ internal static class DarlingTrendReader
         ORDER BY collection_time
         """;
 
-    public static async Task<List<QueryHistoryPoint>> GetQueryHistoryAsync(
+    /// <summary>
+    /// Reads a query's history from the tier that can actually serve the window (#2353).
+    ///
+    /// <para><b>The bug this replaces.</b> This read went to the raw <c>query_stats</c> table only, and the raw
+    /// tier of a ROLLED table is physically dropped at <see cref="TimescaleSupport.RawRetentionSpan"/> — four
+    /// days — independently of the collector's much longer advertised retention. So a caller asking for 168
+    /// hours got whatever had not aged out, under a label saying 168 hours, with nothing in the response
+    /// marking the difference.</para>
+    ///
+    /// <para><b>Tier by the age of the window's oldest point, not by its width</b> — the same rule
+    /// <c>ComposeSourceRouter</c> applies, and for the same reason: retention drops chunks by wall-clock age, so
+    /// the oldest point is the only thing that decides whether raw can answer. A window that reaches past the
+    /// raw horizon is served ENTIRELY from the hourly aggregate rather than stitched, because a series whose
+    /// bucket width changes partway is a worse answer than a coarser consistent one.</para>
+    ///
+    /// <para>The margin keeps a window that lands right on the boundary off the raw tier: the purge is periodic,
+    /// so "four days old" is the point where rows may or may not still be there, and preferring the aggregate
+    /// there trades resolution for an answer that does not depend on when the purge last ran.</para>
+    /// </summary>
+    /// <summary>
+    /// Extra room inside the raw horizon before a window is handed to the aggregate (#2353). The purge is
+    /// periodic, so a window whose oldest point sits exactly on the four-day line may or may not still find its
+    /// rows depending on when the purge last ran; preferring the aggregate there trades resolution for an answer
+    /// that does not change with the purge schedule. Exposed so a test pins the boundary rather than restating it.
+    /// </summary>
+    public static readonly TimeSpan RawTierMargin = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Whether the raw per-collection table can serve a window, decided by the age of its OLDEST point measured
+    /// from WALL CLOCK (#2353).
+    ///
+    /// <para><b>The second parameter is <c>now</c>, not the window's end, and the difference is not cosmetic.</b>
+    /// Retention drops chunks by actual elapsed time, so what decides whether raw still holds a row is how long
+    /// ago that row happened — never where it sits inside the requested window. Measuring the start against the
+    /// END would call a two-hour window from ten days ago "recent", because it is recent relative to its own
+    /// end, and route it to a tier that dropped those rows six days earlier. <c>ComposeSourceRouter</c> takes a
+    /// caller-supplied <c>now</c> for exactly this reason.</para>
+    ///
+    /// <para>Pure so the boundary is unit-testable without a store — the tiering decision is the whole of this
+    /// fix, and a rule that can only be exercised against a live four-day-old hypertable is a rule nobody
+    /// re-checks. Width is deliberately not consulted: a narrow window sitting entirely in last week is exactly
+    /// as unservable from raw as a wide one.</para>
+    /// </summary>
+    public static bool ShouldUseRawTier(DateTime startUtc, DateTime nowUtc) =>
+        startUtc >= nowUtc - TimescaleSupport.RawRetentionSpan + RawTierMargin;
+
+    public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
+        var useRaw = ShouldUseRawTier(startUtc, endUtc);
+
+        var items = useRaw
+            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken)
+            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken);
+
+        /* What was actually covered, which is what the caller gets told. An empty result says nothing about
+           coverage, so the requested start stands rather than being narrowed to a window we cannot describe. */
+        var effectiveStart = items.Count > 0 ? items[0].CollectionTime : startUtc;
+
+        return new QueryHistoryResult(
+            items,
+            useRaw ? "raw" : "hourly",
+            effectiveStart,
+            Truncated: items.Count > 0 && effectiveStart > startUtc.AddMinutes(90));
+    }
+
+    private static async Task<List<QueryHistoryPoint>> ReadQueryHistoryAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, string databaseName, string queryHash,
+        DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
         var items = new List<QueryHistoryPoint>();
-        await using var command = postgres.CreateCommand(QueryHistorySql);
+        await using var command = postgres.CreateCommand(sql);
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, databaseName);
         DarlingMcpReadParameters.AddText(command, queryHash);
