@@ -17,6 +17,8 @@
     <!-- The plan fetcher connects to the MONITORED SQL Server (same client the Service uses);
          Npgsql and Logging.Abstractions flow transitively from the Storage/Notifications references. -->
     <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" VersionOverride="10.0.11" />
   </ItemGroup>
 
   <ItemGroup>

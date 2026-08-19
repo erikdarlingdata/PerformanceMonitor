@@ -22,6 +22,7 @@
          XML), so it needs the SqlClient runtime connection surface. Version matches Lite/Dashboard/the Darling
          service (7.0.1) so there is no transitive version skew. -->
     <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" VersionOverride="10.0.11" />
   </ItemGroup>
 
   <ItemGroup>
