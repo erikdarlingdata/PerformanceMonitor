@@ -663,9 +663,27 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = DateTime.UtcNow;
-            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var requestedStart = now.AddHours(-hours_back);
+            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name);
+
+            /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
+               say nothing about how far back the read reached -- the most expensive query in a month may have
+               run this morning. raw query_store_stats is dropped at 4 days on a store with the rollups armed,
+               and this tool has no rollup to fall back to (the corrected CAGGs carry no query_id or plan_id,
+               and plan identity is the whole point of this tool). So the honest move is to report the window
+               that was served rather than echo the one that was asked for. */
+            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
+            var effectiveStart = floor ?? requestedStart;
+            var truncated = floor is DateTime f && f > requestedStart.AddMinutes(90);
+
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
+                    "may not be enabled on the target databases -- or the window reaches past what the raw tier " +
+                    "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
+                    "nothing was read for the older part of it. Try a shorter window before concluding the " +
+                    "queries did not run.");
 
             var result = rows.Select(r => new
             {
@@ -693,6 +711,16 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #2364: what was served, beside what was asked for. hours_back alone was a request echoed
+                   back as though it described the data. */
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                truncated,
+                truncation_note = truncated
+                    ? "The window reaches further back than this server's raw query_store_stats retains, so the "
+                      + "older part of it was not read. This tool reads the raw tier only: the corrected rollups "
+                      + "carry no query_id or plan_id, and plan identity is what it exists to return."
+                    : null,
                 queries = result
             }, McpHelpers.JsonOptions);
         }
