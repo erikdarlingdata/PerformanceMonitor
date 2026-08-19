@@ -124,8 +124,10 @@ public class DarlingInstallLocationTests
         Assert.Contains("ProfilesDirectory", script, StringComparison.Ordinal);
 
         /* And the current user's own profile is checked as well: a profile redirected outside
-           ProfilesDirectory is still a profile, and it is the one whose owner is most likely running this. */
-        Assert.Contains("Test-PathIsAtOrUnder $root $env:USERPROFILE", script, StringComparison.Ordinal);
+           ProfilesDirectory is still a profile, and it is the one whose owner is most likely running this.
+           Against $classifyRoot since #2348 — the normalized spelling, so the extended-length form of a
+           profile path is caught too. */
+        Assert.Contains("Test-PathIsAtOrUnder $classifyRoot $env:USERPROFILE", script, StringComparison.Ordinal);
     }
 
     /// <summary>
