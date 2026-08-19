@@ -397,25 +397,6 @@ internal static class DarlingTrendReader
         """;
 
     /// <summary>
-    /// Reads a query's history from the tier that can actually serve the window (#2353).
-    ///
-    /// <para><b>The bug this replaces.</b> This read went to the raw <c>query_stats</c> table only, and the raw
-    /// tier of a ROLLED table is physically dropped at <see cref="TimescaleSupport.RawRetentionSpan"/> — four
-    /// days — independently of the collector's much longer advertised retention. So a caller asking for 168
-    /// hours got whatever had not aged out, under a label saying 168 hours, with nothing in the response
-    /// marking the difference.</para>
-    ///
-    /// <para><b>Tier by the age of the window's oldest point, not by its width</b> — the same rule
-    /// <c>ComposeSourceRouter</c> applies, and for the same reason: retention drops chunks by wall-clock age, so
-    /// the oldest point is the only thing that decides whether raw can answer. A window that reaches past the
-    /// raw horizon is served ENTIRELY from the hourly aggregate rather than stitched, because a series whose
-    /// bucket width changes partway is a worse answer than a coarser consistent one.</para>
-    ///
-    /// <para>The margin keeps a window that lands right on the boundary off the raw tier: the purge is periodic,
-    /// so "four days old" is the point where rows may or may not still be there, and preferring the aggregate
-    /// there trades resolution for an answer that does not depend on when the purge last ran.</para>
-    /// </summary>
-    /// <summary>
     /// Extra room inside the raw horizon before a window is handed to the aggregate (#2353). The purge is
     /// periodic, so a window whose oldest point sits exactly on the four-day line may or may not still find its
     /// rows depending on when the purge last ran; preferring the aggregate there trades resolution for an answer
@@ -442,10 +423,30 @@ internal static class DarlingTrendReader
     public static bool ShouldUseRawTier(DateTime startUtc, DateTime nowUtc) =>
         startUtc >= nowUtc - TimescaleSupport.RawRetentionSpan + RawTierMargin;
 
+    /// <summary>
+    /// Reads a query's history from the tier that can actually serve the window (#2353).
+    ///
+    /// <para><b>The bug this replaces.</b> This read went to the raw <c>query_stats</c> table only, and the raw
+    /// tier of a ROLLED table is physically dropped at <see cref="TimescaleSupport.RawRetentionSpan"/> — four
+    /// days — independently of the collector's much longer advertised retention. So a caller asking for 168
+    /// hours got whatever had not aged out, under a label saying 168 hours, with nothing in the response
+    /// marking the difference.</para>
+    ///
+    /// <para><b>Tier by the age of the window's oldest point, not by its width</b> — the same rule
+    /// <c>ComposeSourceRouter</c> applies, and for the same reason: retention drops chunks by wall-clock age, so
+    /// the oldest point is the only thing that decides whether raw can answer. A window that reaches past the
+    /// raw horizon is served ENTIRELY from the hourly aggregate rather than stitched, because a series whose
+    /// bucket width changes partway is a worse answer than a coarser consistent one.</para>
+    ///
+    /// <para><paramref name="nowUtc"/> defaults to the real clock and exists so a test can pin the boundary.
+    /// It is deliberately NOT defaulted to <paramref name="endUtc"/>: a caller asking for a historical window
+    /// would then have its start measured against its own end, which makes a two-hour window from ten days ago
+    /// look recent and routes it to a tier that dropped those rows six days earlier.</para>
+    /// </summary>
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
-        NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default, DateTime? nowUtc = null)
     {
-        var useRaw = ShouldUseRawTier(startUtc, endUtc);
+        var useRaw = ShouldUseRawTier(startUtc, nowUtc ?? DateTime.UtcNow);
 
         var items = useRaw
             ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken)
