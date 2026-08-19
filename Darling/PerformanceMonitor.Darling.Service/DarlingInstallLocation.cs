@@ -9,8 +9,10 @@
 using System;
 using System.IO;
 using System.Runtime.Versioning;
+using System.Security;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -276,28 +278,42 @@ internal static class DarlingInstallLocation
     /// <c>C:\Users</c>: <c>ProfilesDirectory</c> is relocatable, and a hardcoded literal would quietly stop
     /// matching on precisely the box that moved it — the one box where a missed check costs the most.
     ///
-    /// <para>Derived from <c>%PUBLIC%</c>'s parent rather than by reading the registry directly. Windows sets
-    /// <c>PUBLIC</c> machine-wide from the same <c>ProfileList</c> key the installer reads, so it relocates
-    /// with it, and it keeps this class free of a registry dependency the service does not otherwise carry.
-    /// Falls back to <c>%SystemDrive%\Users</c>, which is what the installer falls back to.</para>
+    /// <para><b>Read from the same registry value the installer reads</b>, and this is the second attempt: the
+    /// first derived it from <c>%PUBLIC%</c>'s parent, on the belief that Windows keeps <c>PUBLIC</c> in step
+    /// with <c>ProfilesDirectory</c>. It does not. <c>ProfilesDirectory</c> and <c>Public</c> are two
+    /// INDEPENDENT <c>REG_EXPAND_SZ</c> values under the same key that merely default to the same tree, so an
+    /// administrator who relocates profiles to <c>D:\Profiles</c> — a documented, supported move — without also
+    /// moving Public leaves <c>%PUBLIC%</c> at <c>C:\Users\Public</c>. The service would then have answered
+    /// <c>C:\Users</c> while the installer answered <c>D:\Profiles</c>, and an install under the box's real
+    /// profile root would have passed silently: a false negative on exactly the case this exists to catch, on
+    /// exactly the box where a missed check costs the most. Reading the value itself removes the divergence
+    /// instead of documenting it (review catch on #2185).</para>
+    ///
+    /// <para>Falls back to <c>%SystemDrive%\Users</c>, which is what the installer falls back to. An
+    /// unreadable <c>ProfileList</c> is not a reason to skip the check.</para>
     /// </summary>
     internal static string MachineProfileRoot()
     {
-        var publicProfile = Environment.GetEnvironmentVariable("PUBLIC");
-        if (!string.IsNullOrWhiteSpace(publicProfile))
+        try
         {
-            try
+            using var profileList = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+
+            /* GetValue expands a REG_EXPAND_SZ by default; expanding again is harmless and keeps this
+               correct if the value is ever stored as a plain string containing %SystemDrive%. */
+            if (profileList?.GetValue("ProfilesDirectory") is string configured
+                && !string.IsNullOrWhiteSpace(configured))
             {
-                var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(publicProfile)));
-                if (!string.IsNullOrWhiteSpace(parent))
+                var expanded = Environment.ExpandEnvironmentVariables(configured);
+                if (!string.IsNullOrWhiteSpace(expanded))
                 {
-                    return parent;
+                    return expanded;
                 }
             }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or IOException)
-            {
-                /* An unusable %PUBLIC% is not a reason to skip the check — fall through to the default. */
-            }
+        }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException or ObjectDisposedException or PlatformNotSupportedException)
+        {
+            /* An unreadable ProfileList is not a reason to skip the check — fall through to the default. */
         }
 
         var systemDrive = Environment.GetEnvironmentVariable("SystemDrive");

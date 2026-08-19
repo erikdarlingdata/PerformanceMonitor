@@ -424,6 +424,39 @@ function Get-CimInstance {
             string.Join("\n  ", disagreements));
     }
 
+    /// <summary>
+    /// The two rules must also agree about WHERE the profile root comes from, not just what they do with it
+    /// (review catch on #2185).
+    ///
+    /// <para><b>The blind spot this closes.</b> The table-parity test above injects the profile root into both
+    /// implementations, which is what makes the table comparable — and means neither side's own lookup is ever
+    /// exercised. The first C# version derived the root from <c>%PUBLIC%</c>'s parent on the belief that Windows
+    /// keeps <c>PUBLIC</c> in step with <c>ProfilesDirectory</c>; they are two INDEPENDENT values under one key
+    /// that merely default to the same tree. On a box where profiles were relocated without moving Public, the
+    /// installer would have refused an install the service waved through — a false negative on the exact case
+    /// #2185 exists to catch, invisible to every test that supplies the root itself.</para>
+    ///
+    /// <para>So this one supplies nothing: it runs the installer's <c>Get-ProfilesDirectory</c> as shipped and
+    /// requires <see cref="DarlingInstallLocation.MachineProfileRoot"/> to answer the same, on whatever box the
+    /// tests are running on. It passes trivially on an unrelocated box, which is fine — its job is to fail the
+    /// moment the two stop reading the same thing.</para>
+    /// </summary>
+    [Fact]
+    public void TheInstallerAndTheService_ReadTheProfileRoot_FromTheSamePlace()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-ProfilesDirectory"));
+        probe.AppendLine("Get-ProfilesDirectory");
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Single(answers);
+
+        var installer = answers[0].TrimEnd('\\');
+        var service = PerformanceMonitor.Darling.Service.DarlingInstallLocation.MachineProfileRoot().TrimEnd('\\');
+
+        Assert.Equal(installer, service, ignoreCase: true);
+    }
+
     /// <summary>Returns the single line of <paramref name="script"/> containing <paramref name="marker"/>,
     /// verbatim — so a composition can be executed as shipped instead of retyped into a probe.</summary>
     private static string ExtractLine(string script, string marker)
