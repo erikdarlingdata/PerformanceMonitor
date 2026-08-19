@@ -199,6 +199,49 @@ public sealed class DarlingServiceInstallLocationTests
     }
 
     /// <summary>
+    /// The registry-unreadable fallback root must be a ROOTED path, not a drive-relative one.
+    ///
+    /// <para><b>The bug this pins.</b> The fallback was <c>Path.Combine(systemDrive, "Users")</c>, and
+    /// <c>%SystemDrive%</c> is documented to be a bare <c>C:</c> — which <c>Path.Combine</c> treats like a
+    /// trailing separator and concatenates, producing <c>C:Users</c>. <see cref="Path.GetFullPath(string)"/>
+    /// then resolves that against the process's current directory on the volume instead of the volume root, so
+    /// the profile check silently stopped matching on precisely the box the fallback exists for: one whose
+    /// <c>ProfileList</c> cannot be read. The registry read succeeds on every box CI runs on, which is exactly
+    /// why the branch had to be made reachable to be pinned at all (review catch on #2185).</para>
+    ///
+    /// <para>Asserted against the separator rather than a literal <c>C:\Users</c>, so the row that matters —
+    /// "the drive and the folder are not merely concatenated" — is the one being checked.</para>
+    /// </summary>
+    [Fact]
+    public void ProfileRootForSystemDrive_IsRooted_NotDriveRelative()
+    {
+        var separator = Path.DirectorySeparatorChar;
+
+        foreach (var (drive, expectedDrive, because) in new[]
+        {
+            ("C:", "C:", "the documented bare form, and the one that produced C:Users"),
+            (@"C:\", "C:", "a drive that already carries a separator must not double it"),
+            ("D:", "D:", "a box booted from another volume"),
+            ("", "C:", "an unset %SystemDrive% falls back to C:"),
+            ("   ", "C:", "and so does a blank one"),
+            (null, "C:", "and so does a missing one"),
+        })
+        {
+            var actual = DarlingInstallLocation.ProfileRootForSystemDrive(drive);
+
+            Assert.Equal(expectedDrive + separator + "Users", actual);
+            Assert.DoesNotContain(expectedDrive + "Users", actual, StringComparison.Ordinal);
+            Assert.True(actual.Length > 0, because);
+        }
+
+        /* And the shipped lookup's answer is rooted whichever branch it took - the registry read on a healthy
+           box, or the fallback on a locked-down one. A drive-relative answer here is the defect above. */
+        Assert.True(Path.IsPathFullyQualified(DarlingInstallLocation.MachineProfileRoot()),
+            "MachineProfileRoot must return a fully-qualified path, or IsAtOrUnder resolves it against the " +
+            "process's current directory and the profile check stops matching (#2185)");
+    }
+
+    /// <summary>
     /// The message's three obligations, one per verdict: name the offending PATH, say WHY this account cannot
     /// read it, and say WHAT TO DO. It also has to name the downstream messages it displaces — those are what
     /// the operator has already been chasing by the time they read this, and #2185 took four exchanges

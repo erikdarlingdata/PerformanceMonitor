@@ -316,8 +316,31 @@ internal static class DarlingInstallLocation
             /* An unreadable ProfileList is not a reason to skip the check — fall through to the default. */
         }
 
-        var systemDrive = Environment.GetEnvironmentVariable("SystemDrive");
-        return Path.Combine(string.IsNullOrWhiteSpace(systemDrive) ? "C:" : systemDrive, "Users");
+        return ProfileRootForSystemDrive(Environment.GetEnvironmentVariable("SystemDrive"));
+    }
+
+    /// <summary>
+    /// The fallback root, as a pure function of the system drive, so the branch is reachable from a test — the
+    /// registry read succeeds on any box CI runs on, which is precisely why the bug below shipped.
+    ///
+    /// <para><b>Not <see cref="Path.Combine(string, string)"/></b>, and this is the whole reason the method
+    /// exists. <c>%SystemDrive%</c> is documented to be a bare drive and colon with no trailing separator
+    /// (<c>C:</c>), and <c>Path.Combine</c> treats a trailing volume separator the way it treats a trailing
+    /// directory separator: it inserts nothing. So <c>Path.Combine("C:", "Users")</c> is <c>C:Users</c>, a
+    /// DRIVE-RELATIVE path that <see cref="Path.GetFullPath(string)"/> then resolves against the process's
+    /// current directory on that volume rather than against the volume root. The profile check would have
+    /// silently stopped matching real profile installs on every box whose <c>ProfileList</c> is unreadable —
+    /// the one box the fallback exists for. PowerShell's <c>Join-Path 'C:' 'Users'</c> does NOT have this
+    /// behavior, so it was also a silent divergence from the installer (review catch on #2185).</para>
+    /// </summary>
+    internal static string ProfileRootForSystemDrive(string? systemDrive)
+    {
+        var drive = string.IsNullOrWhiteSpace(systemDrive) ? "C:" : systemDrive.Trim();
+
+        /* Tolerate a drive that already carries a separator (C:\) as well as the documented bare form. */
+        drive = drive.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return drive + Path.DirectorySeparatorChar + "Users";
     }
 
     /// <summary>
