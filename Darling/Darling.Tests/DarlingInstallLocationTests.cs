@@ -334,6 +334,108 @@ function Get-PSDrive {
         }
     }
 
+    /// <summary>
+    /// The installer's verdict and the SERVICE's verdict must be the same verdict (#2185).
+    ///
+    /// <para><b>Why this test exists.</b> #2187 put the rule in PowerShell, where only installs that go
+    /// through the script can benefit; #2185 needed the service to reach the same conclusion by itself, for
+    /// the README's manual <c>sc create</c> path and for anyone who registers the exe by hand. That is two
+    /// implementations of one rule in two languages, and the one that drifted would be the one nobody was
+    /// reading. So both are run over ONE table — <see cref="DarlingServiceInstallLocationTests.Cases"/> — and
+    /// disagreement is a failure regardless of which side is "right".</para>
+    ///
+    /// <para><b>What is really being executed.</b> The PowerShell side is the shipped file: both helper
+    /// functions are extracted whole, and the two lines that COMPOSE them into a verdict are lifted verbatim
+    /// out of the script rather than retyped. Only the environment is injected — the profile root, the
+    /// operator's profile, and the drive type — which is exactly what the C# side takes as parameters.</para>
+    ///
+    /// <para>Windows-only in practice, like every test in this class: it shells out to
+    /// <c>powershell.exe</c>.</para>
+    /// </summary>
+    [Fact]
+    public void TheInstallerAndTheService_ReachTheSameVerdict_OverOneTable()
+    {
+        const string ProfileRoot = @"C:\Users";
+        const string UserProfile = @"C:\Users\installer";
+
+        var script = InstallScript;
+        var cases = DarlingServiceInstallLocationTests.Cases;
+
+        var probe = new StringBuilder();
+
+        /* The environment, injected. Get-ProfilesDirectory reads HKLM and $env:USERPROFILE is the box's own,
+           and a parity test that took either from the machine it runs on would compare the two rules against
+           two different environments. */
+        probe.AppendLine($"$env:USERPROFILE = '{UserProfile}'");
+        probe.AppendLine($"function Get-ProfilesDirectory {{ '{ProfileRoot}' }}");
+
+        /* Z: is a mapped share and every other letter is a local fixed disk. A definite WMI answer is what the
+           shipped function trusts, so no Get-PSDrive shadow is needed - that fallback is #2201's territory and
+           is pinned on its own above. */
+        probe.AppendLine(@"
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+    if (($Rest -join ' ') -match ""DeviceID='[Zz]:'"") { return [pscustomobject]@{ DriveType = 4 } }
+    return [pscustomobject]@{ DriveType = 3 }
+}");
+
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine(ExtractFunction(script, "Get-NetworkPathKind"));
+
+        /* The composition, quoted out of the shipped script. */
+        var networkLine = ExtractLine(script, "$networkKind = Get-NetworkPathKind $root");
+        var profileLine = ExtractLine(script, "$underProfile = (Test-PathIsAtOrUnder $root (Get-ProfilesDirectory))");
+
+        foreach (var (directory, _, _) in cases)
+        {
+            probe.AppendLine($"$root = '{directory}'");
+            probe.AppendLine(networkLine);
+            probe.AppendLine(profileLine);
+            /* The script's own precedence: the profile message is chosen first when a path is somehow both
+               (the 'if ($underProfile)' arm inside the guard block), and the guard fires on either. */
+            probe.AppendLine("if ($underProfile) { 'UserProfile' } elseif ($networkKind -eq 'UNC') { 'UncPath' } elseif ($networkKind) { 'MappedDrive' } else { 'None' }");
+        }
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Equal(cases.Count, answers.Count);
+
+        var disagreements = new List<string>();
+        for (var i = 0; i < cases.Count; i++)
+        {
+            var (directory, expected, because) = cases[i];
+
+            /* The C# side, with the same injected environment. Z: is the table's mapped drive. */
+            var service = PerformanceMonitor.Darling.Service.DarlingInstallLocation.Classify(
+                directory, ProfileRoot, UserProfile,
+                static qualifier => string.Equals(qualifier, "Z:", StringComparison.OrdinalIgnoreCase));
+
+            /* Both sides are also checked against the table's own expectation, so a mutual mistake cannot pass
+               as agreement. */
+            if (!string.Equals(answers[i], expected.ToString(), StringComparison.Ordinal) || service != expected)
+            {
+                disagreements.Add(
+                    $"'{directory}': install-darling.ps1 said {answers[i]}, the service said {service}, the table says {expected} ({because})");
+            }
+        }
+
+        Assert.True(disagreements.Count == 0,
+            "the installer and the service disagree about which install locations cannot work (#2185):\n  " +
+            string.Join("\n  ", disagreements));
+    }
+
+    /// <summary>Returns the single line of <paramref name="script"/> containing <paramref name="marker"/>,
+    /// verbatim — so a composition can be executed as shipped instead of retyped into a probe.</summary>
+    private static string ExtractLine(string script, string marker)
+    {
+        var at = script.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"install-darling.ps1 no longer contains '{marker}' (#2185)");
+
+        var start = script.LastIndexOf('\n', at) + 1;
+        var end = script.IndexOf('\n', at);
+        return (end < 0 ? script.Substring(start) : script.Substring(start, end - start)).Trim();
+    }
+
     /// <summary>Runs <paramref name="script"/> under Windows PowerShell 5.1 and returns its non-empty output
     /// lines. Written to a temp file rather than passed with -Command: the script under test is a whole
     /// function body, and quoting it through a command line is a source of failures that have nothing to do
