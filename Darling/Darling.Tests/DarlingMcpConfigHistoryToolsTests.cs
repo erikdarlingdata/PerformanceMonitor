@@ -395,9 +395,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
 
             var qsh = await DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(qsh, ServerName, "databases");
-            Assert.Contains("\"state_matches_desired\": false", qsh, StringComparison.Ordinal);
+            JsonAssert.Contains("\"state_matches_desired\": false", qsh);
             Assert.Contains("storage cap reached", qsh, StringComparison.Ordinal);
-            Assert.Contains("\"pct_of_cap\": 100", qsh, StringComparison.Ordinal);
+            JsonAssert.Contains("\"pct_of_cap\": 100", qsh);
 
             bodySucceeded = true;
         }

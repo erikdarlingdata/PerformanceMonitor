@@ -210,7 +210,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             Assert.Contains("AutoGrowShrink", json, StringComparison.Ordinal);
             Assert.Contains("SEVERE_MARKER", json, StringComparison.Ordinal);
             Assert.DoesNotContain("ROUTINE_MARKER", json, StringComparison.Ordinal);
-            Assert.Contains("\"total_events\": 2", json, StringComparison.Ordinal);
+            JsonAssert.Contains("\"total_events\": 2", json);
 
             /* Unknown server → the listing error; empty store → the miss. */
             Assert.StartsWith("Could not resolve server.", await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, "darling-no-such-server"), StringComparison.Ordinal);
