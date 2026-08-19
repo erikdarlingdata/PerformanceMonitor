@@ -43,11 +43,11 @@ internal static class DarlingFleetReader
 {
     /// <summary>Shared serializer options for the fleet DTOs — snake_case field names come from the DTOs'
     /// <c>[JsonPropertyName]</c> attributes, enum bands serialize as their string names, and the output is
-    /// indented (matching the MCP tool convention). ONE options object so the web endpoint and the MCP tool
-    /// serialize the identical shape.</summary>
+    /// COMPACT (#2350, matching the MCP tool convention). ONE options object so the web endpoint and the MCP
+    /// tool serialize the identical shape.</summary>
     public static readonly JsonSerializerOptions JsonOptions = new()
     {
-        WriteIndented = true,
+        WriteIndented = false,
         Converters = { new JsonStringEnumConverter() },
     };
 

@@ -57,12 +57,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingAgReader
 {
     /// <summary>Shared serializer options — snake_case field names come from the DTOs' <c>[JsonPropertyName]</c>
-    /// attributes, severities serialize as their string names, and the output is indented (the MCP tool
-    /// convention). ONE options object so <c>/api/ag</c> and <c>get_ag_health</c> serialize the identical
-    /// shape.</summary>
+    /// attributes, severities serialize as their string names, and the output is COMPACT (#2350 - the MCP tool
+    /// convention, since the reader on both ends is a parser rather than a person). ONE options object so
+    /// <c>/api/ag</c> and <c>get_ag_health</c> serialize the identical shape.</summary>
     public static readonly JsonSerializerOptions JsonOptions = new()
     {
-        WriteIndented = true,
+        WriteIndented = false,
         Converters = { new JsonStringEnumConverter() },
     };
 

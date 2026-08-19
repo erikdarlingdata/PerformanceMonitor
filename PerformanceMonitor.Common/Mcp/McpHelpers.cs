@@ -27,9 +27,26 @@ internal static class McpHelpers
     public const int MaxTop = 1000;
 
     /// <summary>
-    /// Shared JSON serializer options with indented formatting.
+    /// Shared JSON serializer options for MCP tool results — compact, not indented (#2350).
+    ///
+    /// <para>The only consumer of an MCP tool result is a language model, and indentation buys a model
+    /// nothing. It was costing roughly 23% of the bytes of a record-heavy result (measured on a 15-field
+    /// blocking-event shape: 2,977 → 2,297 at 10 rows, 29,082 → 22,462 at 100). <b>The token saving is smaller
+    /// than the byte saving</b> — BPE tokenizers pack runs of spaces efficiently — so this is not the 23%
+    /// win it looks like in bytes. It is still free, and it compounds where it matters: tool results are the
+    /// bulk of what fills an agent's context on a real incident, and the fleet-wide reads are the widest
+    /// results we return.</para>
+    ///
+    /// <para>Deliberately NOT applied to the config files (servers.json, profiles, schedules, alert state).
+    /// Those are read and hand-edited by people, and <c>ServerManager</c>/<c>ProfileManager</c>/
+    /// <c>ScheduleManager</c> keep their own indented options for that reason. This object is MCP output only
+    /// — every one of its ~78 call sites serializes a tool result or the web endpoint twin of one.</para>
+    ///
+    /// <para>Nothing parses our output positionally: it is JSON to a JSON reader on both sides, and the tests
+    /// that touch this object assert field NAMES (there is no naming policy here, so snake_case comes from
+    /// <c>[JsonPropertyName]</c> attributes) rather than layout.</para>
     /// </summary>
-    public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
     /// <summary>
     /// Truncates a string to the specified maximum length, adding a truncation suffix.
