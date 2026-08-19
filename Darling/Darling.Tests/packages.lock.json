@@ -14,9 +14,9 @@
       },
       "xunit.runner.visualstudio": {
         "type": "Direct",
-        "requested": "[3.1.5, )",
-        "resolved": "3.1.5",
-        "contentHash": "tKi7dSTwP4m5m9eXPM2Ime4Kn7xNf4x4zT9sdLO/G4hZVnQCRiMTWoSZqI/pYTVeI27oPPqHBKYI/DjJ9GsYgA=="
+        "requested": "[4.0.0, )",
+        "resolved": "4.0.0",
+        "contentHash": "kzLFyBYUnoidpGOXvpNOfIo8C92gVgVR6X8ncHwhcrDYugiOut5rrhDkr0L3cWHd7J2pKXf6LgaeXoBBDlx1ag=="
       },
       "xunit.v3": {
         "type": "Direct",
@@ -284,8 +284,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.11",
           "Microsoft.Extensions.Logging": "10.0.11",
           "Microsoft.Extensions.Logging.Abstractions": "10.0.11",
-          "Microsoft.Extensions.Options": "10.0.11",
-          "System.Diagnostics.EventLog": "10.0.11"
+          "Microsoft.Extensions.Options": "10.0.11"
         }
       },
       "Microsoft.Extensions.Logging.EventSource": {
@@ -594,11 +593,6 @@
           "SkiaSharp.Views.Desktop.Common": "3.119.0"
         }
       },
-      "System.Diagnostics.EventLog": {
-        "type": "Transitive",
-        "resolved": "10.0.11",
-        "contentHash": "QTXEoQBzz00SFWbo7nAg1Ogd4f99lwqcO9uAJ7MYSLEUR28f6As32QktrqG2Fr9cfAfd1GjLyGYspE7Ipj7P6w=="
-      },
       "System.IdentityModel.Tokens.Jwt": {
         "type": "Transitive",
         "resolved": "8.16.0",
@@ -611,10 +605,7 @@
       "System.ServiceProcess.ServiceController": {
         "type": "Transitive",
         "resolved": "10.0.11",
-        "contentHash": "khROyIQ3GAZy5MbCabfmlbvxf9nuvdveFP2XbRCteZ9Lq8OFEvImmrjV6acl1LegRu/9T6VMxi9Lr+KZu29VHg==",
-        "dependencies": {
-          "System.Diagnostics.EventLog": "10.0.11"
-        }
+        "contentHash": "khROyIQ3GAZy5MbCabfmlbvxf9nuvdveFP2XbRCteZ9Lq8OFEvImmrjV6acl1LegRu/9T6VMxi9Lr+KZu29VHg=="
       },
       "xunit.analyzers": {
         "type": "Transitive",
@@ -712,8 +703,7 @@
           "PerformanceMonitor.Collectors": "[1.0.0, )",
           "PerformanceMonitor.Darling.Storage": "[1.0.0, )",
           "PerformanceMonitor.Notifications": "[1.0.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[1.0.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.PlanAnalysis": "[1.0.0, )"
         }
       },
       "performancemonitor.darling.service": {
@@ -730,8 +720,7 @@
           "PerformanceMonitor.Darling.Analysis": "[1.0.0, )",
           "PerformanceMonitor.Darling.Storage": "[1.0.0, )",
           "PerformanceMonitor.PlanAnalysis": "[1.0.0, )",
-          "System.IO.FileSystem.AccessControl": "[5.0.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "System.IO.FileSystem.AccessControl": "[5.0.0, )"
         }
       },
       "performancemonitor.darling.storage": {
@@ -768,8 +757,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.0.2, )",
-          "PerformanceMonitor.Common": "[1.0.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.Common": "[1.0.0, )"
         }
       },
       "performancemonitor.ui": {
@@ -937,12 +925,6 @@
         "requested": "[5.0.0, )",
         "resolved": "5.0.0",
         "contentHash": "SxHB3nuNrpptVk+vZ/F+7OHEpoHUIKKMl02bUmYHQr1r+glbZQxs7pRtsf4ENO29TVm2TH3AEeep2fJcy92oYw=="
-      },
-      "System.Security.Cryptography.ProtectedData": {
-        "type": "CentralTransitive",
-        "requested": "[10.0.11, )",
-        "resolved": "10.0.11",
-        "contentHash": "PNoxCTPb+Tlux+GJyq4c89ddYdpioVSqfGx8pqOF6shCSKwUNNctXhQtRkCICjbJmGrJJsW8NY52kVYO/b8mlQ=="
       },
       "Velopack": {
         "type": "CentralTransitive",
