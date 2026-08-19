@@ -86,6 +86,17 @@ public sealed class DarlingConfig
     public int PlanContentRetentionDays { get; set; } = 21;
 
     /// <summary>
+    /// The per-session <c>statement_timeout</c> applied to the viewer and mcp roles — the hard backstop a
+    /// composed query can never exceed (#2357). Seeds <c>config_service.compose_statement_timeout_seconds</c>;
+    /// the store is authoritative afterwards, like every other value here.
+    ///
+    /// <para>15 preserves the constant it replaces. It is a judgement about store size and disk speed, which
+    /// this product cannot make for someone else's deployment — a fleet-wide aggregate over a wide window on a
+    /// large store can exceed 15s with nothing wrong.</para>
+    /// </summary>
+    public int ComposeStatementTimeoutSeconds { get; set; } = 15;
+
+    /// <summary>
     /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or
     /// 'none' on read. 'gzip' (default, unchanged): plans live as gzip bytes in query_plan_gz - 14.0x
     /// measured, readable only through the apps/MCP. 'none': plans written as plain text into

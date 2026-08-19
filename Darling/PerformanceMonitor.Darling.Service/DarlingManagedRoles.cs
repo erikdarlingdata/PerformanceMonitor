@@ -200,7 +200,14 @@ public static class DarlingManagedRoles
             allowInteractiveRead: false, logger);
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(BuildProvisioningSql(adminPassword, viewerPassword, mcpPassword), connection);
+        /* #2357: read the live knob rather than a constant. Ordering is what makes this safe -- migrations
+           run before provisioning at startup, so the column exists by now -- and because this DDL is re-run
+           on every managed start, a changed value reaches an existing install on its next restart without
+           any new machinery. A store whose config row is not seeded yet answers with the default. */
+        var composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, cancellationToken);
+
+        await using var command = new NpgsqlCommand(
+            BuildProvisioningSql(adminPassword, viewerPassword, mcpPassword, composeTimeoutSeconds), connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         logger.LogInformation(
@@ -288,6 +295,30 @@ public static class DarlingManagedRoles
     }
 
     /// <summary>
+    /// The store's compose <c>statement_timeout</c> in seconds (#2357), or 15 when it cannot be read.
+    ///
+    /// <para>Defensive on purpose. This runs during startup provisioning, before the config row is
+    /// necessarily seeded and on stores that may predate the column, and a role-provisioning step that threw
+    /// over a tuning knob would stop the service from starting over something that has a perfectly good
+    /// default.</para>
+    /// </summary>
+    private static async Task<int> ReadComposeStatementTimeoutAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection);
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            return value is int seconds ? seconds : 15;
+        }
+        catch (Exception) 
+        {
+            return 15;
+        }
+    }
+
+    /// <summary>
     /// The idempotent, self-healing provisioning DDL with the role passwords injected. Passwords are
     /// alnum-only (<see cref="DarlingManagedPostgres.GeneratePassword"/>), verified here before the
     /// interpolation, so string-building the <c>PASSWORD '…'</c> literals is escaping-safe — the same
@@ -297,7 +328,12 @@ public static class DarlingManagedRoles
     /// batch requires those tables to already exist — safe because provisioning runs AFTER migration (see
     /// <see cref="EnsureProvisionedAsync"/>); a dropped/recreated table re-grants on the next start.
     /// </summary>
-    public static string BuildProvisioningSql(string adminPassword, string viewerPassword, string mcpPassword)
+    /// <param name="composeStatementTimeoutSeconds">
+    /// The per-session <c>statement_timeout</c> for the viewer and mcp roles (#2357). Defaults to the 15 the
+    /// constant used to hard-code, so a caller that does not care gets today's behaviour exactly.
+    /// </param>
+    public static string BuildProvisioningSql(
+        string adminPassword, string viewerPassword, string mcpPassword, int composeStatementTimeoutSeconds = 15)
     {
         RequireAlphanumeric(adminPassword, nameof(adminPassword));
         RequireAlphanumeric(viewerPassword, nameof(viewerPassword));
@@ -311,7 +347,12 @@ public static class DarlingManagedRoles
         const string collect = PgSchemaGenerator.CollectSchema;
         const string config = PgSchemaGenerator.ConfigSchema;
         const string marker = RoleMarker;
-        const string statementTimeout = ComposeLimits.StatementTimeout;
+        /* #2357: was ComposeLimits.StatementTimeout, a bare "15s". Clamped here as well as on the config
+           read, because this method is public and a caller passing 0 would remove the backstop entirely --
+           and the backstop is the whole reason the value exists: a LIMIT bounds output, a group-by scans and
+           sorts before it, so something has to bound WORK. */
+        var statementTimeout =
+            $"{Math.Clamp(composeStatementTimeoutSeconds <= 0 ? 15 : composeStatementTimeoutSeconds, 5, 600)}s";
 
         /* The fail-closed viewer column-ACL carve for the secret-bearing config tables (see
            ViewerRestrictedConfigTables). Runs AFTER the blanket config GRANT below, so it strips

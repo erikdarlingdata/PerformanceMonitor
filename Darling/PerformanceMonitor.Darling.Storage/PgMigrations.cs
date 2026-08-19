@@ -134,6 +134,7 @@ public static class PgMigrations
         new Migration(75, "plan-content-retention-knob", V75Sql),
         new Migration(76, "query-store-health", V76Sql),
         new Migration(77, "activity-driven-plan-fetch", V77Sql),
+        new Migration(78, "compose-statement-timeout", V78Sql),
     };
 
     /// <summary>
@@ -1691,6 +1692,27 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_text (
 );
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen
     ON collect.pg_statement_text(last_seen);";
+
+    /// <summary>
+    /// V78 — the compose statement-timeout knob (#2357). The per-session <c>statement_timeout</c> on the
+    /// viewer and mcp roles is the hard backstop a composed query can never exceed, and it shipped as a bare
+    /// 15-second constant. Fifteen seconds is a judgement about how big a store is and how fast its disk is,
+    /// and the product knows neither for anyone else's deployment: a fleet-wide aggregate over a wide window
+    /// on a large store can exceed it with nothing wrong.
+    ///
+    /// <para>Applied in the role PROVISIONING DDL rather than a migration, which is why the constant could
+    /// not simply be raised — an existing install already has the old value baked into its roles. The
+    /// provisioning SQL is re-run on every managed start ("idempotent + self-healing: re-run every managed
+    /// start, converging role state"), so a store picks this up on its next restart without any new
+    /// machinery.</para>
+    ///
+    /// <para>Default 15 preserves today's behaviour exactly for anyone who never touches it. Clamped on READ
+    /// like the V59/V75 knobs, so a hand-edited absurdity cannot remove the backstop the whole design leans
+    /// on — a LIMIT bounds output, a group-by scans and sorts before it, and something has to bound WORK.</para>
+    /// </summary>
+    private const string V78Sql = @"
+ALTER TABLE config.config_service
+    ADD COLUMN IF NOT EXISTS compose_statement_timeout_seconds integer NOT NULL DEFAULT 15;";
 
     /// <summary>
     /// V77 — the activity-driven plan/text fetch (#2312 Finding 2). Three small strokes for one shape

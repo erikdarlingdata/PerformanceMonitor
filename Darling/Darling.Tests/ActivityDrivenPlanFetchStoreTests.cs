@@ -32,7 +32,9 @@ public sealed class ActivityDrivenPlanFetchStoreTests
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(77, versions.Max());
+        /* #2357 added V78, so this rung is no longer the maximum. What stays true: it is PRESENT, the
+           ladder is ordered and dense, and the build's schema version tracks the maximum. */
+        Assert.Contains(77, versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
 
@@ -61,17 +63,18 @@ public sealed class ActivityDrivenPlanFetchStoreTests
     /* ---------------- the viewer probe ---------------- */
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreTo77()
+    public void TheProbeMapsAStoreAtExactly77To77()
     {
-        Assert.Equal(77, StorageVersion.SchemaVersion);
+        /* #2357 added V78, so this rung is no longer the top — the "I am the top" claim moves to the newest
+           rung's own test (ComposeStatementTimeoutStoreTests). What stays true forever is the arm itself: a
+           store migrated to EXACTLY 77 must answer 77 rather than falling through to 76. */
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
-        /* 52 positional sentinels then the V77 one by name — the map takes 53 parameters. Present => 77,
-           newest-first; absent => the previous arm still answers 76 rather than falling through. */
+        /* 52 positional sentinels, then V77 and V78 by name — the map takes 54 parameters. */
         var all = Enumerable.Repeat(true, 52).Cast<object>().ToArray();
 
-        Assert.Equal(77, InvokeMap(all, hasQueryStoreTextHash: true));
-        Assert.Equal(76, InvokeMap(all, hasQueryStoreTextHash: false));
+        Assert.Equal(77, InvokeMap(all, hasQueryStoreTextHash: true, hasComposeTimeoutKnob: false));
+        Assert.Equal(76, InvokeMap(all, hasQueryStoreTextHash: false, hasComposeTimeoutKnob: false));
     }
 
     [Fact]
@@ -95,12 +98,12 @@ public sealed class ActivityDrivenPlanFetchStoreTests
 
     /* ---------------- helpers ---------------- */
 
-    private static int InvokeMap(object[] leading, bool hasQueryStoreTextHash)
+    private static int InvokeMap(object[] leading, bool hasQueryStoreTextHash, bool hasComposeTimeoutKnob)
     {
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
-        var args = leading.Concat(new object[] { hasQueryStoreTextHash }).ToArray();
+        var args = leading.Concat(new object[] { hasQueryStoreTextHash, hasComposeTimeoutKnob }).ToArray();
         Assert.Equal(method.GetParameters().Length, args.Length);
 
         return (int)method.Invoke(null, args)!;
