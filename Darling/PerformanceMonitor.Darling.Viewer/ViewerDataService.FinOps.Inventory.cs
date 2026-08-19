@@ -196,6 +196,7 @@ SELECT
     sp.sqlserver_start_time,
     sp.host_os_version,
     sp.ag_replica_role,
+    s.is_enabled,
     COALESCE(s.monthly_cost_usd, 0) AS monthly_cost_usd
 FROM (
     SELECT DISTINCT ON (server_id)
@@ -207,7 +208,7 @@ FROM (
     ORDER BY server_id, collection_time DESC
 ) sp
 JOIN servers s ON s.server_id = sp.server_id
-ORDER BY server_name";
+ORDER BY s.is_enabled DESC, server_name";
 
     public async Task<List<ServerPropertyRow>> GetServerInventoryAsync(CancellationToken cancellationToken = default)
     {
@@ -244,7 +245,11 @@ ORDER BY server_name";
                 SqlServerStartTime = reader.IsDBNull(14) ? null : reader.GetDateTime(14),
                 HostOsVersion = reader.IsDBNull(15) ? "" : reader.GetString(15),
                 AgReplicaRole = reader.IsDBNull(16) ? "Standalone" : reader.GetString(16),
-                MonthlyCost = reader.IsDBNull(17) ? 0m : Convert.ToDecimal(reader.GetValue(17))
+                /* #2359: is_enabled sits at 17, so monthly_cost_usd moved to 18. A registered-but-disabled
+                   server keeps its final collection_time forever, and without this flag that timestamp reads
+                   as a stale metric rather than as the date monitoring stopped. */
+                IsEnabled = reader.IsDBNull(17) || reader.GetBoolean(17),
+                MonthlyCost = reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18))
             });
         }
         return items;

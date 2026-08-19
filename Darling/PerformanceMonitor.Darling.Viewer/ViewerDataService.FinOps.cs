@@ -234,6 +234,22 @@ public sealed class ServerPropertyRow
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";
 
+    /// <summary>
+    /// Whether this server is still being monitored (#2359). Server Inventory deliberately lists every
+    /// REGISTERED server, and a registered-but-disabled one keeps the <see cref="LastUpdated"/> it had when
+    /// monitoring stopped — accurate, and read by everyone as a broken freshness column.
+    ///
+    /// <para>Disabled rows are kept rather than filtered: this is the FinOps tab, and a decommissioned
+    /// server's cost history is exactly what someone opens it to look at. Dropping them would trade a
+    /// confusing grid for a lying one.</para>
+    /// </summary>
+    public bool IsEnabled { get; set; } = true;
+
+    /// <summary>What the grid shows for <see cref="IsEnabled"/> (#2359) — the one column that makes an old
+    /// <see cref="LastUpdated"/> legible. "Stopped" rather than "Disabled" because the operator's question is
+    /// what happened to the data, not what state a config row is in.</summary>
+    public string MonitoringStatus => IsEnabled ? "Active" : "Stopped";
+
     public decimal? AvgCpuPct { get; set; }
     public decimal? StorageTotalGb { get; set; }
     public int? IdleDbCount { get; set; }
