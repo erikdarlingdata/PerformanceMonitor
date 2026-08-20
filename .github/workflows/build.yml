@@ -515,7 +515,16 @@ jobs:
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)"
           }
-          $checksums | Out-File -FilePath releases/SHA256SUMS.txt -Encoding utf8
+          # LF and no BOM, written explicitly (#2383). Out-File on Windows emits CRLF whatever
+          # the encoding, and `shasum -c` on macOS/Linux then takes the trailing \r as part of
+          # the FILENAME - every entry reports "No such file or directory / FAILED open or
+          # read", which is precisely what a tampered download looks like. The hashes were
+          # always right; the file just could not be used by the tool it exists for, on the two
+          # platforms where that tool is the default. A BOM breaks the first line the same way.
+          [IO.File]::WriteAllText(
+            "$PWD/releases/SHA256SUMS.txt",
+            (($checksums -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false))
           Write-Host "Checksums:"
           $checksums | ForEach-Object { Write-Host $_ }
 
