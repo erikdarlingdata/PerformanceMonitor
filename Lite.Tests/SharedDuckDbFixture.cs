@@ -20,8 +20,28 @@ namespace PerformanceMonitorLite.Tests;
 ///
 /// Deliberately IClassFixture (one database per class), NOT a collection fixture: a
 /// single shared collection would serialize these classes against each other and give
-/// back most of the win. Each class owns its own database file, keeping xUnit's
-/// cross-class parallelism intact.
+/// back most of the win. Each class owns its own database file, so the SCHEMA-BUILD cost
+/// — the ~80 DDL statements above, which is what this fixture exists to amortise — runs
+/// concurrently across classes.
+///
+/// <para><b>What that does NOT buy (#2376).</b> The file separation is real, but it does
+/// not make the classes independent at RUNTIME: <c>DuckDbInitializer</c>'s reader/writer
+/// lock is <c>private static readonly</c>, so every read and write in the suite queues on
+/// ONE process-wide lock no matter which database file it targets. Classes therefore still
+/// serialize against each other inside their locked sections — through a lock rather than
+/// through a collection, and without a collection's ordering.</para>
+///
+/// <para>That lock is correct and must not be narrowed to fix this: production creates
+/// several <c>DuckDbInitializer</c> instances over the same <c>App.DatabasePath</c>
+/// (MainWindow, DatabaseStateOverridesWindow, and DuckDbAlertHistoryStore), and the static
+/// lock is exactly what keeps those mutually exclusive. Per-instance would trade a slow
+/// suite for a real data race.</para>
+///
+/// <para>The practical consequence is worth knowing when a test here fails oddly: a
+/// scheduling-pressure window can starve the 5-second write-lock acquisition in
+/// <c>LocalDataService.GetDatabaseStateDeviationsAsync</c>, whose maintenance block is
+/// best-effort and simply SKIPS on timeout. That is #2374 — a test that assumed the
+/// maintenance had run, rather than waiting for it, failed a nightly.</para>
 /// </summary>
 public sealed class SharedDuckDbFixture : IAsyncLifetime
 {
