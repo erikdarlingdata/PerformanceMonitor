@@ -677,4 +677,130 @@ WHERE hypertable_name = 'wait_stats'
         Assert.Equal(1, calls);
         Assert.Equal(7, result);
     }
+
+    /* ---------------- #2386: the plan dim is capped by ROWS, not by a time slice ---------------- */
+
+    /// <summary>
+    /// The statement, and the two properties that make it work where the time slice does not.
+    ///
+    /// <para><b>Measured on the live use2 store</b> (133 GB / 12.4 M rows): deletes run at ~1,000 rows/sec,
+    /// linear from 10 k to 50 k, worst observed 834 rows/sec. A one-DAY slice there is ~755 k rows of
+    /// ~9.5 KB gzipped plan XML — ~7 GB of TOAST in one statement, needing ~755 s against a 300 s command
+    /// timeout. It timed out, rolled back, deleted nothing, and every later sweep retried the same doomed
+    /// slice, so retention on the store's largest table stopped permanently while the table kept
+    /// growing.</para>
+    /// </summary>
+    [Fact]
+    public void RowCappedDelete_IsOldestFirst_AndBoundedByRows()
+    {
+        var sql = DarlingRetention.RowCappedDeleteSql("query_plan_dim", "last_seen", 50_000);
+
+        Assert.Equal(
+            "DELETE FROM query_plan_dim WHERE ctid IN ("
+            + "SELECT ctid FROM query_plan_dim WHERE last_seen < $1 "
+            + "ORDER BY last_seen LIMIT 50000)",
+            sql);
+
+        /* Oldest-first is not cosmetic: progress has to be monotonic. An unordered cap nibbles arbitrary
+           rows and leaves MIN(last_seen) where it was, so the floor never advances and the next sweep
+           faces the same work. */
+        Assert.Contains("ORDER BY last_seen LIMIT", sql, StringComparison.Ordinal);
+
+        /* Bounded by rows, never by a time span — that is the whole point. */
+        Assert.DoesNotContain("INTERVAL", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The cap is a measurement, not a round number. 50 k costs ~50 s at the measured rate, leaving ~5x
+    /// margin under <c>DeleteTimeoutSeconds</c> — margin that exists because a loaded box is slower than
+    /// the idle one this was measured on. 100 k would run ~97 s nominal and ~291 s under a 3x slowdown,
+    /// i.e. back against the wall this fix exists to move away from.
+    /// </summary>
+    [Fact]
+    public void ThePlanDimRowCap_LeavesRoomUnderTheCommandTimeout()
+    {
+        Assert.Equal(50_000, DarlingRetention.PlanDimDeleteRowCap);
+
+        /* At the WORST measured throughput (834 rows/sec), the cap must still finish comfortably inside
+           the command timeout. Pinned as arithmetic so raising the cap without re-measuring fails here. */
+        const int worstObservedRowsPerSecond = 834;
+        var worstCaseSeconds = DarlingRetention.PlanDimDeleteRowCap / (double)worstObservedRowsPerSecond;
+
+        Assert.True(
+            worstCaseSeconds < 120,
+            $"cap would take {worstCaseSeconds:F0}s at the worst measured rate; the timeout is 300s and "
+            + "the margin is deliberate");
+    }
+
+    /// <summary>
+    /// Only the plan dimension is capped. <c>query_text_dim</c> is ~40 MB in total and drains in a single
+    /// slice, and the fact tables need the compressed-chunk-safe shape that the <c>ctid</c> idiom cannot
+    /// provide (#1564) — so the row cap is scoped to the one table whose rows are large enough to matter.
+    /// </summary>
+    [Fact]
+    public void OnlyThePlanDim_TakesTheRowCap()
+    {
+        var source = ReadRetentionSource();
+
+        var at = source.IndexOf("foreach (var dimTable in PayloadDimensions.DimTables)", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the dim purge loop moved (#2386)");
+
+        var body = source[at..Math.Min(source.Length, at + 2200)];
+
+        /* The plan dim is selected by name, and BOTH the statement and the drain batch size follow it. */
+        Assert.Contains("PayloadDimensions.QueryPlanDimTable", body, StringComparison.Ordinal);
+        Assert.Contains("RowCappedDeleteSql(", body, StringComparison.Ordinal);
+        Assert.Contains("TimeSlicedDeleteSql(", body, StringComparison.Ordinal);
+        Assert.Contains("batchSize:", body, StringComparison.Ordinal);
+
+        /* A row-capped statement MUST carry its cap as the batch size, or the drain loop reverts to
+           "stop when a batch clears nothing" and does one batch per sweep instead of draining. */
+        Assert.Contains("PlanDimDeleteRowCap", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A timed-out purge reports what it actually removed. Each statement autocommits, so a failure on the
+    /// fifth batch does not undo the first four — but the old catch returned null and discarded the running
+    /// total, so the sweep summary said "0 row(s) deleted, 1 failed" for a purge that had deleted 755 k
+    /// rows. That is the line an operator reads, and it turned "slower than the timeout" into "completely
+    /// stuck", which is a different problem with a different fix.
+    /// </summary>
+    [Fact]
+    public void AFailedPurge_ReportsTheRowsItDidRemove()
+    {
+        var source = ReadRetentionSource();
+
+        var at = source.IndexOf("private static async Task<int?> PurgeOneAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "PurgeOneAsync moved (#2386)");
+
+        var body = source[at..Math.Min(source.Length, at + 4000)];
+
+        Assert.Contains("after removing {Rows} row(s)", body, StringComparison.Ordinal);
+
+        /* The accumulator has to live outside the try, or the catch cannot see it. Anchored on the CATCH
+           rather than on "try": the word appears in the explanatory comment above the block, so matching
+           it finds prose instead of code and the assertion passes for the wrong reason. */
+        Assert.True(
+            body.IndexOf("var deleted = 0;", StringComparison.Ordinal)
+                < body.IndexOf("catch (Exception ex)", StringComparison.Ordinal),
+            "the row accumulator must be declared before the catch can read it (#2386)");
+    }
+
+    private static string ReadRetentionSource(
+        [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var relative = System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
+        for (var dir = new System.IO.DirectoryInfo(System.IO.Path.GetDirectoryName(thisFile)!);
+             dir is not null; dir = dir.Parent)
+        {
+            var candidate = System.IO.Path.Combine(dir.FullName, relative);
+            if (System.IO.File.Exists(candidate))
+            {
+                return System.IO.File.ReadAllText(candidate);
+            }
+        }
+
+        throw new System.IO.FileNotFoundException($"Could not locate {relative}");
+    }
 }
