@@ -76,6 +76,38 @@ public class GcfOutputTests : IDisposable
     }
 
     [Fact]
+    public void TryEncode_Decoded_Wire_Carries_Input_Values()
+    {
+        // The claim is that the substituted wire carries the SAME value as the JSON, not
+        // merely that it re-encodes to itself. Decode the wire and assert it reproduces the
+        // input's values, checked against the literals the payload was built from (not
+        // re-derived from the wire), so a silent drop or garble in the round-trip fails here.
+        var wire = GcfOutput.TryEncode(Blocking(30));
+        Assert.NotNull(wire);
+
+        var root = Assert.IsType<OrderedMap>(Gcf.DecodeGeneric(wire!));
+        Assert.Equal("SQLPROD01", (string?)root["server"]);
+        Assert.Equal(24L, (long)root["hours_back"]!);
+        Assert.Equal(30L, (long)root["total_events"]!);
+
+        var events = Assert.IsType<List<object?>>(root["events"]);
+        Assert.Equal(30, events.Count);
+
+        var first = Assert.IsType<OrderedMap>(events[0]);
+        Assert.Equal(60L, (long)first["blocked_session_id"]!);
+        Assert.Equal(55L, (long)first["blocking_session_id"]!);
+        Assert.Equal("LCK_M_X", (string?)first["blocked_wait_type"]);
+        Assert.Equal(1000L, (long)first["wait_duration_ms"]!);
+        Assert.Equal("OrdersDB", (string?)first["blocked_database"]);
+        Assert.True((bool)first["has_report_xml"]!);
+
+        var last = Assert.IsType<OrderedMap>(events[29]);
+        Assert.Equal(89L, (long)last["blocked_session_id"]!); // 60 + 29
+        Assert.Equal(59L, (long)last["blocking_session_id"]!); // 55 + (29 % 5)
+        Assert.Equal(4973L, (long)last["wait_duration_ms"]!); // 1000 + 29 * 137
+    }
+
+    [Fact]
     public void TryEncode_Tiny_Payload_Falls_Back_To_Json()
     {
         var json = JsonSerializer.Serialize(new { status = "ok" });

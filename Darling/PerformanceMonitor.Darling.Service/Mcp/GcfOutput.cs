@@ -121,14 +121,34 @@ public static class GcfOutput
 
     // long/long compare exactly; a long and an integer-valued double (an integer can decode
     // as either) compare by value. Precision-lossy numbers never reach here: FromJson
-    // declined them before the wire was produced.
+    // declined them before the wire was produced; the mixed branch still avoids widening the
+    // long to double so the guard cannot itself launder a value above 2^53.
     private static bool NumbersEqual(object a, object b)
     {
         if (a is long al && b is long bl)
             return al == bl;
-        var da = a is long la ? la : (double)a;
-        var db = b is long lb ? lb : (double)b;
-        return da.Equals(db);
+        if (a is double ad && b is double bd)
+            return ad.Equals(bd);
+
+        // Mixed long/double. Compare without casting the long to double (that cast rounds
+        // above 2^53 and would let a lost value compare equal). The two are equal only when
+        // the double is integral, sits inside the long range, and equals the long exactly.
+        long lng;
+        double dbl;
+        if (a is long la)
+        {
+            lng = la;
+            dbl = (double)b;
+        }
+        else
+        {
+            lng = (long)b;
+            dbl = (double)a;
+        }
+        return dbl == Math.Floor(dbl)
+            && dbl >= long.MinValue
+            && dbl <= long.MaxValue
+            && (long)dbl == lng;
     }
 
     // Converts a parsed JSON value into the gcf-dotnet native model (OrderedMap / List /
