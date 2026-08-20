@@ -196,6 +196,18 @@ LIMIT 20";
         catch { /* Table may not exist or have no data */ }
     }
 
+    /// <summary>The PLAN_REGRESSION comparison window, in days — how far back a query's "best known" plan
+    /// may have been observed.</summary>
+    internal const int PlanRegressionWindowDays = 14;
+
+    /// <summary>
+    /// How far BELOW the comparison window the chunk-exclusion bound sits (#2387). `last_execution_time`
+    /// is the monitored server's clock and `collection_time` is the store's; a monitored server running
+    /// ahead can report an execution time later than the collection that carried it. A day absorbs any
+    /// plausible drift while still excluding all but ~15 days of a store that may hold months.
+    /// </summary>
+    internal const int PlanRegressionSkewMarginDays = 1;
+
     /* PG port: any_value() below is standard SQL:2023, in Postgres since 16 — the product's
        minimum supported PG is 17, so it stays verbatim (DuckDB and PG agree on its semantics:
        an arbitrary non-null value from the group). */
@@ -235,6 +247,17 @@ WITH deduped AS
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
     AND   last_execution_time >= $2
+    -- #2387: the SEMANTIC window is last_execution_time above; this is a REDUNDANT bound on the
+    -- partitioning column so TimescaleDB can exclude chunks. Without it this reads the server's whole
+    -- history every analysis cycle, decompressing whatever is compressed, per server -- cost scaling with
+    -- STORE SIZE rather than with the configured window, which is why no VM size fixes it. Redundant to
+    -- the ANSWER because a row cannot be collected before the execution it reports, so
+    -- last_execution_time >= X already implies collection_time >= X. $3 carries a skew margin below X
+    -- because last_execution_time comes from the MONITORED server's clock and collection_time from the
+    -- store's: a monitored server running fast would otherwise have its newest rows excluded here, which
+    -- would be a silent under-count and a worse bug than the one this fixes. Do not delete as dead
+    -- weight -- it is doing all the pruning.
+    AND   collection_time >= $3
 ),
 plan_agg AS
 (
@@ -350,8 +373,9 @@ LIMIT 20";
     /// cost >= 2x the best plan that query is known to perform well with. Emits one
     /// aggregate PLAN_REGRESSION fact. Sourced from Query Store (v_query_store_stats);
     /// no fact when Query Store is not enabled on the monitored databases.
-    /// Unlike other collectors this windows on last_execution_time (14-day comparison
-    /// window), NOT collection_time — see plan note.
+    /// Windows on last_execution_time (the 14-day comparison window) because a plan regression is about
+    /// when the query last RAN, not when we happened to collect it. It ALSO carries a redundant
+    /// collection_time bound so TimescaleDB can exclude chunks — see the note in the SQL (#2387).
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -361,7 +385,13 @@ LIMIT 20";
 
             using var cmd = new NpgsqlCommand(PlanRegressionSql, connection);
             cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-14)));
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays)));
+
+            /* #2387: the chunk-exclusion bound, one CLOCK-SKEW MARGIN below the comparison window. Bound as
+               its own parameter rather than written as "$2 - INTERVAL '1 day'" so the planner compares
+               against a bare parameter, which is the form runtime chunk exclusion handles most reliably. */
+            cmd.Parameters.AddWithValue(AsNaive(
+                context.TimeRangeStart.AddDays(-(PlanRegressionWindowDays + PlanRegressionSkewMarginDays))));
 
             var offenderCount = 0;
             var worstFactor = 0.0;

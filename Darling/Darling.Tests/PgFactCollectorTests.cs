@@ -351,4 +351,64 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
             $"DELETE FROM cpu_utilization_stats WHERE server_id IN ({TestServerId}, {EmptyServerId});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    /* ---------------- #2387: PLAN_REGRESSION must prune on the partitioning column ---------------- */
+
+    /// <summary>
+    /// The comparison window is on <c>last_execution_time</c> — a plan regression is about when the query
+    /// last RAN — but <c>query_store_stats</c> is partitioned and compressed on <c>collection_time</c>, so a
+    /// predicate on <c>last_execution_time</c> alone prunes nothing. Reported by @ethosthalsell: every
+    /// analysis cycle read the server's whole history and decompressed whatever was compressed, PER SERVER,
+    /// with cost scaling on STORE SIZE rather than on the configured window — which is why no VM size fixed
+    /// it. Same class as #2344's unbounded watermark <c>MAX</c>, one query over.
+    ///
+    /// <para><b>Why the extra predicate is safe.</b> It cannot change the result: a row cannot be collected
+    /// before the execution it reports, so <c>last_execution_time &gt;= X</c> already implies
+    /// <c>collection_time &gt;= X</c>. It is redundant to the ANSWER and load-bearing for the PLANNER —
+    /// #2344's "provably free" argument exactly.</para>
+    ///
+    /// <para><b>Measured on the live use1 store</b> (44 GB, 6 chunks, 4 compressed): a
+    /// <c>collection_time</c> bound tight enough to bite reports <c>Chunks excluded during startup: 4</c>,
+    /// against <c>0</c> without one. The magnitude depends on how much history the store holds BEYOND the
+    /// window — on a store whose raw tier is trimmed to 4 days this prunes nothing and costs nothing, and on
+    /// the reporter's store carrying months it is the whole fix.</para>
+    /// </summary>
+    [Fact]
+    public void PlanRegressionSql_BoundsThePartitioningColumn_NotOnlyLastExecutionTime()
+    {
+        var sql = PgFactCollector.PlanRegressionSql;
+
+        /* The semantic window stays where it belongs. */
+        Assert.Contains("last_execution_time >= $2", sql, StringComparison.Ordinal);
+
+        /* And the partitioning column is bounded too, or TimescaleDB cannot exclude a single chunk. */
+        Assert.Contains("collection_time >= $3", sql, StringComparison.Ordinal);
+
+        /* Its own parameter, NOT "$2 - INTERVAL '1 day'": a bare parameter comparison is the form runtime
+           chunk exclusion handles most reliably, and it keeps the skew margin visible in C# where the
+           reason for it is written down. */
+        Assert.DoesNotContain("$2 - INTERVAL", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The chunk-exclusion bound sits BELOW the comparison window by a clock-skew margin.
+    /// <c>last_execution_time</c> comes from the monitored server's clock and <c>collection_time</c> from the
+    /// store's, so a monitored server running fast can report an execution later than the collection that
+    /// carried it. Without the margin those newest rows would be excluded — a silent under-count, and a
+    /// worse bug than the one being fixed. A margin ABOVE the window would be the wrong direction and prune
+    /// nothing extra, so the ordering is asserted rather than the literals.
+    /// </summary>
+    [Fact]
+    public void TheExclusionBound_SitsBelowTheComparisonWindow()
+    {
+        Assert.True(
+            PgFactCollector.PlanRegressionSkewMarginDays > 0,
+            "a zero margin would exclude rows whose monitored-server clock runs ahead of the store's");
+
+        Assert.Equal(14, PgFactCollector.PlanRegressionWindowDays);
+        Assert.True(
+            PgFactCollector.PlanRegressionWindowDays + PgFactCollector.PlanRegressionSkewMarginDays
+                > PgFactCollector.PlanRegressionWindowDays,
+            "the exclusion bound must reach further back than the comparison window, never less far");
+    }
 }
