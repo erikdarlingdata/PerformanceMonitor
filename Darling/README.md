@@ -510,11 +510,11 @@ Once enabled, open `http://localhost:5153/` in a browser on the service host. Li
   "thisStoreCovers": "the 42 us-east-1 SQL Server primaries",
   "stores": [
     {
-      "name": "prod-pos-use2-monitor-01",
+      "name": "prod-sql-use2-monitor-01",
       "covers": "the readable replicas of those same 42 primaries, in-region from us-east-2",
       "matches": ["use2"]
     },
-    { "name": "prod-pos-pg-monitor-01", "covers": "the Aurora PostgreSQL clusters", "matches": ["-aurora-"] }
+    { "name": "prod-sql-pg-monitor-01", "covers": "the Aurora PostgreSQL clusters", "matches": ["-aurora-"] }
   ]
 }
 ```

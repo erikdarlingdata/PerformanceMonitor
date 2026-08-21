@@ -18,7 +18,7 @@ namespace Darling.Tests;
 /// SKUs' get_collection_health serve so half-rate collection stops being visible only as a service-log
 /// warning. This SAME table is pinned identically in Lite.Tests so the two SKUs cannot drift.
 ///
-/// <para>The load-bearing case is the motivating measurement: prod-pos-use2-multi-01's four heavy
+/// <para>The load-bearing case is the motivating measurement: prod-sql-use2-multi-01's four heavy
 /// collectors averaged 22,141 + 16,590 + 13,544 + 8,437 ms against a 60s cadence — the body could not
 /// fit, every relaunch was skipped (~50 warnings/hour), the server collected at half rate, and all 40
 /// collectors read HEALTHY, because from each one's own seat nothing was wrong.</para>
