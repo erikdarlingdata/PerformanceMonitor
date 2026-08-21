@@ -52,6 +52,13 @@ jobs:
 
   # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
   # manual one — which executes from the dispatched ref (dev for the scheduled path).
+  #
+  # Each checkout resolves that ref EXPLICITLY rather than pinning `ref: dev`. Three of these
+  # were pinned, so a manual dispatch onto any other branch published dev's artifacts while
+  # reporting the dispatched ref as the run's head SHA — the run, the API and the release page
+  # all named a branch that was not what got built. That is worse than simply ignoring the
+  # input, because the mismatch is invisible: it surfaced as a release-candidate build stamping
+  # the PREVIOUS version, which is only noticeable if you happen to read the artifact name.
   check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -61,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
           fetch-depth: 0
 
       - name: Check for new commits in last 24 hours
@@ -91,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -195,7 +202,20 @@ jobs:
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)"
           }
-          $checksums | Out-File -FilePath releases/SHA256SUMS.txt -Encoding utf8
+          # LF and no BOM, written explicitly (#2383). Out-File on Windows emits CRLF whatever
+          # the encoding, and `shasum -c` on macOS/Linux then takes the trailing \r as part of
+          # the FILENAME - every entry reports "No such file or directory / FAILED open or
+          # read", which is precisely what a tampered download looks like. The hashes were
+          # always right; the file just could not be used by the tool it exists for, on the two
+          # platforms where that tool is the default. A BOM breaks the first line the same way.
+          #
+          # This is the SECOND copy of that step. #2384 fixed the release workflow and left this
+          # one, so every nightly since has published a checksum file nobody outside Windows can
+          # verify - and the nightly is the build most likely to be checked by hand.
+          [IO.File]::WriteAllText(
+            "$PWD/releases/SHA256SUMS.txt",
+            (($checksums -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false))
           Write-Host "Checksums:"
           $checksums | ForEach-Object { Write-Host $_ }
 
@@ -411,7 +431,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6

@@ -521,6 +521,9 @@ jobs:
           # read", which is precisely what a tampered download looks like. The hashes were
           # always right; the file just could not be used by the tool it exists for, on the two
           # platforms where that tool is the default. A BOM breaks the first line the same way.
+          #
+          # There is a SECOND copy of this step in nightly.yml. #2384 fixed only this one, and the
+          # nightly went on publishing CRLF for another day; keep them in step.
           [IO.File]::WriteAllText(
             "$PWD/releases/SHA256SUMS.txt",
             (($checksums -join "`n") + "`n"),
