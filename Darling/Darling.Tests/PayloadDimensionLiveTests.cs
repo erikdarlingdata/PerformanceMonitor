@@ -793,6 +793,111 @@ public sealed class PayloadDimensionLiveTests
         }
     }
 
+    // ── (g2) the row-capped drain (#2388) ──
+
+    /// <summary>
+    /// #2388's batched drain against a REAL table, which is the half nothing covered. The existing drain
+    /// tests inject a fake executor and prove the LOOP arithmetic; the SQL those batches actually run had
+    /// only ever been asserted as a string. Both halves can be individually correct and still not delete
+    /// anything: <c>RowCappedDeleteSql</c> puts the cutoff bound, the ORDER BY and the LIMIT inside a
+    /// <c>ctid IN (...)</c> subquery, and that shape has to survive contact with a real planner.
+    ///
+    /// <para>This is the failure #2386 measured on the dogfood store, so it is worth stating what "works"
+    /// means here: not that the statement succeeds, but that repeated bounded statements DRAIN. A single
+    /// batch returning rows looked like success in the field for a week while the table grew, because the
+    /// purge peeled one slice and reported <c>0 failed</c>. The assertion is therefore on the total and on
+    /// the batch COUNT — one batch that deletes something is exactly the bug.</para>
+    ///
+    /// <para>Runs with a deliberately tiny cap rather than the production 50,000 so the multi-batch path is
+    /// exercised in a few hundred rows. The cap is the drain's batch size by construction (a batch at the
+    /// cap forces another round), so a small one tests the same control flow the real one does.</para>
+    /// </summary>
+    [Fact]
+    public async Task RowCappedDelete_DrainsAcrossMultipleBatches_AndLeavesFreshRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var run = Guid.NewGuid().ToString("N")[..12];
+
+        const int cap = 25;
+        const int expiredCount = 110;   // 4 full batches + a partial one -> 5 executions
+        const int liveCount = 7;
+
+        /* Ancient timestamps around an ancient cutoff: the dim GC is fleet-wide (a dim row has no
+           server_id) and this class shares a rig, so the window must only ever contain this run's rows. */
+        var expiredSeen = new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var liveSeen = new DateTime(2001, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var cutoff = new DateTime(2001, 3, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        var expiredDigests = new List<byte[]>(expiredCount);
+        var liveDigests = new List<byte[]>(liveCount);
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            for (var i = 0; i < expiredCount + liveCount; i++)
+            {
+                var expired = i < expiredCount;
+                var payload = $"<ShowPlanXML drain=\"{(expired ? "old" : "new")}-{run}-{i}\"/>";
+                var digest = PayloadDimensions.Digest(payload);
+                (expired ? expiredDigests : liveDigests).Add(digest);
+
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen) VALUES ($1, $2, $3)",
+                    connection);
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
+                insert.Parameters.AddWithValue(payload);
+                insert.Parameters.AddWithValue(expired ? expiredSeen : liveSeen);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var batches = 0;
+            using var delete = new NpgsqlCommand(
+                DarlingRetention.RowCappedDeleteSql(
+                    PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn, cap),
+                connection);
+            delete.Parameters.AddWithValue(cutoff);
+
+            var deleted = await DarlingRetention.DrainBatchesAsync(
+                async batchCt =>
+                {
+                    batches++;
+                    return await delete.ExecuteNonQueryAsync(batchCt);
+                },
+                cap,
+                ct);
+
+            /* Every expired row, and only those. */
+            Assert.Equal(expiredCount, deleted);
+
+            /* The point of the fix: it took more than one statement to get there. A single execution
+               deleting 110 rows would mean the LIMIT never bound, which is the unbounded statement
+               #2388 replaced — the one that times out on a real backlog. */
+            Assert.Equal(5, batches);
+
+            Assert.Equal(0L, await ScalarAsync(
+                connection, "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen < $1", ct, cutoff));
+            Assert.Equal((long)liveCount, await ScalarAsync(
+                connection,
+                "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen = $1", ct, liveSeen));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var digest in expiredDigests.Concat(liveDigests))
+                {
+                    await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+                }
+            });
+        }
+    }
+
     // ── (g) the recompression verb (#2076) ──
 
     [Fact]

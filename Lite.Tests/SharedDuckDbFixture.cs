@@ -25,11 +25,23 @@ namespace PerformanceMonitorLite.Tests;
 /// concurrently across classes.
 ///
 /// <para><b>What that does NOT buy (#2376).</b> The file separation is real, but it does
-/// not make the classes independent at RUNTIME: <c>DuckDbInitializer</c>'s reader/writer
-/// lock is <c>private static readonly</c>, so every read and write in the suite queues on
-/// ONE process-wide lock no matter which database file it targets. Classes therefore still
-/// serialize against each other inside their locked sections — through a lock rather than
-/// through a collection, and without a collection's ordering.</para>
+/// not make the classes independent at RUNTIME: <c>DuckDbInitializer</c>'s lock is
+/// <c>private static readonly</c>, so it is ONE lock for the whole process no matter which
+/// database file a call targets.</para>
+///
+/// <para>Be precise about what that costs, because the obvious reading overstates it. The
+/// lock is a <c>ReaderWriterLockSlim</c>, so readers do NOT queue behind each other — any
+/// number of <c>AcquireReadLock</c> holders run concurrently across classes, and this suite
+/// is overwhelmingly readers (~184 read call sites against ~20 write sites). The
+/// serialization is writer-driven: a writer excludes everyone, and readers block only while
+/// a writer holds the lock or is waiting for it. The contention is therefore bursty around
+/// the write sites — archival, compaction, CHECKPOINT, the mute and alert-history stores —
+/// rather than a flat tax on every database call.</para>
+///
+/// <para>That distinction decides what a fix could even look like: a collection fixture
+/// would serialize the READERS as well, so it does not address writer-driven contention and
+/// would cost more than it saves. Nobody has measured how much of the suite's ~190-220s is
+/// this, and the honest answer is that it may be very little.</para>
 ///
 /// <para>That lock is correct and must not be narrowed to fix this: production creates
 /// several <c>DuckDbInitializer</c> instances over the same <c>App.DatabasePath</c>
