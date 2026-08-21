@@ -165,8 +165,38 @@ public class DarlingPrintEndpointTokenTests
 
         Assert.Equal(1, exit);
         Assert.Equal(string.Empty, output.ToString());
-        Assert.Contains("only decrypts on the machine that produced it", error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("only decrypts on the host that produced it", error.ToString(), StringComparison.Ordinal);
         Assert.Contains("--configure-network", error.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A CORRUPTED blob gets the same verdict as an undecryptable one.
+    ///
+    /// <para>Review catch on #2479. <c>DarlingSecrets.Unprotect</c> runs <c>Convert.FromBase64String</c>
+    /// BEFORE <c>ProtectedData.Unprotect</c>, so a truncated or hand-edited <c>encryptedToken</c> raises
+    /// <see cref="FormatException"/>, not <see cref="System.Security.Cryptography.CryptographicException"/>.
+    /// Catching only the cryptographic half sent it to the arm that says "the token itself is fine and does
+    /// not need regenerating" — the exact opposite of true for a blob that no longer decodes.</para>
+    /// </summary>
+    [Fact]
+    public void Elevated_WhenTheBlobIsCorrupted_SaysItCannotBeRecovered_NotThatItIsFine()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = DarlingCliCommands.PrintEndpointToken(
+            "mcp", "MCP bearer", "--print-mcp-token", "clients send it as a header",
+            elevated: true, configured: true,
+            () => throw new FormatException("The input is not a valid Base-64 string."),
+            output, error);
+
+        var message = error.ToString();
+
+        Assert.Equal(1, exit);
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Contains("cannot be recovered", message, StringComparison.Ordinal);
+        Assert.Contains("--configure-network", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not need regenerating", message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -282,9 +312,9 @@ public class DarlingNetworkBlockLifetimeTests
     [Fact]
     public void TheThreeStates_ReadDifferently_AndEachNamesTheKeyAndTheRestart()
     {
-        var absent = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", blockConfigured: false, exposed: false, null, null);
-        var loopback = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", blockConfigured: true, exposed: false, null, null);
-        var exposed = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", blockConfigured: true, exposed: true, "10.0.0.7", "10.0.0.0/24");
+        var absent = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", blockConfigured: false, exposed: false, listenIsExposedAddress: false, null, null);
+        var loopback = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", blockConfigured: true, exposed: false, listenIsExposedAddress: true, null, null);
+        var exposed = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", blockConfigured: true, exposed: true, listenIsExposedAddress: true, "10.0.0.7", "10.0.0.0/24");
 
         Assert.NotEqual(absent, loopback);
         Assert.NotEqual(loopback, exposed);
@@ -312,9 +342,9 @@ public class DarlingNetworkBlockLifetimeTests
     [Fact]
     public void OnlyTheLoopbackWithABlock_TellsYouToRestart()
     {
-        var exposed = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", true, true, "10.0.0.7", "10.0.0.0/24");
-        var loopback = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", true, false, null, null);
-        var absent = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", false, false, null, null);
+        var exposed = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", true, true, true, "10.0.0.7", "10.0.0.0/24");
+        var loopback = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", true, false, true, null, null);
+        var absent = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", false, false, false, null, null);
 
         Assert.Contains("restart the service", loopback, StringComparison.Ordinal);
         Assert.DoesNotContain("restart the service", exposed, StringComparison.Ordinal);
@@ -325,12 +355,61 @@ public class DarlingNetworkBlockLifetimeTests
         Assert.Contains("why the exposure was refused", loopback, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A block with no LAN <c>listen</c> must not send the operator hunting for a log line nobody wrote.
+    ///
+    /// <para>Review catch on #2479, and this issue's own defect committed by the fix for it.
+    /// <c>IsConfigured</c> is true if ANY of listen / allowFrom / token is set, but a block whose
+    /// <c>listen</c> is absent or loopback never asks for exposure: <c>ResolveBind</c> answers
+    /// <c>LoopbackByDefault</c>, whose severity maps to null, so nothing at all is logged. The trap branch
+    /// told that operator "the mcp.network line logged above says why the exposure was refused" — pointing
+    /// at a message that was never written, about a refusal that never happened.</para>
+    /// </summary>
+    [Fact]
+    public void ABlockWithNoLanListen_NamesTheMissingField_InsteadOfPromisingALogLine()
+    {
+        var noListen = DarlingHostBinding.DescribeNetworkBlockLifetime(
+            "mcp", "MCP", blockConfigured: true, exposed: false, listenIsExposedAddress: false, null, null);
+
+        Assert.DoesNotContain("why the exposure was refused", noListen, StringComparison.Ordinal);
+        Assert.DoesNotContain("logged above", noListen, StringComparison.Ordinal);
+        Assert.Contains("no exposure was requested and none was refused", noListen, StringComparison.Ordinal);
+        Assert.Contains("there is no further log line about it", noListen, StringComparison.Ordinal);
+
+        /* And it names the field that is actually missing, which is the operator's next keystroke. */
+        Assert.Contains("mcp.network.listen", noListen, StringComparison.Ordinal);
+        Assert.Contains("RESTART", noListen, StringComparison.Ordinal);
+
+        /* The refused case still points at the line, because that path really does log one. */
+        var refused = DarlingHostBinding.DescribeNetworkBlockLifetime(
+            "mcp", "MCP", blockConfigured: true, exposed: false, listenIsExposedAddress: true, "10.0.0.7", null);
+        Assert.Contains("why the exposure was refused", refused, StringComparison.Ordinal);
+        Assert.Contains("REFUSED", refused, StringComparison.Ordinal);
+
+        Assert.NotEqual(noListen, refused);
+    }
+
+    /// <summary>Both hosts must PASS the listen fact, or the split above cannot happen at runtime.</summary>
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs", "config.Mcp.Network?.Listen")]
+    [InlineData("DarlingWebHostService.cs", "config.Web.Network?.Listen")]
+    public void EachHost_TellsTheReportWhetherExposureWasEvenAskedFor(string fileName, string accessor)
+    {
+        var source = ReadHostSource(fileName);
+
+        var call = source.IndexOf("DarlingHostBinding.DescribeNetworkBlockLifetime(", StringComparison.Ordinal);
+        Assert.True(call >= 0, $"{fileName} no longer states its network block's lifetime at start-up (#2479)");
+
+        var arguments = source[call..Math.Min(source.Length, call + 500)];
+        Assert.Contains($"DarlingNetwork.IsExposedListenAddress({accessor})", arguments, StringComparison.Ordinal);
+    }
+
     /// <summary>The exposed line quotes what this process is actually bound to, so an operator comparing it
     /// against the file can see at a glance whether the file has moved underneath it.</summary>
     [Fact]
     public void TheExposedLine_QuotesTheAddressAndCidrItIsHolding()
     {
-        var report = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", true, true, "10.197.53.214", "10.197.0.0/16");
+        var report = DarlingHostBinding.DescribeNetworkBlockLifetime("mcp", "MCP", true, true, true, "10.197.53.214", "10.197.0.0/16");
 
         Assert.Contains("10.197.53.214", report, StringComparison.Ordinal);
         Assert.Contains("10.197.0.0/16", report, StringComparison.Ordinal);
@@ -342,7 +421,7 @@ public class DarlingNetworkBlockLifetimeTests
     [Fact]
     public void TheSectionName_ThreadsThroughEveryKeyItNames()
     {
-        var web = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", true, false, null, null);
+        var web = DarlingHostBinding.DescribeNetworkBlockLifetime("web", "Web dashboard", true, false, true, null, null);
 
         Assert.Contains("web.network", web, StringComparison.Ordinal);
         Assert.Contains("config.config_service.web_enabled", web, StringComparison.Ordinal);

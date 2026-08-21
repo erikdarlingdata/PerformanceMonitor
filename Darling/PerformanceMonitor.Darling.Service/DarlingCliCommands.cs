@@ -573,19 +573,26 @@ public static class DarlingCliCommands
         {
             token = resolveToken();
         }
-        catch (System.Security.Cryptography.CryptographicException ex)
+        /* The BLOB is unusable - either it will not decrypt here, or it is not a blob at all.
+           DarlingSecrets.Unprotect runs Convert.FromBase64String BEFORE ProtectedData.Unprotect, so a
+           truncated or hand-edited encryptedToken raises FormatException rather than
+           CryptographicException (review catch on #2479). Both need the same answer, and it is the
+           opposite of the one below: this token cannot be recovered and must be regenerated. Catching only
+           the cryptographic half sent a corrupted blob to the arm that says "the token itself is fine".
+
+           ResolveToken's OTHER failures - env: and file: secret references - raise
+           InvalidOperationException naming the missing variable or the unreadable path, and appending
+           "regenerate it" to those would be a false diagnosis pointing at a destructive fix: regenerating
+           invalidates every configured client when the actual repair is to set the variable or correct the
+           path. So the advice is gated on the exceptions that earn it. */
+        catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or FormatException)
         {
-            /* The DPAPI cause, and ONLY the DPAPI cause. ResolveToken also resolves env: and file: secret
-               references, and those fail with an InvalidOperationException whose message already names the
-               missing variable or the unreadable path (review catch on #2479). Appending "a DPAPI blob only
-               decrypts on the machine that produced it - regenerate it" to THOSE would be a false diagnosis
-               pointing at a destructive fix: regenerating invalidates every configured client, when the
-               actual repair is to set the environment variable or correct the path. So the advice is gated
-               on the exception that earns it, and the arm below reports what it actually knows. */
             error.WriteLine($"Could not read the {tokenName} token: {ex.Message}");
             error.WriteLine(
-                $"A DPAPI blob only decrypts on the machine that produced it, so a {section}.network.encryptedToken "
-                + "copied from another host can never be read here - regenerate it with --configure-network.");
+                $"The {section}.network.encryptedToken is unreadable on this machine: a DPAPI blob only decrypts on "
+                + "the host that produced it, and a truncated or hand-edited one does not decode at all. Either way "
+                + "this token cannot be recovered - regenerate it with --configure-network, which invalidates every "
+                + "client currently configured against it.");
             return 1;
         }
         catch (Exception ex)

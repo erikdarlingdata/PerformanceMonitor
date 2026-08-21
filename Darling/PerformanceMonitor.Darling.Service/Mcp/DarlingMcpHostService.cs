@@ -763,6 +763,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 "{Report}",
                 DarlingHostBinding.DescribeNetworkBlockLifetime(
                     "mcp", "MCP", config.Mcp.Network?.IsConfigured ?? false, networkMode,
+                    DarlingNetwork.IsExposedListenAddress(config.Mcp.Network?.Listen),
                     networkMode ? primaryBind.ToString() : null,
                     networkMode ? allowedCidr.ToString() : null));
 

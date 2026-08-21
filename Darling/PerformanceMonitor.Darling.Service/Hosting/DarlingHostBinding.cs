@@ -429,6 +429,13 @@ internal static class DarlingHostBinding
     /// <param name="surface">"MCP" or "Web dashboard" - how the log names this endpoint elsewhere.</param>
     /// <param name="blockConfigured">A <c>{section}.network</c> block was present in the file.</param>
     /// <param name="exposed">This endpoint actually bound a LAN address as a result.</param>
+    /// <param name="listenIsExposedAddress">The block's <c>listen</c> names a non-loopback address — i.e.
+    /// the operator ASKED for exposure. This separates the two ways an endpoint can be configured and still
+    /// loopback-bound, which log very differently: a REFUSED exposure is reported by <c>LogBindReason</c> at
+    /// Warning or Critical, while an absent or loopback <c>listen</c> resolves to
+    /// <c>BindReason.LoopbackByDefault</c>, whose severity map is null — so NOTHING is logged. Without the
+    /// distinction the trap branch pointed an operator at a preceding line that was never written, which is
+    /// this issue's own defect committed by the fix for it (review catch on #2479).</param>
     /// <param name="listen">The bound address, when exposed.</param>
     /// <param name="allowFrom">The source CIDR, when exposed.</param>
     internal static string DescribeNetworkBlockLifetime(
@@ -436,6 +443,7 @@ internal static class DarlingHostBinding
         string surface,
         bool blockConfigured,
         bool exposed,
+        bool listenIsExposedAddress,
         string? listen,
         string? allowFrom)
     {
@@ -465,14 +473,31 @@ internal static class DarlingHostBinding
                 + storeHalf;
         }
 
-        /* The trap, named. An operator who edited the block and restarted nothing sees this and has their
-           answer; one who DID restart is pointed at the fail-closed reason already logged above rather than
-           being told the same thing twice in different words. */
-        return $"{surface} network exposure: darling.json DEFINES {section}.network, but this endpoint is bound "
-            + "loopback-only. That block was read at start-up and is FIXED for the lifetime of this process, so "
-            + "editing darling.json now changes nothing until the service is RESTARTED. If you just edited it to "
-            + $"expose this endpoint, restart the service; if you already restarted, the {section}.network line "
-            + "logged above says why the exposure was refused."
+        /* The trap, named - in the TWO ways it happens, because they need different next steps and only one
+           of them has a preceding log line to point at.
+
+           A block whose listen is absent or loopback never ASKS for exposure: ResolveBind answers
+           LoopbackByDefault, whose severity maps to null, so nothing is logged and there is no "why" to go
+           and read. Telling that operator to find the reason above sends them hunting for a message that
+           was never written - this issue's own defect, committed by the fix for it. So that state names the
+           field that is missing instead. */
+        if (!listenIsExposedAddress)
+        {
+            return $"{surface} network exposure: darling.json DEFINES {section}.network, but its 'listen' is absent "
+                + "or a loopback address, so no exposure was requested and none was refused - there is no further "
+                + $"log line about it. Set {section}.network.listen to this host's LAN address (with allowFrom and a "
+                + "token) and RESTART: that block is read once at start-up and is fixed for the lifetime of this "
+                + "process, so editing darling.json now changes nothing until then."
+                + storeHalf;
+        }
+
+        /* Exposure WAS asked for and refused, and that path always logs its reason at Warning or Critical -
+           so pointing at it is honest, and repeating it here in different words would not be. */
+        return $"{surface} network exposure: darling.json asks for {section}.network exposure on '{listen}', but this "
+            + "endpoint is bound loopback-only, so it was REFUSED. That block was read at start-up and is FIXED for "
+            + "the lifetime of this process, so editing darling.json now changes nothing until the service is "
+            + $"RESTARTED. If you just edited it, restart the service; if you already restarted, the {section}.network "
+            + "line logged above says why the exposure was refused."
             + storeHalf;
     }
 }
