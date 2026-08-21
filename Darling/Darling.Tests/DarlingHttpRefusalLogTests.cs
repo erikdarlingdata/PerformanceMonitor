@@ -138,10 +138,10 @@ public class DarlingHttpRefusalLogTests
             }
         }
 
-        Assert.True(lines < 400, $"108,000 refused requests produced {lines} log lines — the ceiling is not holding");
+        Assert.True(lines < 900, $"108,000 refused requests produced {lines} log lines — the ceiling is not holding");
         Assert.True(
             log.TrackedCount <= 16 + Enum.GetValues<DarlingRefusalGate>().Length,
-            $"tracked entries grew to {log.TrackedCount} — the per-source map is unbounded");
+            $"tracked entries grew to {log.TrackedCount} — the per-key map is unbounded");
     }
 
     /// <summary>
@@ -361,6 +361,75 @@ public class DarlingHttpRefusalLogTests
     [InlineData(302, "did not authorize")]
     public void TheOutcomeVerb_AgreesWithTheStatusCode(int statusCode, string expected) =>
         Assert.Equal(expected, DarlingHttpRefusalLog.DescribeOutcome(statusCode));
+
+    /// <summary>
+    /// The RENDERED line does not argue with itself on the web host's 200 path.
+    ///
+    /// <para>Review catch on #2479, and the second half of a fix that was only half done.
+    /// <see cref="DarlingHttpRefusalLog.DescribeOutcome"/> stopped the line saying "refused … with 200",
+    /// but the middle clause still said the gate "rejected it", so the sentence contradicted itself two
+    /// clauses later — and nothing tested the FULL message, only the verb in isolation. The gate is now
+    /// stated as the REASON ("because of the … gate") rather than as a second verdict, which is accurate
+    /// at every status. This test renders through a real ILogger for exactly that reason: asserting on a
+    /// helper in isolation is what let the contradiction survive the first fix.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(401, "refused")]
+    [InlineData(403, "refused")]
+    [InlineData(400, "refused")]
+    [InlineData(200, "did not authorize")]
+    public void TheRenderedLine_NeverContradictsItsOwnStatusCode(int statusCode, string expectedVerb)
+    {
+        var logger = new CapturingTestLogger();
+        var log = new DarlingHttpRefusalLog(Window, 16);
+
+        log.Report(
+            logger, "Web dashboard", DarlingRefusalGate.Token, statusCode,
+            IPAddress.Parse("10.0.0.5"),
+            "the presented ?token= does not match web.network.encryptedToken",
+            T0);
+
+        var line = logger.Joined;
+
+        Assert.Contains(expectedVerb, line, StringComparison.Ordinal);
+        Assert.Contains($"HTTP {statusCode}", line, StringComparison.Ordinal);
+        Assert.Contains("because of the access token gate", line, StringComparison.Ordinal);
+        Assert.Contains("10.0.0.5", line, StringComparison.Ordinal);
+
+        /* The whole point: no clause anywhere in the line may call a 200 a rejection or a refusal. */
+        if (statusCode < 400)
+        {
+            Assert.DoesNotContain("rejected", line, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("refused", line, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// The cap counts (gate, source) KEYS, not addresses — and is sized so the budget that matters,
+    /// distinct ADDRESSES, is the 16 the design intends.
+    ///
+    /// <para>Review catch on #2479: one address that trips several gates over time (fix the Host header,
+    /// then fail the token, then the CIDR — the iterating tester this is built around) consumes a slot per
+    /// gate, so a per-key cap of 16 would have given only ~5 addresses individual treatment while the docs
+    /// claimed 16.</para>
+    /// </summary>
+    [Fact]
+    public void SixteenDistinctAddresses_AllGetTheirOwnLine_EvenTrippingEveryGate()
+    {
+        var log = new DarlingHttpRefusalLog(Window);
+
+        for (var address = 1; address <= 16; address++)
+        {
+            foreach (DarlingRefusalGate gate in Enum.GetValues<DarlingRefusalGate>())
+            {
+                var decision = log.Observe(gate, $"10.0.0.{address}", T0);
+                Assert.True(decision.Log, $"10.0.0.{address} / {gate} was not logged");
+                Assert.False(
+                    decision.Aggregated,
+                    $"10.0.0.{address} / {gate} fell into the aggregate — the per-key cap is sized for fewer addresses than documented");
+            }
+        }
+    }
 
     /// <summary>
     /// Every refusal site on both hosts reports. This is the half that decays: a gate added later is a

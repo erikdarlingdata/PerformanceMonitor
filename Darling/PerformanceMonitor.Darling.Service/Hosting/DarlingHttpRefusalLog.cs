@@ -51,8 +51,8 @@ internal enum DarlingRefusalGate
 /// nothing to lose because a second identical refusal carries no information the first did not.</para>
 ///
 /// <para><b>Why there is a cap, and what it costs.</b> A per-source map is unbounded by construction on an
-/// exposed port. Past <see cref="DefaultMaxTrackedSources"/> distinct sources in a window, further sources
-/// fold into one per-gate aggregate bucket that says so, which bounds both memory and log volume to
+/// exposed port. Past <see cref="DefaultMaxTrackedKeys"/> distinct (gate, source) keys in a window, further
+/// sources fold into one per-gate aggregate bucket that says so, which bounds both memory and log volume to
 /// (cap + gate count) entries and one line per gate per window. The accepted cost: under an active scan
 /// the per-source slots may be taken, and a tester arriving mid-scan lands in the aggregate. That is
 /// visible rather than silent — the line says the per-source budget is full — and if the port is being
@@ -76,8 +76,17 @@ internal sealed class DarlingHttpRefusalLog
     /// </summary>
     internal static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(10);
 
-    /// <summary>Distinct sources tracked before new ones fold into the per-gate aggregate.</summary>
-    internal const int DefaultMaxTrackedSources = 16;
+    /// <summary>
+    /// Distinct (gate, source) KEYS tracked before new ones fold into the per-gate aggregate.
+    ///
+    /// <para>Keys, not addresses, and the distinction is not pedantic (review catch on #2479): the map is
+    /// keyed per (gate, source), so one address that trips more than one gate over time — fix the Host
+    /// header, then get refused on the token, then on the CIDR, which is the iterating tester this feature
+    /// is built around — consumes a slot per gate it trips, not one slot total. Sized at
+    /// <c>16 x the gate count</c> so the budget an operator actually cares about, distinct ADDRESSES, is
+    /// the 16 the design intends rather than the ~5 a per-key cap of 16 would deliver.</para>
+    /// </summary>
+    internal const int DefaultMaxTrackedKeys = 16 * 3;
 
     /// <summary>Longest a Host header is echoed into the log.</summary>
     internal const int MaxEchoedLength = 64;
@@ -87,7 +96,7 @@ internal sealed class DarlingHttpRefusalLog
     internal const string UnknownSource = "unknown";
 
     private readonly TimeSpan _window;
-    private readonly int _maxTrackedSources;
+    private readonly int _maxTrackedKeys;
 
     /* A plain Dictionary under a lock rather than a ConcurrentDictionary: the decision reads AND writes
        several fields together (last-logged, last-seen, the suppressed counter) and has to consult Count
@@ -97,10 +106,10 @@ internal sealed class DarlingHttpRefusalLog
     private readonly Dictionary<string, Entry> _perSource = new(StringComparer.Ordinal);
     private readonly Dictionary<DarlingRefusalGate, Entry> _perGate = new();
 
-    public DarlingHttpRefusalLog(TimeSpan? window = null, int? maxTrackedSources = null)
+    public DarlingHttpRefusalLog(TimeSpan? window = null, int? maxTrackedKeys = null)
     {
         _window = window ?? DefaultWindow;
-        _maxTrackedSources = maxTrackedSources ?? DefaultMaxTrackedSources;
+        _maxTrackedKeys = maxTrackedKeys ?? DefaultMaxTrackedKeys;
     }
 
     /// <summary>Whether this refusal should be written, and what the line owes the reader.</summary>
@@ -132,7 +141,7 @@ internal sealed class DarlingHttpRefusalLog
                 return Fold(tracked, nowUtc, aggregated: false);
             }
 
-            if (_perSource.Count < _maxTrackedSources)
+            if (_perSource.Count < _maxTrackedKeys)
             {
                 /* First sighting: logged immediately and unconditionally. This is the line the operator is
                    waiting for, and making it wait for a window would be the whole feature failing. */
@@ -342,7 +351,7 @@ internal sealed class DarlingHttpRefusalLog
             : string.Empty;
 
         logger.LogWarning(
-            "{Surface} {Outcome} a request from {Source} (HTTP {Status}): the {Gate} gate rejected it — {Reason}.{Suppressed}{Scope}",
+            "{Surface} {Outcome} a request from {Source} (HTTP {Status}), because of the {Gate} gate — {Reason}.{Suppressed}{Scope}",
             surface,
             DescribeOutcome(statusCode),
             source,
