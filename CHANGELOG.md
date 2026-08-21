@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-08-21
+
+Two defects this release fixes shipped in 3.5.0 itself, and both are the kind that produce no signal: one makes the store grow without bound while retention reports success, the other makes an analysis query read the whole history table every run. The third item is a feature 3.5.0 shipped with no way to turn on.
+
+### Fixed
+- **Plan-dimension retention now deletes by ROW COUNT, not by time slice, so it can finish inside the statement timeout** ([#2388], [#2386]) - `query_plan_dim` is a plain table (never a hypertable), so `drop_chunks` cannot touch it and every expired row leaves through a `DELETE`. That delete was bounded by a TIME slice, which is the wrong bound for this table: slice width is set by how much data sits at the OLD end, not by how far behind retention is, so a slice can be arbitrarily large while the statement still has 300 seconds to finish. On the dogfood fleet it was not close - four consecutive purges died at ~301s with `Exception while reading from stream`, and because the statement is unbounded a timeout rolls back everything it had done, so each of those runs deleted **zero** rows. The runs that did NOT time out were worse, because they reported success: on 2026-08-20 the purge logged `0 failed` while `query_plan_dim` grew 366k rows the same day, having peeled a thin slice while ~380k rows/day crossed the horizon. The steady state was retention removing roughly 6% of what expired, falling ~360k rows/day behind with `0 failed` in the log and 1.16 M expired rows accumulated. Bounding by rows instead (50,000 per statement, looping until the slice is drained) makes every statement finish in well under the timeout regardless of how much is queued, and the loop accumulates its count OUTSIDE the try so a mid-drain failure reports the rows it actually deleted rather than discarding the tally. Fixes the case where a store that fell behind could never catch up, because the backlog that caused the timeout was also what made the next attempt bigger.
+- **The PLAN_REGRESSION analysis query now bounds `collection_time`, so TimescaleDB can exclude chunks** ([#2390]) - the query filtered on the columns it compares but never on the PARTITIONING column, and chunk exclusion needs a predicate on the partitioning column specifically. Without one, every run read and decompressed the entire `query_store_stats` history - the full retention window, growing with it, every analysis cycle. The fix adds an explicit 14-day bound (plus a 1-day margin for collection skew) as a third bound parameter. Measured with `Chunks excluded during startup`, which read 0 before and excludes the majority after. Note the first measurement of this looked like a 199x improvement and was mostly cache warming; reversing the query order showed identical reads both ways, and the chunk-exclusion count is what actually proves the mechanism.
+- **`SHA256SUMS.txt` is written with LF, so `shasum -c` accepts it** ([#2384]) - the release wrote it with CRLF, and `shasum -c` treats the trailing `\r` as part of the filename, so verifying a download failed on every non-Windows machine with a "no properly formatted checksum lines found" error. Anyone verifying signatures on macOS or Linux - the people most likely to check - got a broken file.
+
+### Added
+- **The file-growth alert's four knobs reach a user on all three surfaces** ([#2391], [#2349]) - #2349 shipped the Database File Growth alert **OFF** with its knobs wired through the store and the alerting engine and exposed nowhere: no MCP group, no Settings control on either SKU. For an alert that ships off, that made a hand-written `UPDATE` against `config_alert_settings` the only supported way to enable a feature that had been requested. `get_alert_settings` now reports a `file_growth` group and `update_alert_settings` accepts `enabled` / `rise_mb` / `volume_percent` / `lookback_minutes`; both Settings windows carry the control row, including the `Will alert when:` summary, which previously could omit an alert that was enabled and able to fire. Write bounds match the engine's clamps exactly, pinned by a test that reads both files, so no surface can accept a value the engine silently rewrites on read - and zero stays valid on the rise and volume gates, because #2349 uses zero to disable a gate and a floor of 1 would have removed the rise-only and level-only configurations. The service side needed no change: `StoreConfigProvider` has selected and read all four columns since #2349. Reported by @gotqn.
+
+### Changed
+- **The DuckDB test fixture's doc comment now describes what class-per-database actually buys** ([#2385]) - it claimed the `IClassFixture` choice kept xUnit's cross-class parallelism intact, which `DuckDbInitializer`'s process-wide lock does not permit. The file separation is real and worth having; the parallelism claim was not, and a comment asserting a property the code does not hold is worse than no comment when the next person is deciding whether to change the topology.
+
 ## [3.5.0] - 2026-08-19
 
 ### Added
@@ -2850,3 +2865,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#2201]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2201
 [#2205]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2205
 [#2195]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2195
+[#2384]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2384
+[#2385]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2385
+[#2386]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2386
+[#2388]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2388
+[#2390]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2390
+[#2391]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2391
