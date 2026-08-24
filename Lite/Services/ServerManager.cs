@@ -51,7 +51,13 @@ public class ServerManager
             CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
             DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
             CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
-            CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
+            /* #2575: DB_ID alone answers NULL both for a database that does not exist and for one the caller
+       cannot SEE, so a least-privilege monitoring login without VIEW ANY DATABASE reported every RDS
+       instance as not-RDS - measured across 84 of them. SUSER_SNAME is executable by public and is not
+       filtered by database visibility: RDS renames the sa-equivalent principal (SID 0x01) to 'rdsa',
+       where a stock instance answers 'sa'. OR'd rather than replaced, so a privileged login keeps the
+       direct signal and a restricted one gains a second chance at the truth. */
+    CASE WHEN DB_ID('rdsadmin') IS NOT NULL OR SUSER_SNAME(0x01) = 'rdsa' THEN 1 ELSE 0 END AS is_aws_rds,
             HAS_DBACCESS(N'msdb') AS has_msdb_access";
 
     /// <summary>

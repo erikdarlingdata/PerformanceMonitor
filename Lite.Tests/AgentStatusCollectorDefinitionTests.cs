@@ -64,13 +64,14 @@ public sealed class AgentStatusCollectorDefinitionTests
     }
 
     [Fact]
-    public void AppliesTo_CollectsEverywhereExceptAzureSqlDbRdsAndNoMsdb()
+    public void AppliesTo_CollectsEverywhereExceptAzureSqlDbAndNoMsdb()
     {
         /* Azure SQL DB has no Agent / no sys.dm_server_services; AWS RDS is a managed service that doesn't
            expose the OS/service-control state sys.dm_server_services reads — skip both rather than return an
            empty snapshot that would drive a false "Agent Not Running" alert. */
         Assert.False(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAzureSqlDb = true }));
-        Assert.False(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAwsRds = true }));
+        /* #2575: RDS has SQL Agent and this collects there — measured on 84 instances. */
+        Assert.True(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAwsRds = true }));
         /* No msdb access → the sysjobschedules next-run decode can't run; skip (gate collapsed from
            IsCollectorSupported into the shared AppliesTo — #1: one authoritative gate surface). */
         Assert.False(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { HasMsdbAccess = false }));

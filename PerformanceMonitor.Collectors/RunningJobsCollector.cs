@@ -148,15 +148,21 @@ OPTION(RECOMPILE);";
     /// Azure SQL Database has no SQL Agent — <c>msdb.dbo.sysjobactivity</c> is unreachable there
     /// (the three-part msdb reference raises "not supported in this version of SQL Server"), so skip
     /// the collector rather than log a per-cycle ERROR. Managed Instance (edition 8) DOES have Agent,
-    /// so it collects there; on-prem collects too. AWS RDS is skipped: this query joins
-    /// <c>msdb.dbo.syssessions</c>, which RDS blocks with "SELECT permission was denied" even for the
-    /// master login (the table requires sysadmin, which RDS never grants), so it would ERROR every cycle.
-    /// A login without msdb access is also skipped: every table this reads lives in msdb. All three gates
-    /// live here in the shared AppliesTo — the single authoritative gate both SKUs consult (mirrors the
-    /// failed-jobs alert path's Azure/msdb skip).
+    /// so it collects there; on-prem collects too. A login without msdb access is skipped: every table
+    /// this reads lives in msdb. Both gates live here in the shared AppliesTo — the single authoritative
+    /// gate both SKUs consult (mirrors the failed-jobs alert path's Azure/msdb skip).
+    ///
+    /// <para><b>AWS RDS is NOT skipped, since #2575.</b> It used to be, on the reasoning that this query
+    /// joins <c>msdb.dbo.syssessions</c>, which requires sysadmin and which RDS never grants, so the read
+    /// "would ERROR every cycle". Two things retired that. The MEASUREMENT: across 84 RDS instances this
+    /// collector returns SUCCESS on every one, with zero non-SUCCESS rows, so the premise is not true of
+    /// RDS today. The MECHANISM: a denial is SQL error 229, which <see cref="CollectorTargetFault"/>
+    /// classifies as a PERMISSIONS degrade rather than an ERROR, so even where the premise does hold the
+    /// cost is one non-fatal row that the runtime-precondition read then explains with the grant to issue.
+    /// The gate was guarding against a failure mode the fault classifier did not yet handle.</para>
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        !target.IsAzureSqlDb && !target.IsAwsRds && target.HasMsdbAccess;
+        !target.IsAzureSqlDb && target.HasMsdbAccess;
 
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
