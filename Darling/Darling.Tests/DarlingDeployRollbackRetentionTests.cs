@@ -741,8 +741,26 @@ public sealed class DarlingDeployRollbackRetentionTests
 
         /* SYSTEM and Administrators only. Deliberately NO Interactive grant, unlike the live darling.json:
            the Viewer and the CLI verbs read the live file, and nothing reads a backup except a human
-           recovering, who is an administrator by then. install-darling.ps1 draws the same line for .bak-*. */
-        Assert.DoesNotContain("InteractiveSid", script[harden..Math.Min(harden + 1200, script.Length)], StringComparison.Ordinal);
+           recovering, who is an administrator by then. install-darling.ps1 draws the same line for .bak-*.
+
+           Scanned from where the ACL is BUILT up to the Set-Acl, not forward from it. The first version of
+           this assertion looked forward and so inspected the catch blocks instead of the AddAccessRule
+           calls — an Interactive grant added beside the other two, which is exactly where anyone would put
+           one, sat before the window and passed. */
+        var aclStart = script.IndexOf("$acl = New-Object System.Security.AccessControl.FileSecurity", StringComparison.Ordinal);
+        Assert.True(aclStart > 0 && aclStart < harden, "the rollback harden block no longer builds its own ACL — this pin needs rewriting");
+        Assert.DoesNotContain("InteractiveSid", script[aclStart..harden], StringComparison.Ordinal);
+
+        /* VERIFY rather than assume (#1957): a Set-Acl that returns without throwing is not proof the file
+           is protected — that exact hole fired on three consecutive field installs, and install-darling.ps1
+           re-reads the ACL for these same files because of it. */
+        var verify = script.IndexOf("$after = Get-Acl -LiteralPath $copy.FullName", StringComparison.Ordinal);
+        Assert.True(verify > harden, "the rollback harden does not re-read the ACL it just set (#1957)");
+        Assert.Contains("AreAccessRulesProtected", script, StringComparison.Ordinal);
+
+        /* An enumeration that fails yields an EMPTY set rather than an error, so a backup could go
+           unhardened with nothing said — the silent-exposure shape this change exists to close. */
+        Assert.Contains("$secretCopies.Count -eq 0", script, StringComparison.Ordinal);
     }
 
 

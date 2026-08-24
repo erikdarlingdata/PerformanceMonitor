@@ -1262,8 +1262,17 @@ else {
         #
         # Best-effort and non-fatal: a backup that is taken but not hardened is strictly better than an
         # upgrade that refuses to proceed, and the operator is told which.
-        $secretCopies = Get-ChildItem -LiteralPath $backupPath -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ieq 'darling.json' -or $_.Extension -ieq '.dpapi' }
+        $secretCopies = @(Get-ChildItem -LiteralPath $backupPath -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq 'darling.json' -or $_.Extension -ieq '.dpapi' })
+
+        # An enumeration that fails - a locked handle, an AV scan mid-copy - yields an EMPTY set, not an
+        # error, so without this the loop below would simply not run and nothing would be said. That is the
+        # silent-exposure shape this whole change is about, so the absence is checked against what the
+        # install root actually holds rather than assumed benign.
+        if ($secretCopies.Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'darling.json'))) {
+            Warn "Found no darling.json in the rollback backup to restrict, though the install root has one. The backup may hold an unprotected copy of your credentials - check $backupPath by hand, or delete it."
+        }
+
         foreach ($copy in $secretCopies) {
             try {
                 $wk = [System.Security.Principal.WellKnownSidType]
@@ -1274,6 +1283,17 @@ else {
                 $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')))
                 $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($adminsSid, 'FullControl', 'Allow')))
                 Set-Acl -LiteralPath $copy.FullName -AclObject $acl
+
+                # VERIFY, do not assume (#1957). A Set-Acl that returns without throwing is not proof the
+                # file is protected: install-darling.ps1 carries the same re-read for the same files, added
+                # after a permissions call that appeared to succeed left them readable on three consecutive
+                # field installs. Trusting the absence of an exception is precisely how that went unnoticed
+                # for months, and the stake here is every monitored server's encrypted credentials.
+                $after = Get-Acl -LiteralPath $copy.FullName
+                $stillOpen = @($after.Access | Where-Object { $_.IdentityReference -match 'Users|Everyone|Authenticated' })
+                if ((-not $after.AreAccessRulesProtected) -or $stillOpen.Count -gt 0) {
+                    Warn "Restricting $($copy.Name) in the rollback backup reported success but the file is STILL readable by ordinary users (protected=$($after.AreAccessRulesProtected)). It holds encrypted credentials - restrict it by hand, or delete the backup."
+                }
             }
             catch {
                 Warn "Could not restrict $($copy.Name) in the rollback backup ($($_.Exception.Message)). It holds encrypted credentials and inherited the install root's permissions - restrict it by hand, or delete the backup."
