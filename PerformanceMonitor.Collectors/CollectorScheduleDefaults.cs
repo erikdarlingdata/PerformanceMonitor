@@ -227,5 +227,11 @@ public static class CollectorScheduleDefaults
            actually act on the answer. Longer would mean keeping per-session rows, which are the widest and
            most numerous thing here, well past the point anyone would correlate them to a deploy. */
         ["pg_session_states"] = new(1, 30),
+        /* #2564 plan-capture readiness. HOURLY, not per-minute: every facet is a parameter-group setting,
+           and on Aurora/RDS changing one needs a reboot - so the value cannot move between cycles the way a
+           counter does. The history exists so somebody can see WHEN it changed, which an hourly grain
+           answers, and a 1-minute grain would pay 60x for the same answer. Retained a year because "when
+           did plan capture get turned on" is a question asked months later. */
+        ["pg_plan_capture_readiness"] = new(60, 365),
     };
 }

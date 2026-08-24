@@ -37,13 +37,14 @@ public sealed class PgSchemaGeneratorTests
            (#2319) = 50, plus pg_database_stats (#2539, the pg_stat_database counters) = 51, plus
            pg_index_usage_stats (#2541, per-index usage) = 52, plus pg_table_bloat_stats (#2542, the
            bloat estimate) = 53, plus pg_session_states (#2540, the sessions behind a pinned xmin
-           horizon) = 54. The catalog is
+           horizon) = 54, plus pg_plan_capture_readiness (#2564, whether plans can be
+           captured at all) = 55. The catalog is
            deliberately
            engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(54, CollectorCatalog.All.Count);
+        Assert.Equal(55, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -616,6 +617,7 @@ public sealed class PgSchemaGeneratorTests
             (84, PgIndexUsageStatsCollector.Instance),
             (85, PgTableBloatStatsCollector.Instance),
             (86, PgSessionStatesCollector.Instance),
+            (87, PgPlanCaptureReadinessCollector.Instance),
         };
 
         /* Every PostgreSQL collector must appear above. One added without a rung listed here would

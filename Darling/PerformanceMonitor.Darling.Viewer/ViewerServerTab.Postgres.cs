@@ -227,8 +227,9 @@ public partial class ViewerServerTab
         var xminTask = _dataService.GetPgXminHorizonAsync(_server.ServerId, startUtc, endUtc);
         var autovacuumTask = _dataService.GetPgAutovacuumAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var wraparoundTask = _dataService.GetPgWraparoundAsync(_server.ServerId, startUtc, endUtc);
+        var planCaptureTask = _dataService.GetPgPlanCaptureReadinessAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        await Task.WhenAll(sessionsTask, xminTask, autovacuumTask, wraparoundTask);
+        await Task.WhenAll(sessionsTask, xminTask, autovacuumTask, wraparoundTask, planCaptureTask);
 
         PgSessionStatesGrid.ItemsSource = sessionsTask.Result.Select(PgDisplay.SessionState).ToList();
 
@@ -267,6 +268,40 @@ public partial class ViewerServerTab
         PgWraparoundGrid.ItemsSource = wraparoundTask.Result.Select(PgDisplay.Wraparound).ToList();
         PgWraparoundNote.Text = PanelNote("pg_wraparound_stats", wraparoundTask.Result.Count,
             "No per-database freeze headroom has been collected in this window.");
+
+        PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result
+            .Select(r => new
+            {
+                r.Facet,
+                /* Rendered as words, not a checkbox or a bare bool. The reader is being told whether a
+                   PRECONDITION holds, and "False" beside a remedy sentence reads as a failure rather than as
+                   a step not yet taken. */
+                Satisfied = r.IsSatisfied ? "yes" : "no",
+                Observed = r.Observed ?? "(not reported)",
+                Detail = r.Detail ?? string.Empty,
+            })
+            .ToList();
+
+        /* Three states, and they are genuinely different answers. Gated off is the engine sentence. Zero
+           rows means the collector has not run yet on a server that only just started collecting - NOT that
+           capture is impossible, which is the mistake worth heading off, because "no rows about readiness"
+           and "not ready" look identical. And when rows exist the panel says whether every facet is
+           satisfied, because the useful summary is the AND of them: one unsatisfied facet is enough to mean
+           no plans. */
+        PgPlanCaptureNote.Text = PgCollectorIsGatedOff("pg_plan_capture_readiness")
+            ? PanelNote("pg_plan_capture_readiness", 0, string.Empty)
+            : planCaptureTask.Result.Count == 0
+                ? "Plan-capture readiness has not been collected for this server yet. This is an hourly "
+                  + "collector, so a server added in the last hour has nothing here — it does NOT mean plan "
+                  + "capture is unavailable."
+                : planCaptureTask.Result.All(r => r.IsSatisfied)
+                    ? "Every precondition for auto_explain capture is satisfied on this server. That means "
+                      + "plans CAN be captured — not that this product is reading them, which is a separate "
+                      + "thing: auto_explain writes to the server log, which a SQL connection cannot read."
+                    : "At least one precondition is unmet, so no execution plans are being captured by "
+                      + "auto_explain here. Read the rows in order — extension_available, library_loaded, "
+                      + "capture_threshold — each names the specific step and, on Aurora/RDS, whether it "
+                      + "needs a parameter-group change and a reboot rather than a SET.";
     }
 
     /// <summary>Waits — Aurora's cumulative wait counters. Shown on stock PostgreSQL too, where the panel
