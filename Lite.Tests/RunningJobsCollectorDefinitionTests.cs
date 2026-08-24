@@ -34,18 +34,13 @@ public sealed class RunningJobsCollectorDefinitionTests
     }
 
     [Fact]
-    public void AppliesTo_SkipsAzureSqlDbAndNoMsdb_ButCollectsOnPremManagedInstanceAndRds()
+    public void AppliesTo_SkipsAzureSqlDbRdsAndNoMsdb_ButCollectsOnPremAndManagedInstance()
     {
         /* Azure SQL DB has no SQL Agent (msdb unreachable) — skip rather than log a per-cycle ERROR. */
         Assert.False(RunningJobsCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAzureSqlDb = true }));
-        /* #2575: RDS COLLECTS. The old reasoning was that the msdb.dbo.syssessions join needs sysadmin,
-           which RDS never grants, so the read "would ERROR every cycle". Measured across 84 RDS instances:
-           SUCCESS on every one, with zero non-SUCCESS rows — the premise is not true of RDS today. And a
-           denial is SQL 229, which CollectorTargetFault classifies as a PERMISSIONS degrade rather than an
-           ERROR, so even where the premise holds the cost is one non-fatal row the precondition read then
-           explains with the grant. The gate guarded a failure mode the fault classifier did not yet
-           handle. */
-        Assert.True(RunningJobsCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAwsRds = true }));
+        /* AWS RDS blocks msdb.dbo.syssessions (the join needs sysadmin, which RDS never grants) — it would
+           raise "SELECT permission was denied" every cycle, so skip it there. */
+        Assert.False(RunningJobsCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAwsRds = true }));
         /* No msdb access → every table this reads lives in msdb; skip (gate collapsed from
            IsCollectorSupported into the shared AppliesTo). */
         Assert.False(RunningJobsCollector.Instance.AppliesTo(new CollectorTargetInfo { HasMsdbAccess = false }));

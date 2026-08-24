@@ -133,15 +133,10 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void RunningJobs_AppliesTo_SkipsAzureSqlDbAndNoMsdb()
+    public void RunningJobs_AppliesTo_SkipsAzureSqlDbRdsAndNoMsdb()
     {
         Assert.False(RunningJobsCollector.Instance.AppliesTo(AzureSqlDb));
-        /* #2575: RDS COLLECTS. It was skipped on the reasoning that the syssessions join needs sysadmin,
-           which RDS never grants, so the read "would ERROR every cycle". Measured across 84 RDS instances:
-           SUCCESS on every one, zero non-SUCCESS rows. And a denial is SQL 229, which CollectorTargetFault
-           now classifies as a PERMISSIONS degrade rather than an ERROR - the gate was guarding a failure
-           mode the fault classifier did not yet handle when it was written. */
-        Assert.True(RunningJobsCollector.Instance.AppliesTo(AwsRds));
+        Assert.False(RunningJobsCollector.Instance.AppliesTo(AwsRds));    /* joins msdb.dbo.syssessions */
         Assert.False(RunningJobsCollector.Instance.AppliesTo(NoMsdb));
         Assert.True(RunningJobsCollector.Instance.AppliesTo(AzureMi));
         Assert.True(RunningJobsCollector.Instance.AppliesTo(OnPrem2016));
@@ -160,10 +155,10 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void AgentStatus_AppliesTo_SkipsAzureSqlDbAndNoMsdb()
+    public void AgentStatus_AppliesTo_SkipsAzureSqlDbRdsAndNoMsdb()
     {
         Assert.False(AgentStatusCollector.Instance.AppliesTo(AzureSqlDb));
-        Assert.True(AgentStatusCollector.Instance.AppliesTo(AwsRds));   /* #2575: RDS has Agent and collects */
+        Assert.False(AgentStatusCollector.Instance.AppliesTo(AwsRds));    /* no sys.dm_server_services */
         Assert.False(AgentStatusCollector.Instance.AppliesTo(NoMsdb));
         Assert.True(AgentStatusCollector.Instance.AppliesTo(AzureMi));
         Assert.True(AgentStatusCollector.Instance.AppliesTo(OnPrem2016));
