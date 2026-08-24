@@ -72,17 +72,31 @@ public sealed class MigrationUpgradeLadderLiveTests
     /// </summary>
     public static TheoryData<string> LadderFixtures()
     {
-        var data = new TheoryData<string>();
-        var root = FindRepoRoot();
-        if (root is null)
-        {
-            return data;
-        }
+        /* THROW rather than return empty, and the irony is the point: a [Theory] with zero data rows reports
+           zero test cases and stays GREEN. Returning an empty set here on a failed root walk-up would make
+           the entire upgrade-ladder climb vanish from a CI run with nothing red to notice — which is the same
+           silent-decay failure this whole change exists to fix, one layer down and in the fix itself. This
+           path cannot call Assert (it runs during data generation, not inside a test), so an exception is the
+           loud option available. */
+        var root = FindRepoRoot()
+            ?? throw new InvalidOperationException(
+                "Could not locate the repository root (walked up from the test binary looking for "
+                + "PerformanceMonitor.sln). The upgrade-ladder fixtures live in the source tree, and without "
+                + "them this Theory would silently contribute no test cases at all.");
 
         var dir = Path.Combine(root, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar));
+        var data = new TheoryData<string>();
         foreach (var path in Directory.EnumerateFiles(dir, "migration-ladder-v*.sql").OrderBy(p => p, StringComparer.Ordinal))
         {
             data.Add(Path.GetFileName(path));
+        }
+
+        if (data.Count == 0)
+        {
+            /* Same reasoning: no fixtures is not "nothing to test", it is the upgrade gate missing. */
+            throw new InvalidOperationException(
+                $"No migration-ladder fixtures found in {dir}. The upgrade-path gate cannot run, and an empty "
+                + "Theory would report success by reporting nothing.");
         }
 
         return data;
