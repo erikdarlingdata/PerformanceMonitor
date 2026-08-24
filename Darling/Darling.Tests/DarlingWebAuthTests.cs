@@ -10,6 +10,7 @@ using System;
 using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -161,4 +162,145 @@ public sealed class DarlingWebAuthTests
     [InlineData("notanumber.YWJjZA")]      // non-numeric expiry
     public void SessionCookie_Malformed_Fails(string? value)
         => Assert.False(DarlingWebHostService.TryValidateSessionCookie(value, Key, DateTimeOffset.UtcNow));
+
+    /* ---- SESSION SUBJECT: the cookie carries WHO, and the signature covers it (#2550) ---- */
+
+    /// <summary>
+    /// base64url of a subject, matching what the builder embeds — so a test can forge a segment that is
+    /// well-formed in every respect EXCEPT being signed, which is the only interesting kind of forgery.
+    /// </summary>
+    private static string EncodeSubject(string subject)
+        => Convert.ToBase64String(Encoding.UTF8.GetBytes(subject)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    [Fact]
+    public void SessionSubject_RoundTrips()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var cookie = DarlingWebHostService.BuildSessionCookieValue(Key, now.AddHours(12), "erik@example.com");
+
+        Assert.Equal(3, cookie.Split('.').Length);
+        Assert.True(DarlingWebHostService.TryValidateSessionCookie(cookie, Key, now, out var subject));
+        Assert.Equal("erik@example.com", subject);
+    }
+
+    /// <summary>
+    /// THE property this shape exists for. Signing only the expiry and parking the subject beside it would
+    /// leave identity unauthenticated: any holder of a valid cookie could rewrite the subject and be served as
+    /// anyone. That is strictly worse than the shared token it replaces, because it would LOOK like identity.
+    /// </summary>
+    [Fact]
+    public void SessionSubject_Rewritten_Fails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var parts = DarlingWebHostService.BuildSessionCookieValue(Key, now.AddHours(12), "reader@example.com").Split('.');
+        var forged = $"{parts[0]}.{EncodeSubject("admin@example.com")}.{parts[2]}";
+
+        Assert.False(DarlingWebHostService.TryValidateSessionCookie(forged, Key, now, out _));
+    }
+
+    /// <summary>
+    /// The other half of the same property: a signature is bound to ITS payload, so one lifted off a different
+    /// principal's cookie does not authenticate this one. Both cookies here are genuine and unexpired — only
+    /// the pairing is wrong.
+    /// </summary>
+    [Fact]
+    public void SessionSubject_GraftedSignatureFromAnotherPrincipal_Fails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var expiry = now.AddHours(12);
+        var mine = DarlingWebHostService.BuildSessionCookieValue(Key, expiry, "reader@example.com").Split('.');
+        var theirs = DarlingWebHostService.BuildSessionCookieValue(Key, expiry, "admin@example.com").Split('.');
+
+        Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{mine[0]}.{mine[1]}.{theirs[2]}", Key, now, out _));
+    }
+
+    [Fact]
+    public void SessionSubject_TamperedExpiry_Fails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var parts = DarlingWebHostService.BuildSessionCookieValue(Key, now.AddHours(1), "erik@example.com").Split('.');
+        var forgedExpiry = now.AddYears(10).ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+
+        /* The signed region grew to include the subject, so this pins that it still covers the expiry too —
+           a construction that authenticated only the subject would trade one forgery for another. */
+        Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{forgedExpiry}.{parts[1]}.{parts[2]}", Key, now, out _));
+    }
+
+    /// <summary>
+    /// The shared-token seat reports null, NOT empty string. "The shared token did this" and "somebody signed
+    /// in whose name we failed to read" are different facts, and a caller stamping provenance has to be able
+    /// to tell them apart.
+    /// </summary>
+    [Fact]
+    public void SessionSubject_SharedTokenSeat_IsNullNotEmpty()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var cookie = DarlingWebHostService.BuildSessionCookieValue(Key, now.AddHours(12));
+
+        Assert.Equal(2, cookie.Split('.').Length);
+        Assert.True(DarlingWebHostService.TryValidateSessionCookie(cookie, Key, now, out var subject));
+        Assert.Null(subject);
+    }
+
+    /// <summary>
+    /// An upgrade must not sign everybody out, so the subjectless cookie is byte-for-byte what this minted
+    /// before per-user identity existed — asserted by equality against a freshly built one rather than by
+    /// eyeballing the format.
+    /// </summary>
+    [Fact]
+    public void SessionSubject_EmptySubject_ProducesTheSubjectlessShape()
+    {
+        var expiry = DateTimeOffset.UtcNow.AddHours(12);
+
+        Assert.Equal(
+            DarlingWebHostService.BuildSessionCookieValue(Key, expiry),
+            DarlingWebHostService.BuildSessionCookieValue(Key, expiry, string.Empty));
+    }
+
+    /// <summary>
+    /// Refuses rather than truncates. Truncation is the worse failure: two subjects sharing a 256-character
+    /// prefix would collapse into one seat, silently attributing one person's writes to another.
+    /// </summary>
+    [Fact]
+    public void SessionSubject_OverLong_ThrowsRatherThanTruncating()
+    {
+        var expiry = DateTimeOffset.UtcNow.AddHours(12);
+        var tooLong = new string('x', DarlingWebHostService.MaxSessionSubjectLength + 1);
+
+        Assert.Throws<ArgumentException>(() => DarlingWebHostService.BuildSessionCookieValue(Key, expiry, tooLong));
+        Assert.Equal(3, DarlingWebHostService
+            .BuildSessionCookieValue(Key, expiry, new string('x', DarlingWebHostService.MaxSessionSubjectLength))
+            .Split('.').Length);
+    }
+
+    /// <summary>
+    /// UTF-8, not ASCII: a subject can be an email or a display name with an accent in it, and mangling
+    /// somebody's name into question marks is both wrong and a way for two people to become one seat.
+    /// </summary>
+    [Fact]
+    public void SessionSubject_NonAscii_RoundTrips()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const string Subject = "yasm\u00edn.o'brien@example.com";
+        var cookie = DarlingWebHostService.BuildSessionCookieValue(Key, now.AddHours(12), Subject);
+
+        Assert.True(DarlingWebHostService.TryValidateSessionCookie(cookie, Key, now, out var subject));
+        Assert.Equal(Subject, subject);
+    }
+
+    /// <summary>
+    /// The two shapes share a separator, so these pin that neither can be re-presented as the other: a
+    /// 3-segment payload offered as a 2-segment cookie needs the subject to be a valid HMAC over the expiry,
+    /// and a smuggled extra dot is refused outright so two distinct cookies can never parse to one subject.
+    /// </summary>
+    [Fact]
+    public void SessionSubject_ShapeConfusion_Fails()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var parts = DarlingWebHostService.BuildSessionCookieValue(Key, now.AddHours(12), "erik@example.com").Split('.');
+
+        Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{parts[0]}.{parts[1]}", Key, now, out _));
+        Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{parts[0]}.{parts[1]}.{parts[1]}.{parts[2]}", Key, now, out _));
+        Assert.False(DarlingWebHostService.TryValidateSessionCookie($"{parts[0]}..{parts[2]}", Key, now, out _));
+    }
 }
