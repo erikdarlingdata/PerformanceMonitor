@@ -50,6 +50,56 @@ public sealed class HostHeaderGuardTests
     public void IsAllowedHost_NetworkMode_AllowsLoopbackAndTheListenIp_RejectsEverythingElse(string host, bool expected)
         => Assert.Equal(expected, HostHeaderGuard.IsAllowedHost(host, IPAddress.Parse("192.168.1.205")));
 
+    /// <summary>
+    /// WILDCARD listen (#2569) — the mode the compose distribution ships for BOTH surfaces, and the one that
+    /// refused every real LAN request. Comparing a Host against <c>0.0.0.0</c> can only match the literal
+    /// string "0.0.0.0", which no client sends, so a browser at the box's actual address got a 400 before any
+    /// auth ran. Measured through a real Kestrel pipeline, not just this function.
+    ///
+    /// <para>The rule is "any IP literal", because a wildcard names no single address to compare against. The
+    /// tempting alternative — enumerate this machine's interfaces at bind time — does NOT fix the case that
+    /// motivated the bug: inside a container the local interfaces are the container's, while the address the
+    /// browser used is the host's published one, which the container cannot see. NAT and port forwarding
+    /// break it the same way, silently, as a 400.</para>
+    ///
+    /// <para>The rebinding defence is unchanged, and the hostname rows below are the proof: a rebind arrives
+    /// with a HOSTNAME by construction (the victim loaded http://evil.com, so the browser sends that Host and
+    /// treats the reply as same-origin), and a hostname still never passes.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("192.168.1.205", true)]        // the LAN client this bug refused
+    [InlineData("10.0.0.7", true)]             // another subnet: with a wildcard we bind that too
+    [InlineData("172.18.0.3", true)]           // the container case, where enumeration would have failed
+    [InlineData("localhost", true)]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("::1", true)]
+    [InlineData("", true)]
+    [InlineData("evil.com", false)]                    // THE attack, still refused
+    [InlineData("darling.corp.local", false)]          // a friendly hostname is still a hostname
+    [InlineData("192.168.1.205.evil.com", false)]      // an IP-shaped prefix on an attacker domain
+    [InlineData("localhost.evil.com", false)]          // and on the loopback name
+    public void IsAllowedHost_WildcardListen_AllowsAnyIpLiteral_ButNeverAHostname(string host, bool expected)
+        => Assert.Equal(expected, HostHeaderGuard.IsAllowedHost(host, IPAddress.Any));
+
+    /// <summary>The IPv6 wildcard behaves the same as the IPv4 one — it is the same "bind everything" intent,
+    /// and a rule that covered only <c>0.0.0.0</c> would leave <c>::</c> refusing every request.</summary>
+    [Theory]
+    [InlineData("192.168.1.205", true)]
+    [InlineData("2001:db8::1", true)]
+    [InlineData("evil.com", false)]
+    public void IsAllowedHost_IPv6WildcardListen_MatchesTheIPv4Wildcard(string host, bool expected)
+        => Assert.Equal(expected, HostHeaderGuard.IsAllowedHost(host, IPAddress.IPv6Any));
+
+    /// <summary>A SPECIFIC listen IP is unchanged by #2569 — the wildcard arm must not leak into it, or the
+    /// guard would accept any IP literal everywhere and the "an address we actually bind" rule would be
+    /// gone.</summary>
+    [Theory]
+    [InlineData("192.168.1.205", true)]
+    [InlineData("192.168.1.206", false)]
+    [InlineData("10.0.0.7", false)]
+    public void IsAllowedHost_SpecificListen_StillRejectsOtherIpLiterals(string host, bool expected)
+        => Assert.Equal(expected, HostHeaderGuard.IsAllowedHost(host, IPAddress.Parse("192.168.1.205")));
+
     /// <summary>Loopback-only mode (null listen IP) — the default, and the mode the MCP hosts were exposed in.</summary>
     [Theory]
     [InlineData("localhost", true)]
