@@ -71,7 +71,7 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
         string? Observed,
         string? Detail);
 
-    /* Four facets, each a separate row, because each has a DIFFERENT remedy and collapsing them would
+    /* Each facet is a separate row, because each has a DIFFERENT remedy and collapsing them would
        produce the one thing this collector exists to prevent: a single "plans unavailable" that tells
        nobody what to do.
 

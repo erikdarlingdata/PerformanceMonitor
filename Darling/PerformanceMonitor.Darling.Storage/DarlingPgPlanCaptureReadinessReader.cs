@@ -19,12 +19,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// state of each facet, not the history.
 ///
 /// <para><b>Latest per facet, deliberately.</b> Every facet is a parameter-group setting that on Aurora/RDS
-/// needs a reboot to change, so the window holds the same four rows repeated hourly. A raw read would return
+/// needs a reboot to change, so the window holds the same rows repeated hourly. A raw read would return
 /// the same answer dozens of times and say nothing more than one row would. What the reader wants to know is
 /// "can this server capture plans right now, and if not, what do I do" — a current state, and the history
 /// exists so somebody can see WHEN it changed, which is a different question and a different read.</para>
 ///
-/// <para><b>Ordered by facet, not by satisfaction.</b> The four facets have a causal order —
+/// <para><b>Ordered by facet, not by satisfaction.</b> The facets have a causal order —
 /// <c>library_loaded</c> gates <c>capture_threshold</c>, and <c>extension_available</c> explains whether
 /// either is even possible — so sorting the unsatisfied ones to the top would break the sequence a reader
 /// has to follow. <c>extension_available</c> first, then <c>library_loaded</c>, then
