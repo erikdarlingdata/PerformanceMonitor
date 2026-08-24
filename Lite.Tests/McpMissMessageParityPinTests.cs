@@ -136,7 +136,7 @@ public sealed class McpMissMessageParityPinTests
            CollectorRuntimePrecondition and is byte-identical by construction, so it does not belong here —
            but this sentence is supplied by each tool body at its own call site, lives twice, and is exactly
            what drifts. A tree missing it is a tree whose get_running_jobs never grew the arm at all. */
-        "the monitoring login has no access to msdb",
+        "this is an AWS RDS instance, where the Agent job tables are not reachable",
     };
 
     [Theory]

@@ -1320,13 +1320,59 @@ public sealed class DarlingComposeTests
         Assert.True(wait["awsRds"]!.GetValue<bool>());
         Assert.False(wait["needsMsdb"]!.GetValue<bool>());
 
-        /* A SQL-Agent collector (running_jobs) needs msdb and is gated off Azure SQL DB + AWS RDS. */
+        /* A SQL-Agent collector (running_jobs) needs msdb and is gated off Azure SQL DB + AWS RDS.
+
+           needsMsdb is still TRUE here after #2559, and that is the point: the dispatch gate stopped reading
+           msdb access, but the DATA still comes from msdb.dbo.sysjobs, so a composer building a job panel
+           still has to know. What changed is the consequence of not having the grant - a PERMISSIONS row
+           instead of no dispatch - so the flag is now sourced from the named SQL-Agent set rather than
+           inferred by probing the gate against an msdb-less target, which no longer discriminates. */
         var job = AppliesToFor("runningjob_current_duration_s");
         Assert.True(job["onPrem"]!.GetValue<bool>());
         Assert.False(job["azureSqlDb"]!.GetValue<bool>());
         Assert.True(job["azureMi"]!.GetValue<bool>());
         Assert.False(job["awsRds"]!.GetValue<bool>());
         Assert.True(job["needsMsdb"]!.GetValue<bool>());
+    }
+
+    /// <summary>
+    /// The named SQL-Agent set behind <c>needsMsdb</c> is exactly the collectors that read msdb, asserted
+    /// against each one's actual query text rather than against a second copy of the list.
+    ///
+    /// <para>Before #2559 the flag was derived by probing the gate, so it could not drift. It is a named set
+    /// now, which can — so this holds both halves it is able to hold: every collector claiming the flag
+    /// really does reference msdb, and no other measure claims it. What it cannot catch is a NEW collector
+    /// that reads msdb and never gets added, and saying so here is better than implying coverage that is
+    /// not there.</para>
+    /// </summary>
+    [Fact]
+    public void NeedsMsdb_IsClaimedByExactlyTheCollectorsWhoseQueriesReadMsdb()
+    {
+        var compose = Assert.IsType<JsonObject>(DarlingWebEndpoints.BuildCatalogNode()["compose"]);
+        var measures = Assert.IsType<JsonArray>(compose["measures"]);
+
+        var claiming = measures.Cast<JsonObject>()
+            .Where(m => m!["appliesTo"]?["needsMsdb"]?.GetValue<bool>() == true)
+            .Select(m => m!["source"]!.GetValue<string>())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(t => t, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(new[] { "agent_status", "job_history", "running_jobs" }, claiming);
+
+        /* And each one genuinely reads msdb — so a collector rewritten off it stops matching, rather than
+           the badge quietly outliving the dependency it describes. */
+        var context = new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "s",
+            CollectionTime = new DateTime(2026, 8, 25, 0, 0, 0, DateTimeKind.Utc),
+            Deltas = new CollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+        };
+        Assert.Contains("msdb", RunningJobsCollector.Instance.BuildQuery(context).Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("msdb", JobHistoryCollector.Instance.BuildQuery(context).Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("msdb", AgentStatusCollector.Instance.BuildQuery(context).Text, StringComparison.OrdinalIgnoreCase);
     }
 
     /* ─────────────────────────── D5: event annotations (catalog pins) ─────────────────────────── */

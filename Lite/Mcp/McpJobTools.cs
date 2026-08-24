@@ -31,16 +31,17 @@ public sealed class McpJobTools
                        see what is running". */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "running_jobs")
                     /* #2559, and it must land on BOTH SKUs: the gate this reports on
-                       (!IsAzureSqlDb && !IsAwsRds && HasMsdbAccess) lives in the shared collector definition,
-                       so a Lite login with HAS_DBACCESS('msdb') = 0 reproduces the identical defect — a
-                       collector that never runs, records no collection_log row, and leaves this read asserting
-                       the Agent is idle on a server it was never permitted to query. */
+                       (!IsAzureSqlDb && !IsAwsRds) lives in the shared collector definition, so both SKUs
+                       report it identically. The dispatch half of #2559 removed HasMsdbAccess from that gate,
+                       so a login without msdb access no longer lands here at all — it dispatches, is denied,
+                       and the collector's own recorded PERMISSIONS outcome answers first. */
                     ?? await McpRuntimePrecondition.GatedOffStatusAsync(
                         dataService, resolved.ServerId, resolved.ServerName, "running_jobs",
-                        "For this collector the gate is: the monitoring login has no access to msdb "
-                        + "(HAS_DBACCESS('msdb') = 0 — the grant to fix that is in the README's monitoring-login "
-                        + "section), or this is an AWS RDS instance, where the Agent job tables are not reachable "
-                        + "to a monitoring login at all and no grant changes that.")
+                        "For this collector the gate is: this is an AWS RDS instance, where the Agent job "
+                        + "tables are not reachable to a monitoring login at all and no grant changes that. "
+                        + "Since #2559 msdb access is NOT a gate — a login without it now attempts and is "
+                        + "reported as a permission denial, so the grant takes effect on the next cycle "
+                        + "rather than the next reconnect.")
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
             }
 
