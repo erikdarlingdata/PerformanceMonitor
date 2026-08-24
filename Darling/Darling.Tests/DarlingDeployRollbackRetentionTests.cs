@@ -708,6 +708,46 @@ public sealed class DarlingDeployRollbackRetentionTests
 
     /// <summary>Returns the full <c>function NAME(...) { ... }</c> definition text from the script —
     /// signature included, so the extracted copy takes its parameters the way the shipped one does.</summary>
+    /// <summary>
+    /// #2574: the rollback backup must RESTRICT the secrets it copies. `darling.json` holds every monitored
+    /// server's `encryptedPassword` plus the MCP and web tokens, DPAPI LocalMachine with an entropy constant
+    /// published in this open-source repo — so read access to a copy is decrypt access to all of it, which is
+    /// #1647's whole finding and why the live file is hardened.
+    ///
+    /// <para><c>Copy-Item</c> into a new directory takes the DESTINATION's inherited DACL, not the source
+    /// file's. Measured on a real install root: <c>BUILTIN\Users : ReadAndExecute</c>, the inherited-from-C:\
+    /// DACL #1647 called out. So every retained backup was a config readable by any local user on a box whose
+    /// live config is locked down — the hardening and the copying disagreed, and only the copying ran.</para>
+    ///
+    /// <para>Asserted against the SOURCE rather than by running it, like the rest of this class: the script is
+    /// Windows-only and this suite has to say something useful on any host.</para>
+    /// </summary>
+    [Fact]
+    public void TheRollbackBackup_RestrictsTheConfigCopyItTakes()
+    {
+        var script = DeployScript;
+
+        var copy = script.IndexOf("Copy-Item -Destination $backupPath", StringComparison.Ordinal);
+        Assert.True(copy > 0, "the rollback backup no longer copies the install root's files — this pin needs rewriting");
+
+        var harden = script.IndexOf("Set-Acl -LiteralPath $copy.FullName", StringComparison.Ordinal);
+        Assert.True(harden > copy, "the rollback backup does not restrict the darling.json copy it just took (#2574)");
+
+        /* It must select the secrets, not everything: a backup is ~120 MB of binaries and re-ACLing all of
+           them would be slow and would lock an operator out of files that are not secret. */
+        Assert.Contains("$_.Name -ieq 'darling.json'", script, StringComparison.Ordinal);
+        Assert.Contains("$_.Extension -ieq '.dpapi'", script, StringComparison.Ordinal);
+
+        /* Protected from inheritance, or the install root's Users ACE flows straight back in and the
+           hardening achieves nothing. */
+        Assert.Contains("SetAccessRuleProtection($true, $false)", script, StringComparison.Ordinal);
+
+        /* SYSTEM and Administrators only. Deliberately NO Interactive grant, unlike the live darling.json:
+           the Viewer and the CLI verbs read the live file, and nothing reads a backup except a human
+           recovering, who is an administrator by then. install-darling.ps1 draws the same line for .bak-*. */
+        Assert.DoesNotContain("InteractiveSid", script[harden..Math.Min(harden + 1200, script.Length)], StringComparison.Ordinal);
+    }
+
     private static string ExtractFunction(string script, string name)
     {
         var start = script.IndexOf("function " + name, StringComparison.Ordinal);
