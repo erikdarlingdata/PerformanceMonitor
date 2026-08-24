@@ -705,6 +705,64 @@ public sealed class DarlingDeployRollbackRetentionTests
             try { File.Delete(path); } catch (IOException) { /* best-effort */ }
         }
     }
+    /// <summary>
+    /// #2574: the rollback backup must RESTRICT the secrets it copies. `darling.json` holds every monitored
+    /// server's `encryptedPassword` plus the MCP and web tokens, DPAPI LocalMachine with an entropy constant
+    /// published in this open-source repo — so read access to a copy is decrypt access to all of it, which is
+    /// #1647's whole finding and why the live file is hardened.
+    ///
+    /// <para><c>Copy-Item</c> into a new directory takes the DESTINATION's inherited DACL, not the source
+    /// file's. Measured on a real install root: <c>BUILTIN\Users : ReadAndExecute</c>, the inherited-from-C:\
+    /// DACL #1647 called out. So every retained backup was a config readable by any local user on a box whose
+    /// live config is locked down — the hardening and the copying disagreed, and only the copying ran.</para>
+    ///
+    /// <para>Asserted against the SOURCE rather than by running it, like the rest of this class: the script is
+    /// Windows-only and this suite has to say something useful on any host.</para>
+    /// </summary>
+    [Fact]
+    public void TheRollbackBackup_RestrictsTheConfigCopyItTakes()
+    {
+        var script = DeployScript;
+
+        var copy = script.IndexOf("Copy-Item -Destination $backupPath", StringComparison.Ordinal);
+        Assert.True(copy > 0, "the rollback backup no longer copies the install root's files — this pin needs rewriting");
+
+        var harden = script.IndexOf("Set-Acl -LiteralPath $copy.FullName", StringComparison.Ordinal);
+        Assert.True(harden > copy, "the rollback backup does not restrict the darling.json copy it just took (#2574)");
+
+        /* It must select the secrets, not everything: a backup is ~120 MB of binaries and re-ACLing all of
+           them would be slow and would lock an operator out of files that are not secret. */
+        Assert.Contains("$_.Name -ieq 'darling.json'", script, StringComparison.Ordinal);
+        Assert.Contains("$_.Extension -ieq '.dpapi'", script, StringComparison.Ordinal);
+
+        /* Protected from inheritance, or the install root's Users ACE flows straight back in and the
+           hardening achieves nothing. */
+        Assert.Contains("SetAccessRuleProtection($true, $false)", script, StringComparison.Ordinal);
+
+        /* SYSTEM and Administrators only. Deliberately NO Interactive grant, unlike the live darling.json:
+           the Viewer and the CLI verbs read the live file, and nothing reads a backup except a human
+           recovering, who is an administrator by then. install-darling.ps1 draws the same line for .bak-*.
+
+           Scanned from where the ACL is BUILT up to the Set-Acl, not forward from it. The first version of
+           this assertion looked forward and so inspected the catch blocks instead of the AddAccessRule
+           calls — an Interactive grant added beside the other two, which is exactly where anyone would put
+           one, sat before the window and passed. */
+        var aclStart = script.IndexOf("$acl = New-Object System.Security.AccessControl.FileSecurity", StringComparison.Ordinal);
+        Assert.True(aclStart > 0 && aclStart < harden, "the rollback harden block no longer builds its own ACL — this pin needs rewriting");
+        Assert.DoesNotContain("InteractiveSid", script[aclStart..harden], StringComparison.Ordinal);
+
+        /* VERIFY rather than assume (#1957): a Set-Acl that returns without throwing is not proof the file
+           is protected — that exact hole fired on three consecutive field installs, and install-darling.ps1
+           re-reads the ACL for these same files because of it. */
+        var verify = script.IndexOf("$after = Get-Acl -LiteralPath $copy.FullName", StringComparison.Ordinal);
+        Assert.True(verify > harden, "the rollback harden does not re-read the ACL it just set (#1957)");
+        Assert.Contains("AreAccessRulesProtected", script, StringComparison.Ordinal);
+
+        /* An enumeration that fails yields an EMPTY set rather than an error, so a backup could go
+           unhardened with nothing said — the silent-exposure shape this change exists to close. */
+        Assert.Contains("$secretCopies.Count -eq 0", script, StringComparison.Ordinal);
+    }
+
 
     /// <summary>Returns the full <c>function NAME(...) { ... }</c> definition text from the script —
     /// signature included, so the extracted copy takes its parameters the way the shipped one does.</summary>

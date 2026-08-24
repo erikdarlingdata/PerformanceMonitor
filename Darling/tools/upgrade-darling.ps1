@@ -1245,6 +1245,60 @@ else {
         # re-extracting a zip you still have, and it still would not cover pg-runtime. The failure paths
         # below say this rather than leaving an operator to discover it while recovering.
         Get-ChildItem -LiteralPath $InstallRoot -File -Force | Copy-Item -Destination $backupPath -Force
+
+        # HARDEN THE SECRETS WE JUST COPIED (#2574). darling.json holds every monitored server's
+        # encryptedPassword plus the MCP and web tokens, all DPAPI LocalMachine scope with an entropy
+        # constant published in this open-source repo - so anything that can READ a copy can decrypt the
+        # lot, which is #1647's finding and the reason the LIVE file is hardened.
+        #
+        # Copy-Item into a new directory takes the DESTINATION's inherited DACL, not the source file's, so
+        # the copy lands with whatever the install root grants. Measured on a real install root: BUILTIN\Users
+        # ReadAndExecute - the inherited-from-C:\ DACL #1647 called out. Every retained backup was therefore
+        # a config readable by any local user, on a box where the live file is locked down.
+        #
+        # No INTERACTIVE grant here, deliberately, and unlike the live file: the Viewer and the CLI verbs
+        # read darling.json, and nothing reads a backup copy except a human recovering, who is an
+        # administrator by then. install-darling.ps1 draws the same line for the .bak-* copies.
+        #
+        # Best-effort and non-fatal: a backup that is taken but not hardened is strictly better than an
+        # upgrade that refuses to proceed, and the operator is told which.
+        $secretCopies = @(Get-ChildItem -LiteralPath $backupPath -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq 'darling.json' -or $_.Extension -ieq '.dpapi' })
+
+        # An enumeration that fails - a locked handle, an AV scan mid-copy - yields an EMPTY set, not an
+        # error, so without this the loop below would simply not run and nothing would be said. That is the
+        # silent-exposure shape this whole change is about, so the absence is checked against what the
+        # install root actually holds rather than assumed benign.
+        if ($secretCopies.Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'darling.json'))) {
+            Warn "Found no darling.json in the rollback backup to restrict, though the install root has one. The backup may hold an unprotected copy of your credentials - check $backupPath by hand, or delete it."
+        }
+
+        foreach ($copy in $secretCopies) {
+            try {
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $systemSid = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+                $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+                $acl = New-Object System.Security.AccessControl.FileSecurity
+                $acl.SetAccessRuleProtection($true, $false)
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')))
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($adminsSid, 'FullControl', 'Allow')))
+                Set-Acl -LiteralPath $copy.FullName -AclObject $acl
+
+                # VERIFY, do not assume (#1957). A Set-Acl that returns without throwing is not proof the
+                # file is protected: install-darling.ps1 carries the same re-read for the same files, added
+                # after a permissions call that appeared to succeed left them readable on three consecutive
+                # field installs. Trusting the absence of an exception is precisely how that went unnoticed
+                # for months, and the stake here is every monitored server's encrypted credentials.
+                $after = Get-Acl -LiteralPath $copy.FullName
+                $stillOpen = @($after.Access | Where-Object { $_.IdentityReference -match 'Users|Everyone|Authenticated' })
+                if ((-not $after.AreAccessRulesProtected) -or $stillOpen.Count -gt 0) {
+                    Warn "Restricting $($copy.Name) in the rollback backup reported success but the file is STILL readable by ordinary users (protected=$($after.AreAccessRulesProtected)). It holds encrypted credentials - restrict it by hand, or delete the backup."
+                }
+            }
+            catch {
+                Warn "Could not restrict $($copy.Name) in the rollback backup ($($_.Exception.Message)). It holds encrypted credentials and inherited the install root's permissions - restrict it by hand, or delete the backup."
+            }
+        }
     }
     catch {
         Fail "Could not take the rollback backup ($($_.Exception.Message)). The service is STOPPED and NOTHING has been overwritten, so the install is intact: start it with 'Start-Service ''$serviceName''', or free up disk and re-run."
