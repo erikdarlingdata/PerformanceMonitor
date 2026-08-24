@@ -246,6 +246,130 @@ public sealed class CollectorRuntimePreconditionTests
             DateTime.UtcNow));
     }
 
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
+
+    /* ---- #2559: the gated-off collector, which records nothing to read ---- */
+
+    /// <summary>
+    /// The case the recorded-outcome reader structurally cannot see. A collector whose <c>AppliesTo</c> gate
+    /// is off never runs, and the runner returns before writing any <c>collection_log</c> row — so there is
+    /// no status to report, the outcome reader answers null, and the read falls through to its <c>empty</c>
+    /// miss. For <c>get_running_jobs</c> that miss asserts "No running SQL Agent jobs found" about a server
+    /// nobody was permitted to look at, which is the exact claim this vocabulary exists to stop.
+    /// </summary>
+    [Fact]
+    public void AGatedOffCollector_IsReportedAsAPrecondition_NotAsNothingToReport()
+    {
+        var message = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", "the login has no msdb access, or this is AWS RDS.",
+            collectorEverRan: false, serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3));
+
+        Assert.NotNull(message);
+        Assert.Contains("never run", message, StringComparison.Ordinal);
+        Assert.Contains("never permitted to look", message, StringComparison.Ordinal);
+        Assert.Contains("msdb", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both halves of the inference are required. A collector that HAS run is not gated off — whatever its
+    /// miss is, it is the recorded-outcome reader's business and this must stand aside so the specific
+    /// sentence the monitored server gave wins over an inference from an absence.
+    /// </summary>
+    [Fact]
+    public void ACollectorThatHasRun_IsNeverCalledGatedOff()
+        => Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", "candidates", collectorEverRan: true,
+            serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3)));
+
+    /// <summary>
+    /// The other half, and the one that would turn an outage into a lie. A server that has collected NOTHING
+    /// has no working collectors to contrast against, so "this collector never ran" says nothing about a
+    /// gate — that is <c>unavailable</c>, and collection health's business.
+    /// </summary>
+    [Fact]
+    public void AServerCollectingNothingAtAll_IsAnOutage_NotAGate()
+        => Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", "candidates", collectorEverRan: false, serverLastCollectedUtc: null));
+
+    /// <summary>
+    /// A gated-off collector cannot re-derive its own precondition, so its message must NOT carry the general
+    /// promise that nothing needs restarting. The deciding fact is read once at connect and cached for the
+    /// connection's life — that is the whole of #2559 — and a message telling the operator to grant and retry
+    /// sends them round a loop that never terminates.
+    /// </summary>
+    [Fact]
+    public void TheGatedOffMessage_SaysAReconnectIsNeeded_NotThatNothingNeedsRestarting()
+    {
+        var message = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", "candidates", collectorEverRan: false,
+            serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3))!;
+
+        Assert.Contains("reconnect", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The contradiction this change also fixes, which predates #2559 and shipped for two issues. The
+    /// SESSION_MISSING arm has always said in its own sentence that a dropped session "stays missing until
+    /// the next connect", and then appended a shared epilogue promising "nothing to restart on the monitoring
+    /// side". Both sentences were in the same operator-facing string.
+    /// </summary>
+    [Fact]
+    public void TheCaptureSessionMessage_NoLongerContradictsItself()
+    {
+        var message = CollectorRuntimePrecondition.CollectionOutcomeMessage(
+            Server, "deadlocks", CollectorRuntimePrecondition.CaptureSessionMissingStatus,
+            "The session was not found.", DateTime.UtcNow.AddMinutes(-3))!;
+
+        Assert.Contains("next connect", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// And the arm that CAN honour the promise keeps it. A PERMISSIONS skip is recorded by a collector that
+    /// runs every cycle, so the denial really is re-derived and really does clear itself the cycle after the
+    /// grant lands — losing that would make the common case worse to fix the rare one.
+    /// </summary>
+    [Fact]
+    public void ThePermissionsMessage_StillPromisesNoRestart()
+    {
+        var message = CollectorRuntimePrecondition.CollectionOutcomeMessage(
+            Server, "running_jobs", CollectorRuntimePrecondition.DegradedStatus,
+            "SELECT permission was denied.", DateTime.UtcNow.AddMinutes(-3))!;
+
+        Assert.Contains("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// WIRING, parsed from the shipped source: the gated-off check must sit AFTER the recorded-outcome check
+    /// and BEFORE the empty miss. Order is the whole correctness argument — recorded evidence from the
+    /// monitored server beats an inference from an absence, and both beat asserting the Agent is idle.
+    /// </summary>
+    [Fact]
+    public void GetRunningJobs_AsksAboutTheGate_AfterTheRecordedOutcome_AndBeforeTheEmptyMiss()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpJobTools.cs"));
+
+        var recorded = source.IndexOf("DarlingRuntimePrecondition.StatusAsync", StringComparison.Ordinal);
+        var gate = source.IndexOf("DarlingRuntimePrecondition.GatedOffStatusAsync", StringComparison.Ordinal);
+        var empty = source.IndexOf("No running SQL Agent jobs found", StringComparison.Ordinal);
+
+        Assert.True(recorded > 0 && gate > 0 && empty > 0, "get_running_jobs no longer has all three arms");
+        Assert.True(gate > recorded, "the gate inference must not pre-empt the collector's own recorded denial");
+        Assert.True(empty > gate, "the empty miss must remain the LAST resort");
+    }
+
     /// <summary>
     /// The status word is not one of the three that already exist. Stated as an assertion because the whole
     /// design rests on it: reusing <c>unavailable</c> would send the reader to collection health, where they

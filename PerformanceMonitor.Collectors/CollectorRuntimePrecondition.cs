@@ -88,6 +88,25 @@ public static class CollectorRuntimePrecondition
         "this read starts answering from, with nothing to restart on the monitoring side.";
 
     /// <summary>
+    /// The epilogue for a precondition whose collector CANNOT re-derive it every cycle, because the fact that
+    /// gates it is read once when the server connects and cached for that connection's life.
+    ///
+    /// <para>The shared <see cref="PreconditionEpilogue"/> promises "nothing to restart on the monitoring
+    /// side", and for these arms that promise is false — a user who satisfies the precondition and retries
+    /// gets the identical answer forever. The <c>SESSION_MISSING</c> arm has always said in its own sentence
+    /// that a dropped session "stays missing until the next connect" and then appended an epilogue denying
+    /// it; the two have contradicted each other in shipped operator-facing text. A blanket claim is the wrong
+    /// shape here, so the claim is now made only by the arms that can honour it.</para>
+    /// </summary>
+    private const string ConnectScopedEpilogue =
+        "This is a runtime PRECONDITION, not a permanent engine capability gap and not a collection outage: " +
+        "it can be satisfied on the monitored server. But unlike most preconditions this one is NOT " +
+        "re-derived every cycle — it is read once when the service connects to this server and cached for " +
+        "that connection's life, so satisfying it is not enough on its own: the service has to reconnect " +
+        "(restart it, or change this server's configuration, which drops the cached connection) before " +
+        "collection resumes. Retrying this read before that will return exactly this answer again.";
+
+    /// <summary>
     /// The precondition explanation for a read whose collector's most recent run recorded one, or
     /// <c>null</c> when it did not — in which case the caller falls through to its own miss vocabulary,
     /// unchanged.
@@ -131,7 +150,7 @@ public static class CollectorRuntimePrecondition
                    "its capture sessions when it CONNECTS to a server, so a session dropped or stopped " +
                    "afterwards stays missing until the next connect — check that the monitoring login holds " +
                    "ALTER ANY EVENT SESSION, then let the server reconnect. " +
-                   PreconditionEpilogue;
+                   ConnectScopedEpilogue;
         }
 
         if (string.Equals(status, DegradedStatus, StringComparison.OrdinalIgnoreCase))
@@ -146,6 +165,57 @@ public static class CollectorRuntimePrecondition
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The precondition explanation for a read whose collector has produced <b>no <c>collection_log</c> row
+    /// at all</b> on a server that is demonstrably collecting other things — or null when that is not the
+    /// case, in which case the caller falls through to its own miss vocabulary.
+    ///
+    /// <para><b>Why this arm has to exist, and why <see cref="CollectionOutcomeMessage"/> cannot cover it.</b>
+    /// That method reports what the collector's last run RECORDED. A collector whose <c>AppliesTo</c> gate is
+    /// off never runs, and the runner returns before writing anything — deliberately, because a per-cycle
+    /// fake row was thousands of rows a day of noise. So the gated-off case records nothing, the outcome
+    /// reader finds nothing, and the read falls through to its <c>empty</c> miss, which for
+    /// <c>get_running_jobs</c> means asserting "No running SQL Agent jobs found" about a server we were never
+    /// permitted to look at. That is precisely the affirmative claim the precondition vocabulary was built to
+    /// stop, surviving in the one case that produces no evidence to read.</para>
+    ///
+    /// <para><b>The inference.</b> No row EVER for this collector, while the server has collected something
+    /// recently, means the gate is off — there is no third way to get here. Retention cannot fake it: a
+    /// collector whose rows have all aged out has not run inside the retention window either, which is the
+    /// same conclusion. Both halves are required; a server that has collected nothing at all is a collection
+    /// outage and belongs in <c>unavailable</c>, not here.</para>
+    ///
+    /// <para><b>What it must not claim.</b> It cannot say WHICH gate is off, because the facts that decide
+    /// are not persisted — <c>HAS_DBACCESS('msdb')</c> and the RDS flag live on the cached connection, not on
+    /// the registry. So it names the candidates rather than picking one, and carries the connect-scoped
+    /// epilogue, because the actionable candidate is a grant whose probe is cached for the connection's
+    /// life.</para>
+    /// </summary>
+    /// <param name="serverName">The server as the caller named it.</param>
+    /// <param name="collectorName">The collector serving the read that missed.</param>
+    /// <param name="gateCandidates">Operator-facing description of what could switch this collector off.</param>
+    /// <param name="collectorEverRan">Whether this collector has any recorded run against this server.</param>
+    /// <param name="serverLastCollectedUtc">The server's most recent run by ANY collector, or null if none.</param>
+    public static string? GatedOffMessage(
+        string serverName,
+        string collectorName,
+        string gateCandidates,
+        bool collectorEverRan,
+        DateTime? serverLastCollectedUtc)
+    {
+        if (collectorEverRan || serverLastCollectedUtc is null)
+        {
+            return null;
+        }
+
+        return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
+               $"is collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination means the " +
+               $"collector's gate is switched off for this server rather than that it has nothing to report, " +
+               $"so this read cannot tell you the state it describes — it can only tell you it was never " +
+               $"permitted to look. {gateCandidates} " +
+               ConnectScopedEpilogue;
     }
 
     /// <summary>
