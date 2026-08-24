@@ -47,6 +47,23 @@ public sealed class DarlingMcpJobTools
                        issue. Reporting it here is the difference between "nothing is running" and "we cannot
                        see what is running". */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs")
+                    /* #2559: the case the line above cannot see. StatusAsync reports what the collector's last
+                       run RECORDED, and a collector whose AppliesTo gate is off never runs — the runner returns
+                       before writing any collection_log row, deliberately, because a per-cycle fake row was
+                       thousands of rows a day of noise. So the gated-off server produced no evidence, this fell
+                       through to the "empty" line below, and we went back to asserting the Agent is idle on a
+                       server we were never permitted to look at. That is the exact claim #2546 set out to
+                       remove, surviving in the one case that records nothing to read.
+
+                       The gate is !IsAzureSqlDb && !IsAwsRds && HasMsdbAccess. The engine half is already
+                       answered above; none of the remaining facts is persisted on the registry, so the message
+                       names the candidates instead of guessing which one is in force. */
+                    ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(
+                        postgres, resolved.ServerId, resolved.ServerName, "running_jobs",
+                        "For this collector the gate is: the monitoring login has no access to msdb "
+                        + "(HAS_DBACCESS('msdb') = 0 — the grant to fix that is in the README's monitoring-login "
+                        + "section), or this is an AWS RDS instance, where the Agent job tables are not reachable "
+                        + "to a monitoring login at all and no grant changes that.")
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
 
             var jobs = rows.Select(r => new

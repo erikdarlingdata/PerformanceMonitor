@@ -30,6 +30,17 @@ public sealed class McpJobTools
                        issue. Reporting it here is the difference between "nothing is running" and "we cannot
                        see what is running". */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "running_jobs")
+                    /* #2559, and it must land on BOTH SKUs: the gate this reports on
+                       (!IsAzureSqlDb && !IsAwsRds && HasMsdbAccess) lives in the shared collector definition,
+                       so a Lite login with HAS_DBACCESS('msdb') = 0 reproduces the identical defect — a
+                       collector that never runs, records no collection_log row, and leaves this read asserting
+                       the Agent is idle on a server it was never permitted to query. */
+                    ?? await McpRuntimePrecondition.GatedOffStatusAsync(
+                        dataService, resolved.ServerId, resolved.ServerName, "running_jobs",
+                        "For this collector the gate is: the monitoring login has no access to msdb "
+                        + "(HAS_DBACCESS('msdb') = 0 — the grant to fix that is in the README's monitoring-login "
+                        + "section), or this is an AWS RDS instance, where the Agent job tables are not reachable "
+                        + "to a monitoring login at all and no grant changes that.")
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
             }
 
