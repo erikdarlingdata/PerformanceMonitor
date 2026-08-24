@@ -849,15 +849,65 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// Builds a session cookie value <c>{expiryUnix}.{base64url(HMAC-SHA256(key, expiryUnix))}</c>. PURE — the
-    /// HMAC is over the exact expiry string that is stored, so <see cref="TryValidateSessionCookie"/> verifies
-    /// the same bytes it signs (a tampered expiry fails the HMAC).
+    /// The longest <paramref name="subject"/> <see cref="BuildSessionCookieValue"/> will mint into a cookie.
+    ///
+    /// <para>Generous for an OIDC <c>sub</c> — the identifiers real providers issue are GUIDs, opaque
+    /// 40-character strings, or an email — and a hard REFUSAL rather than a truncation, deliberately.
+    /// Truncating an identity is the one failure mode that would be worse than not having one: two subjects
+    /// sharing a prefix would collapse to the same seat, so the surface would report the wrong person as the
+    /// author of a change and every downstream authorization decision would be made about somebody else.
+    /// Failing the sign-in loudly is recoverable; silently merging two identities is not.</para>
     /// </summary>
-    internal static string BuildSessionCookieValue(byte[] signingKey, DateTimeOffset expiry)
+    internal const int MaxSessionSubjectLength = 256;
+
+    /// <summary>
+    /// Builds a session cookie value. PURE.
+    ///
+    /// <para>Two shapes, and the difference is whether the seat has a NAME:
+    /// <c>{expiryUnix}.{base64url(HMAC)}</c> for the shared-token seat, which has no identity to carry, and
+    /// <c>{expiryUnix}.{base64url(subject)}.{base64url(HMAC)}</c> once a per-user sign-in has established
+    /// who is holding it (#2550).</para>
+    ///
+    /// <para><b>The signature covers the whole prefix before the FINAL dot</b>, which is what makes the two
+    /// shapes one construction rather than two. Signing only the expiry and appending the subject beside it
+    /// would leave the subject unauthenticated — anyone holding a valid cookie could rewrite it to any other
+    /// subject and be served as that person, which is a worse position than the shared token this exists to
+    /// improve on, because it would look like identity while providing none. Extending the signed region
+    /// instead means expiry and subject are tamper-evident together.</para>
+    ///
+    /// <para>The two shapes cannot be confused for each other even though they share a separator: the
+    /// signature is always the last segment and the signed payload is always everything before it, so
+    /// re-presenting a 3-segment cookie as a 2-segment one requires the subject to be a valid HMAC over the
+    /// expiry, and the reverse requires forging an HMAC. Neither is available without the key.</para>
+    ///
+    /// <para>The subjectless form is byte-for-byte what this method produced before per-user identity existed,
+    /// so cookies already in browsers keep validating across the upgrade instead of signing everyone out.</para>
+    /// </summary>
+    /// <param name="subject">The authenticated principal, or null/empty for the shared-token seat.</param>
+    /// <exception cref="ArgumentException"><paramref name="subject"/> exceeds
+    /// <see cref="MaxSessionSubjectLength"/> — see the note there on why this refuses rather than truncates.
+    /// </exception>
+    internal static string BuildSessionCookieValue(byte[] signingKey, DateTimeOffset expiry, string? subject = null)
     {
+        if (subject is { Length: > MaxSessionSubjectLength })
+        {
+            throw new ArgumentException(
+                $"Session subject is {subject.Length} characters, which exceeds the {MaxSessionSubjectLength}-character "
+                + "limit. It is refused rather than truncated because two subjects sharing a prefix would become the "
+                + "same seat.",
+                nameof(subject));
+        }
+
         var expiryUnix = expiry.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
-        var signature = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(expiryUnix));
-        return $"{expiryUnix}.{Base64UrlEncode(signature)}";
+        var payload = string.IsNullOrEmpty(subject)
+            ? expiryUnix
+            : $"{expiryUnix}.{Base64UrlEncode(Encoding.UTF8.GetBytes(subject))}";
+
+        /* ASCII, as before: the payload is an integer and base64url by construction, so every byte is in
+           range, and keeping the encoding means the subjectless cookie is identical to the one this minted
+           before the subject existed. */
+        var signature = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(payload));
+        return $"{payload}.{Base64UrlEncode(signature)}";
     }
 
     /// <summary>
@@ -866,20 +916,50 @@ public sealed class DarlingWebHostService : BackgroundService
     /// The signature compare is constant-time.
     /// </summary>
     internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now)
+        => TryValidateSessionCookie(cookieValue, signingKey, now, out _);
+
+    /// <summary>
+    /// PURE verify, additionally reporting WHO the cookie says is holding it (#2550).
+    ///
+    /// <para><paramref name="subject"/> is null for the shared-token seat, which genuinely has no identity —
+    /// distinct from an empty string, which would read as an authenticated principal with a blank name. Every
+    /// caller that stamps provenance has to keep those apart, because "the shared token did this" and "a
+    /// signed-in person we failed to name did this" are different facts.</para>
+    ///
+    /// <para>The subject is decoded only AFTER the HMAC verifies, so nothing derived from an unauthenticated
+    /// cookie ever reaches a caller.</para>
+    /// </summary>
+    internal static bool TryValidateSessionCookie(string? cookieValue, byte[] signingKey, DateTimeOffset now, out string? subject)
     {
+        subject = null;
+
         if (string.IsNullOrEmpty(cookieValue))
         {
             return false;
         }
 
-        var dot = cookieValue.IndexOf('.');
-        if (dot <= 0 || dot >= cookieValue.Length - 1)
+        /* LAST dot, not the first: the signature is the final segment and the signed payload is everything
+           before it, which is the rule that lets the subjectless and subject-bearing shapes share one parse.
+           For a subjectless cookie the last dot IS the first, so this is the original behavior unchanged. */
+        var lastDot = cookieValue.LastIndexOf('.');
+        if (lastDot <= 0 || lastDot >= cookieValue.Length - 1)
         {
             return false;
         }
 
-        var expiryPart = cookieValue.Substring(0, dot);
-        var signaturePart = cookieValue.Substring(dot + 1);
+        var payload = cookieValue.Substring(0, lastDot);
+        var signaturePart = cookieValue.Substring(lastDot + 1);
+
+        var firstDot = payload.IndexOf('.');
+        var expiryPart = firstDot < 0 ? payload : payload.Substring(0, firstDot);
+        var subjectPart = firstDot < 0 ? null : payload.Substring(firstDot + 1);
+
+        /* Exactly two or three segments. A fourth would leave a dot inside the subject segment, and accepting
+           it would mean two different cookies could parse to the same subject. */
+        if (subjectPart is not null && (subjectPart.Length == 0 || subjectPart.Contains('.')))
+        {
+            return false;
+        }
 
         if (!long.TryParse(expiryPart, NumberStyles.None, CultureInfo.InvariantCulture, out var expiryUnix))
         {
@@ -901,8 +981,28 @@ public sealed class DarlingWebHostService : BackgroundService
             return false;
         }
 
-        var expected = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(expiryPart));
-        return CryptographicOperations.FixedTimeEquals(presented, expected);
+        var expected = HMACSHA256.HashData(signingKey, Encoding.ASCII.GetBytes(payload));
+        if (!CryptographicOperations.FixedTimeEquals(presented, expected))
+        {
+            return false;
+        }
+
+        if (subjectPart is not null)
+        {
+            try
+            {
+                subject = Encoding.UTF8.GetString(Base64UrlDecode(subjectPart));
+            }
+            catch (FormatException)
+            {
+                /* Signed by us and still undecodable means we minted it wrong, not that a caller tampered.
+                   Refusing is still right: serving a session whose identity we cannot read would put an
+                   unnamed principal behind the write paths this exists to attribute. */
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void AppendSessionCookie(HttpContext context, byte[] signingKey)
