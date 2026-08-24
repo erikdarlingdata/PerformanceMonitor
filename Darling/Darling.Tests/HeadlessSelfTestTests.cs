@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.IO;
+using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -78,5 +80,44 @@ public sealed class HeadlessSelfTestTests
             Layer(StoreConnectionSelfTest.LayerOutcome.Failed),
             Layer(StoreConnectionSelfTest.LayerOutcome.NotReached),
         }));
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
+
+    /// <summary>
+    /// #2578: the self-test must probe the connection string STARTUP opens, not the raw darling.json one.
+    ///
+    /// <para>MainWindow builds its data service as
+    /// <c>new ViewerDataService(settings.ConnectionString, appSettings.ConnectionTimeoutSeconds)</c>, and that
+    /// constructor rewrites the string through <see cref="ViewerDataService.ApplyConnectionTimeout"/>. The
+    /// headless probe used the raw string, so the two diverged whenever a Connection timeout preference
+    /// existed — which is always, since <see cref="ViewerAppSettings.ConnectionTimeoutSeconds"/> defaults to 5
+    /// and is clamped to 5..60.</para>
+    ///
+    /// <para>The consequence is a diagnostic that can pass every layer while startup fails, which is the
+    /// report that found it. Asserted against the shipped source: the probe must not be handed
+    /// <c>settings.ConnectionString</c> directly.</para>
+    /// </summary>
+    [Fact]
+    public void TheHeadlessSelfTest_ProbesTheEffectiveConnectionString_NotTheRawOne()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", "HeadlessSelfTest.cs"));
+
+        Assert.DoesNotContain(
+            "StoreConnectionSelfTest.RunAsync(settings.ConnectionString)", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "StoreConnectionSelfTest.RunAsync(effectiveConnectionString)", source, StringComparison.Ordinal);
+        Assert.Contains("ViewerDataService.ApplyConnectionTimeout(", source, StringComparison.Ordinal);
     }
 }
