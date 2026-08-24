@@ -3662,9 +3662,11 @@ LIMIT 1", connection);
                    nulled it on a connection-level failure. */
                 if (server.Runtime is null
                     || !CollectorCatalog.EngineMatches(name, server.Runtime.Target)
-                    /* And the within-engine gate, PostgreSQL only — same reasoning as the scheduled sweep. */
-                    || (server.Runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                        && !CollectorCatalog.AppliesTo(name, server.Runtime.Target)))
+                    /* And the within-engine gate, on EVERY engine — same reasoning as the scheduled sweep,
+                       and extended to SQL Server with it (#2579). This loop runs on every connect and
+                       reconnect, so leaving it PostgreSQL-scoped would keep landing fake SUCCESS rows for
+                       gated-off SQL Server collectors at exactly the moments an operator is watching. */
+                    || !CollectorCatalog.AppliesTo(name, server.Runtime.Target))
                 {
                     continue;
                 }
@@ -3781,23 +3783,28 @@ LIMIT 1", connection);
                     continue;
                 }
 
-                /* WITHIN-engine gates get the same treatment, on PostgreSQL targets only.
+                /* WITHIN-engine gates get the same treatment, on EVERY engine.
                    EngineMatches above drops the wrong DIALECT; it says nothing about a collector that is
                    right-dialect but inapplicable to this particular target — pg_wait_stats and
                    pg_statement_stats read Aurora-only functions, so on stock PostgreSQL they dispatched, came
                    back with 0 rows, and RunOneAsync recorded SUCCESS. Two collectors at a 1-minute cadence is
                    ~2,880 fake successes a day per server, and the PR promised "a graceful skip with an
-                   explanation" instead. Confirmed on the review's live stock-PostgreSQL run.
+                   explanation" instead.
 
-                   Scoped to PostgreSQL deliberately rather than applied to the composed gate for everyone: on
-                   SQL Server the same zero-row-SUCCESS path covers a long-established handful of Azure-gated
-                   collectors, and silencing those is a change to a shipping SKU's log semantics that deserves
-                   its own decision rather than riding along here.
+                   #2579 EXTENDS THIS TO SQL SERVER, which the PostgreSQL change deliberately left alone as
+                   "its own decision" because it changes a shipping SKU's log semantics for the Azure-gated
+                   collectors. Here is that decision, and what settled it is that the cost turned out to be
+                   the opposite of cosmetic. On an AWS RDS fleet the SQL Server gates are not a handful: 84
+                   instances x agent_status and running_jobs x a 5-minute cadence is ~24,000 rows a day that
+                   say SUCCESS about collectors deliberately not running. A gated-off run recorded as SUCCESS
+                   is byte-identical to a real one — same status, zero rows, no note — so nothing downstream
+                   can tell them apart. That is not merely noise: it is the shape the whole miss vocabulary
+                   exists to prevent, and it read as evidence of working collection convincingly enough to
+                   produce an issue and a PR built on it before the 0ms durations gave it away.
 
                    No log row is the honest outcome, and it is not silent: --test-connection names exactly
                    which collectors do not apply to a target, and why, before the service ever runs. */
-                if (runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                    && !CollectorCatalog.AppliesTo(name, runtime.Target))
+                if (!CollectorCatalog.AppliesTo(name, runtime.Target))
                 {
                     continue;
                 }
@@ -3880,11 +3887,12 @@ LIMIT 1", connection);
                 /* The THIRD dispatch loop, and it got neither engine gate in the first round: an operator
                    snapshot against a PostgreSQL target dispatched every SQL Server collector, whose
                    AppliesTo early-return yields zero rows and lands a burst of fake SUCCESS in
-                   collection_log — the phantom-success class the other two loops (on-load :3157, scheduled
-                   sweep) were gated against. Same predicate, same PostgreSQL-only scoping. */
+                   collection_log — the phantom-success class the other two loops (on-load, scheduled
+                   sweep) were gated against. Same predicate, and since #2579 the same every-engine scoping:
+                   an operator-triggered snapshot against an RDS target would otherwise land its own burst of
+                   fake successes for the msdb-gated collectors. */
                 if (!CollectorCatalog.EngineMatches(name, runtime.Target)
-                    || (runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                        && !CollectorCatalog.AppliesTo(name, runtime.Target)))
+                    || !CollectorCatalog.AppliesTo(name, runtime.Target))
                 {
                     continue;
                 }
