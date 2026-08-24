@@ -12,6 +12,8 @@ using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using System.IO;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -367,6 +369,56 @@ public sealed class PostgresEngineGateBehaviorTests
         StorageName = PgHost,
         ServerId = ServerIdFor(PgHost, "postgres"),
     };
+
+    /// <summary>
+    /// #2579: the within-engine pre-dispatch skip covers EVERY engine, not just PostgreSQL.
+    ///
+    /// <para>It was scoped to PostgreSQL when it landed, deliberately, because dropping it on SQL Server
+    /// changes a shipping SKU's log semantics for the Azure-gated collectors — left as "its own decision".
+    /// This is that decision. What settled it: on an AWS RDS fleet the SQL Server gates are not a handful.
+    /// 84 instances x <c>agent_status</c> and <c>running_jobs</c> x a 5-minute cadence is ~24,000
+    /// <c>collection_log</c> rows a day reporting SUCCESS for collectors that deliberately do not run.</para>
+    ///
+    /// <para>And a gated-off run recorded as SUCCESS is byte-identical to a real one — same status, zero
+    /// rows, no note — so nothing downstream can tell them apart. That is the shape the miss vocabulary
+    /// exists to prevent, and it convincingly read as evidence of working collection: it produced a filed
+    /// issue and an opened PR before the 0ms durations gave it away.</para>
+    ///
+    /// <para>Asserted against the shipped source rather than by running a sweep, because the condition is
+    /// one line inside the dispatch loop and the alternative is standing up a whole worker. The pin is that
+    /// the engine discriminator is GONE from this gate — if it comes back, SQL Server silently resumes
+    /// logging fake successes.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreDispatchGate_AppliesToEveryEngine_NotOnlyPostgres()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        var gate = source.IndexOf("if (!CollectorCatalog.AppliesTo(name, runtime.Target))", StringComparison.Ordinal);
+        Assert.True(gate > 0, "the within-engine pre-dispatch gate is gone — a gated-off collector will log a fake SUCCESS again (#2579)");
+
+        /* The engine discriminator must not be back on this gate. Scanning the 400 characters before it
+           rather than the whole file, because CollectorTargetEngine.PostgreSql legitimately appears all over
+           this class — it is only wrong HERE. */
+        var window = source[Math.Max(0, gate - 400)..gate];
+        Assert.DoesNotContain("runtime.Target.Engine == CollectorTargetEngine.PostgreSql", window, StringComparison.Ordinal);
+
+        /* The wrong-DIALECT drop above it is a separate gate and must survive. */
+        Assert.Contains("if (!CollectorCatalog.EngineMatches(name, runtime.Target))", source, StringComparison.Ordinal);
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")) && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
+    }
 
     private static void SetField(DarlingWorker worker, string name, object value) =>
         typeof(DarlingWorker)
