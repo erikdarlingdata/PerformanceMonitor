@@ -43,7 +43,23 @@ public sealed class MigrationUpgradeLadderLiveTests
 
     private const string FixtureDirectory = "Darling/Darling.Tests/Fixtures";
 
-    private const string ScratchDatabase = "darling_upgrade_ladder_test";
+    /// <summary>
+    /// The scratch database is named PER FIXTURE, and that is load-bearing rather than tidy.
+    ///
+    /// <para>The drop below is <c>WITH (FORCE)</c>, which terminates every backend on that database. With one
+    /// shared name the second fixture's drop force-killed the connection the FIRST fixture had returned to
+    /// Npgsql's pool — physically open, and as far as the pool knew, reusable. Npgsql then handed that dead
+    /// connection back on the next open of the same connection string, and the first write failed with
+    /// "Exception while writing to stream". Which is exactly what CI reported the moment this became a
+    /// Theory: v3.3.0 green, v3.5.0 red, and nothing wrong with either ladder.</para>
+    /// </summary>
+    private static string ScratchDatabaseFor(string fixtureFileName)
+    {
+        var version = Regex.Match(fixtureFileName, @"v(\d+)\.(\d+)\.(\d+)");
+        return version.Success
+            ? $"darling_upgrade_ladder_test_{version.Groups[1].Value}_{version.Groups[2].Value}_{version.Groups[3].Value}"
+            : "darling_upgrade_ladder_test";
+    }
 
     /// <summary>
     /// Every released-ladder fixture in the tree, so adding one at a release cut needs no edit here.
@@ -83,6 +99,7 @@ public sealed class MigrationUpgradeLadderLiveTests
         Assert.True(root is not null,
             "Could not locate the repository root (walked up from the test binary looking for " +
             "PerformanceMonitor.sln) — the fixture lives in the source tree.");
+        var scratchDatabase = ScratchDatabaseFor(fixtureFileName);
         var fixturePath = Path.Combine(
             root!, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar), fixtureFileName);
         Assert.True(File.Exists(fixturePath), $"Previous-release ladder fixture missing: {fixturePath}");
@@ -100,19 +117,26 @@ public sealed class MigrationUpgradeLadderLiveTests
                 await role.ExecuteNonQueryAsync();
             }
 
+            /* Clear this process's own pooled connections to the scratch database BEFORE forcing the drop.
+               Per-fixture naming already stops one case killing another's pooled connection; this covers the
+               same hazard within a single case, where the pool key would be identical. Cheap, and the
+               alternative failure is a socket error thrown a long way from its cause. */
+            var scratchForPool = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
+            NpgsqlConnection.ClearPool(new NpgsqlConnection(scratchForPool.ConnectionString));
+
             await using (var drop = new NpgsqlCommand(
-                $"DROP DATABASE IF EXISTS {ScratchDatabase} WITH (FORCE)", admin))
+                $"DROP DATABASE IF EXISTS {scratchDatabase} WITH (FORCE)", admin))
             {
                 await drop.ExecuteNonQueryAsync();
             }
 
-            await using (var create = new NpgsqlCommand($"CREATE DATABASE {ScratchDatabase}", admin))
+            await using (var create = new NpgsqlCommand($"CREATE DATABASE {scratchDatabase}", admin))
             {
                 await create.ExecuteNonQueryAsync();
             }
         }
 
-        var scratch = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = ScratchDatabase };
+        var scratch = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
 
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync();
