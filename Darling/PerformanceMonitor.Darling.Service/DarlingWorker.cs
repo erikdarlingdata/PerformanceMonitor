@@ -3662,9 +3662,11 @@ LIMIT 1", connection);
                    nulled it on a connection-level failure. */
                 if (server.Runtime is null
                     || !CollectorCatalog.EngineMatches(name, server.Runtime.Target)
-                    /* And the within-engine gate, PostgreSQL only — same reasoning as the scheduled sweep. */
-                    || (server.Runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                        && !CollectorCatalog.AppliesTo(name, server.Runtime.Target)))
+                    /* And the within-engine gate, on EVERY engine — same reasoning as the scheduled sweep,
+                       and extended to SQL Server with it (#2579). This loop runs on every connect and
+                       reconnect, so leaving it PostgreSQL-scoped would keep landing fake SUCCESS rows for
+                       gated-off SQL Server collectors at exactly the moments an operator is watching. */
+                    || !CollectorCatalog.AppliesTo(name, server.Runtime.Target))
                 {
                     continue;
                 }
@@ -3885,11 +3887,12 @@ LIMIT 1", connection);
                 /* The THIRD dispatch loop, and it got neither engine gate in the first round: an operator
                    snapshot against a PostgreSQL target dispatched every SQL Server collector, whose
                    AppliesTo early-return yields zero rows and lands a burst of fake SUCCESS in
-                   collection_log — the phantom-success class the other two loops (on-load :3157, scheduled
-                   sweep) were gated against. Same predicate, same PostgreSQL-only scoping. */
+                   collection_log — the phantom-success class the other two loops (on-load, scheduled
+                   sweep) were gated against. Same predicate, and since #2579 the same every-engine scoping:
+                   an operator-triggered snapshot against an RDS target would otherwise land its own burst of
+                   fake successes for the msdb-gated collectors. */
                 if (!CollectorCatalog.EngineMatches(name, runtime.Target)
-                    || (runtime.Target.Engine == CollectorTargetEngine.PostgreSql
-                        && !CollectorCatalog.AppliesTo(name, runtime.Target)))
+                    || !CollectorCatalog.AppliesTo(name, runtime.Target))
                 {
                     continue;
                 }

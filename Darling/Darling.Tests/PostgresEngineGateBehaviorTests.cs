@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -395,17 +396,25 @@ public sealed class PostgresEngineGateBehaviorTests
         var source = File.ReadAllText(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
-        var gate = source.IndexOf("if (!CollectorCatalog.AppliesTo(name, runtime.Target))", StringComparison.Ordinal);
-        Assert.True(gate > 0, "the within-engine pre-dispatch gate is gone — a gated-off collector will log a fake SUCCESS again (#2579)");
+        /* THREE dispatch loops carry this gate — the scheduled sweep, the on-load loop that runs on every
+           connect and reconnect, and snapshot_now. The first draft of this pin matched only the scheduled
+           sweep's standalone form and would have passed while the other two still logged fake successes on
+           every reconnect and every operator-triggered snapshot; a reviewer caught that. Counting the gates
+           is what makes the pin cover all of them without naming each site's exact spelling. */
+        var gates = Regex.Matches(source, @"!CollectorCatalog\.AppliesTo\(name, (?:server\.Runtime\.Target|runtime\.Target)\)");
+        Assert.True(gates.Count >= 3, $"expected the pre-dispatch AppliesTo gate at all three dispatch loops, found {gates.Count} (#2579)");
 
-        /* The engine discriminator must not be back on this gate. Scanning the 400 characters before it
-           rather than the whole file, because CollectorTargetEngine.PostgreSql legitimately appears all over
-           this class — it is only wrong HERE. */
-        var window = source[Math.Max(0, gate - 400)..gate];
-        Assert.DoesNotContain("runtime.Target.Engine == CollectorTargetEngine.PostgreSql", window, StringComparison.Ordinal);
+        /* And NONE of them may be conditioned on the engine. This is the regression that matters: the gate
+           existing but scoped back to PostgreSQL is exactly the state this change removed, and it reads as
+           correct at a glance. */
+        Assert.DoesNotMatch(
+            new Regex(@"CollectorTargetEngine\.PostgreSql\s*\r?\n?\s*&&\s*!CollectorCatalog\.AppliesTo"),
+            source);
 
-        /* The wrong-DIALECT drop above it is a separate gate and must survive. */
-        Assert.Contains("if (!CollectorCatalog.EngineMatches(name, runtime.Target))", source, StringComparison.Ordinal);
+        /* The wrong-DIALECT drop is a separate gate and must survive at every site. */
+        Assert.True(
+            Regex.Matches(source, @"!CollectorCatalog\.EngineMatches\(name, (?:server\.Runtime\.Target|runtime\.Target)\)").Count >= 3,
+            "the wrong-dialect drop is missing from a dispatch loop — that gate is not what #2579 changed");
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
