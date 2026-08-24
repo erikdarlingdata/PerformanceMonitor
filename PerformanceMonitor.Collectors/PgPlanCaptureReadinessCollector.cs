@@ -78,7 +78,10 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
          library_loaded      - is auto_explain in shared_preload_libraries? A parameter-group change plus a
                                reboot on Aurora/RDS; not a SET, which is the misconception worth heading off.
          capture_threshold   - auto_explain.log_min_duration. -1 is the trap: loaded and capturing nothing,
-                               visually identical to not-loaded from where the user is standing.
+                               visually identical to not-loaded from where the user is standing. 0 is the
+                               OTHER trap and the remedy no longer suggests it - measured at 31 percent of
+                               throughput and 772 MB of log per 20 seconds (#2565), where the same
+                               instrumentation at a 10ms threshold cost nothing measurable.
          extension_available - available as far as this can PROVE: catalogued, or already loaded. A negative
                                is inconclusive and says so, because auto_explain is preload-only and never
                                appears in pg_available_extensions - see the type header.
@@ -139,8 +142,22 @@ SELECT
                  || 'the threshold cannot be set independently of the library.'
         WHEN current_setting('auto_explain.log_min_duration', true) = '-1'
             THEN 'auto_explain IS loaded but log_min_duration is -1, so it captures NOTHING - which looks '
-                 || 'identical to not being loaded from the outside. Set it to 0 to capture every statement, '
-                 || 'or a millisecond threshold to capture only the slow ones.'
+                 || 'identical to not being loaded from the outside. Set a MILLISECOND THRESHOLD, not 0: '
+                 || 'a threshold captures the statements somebody actually wants a plan for, and skips the '
+                 || 'fast ones that produce the volume. On Aurora/RDS this is a parameter-group change that '
+                 || 'applies WITHOUT a reboot, unlike the library itself.'
+        /* Zero renders as exactly '0' - no unit - which is why comparing the text is safe here. Measured
+           against the GUC: -1 and 0 come back bare, 250 comes back '250ms', 1000 comes back '1s' and 60000
+           comes back '1min'. current_setting renders in the largest unit that divides evenly, so anything
+           downstream that tried to read this as a number breaks on a perfectly ordinary one-second
+           threshold. That is the whole reason observed is stored as the server's own text. */
+        WHEN current_setting('auto_explain.log_min_duration', true) = '0'
+            THEN 'auto_explain is capturing EVERY statement, which is the setting to move off. Measured on '
+                 || 'PostgreSQL 17 (pgbench, 8 clients): capture-everything cost 31 percent of throughput '
+                 || 'and wrote 772 MB of server log in 20 seconds, while the same instrumentation at a 10ms '
+                 || 'threshold cost nothing measurable. On Aurora/RDS the log is also bounded by '
+                 || 'rds.log_retention_period, so at this rate plans age out before they can be read. Set a '
+                 || 'millisecond threshold instead - it is a dynamic parameter and needs no reboot.'
         ELSE 'auto_explain is loaded and capturing at this threshold. Capture is not the same fact as the '
              || 'plans being readable by this product, which is tracked separately.'
     END
