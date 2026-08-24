@@ -143,6 +143,7 @@ public static class PgMigrations
         new Migration(84, "pg-index-usage-stats", V84Sql),
         new Migration(85, "pg-table-bloat-stats", V85Sql),
         new Migration(86, "pg-session-states", V86Sql),
+        new Migration(87, "pg-plan-capture-readiness", V87Sql),
     };
 
     /// <summary>
@@ -1956,6 +1957,39 @@ CREATE TABLE IF NOT EXISTS collect.pg_session_states (
 
 CREATE INDEX IF NOT EXISTS idx_pg_session_states_time
     ON collect.pg_session_states(server_id, collection_time);";
+
+    /// <summary>
+    /// V87 — <c>collect.pg_plan_capture_readiness</c> (#2564): whether a PostgreSQL target could capture
+    /// execution plans at all, and if not, which step is missing.
+    ///
+    /// <para>One row PER FACET rather than one wide row per capture, because each facet has a different
+    /// remedy and the whole point is to say WHICH one is missing. A wide row would collapse "the library was
+    /// never loaded" and "the library is loaded and its threshold is -1" into the same shape, and those are a
+    /// parameter-group change plus a reboot versus a single setting.</para>
+    ///
+    /// <para><c>observed</c> is TEXT and stores what the server answered verbatim, not a parsed value. GUCs
+    /// render with their units on some settings and not others, and a store column typed to a number is how a
+    /// collector starts failing on one major version and not another — the raw answer keeps the row honest
+    /// and lets interpretation change without a migration.</para>
+    ///
+    /// <para><c>detail</c> is stored rather than derived on read for the same reason the collector frames it:
+    /// the remedy is specific to the facet AND to the platform, and a read that reconstructed it would drift
+    /// from what the collector actually observed.</para>
+    /// </summary>
+    private const string V87Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_plan_capture_readiness (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    facet text NOT NULL,
+    is_satisfied boolean,
+    observed text,
+    detail text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_plan_capture_readiness_time
+    ON collect.pg_plan_capture_readiness(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

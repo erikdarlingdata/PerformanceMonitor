@@ -79,6 +79,7 @@ public static class CollectorCatalog
         PgIndexUsageStatsCollector.Instance,
         PgTableBloatStatsCollector.Instance,
         PgSessionStatesCollector.Instance,
+        PgPlanCaptureReadinessCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
