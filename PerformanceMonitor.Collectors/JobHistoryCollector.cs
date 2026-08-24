@@ -195,7 +195,7 @@ AND   DATEADD
     /// AWS RDS — unlike <see cref="RunningJobsCollector"/> it never touches <c>syssessions</c>, so retained
     /// history reads fine there. Gated here in the shared AppliesTo so Lite and Darling skip identically.
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb && target.HasMsdbAccess;
+    public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {

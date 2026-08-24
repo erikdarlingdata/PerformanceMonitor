@@ -23,8 +23,10 @@ namespace Lite.Tests;
 /// the running_jobs/job_history/agent_status msdb gate) was silently ignored by Darling. That layer is gone.
 /// These pins assert:
 /// <list type="number">
-/// <item>each moved gate's <c>AppliesTo</c> truth table (Azure SQL DB / AWS RDS / no-msdb / pre-2016), so a
-/// gate can't silently regress;</item>
+/// <item>each moved gate's <c>AppliesTo</c> truth table (Azure SQL DB / AWS RDS / pre-2016), so a
+/// gate can't silently regress. msdb access is deliberately NOT among them since #2559 — it is a grant
+/// rather than an engine capability, so the Agent collectors attempt and fail into PERMISSIONS instead of
+/// gating off on a cached probe;</item>
 /// <item>that the by-name surface Lite dispatches through (<see cref="CollectorCatalog.AppliesTo(string, CollectorTargetInfo)"/>)
 /// agrees with the definition's own <c>AppliesTo</c> that Darling's runner calls — the proof both SKUs now
 /// gate identically off ONE surface;</item>
@@ -133,21 +135,21 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void RunningJobs_AppliesTo_SkipsAzureSqlDbRdsAndNoMsdb()
+    public void RunningJobs_AppliesTo_SkipsAzureSqlDbAndRds_ButAttemptsWithoutMsdb()
     {
         Assert.False(RunningJobsCollector.Instance.AppliesTo(AzureSqlDb));
         Assert.False(RunningJobsCollector.Instance.AppliesTo(AwsRds));    /* joins msdb.dbo.syssessions */
-        Assert.False(RunningJobsCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(RunningJobsCollector.Instance.AppliesTo(NoMsdb));   // #2559: reported, not dispatched on
         Assert.True(RunningJobsCollector.Instance.AppliesTo(AzureMi));
         Assert.True(RunningJobsCollector.Instance.AppliesTo(OnPrem2016));
         Assert.True(RunningJobsCollector.Instance.AppliesTo(Unknown));
     }
 
     [Fact]
-    public void JobHistory_AppliesTo_SkipsAzureSqlDbAndNoMsdb_ButNotRds()
+    public void JobHistory_AppliesTo_SkipsAzureSqlDb_ButNotRdsAndNotNoMsdb()
     {
         Assert.False(JobHistoryCollector.Instance.AppliesTo(AzureSqlDb));
-        Assert.False(JobHistoryCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(JobHistoryCollector.Instance.AppliesTo(NoMsdb));   // #2559: reported, not dispatched on
         Assert.True(JobHistoryCollector.Instance.AppliesTo(AwsRds));      /* never touches syssessions */
         Assert.True(JobHistoryCollector.Instance.AppliesTo(AzureMi));
         Assert.True(JobHistoryCollector.Instance.AppliesTo(OnPrem2016));
@@ -155,11 +157,11 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void AgentStatus_AppliesTo_SkipsAzureSqlDbRdsAndNoMsdb()
+    public void AgentStatus_AppliesTo_SkipsAzureSqlDbAndRds_ButAttemptsWithoutMsdb()
     {
         Assert.False(AgentStatusCollector.Instance.AppliesTo(AzureSqlDb));
         Assert.False(AgentStatusCollector.Instance.AppliesTo(AwsRds));    /* no sys.dm_server_services */
-        Assert.False(AgentStatusCollector.Instance.AppliesTo(NoMsdb));
+        Assert.True(AgentStatusCollector.Instance.AppliesTo(NoMsdb));   // #2559: reported, not dispatched on
         Assert.True(AgentStatusCollector.Instance.AppliesTo(AzureMi));
         Assert.True(AgentStatusCollector.Instance.AppliesTo(OnPrem2016));
         Assert.True(AgentStatusCollector.Instance.AppliesTo(Unknown));
@@ -206,10 +208,12 @@ public sealed class CollectorGateSurfacePinTests
     }
 
     [Fact]
-    public void HasMsdbAccess_DefaultsToTrue_SoUnknownTargetsStillAttemptAgentCollectors()
+    public void HasMsdbAccess_DefaultsToTrue_AndTheAgentCollectorsAttemptRegardless()
     {
-        /* The probe returns NULL ⇒ assume access; every bare CollectorTargetInfo must mirror that, or the
-           three Agent collectors would silently gate off on the unknown path. */
+        /* The probe returns NULL ⇒ assume access, and every bare CollectorTargetInfo mirrors that. Since
+           #2559 the three Agent collectors attempt whatever this says, so the default no longer decides
+           dispatch — but it is still the value reported on a connection surface, and it staying true is
+           what keeps an unclassified target from being described as having no msdb access. */
         Assert.True(new CollectorTargetInfo().HasMsdbAccess);
         Assert.True(RunningJobsCollector.Instance.AppliesTo(new CollectorTargetInfo()));
         Assert.True(JobHistoryCollector.Instance.AppliesTo(new CollectorTargetInfo()));

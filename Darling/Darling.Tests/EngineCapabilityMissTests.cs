@@ -70,16 +70,20 @@ public sealed class CollectorEngineCapabilityTests
     }
 
     /// <summary>
-    /// A gate that reads a FIXABLE fact is not an engine gap. <c>job_history</c> needs msdb access and
-    /// <c>running_jobs</c> needs msdb access and a non-RDS host; on a box edition both of those are things an
-    /// operator can change, so the honest answer there is "collected" and the read keeps its
-    /// <c>unavailable</c> vocabulary, which is what sends someone to look. Only the Azure SQL DB half of
-    /// those same gates is permanent.
+    /// A gate that reads a FIXABLE fact is not an engine gap. <c>running_jobs</c> and <c>agent_status</c>
+    /// need a non-RDS host; on a box edition that is something an operator can change, so the honest answer
+    /// there is "collected" and the read keeps its <c>unavailable</c> vocabulary, which is what sends
+    /// someone to look. Only the Azure SQL DB half of those same gates is permanent.
     ///
-    /// <para>This is the assertion that would fail if the sweep stopped varying a dimension: a sweep fixed at
-    /// <c>HasMsdbAccess = false</c>, or at <c>IsAwsRds = true</c>, would report both of these as permanent
-    /// engine gaps on an ordinary Enterprise box and tell an operator to stop looking at a problem they could
-    /// have fixed in a minute.</para>
+    /// <para>#2559 removed the most fixable fact of all from these gates: msdb access is a GRANT, and
+    /// gating on it meant the grant did not take effect until the connection was rebuilt. All three
+    /// collectors now attempt regardless and fail into PERMISSIONS. They are still asserted here because
+    /// what this test protects is unchanged — none of the three may be reported as a permanent engine gap
+    /// on a box edition.</para>
+    ///
+    /// <para>This is the assertion that would fail if the sweep stopped varying a dimension: a sweep fixed
+    /// at <c>IsAwsRds = true</c> would report these as permanent engine gaps on an ordinary Enterprise box
+    /// and tell an operator to stop looking at a problem they could have fixed in a minute.</para>
     /// </summary>
     [Fact]
     public void AFixableGate_IsNotReportedAsAnEngineGap()
