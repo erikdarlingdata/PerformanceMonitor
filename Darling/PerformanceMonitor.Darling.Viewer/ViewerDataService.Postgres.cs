@@ -310,7 +310,7 @@ public sealed partial class ViewerDataService
 
     /// <summary>Vacuum tab, panel 5 - whether this target can capture execution plans at all, and if not,
     /// which step is missing. Latest state per facet rather than the history: every facet is a
-    /// parameter-group setting, so the window holds the same four rows repeated.</summary>
+    /// parameter-group setting, so the window holds the same rows repeated.</summary>
     public Task<List<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow>> GetPgPlanCaptureReadinessAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgPlanCaptureReadinessReader.GetPgPlanCaptureReadinessAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);

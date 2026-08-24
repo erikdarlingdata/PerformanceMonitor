@@ -109,23 +109,27 @@ public class PgPlanCaptureReadinessCollectorDefinitionTests
     }
 
     /// <summary>
-    /// The four facets are separate rows, and that IS the feature. Collapsing them would produce the one
-    /// thing this collector exists to prevent: a single "plans unavailable" that tells nobody what to do,
-    /// when the remedies are a parameter-group change plus a reboot, a single setting, and a platform
-    /// limitation respectively.
+    /// Every facet is a separate row, and that IS the feature. Collapsing them would produce the one thing
+    /// this collector exists to prevent: a single "plans unavailable" that tells nobody what to do, when the
+    /// remedies are a parameter-group change plus a reboot, a single setting, and a log_line_prefix edit
+    /// respectively.
     /// </summary>
     [Fact]
-    public void TheFourFacets_AreSeparateRows()
+    public void EveryFacet_IsASeparateRow()
     {
         var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
 
-        foreach (var facet in new[] { "library_loaded", "capture_threshold", "extension_available", "plan_text_setting" })
+        var facets = new[] { "library_loaded", "capture_threshold", "extension_available", "plan_text_setting", "plan_attribution" };
+        foreach (var facet in facets)
         {
             Assert.Contains($"'{facet}'::text", sql, StringComparison.Ordinal);
         }
 
-        /* Four SELECTs joined by three UNION ALLs — one row per facet, not a wide row. */
-        Assert.Equal(3, Regex.Matches(sql, @"\bUNION ALL\b").Count);
+        /* DERIVED from the roster above, not spelled as a literal. This assertion was `Assert.Equal(3, ...)`
+           and adding a fifth facet left it stale — the roster was updated, the count was not, and a guard
+           whose whole job is to catch a collapsed facet failed for arithmetic instead. N facets are joined by
+           N-1 UNION ALLs by construction, so saying that is both the real invariant and un-staleable. */
+        Assert.Equal(facets.Length - 1, Regex.Matches(sql, @"\bUNION ALL\b").Count);
     }
 
     /// <summary>

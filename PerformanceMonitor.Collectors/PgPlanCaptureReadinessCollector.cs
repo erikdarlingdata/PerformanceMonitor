@@ -43,6 +43,14 @@ namespace PerformanceMonitor.Collectors;
 /// <para>Core catalog surfaces only (<c>pg_settings</c>, <c>pg_available_extensions</c>), both readable by any
 /// role, so this runs on every PostgreSQL target including standbys — a replica's parameter group can differ
 /// from its writer's, and that difference is exactly the kind of thing nobody notices.</para>
+///
+/// <para><b>What SQL cannot answer here.</b> Whether an UNLOADED <c>auto_explain</c> is available on the
+/// server is not visible to any read-only query: it is a preload-only module with no <c>CREATE EXTENSION</c>,
+/// so it is absent from <c>pg_available_extensions</c> on every server including the ones running it. The
+/// <c>extension_available</c> facet therefore reports availability it can PROVE — catalogued, or already
+/// loaded — and says plainly that a negative is inconclusive rather than asserting a platform limitation it
+/// has not established. The authoritative answer on Aurora/RDS lives in the cluster parameter group's allowed
+/// values, which is an AWS API surface rather than a SQL one.</para>
 /// </summary>
 public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitionBase<PgPlanCaptureReadinessCollector.Row>
 {
@@ -63,7 +71,7 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
         string? Observed,
         string? Detail);
 
-    /* Four facets, each a separate row, because each has a DIFFERENT remedy and collapsing them would
+    /* Each facet is a separate row, because each has a DIFFERENT remedy and collapsing them would
        produce the one thing this collector exists to prevent: a single "plans unavailable" that tells
        nobody what to do.
 
@@ -71,11 +79,19 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
                                reboot on Aurora/RDS; not a SET, which is the misconception worth heading off.
          capture_threshold   - auto_explain.log_min_duration. -1 is the trap: loaded and capturing nothing,
                                visually identical to not-loaded from where the user is standing.
-         extension_available - is auto_explain even present in pg_available_extensions? Answers "could this
-                               server ever do it" as distinct from "is it doing it", which is the difference
-                               between a configuration task and a platform limitation.
+         extension_available - available as far as this can PROVE: catalogued, or already loaded. A negative
+                               is inconclusive and says so, because auto_explain is preload-only and never
+                               appears in pg_available_extensions - see the type header.
+
          plan_text_setting   - auto_explain.log_format. Recorded rather than judged: any format proves
                                capture is happening, and #2565 has not chosen what we would read.
+         plan_attribution    - log_line_prefix carrying %Q. Measured on PostgreSQL 17 while investigating
+                               #2538: auto_explain's JSON output contains NO query identifier, even with
+                               compute_query_id on. The only place the id appears is the LOG LINE PREFIX,
+                               and with %Q present it equals pg_stat_statements.queryid exactly. So without
+                               it every captured plan is an orphan that cannot be joined to the statement it
+                               belongs to - and the failure looks like the feature working, which is why
+                               this is a facet rather than a footnote.
 
        current_setting(..., true) throughout — the MISSING_OK form. Reading a GUC that does not exist because
        the library was never loaded is the NORMAL case here, and the two-argument form answers NULL instead of
@@ -133,11 +149,36 @@ UNION ALL
 
 SELECT
     'extension_available'::text,
-    EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain'),
-    (SELECT coalesce(max(default_version), '(not present)') FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain'),
-    'Whether this server COULD load auto_explain at all, which is a different question from whether it '
-        || 'currently does. If it is absent, plan capture by this mechanism is a platform limitation rather '
-        || 'than a configuration step.'
+    /* CORRECTED. This shipped asking pg_available_extensions alone, and that is false on EVERY server:
+       auto_explain is a preload-only module with no CREATE EXTENSION and no control file, so it never appears
+       there - verified on PostgreSQL 17, where the module was loaded and serving a threshold of 250ms while
+       this facet reported '(not present)' and told the reader their platform could not do plan capture. That
+       is precisely the wrong-fix failure the whole collector exists to prevent, and it contradicted
+       library_loaded sitting two rows above it.
+
+       A loaded library IS proof of availability, so that alternative is now part of the test and the
+       contradiction cannot recur. The catalog check is kept rather than dropped because a managed provider
+       may ship a control file this does not know about, and finding it there is still a true positive. */
+    EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
+        OR coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)',
+    CASE
+        WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
+            THEN (SELECT max(default_version) FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
+        WHEN coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)'
+            THEN '(loaded, and therefore available - not listed as an extension)'
+        ELSE '(not listed, which is the NORMAL answer and not evidence of absence)'
+    END,
+    CASE
+        WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
+          OR coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)'
+            THEN 'auto_explain is available on this server.'
+        ELSE 'Availability could NOT be confirmed, and that is not the same as unavailable. auto_explain is a '
+             || 'preload-only module with no CREATE EXTENSION, so it does not appear in pg_available_extensions '
+             || 'even on servers that ship it - which is most of them, since it is standard contrib. The '
+             || 'authoritative check on Aurora/RDS is whether auto_explain is in the allowed values for '
+             || 'shared_preload_libraries on the cluster parameter group, which SQL cannot see. Do not read '
+             || 'this row as a platform limitation.'
+    END
 
 UNION ALL
 
@@ -146,7 +187,37 @@ SELECT
     current_setting('auto_explain.log_format', true) IS NOT NULL,
     coalesce(current_setting('auto_explain.log_format', true), '(setting absent - library not loaded)'),
     'The format auto_explain writes plans in. Recorded, not judged: any value proves capture is configured, '
-        || 'and which format is readable is settled separately.'";
+        || 'and which format is readable is settled separately.'
+
+UNION ALL
+
+SELECT
+    'plan_attribution'::text,
+    /* strpos, NOT like. This is a printf-style format string rather than a delimited list, so the boundary
+       regex library_loaded needs would be wrong here - but LIKE is wrong in a way that is much easier to
+       miss: '%%Q%' reads as wildcard-wildcard-Q-wildcard, so it matches ANY value containing the letter Q
+       and reports attribution working on a prefix that has none. strpos takes the two characters literally
+       and needs no escape clause to do it.
+
+       Case-sensitive, and that is load-bearing rather than incidental: %q and %Q are DIFFERENT log_line_prefix
+       escapes - %q stops the prefix in non-session processes, %Q is the query identifier - and %q is common
+       in real prefixes. A case-insensitive test would report attribution satisfied on a great many servers
+       that cannot attribute anything.
+
+       Known limit, stated rather than parsed around: a prefix containing the literal-percent escape %%
+       immediately before a Q renders as literal %Q text and would read as satisfied here. Detecting that needs
+       a real scan of the escape sequence, which is not worth carrying for a prefix nobody writes. */
+    strpos(coalesce(current_setting('log_line_prefix', true), ''), '%Q') > 0,
+    coalesce(current_setting('log_line_prefix', true), '(unreadable)'),
+    CASE
+        WHEN strpos(coalesce(current_setting('log_line_prefix', true), ''), '%Q') > 0
+            THEN 'log_line_prefix carries %Q, so each captured plan is stamped with the query id that joins '
+                 || 'it to pg_stat_statements.'
+        ELSE 'log_line_prefix does NOT carry %Q. auto_explain does not put a query identifier in the plan '
+             || 'itself - the id appears ONLY in the log line prefix - so plans captured without it cannot '
+             || 'be joined to the statement they belong to. Add %Q to log_line_prefix; it is a dynamic '
+             || 'parameter and needs no restart.'
+    END";
 
     public override string Name => "pg_plan_capture_readiness";
 
