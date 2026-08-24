@@ -28,8 +28,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>library_loaded</c> gates <c>capture_threshold</c>, and <c>extension_available</c> explains whether
 /// either is even possible — so sorting the unsatisfied ones to the top would break the sequence a reader
 /// has to follow. <c>extension_available</c> first, then <c>library_loaded</c>, then
-/// <c>capture_threshold</c>, then <c>plan_text_setting</c>: could it, does it, is it capturing, in what
-/// form.</para>
+/// <c>capture_threshold</c>, then <c>plan_text_setting</c>, then <c>plan_attribution</c>: could it, does
+/// it, is it capturing, in what form, and can what it captures be joined to the statement it came from.</para>
 ///
 /// <para>Shared by the WPF tab and the MCP surface so there is one copy of this SQL, per #2530.</para>
 /// </summary>
@@ -55,8 +55,8 @@ public static class DarlingPgPlanCaptureReadinessReader
        different sorts and need the subquery.
 
        The facet order is spelled as a CASE rather than left to alphabetical, which would give
-       capture_threshold, extension_available, library_loaded, plan_text_setting - the reverse of the order
-       somebody has to act in. */
+       capture_threshold, extension_available, library_loaded, plan_attribution, plan_text_setting - close to
+       the reverse of the order somebody has to act in. */
     public const string PgPlanCaptureReadinessSql = """
         SELECT facet, is_satisfied, observed, detail, collection_time
         FROM (
@@ -73,7 +73,8 @@ public static class DarlingPgPlanCaptureReadinessReader
                      WHEN 'library_loaded'      THEN 2
                      WHEN 'capture_threshold'   THEN 3
                      WHEN 'plan_text_setting'   THEN 4
-                     ELSE 5
+                     WHEN 'plan_attribution'    THEN 5
+                     ELSE 6
                  END,
                  facet
         LIMIT $4

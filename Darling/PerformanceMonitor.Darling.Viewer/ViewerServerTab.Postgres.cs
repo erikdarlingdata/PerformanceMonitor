@@ -295,13 +295,18 @@ public partial class ViewerServerTab
                   + "collector, so a server added in the last hour has nothing here — it does NOT mean plan "
                   + "capture is unavailable."
                 : planCaptureTask.Result.All(r => r.IsSatisfied)
-                    ? "Every precondition for auto_explain capture is satisfied on this server. That means "
-                      + "plans CAN be captured — not that this product is reading them, which is a separate "
-                      + "thing: auto_explain writes to the server log, which a SQL connection cannot read."
-                    : "At least one precondition is unmet, so no execution plans are being captured by "
-                      + "auto_explain here. Read the rows in order — extension_available, library_loaded, "
-                      + "capture_threshold — each names the specific step and, on Aurora/RDS, whether it "
-                      + "needs a parameter-group change and a reboot rather than a SET.";
+                    ? "Every precondition for auto_explain capture is satisfied on this server, and a "
+                      + "captured plan carries the query id that joins it back to pg_stat_statements. That "
+                      + "means plans CAN be captured — not that this product is reading them, which is a "
+                      + "separate thing: auto_explain writes to the server log, which a SQL connection "
+                      + "cannot read."
+                    : "At least one precondition is unmet, so either no execution plans are being captured "
+                      + "by auto_explain here or the ones that are cannot be attributed. Read the rows in "
+                      + "order — extension_available, library_loaded, capture_threshold, plan_text_setting, "
+                      + "plan_attribution — each names the specific step and, on Aurora/RDS, whether it "
+                      + "needs a parameter-group change and a reboot rather than a SET. plan_attribution is "
+                      + "the one that is easy to miss: auto_explain puts no query id in the plan itself, so "
+                      + "without %Q in log_line_prefix every captured plan is an orphan.";
     }
 
     /// <summary>Waits — Aurora's cumulative wait counters. Shown on stock PostgreSQL too, where the panel
