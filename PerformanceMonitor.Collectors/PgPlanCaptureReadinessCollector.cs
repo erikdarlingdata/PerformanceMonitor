@@ -81,6 +81,11 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
        the library was never loaded is the NORMAL case here, and the two-argument form answers NULL instead of
        raising 42704, which would turn the collector's entire purpose into an error every cycle.
 
+       Catalog reads are schema-qualified as pg_catalog.<view>, matching every other PostgreSQL collector
+       here. pg_catalog is searched implicitly but not necessarily FIRST, so an unqualified read can resolve
+       to an object a user created in a schema earlier in the monitoring login's search_path — which for this
+       collector would mean fabricating an answer about whether plan capture is possible.
+
        No unit arithmetic anywhere. log_min_duration is a memory-less integer of milliseconds, but the
        skill's own scar tissue applies: current_setting renders GUCs WITH their unit on some settings, so the
        value is stored as TEXT exactly as the server rendered it and interpreted downstream. Casting it here
@@ -88,7 +93,12 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
     private const string QueryText = @"
 SELECT
     'library_loaded'::text                                                        AS facet,
-    coalesce(current_setting('shared_preload_libraries', true), '') LIKE '%auto_explain%' AS is_satisfied,
+    /* BOUNDARY-AWARE, not a substring. shared_preload_libraries is a comma-separated list, and a plain
+       substring test reports true for any library whose name merely CONTAINS this one (measured: both
+       my_auto_explain_shim and auto_explain_extra false-positive that way). This facet's
+       entire job is to be trustworthy about loaded-versus-not, so a match that can be fooled by a name is
+       the wrong instrument no matter how unlikely the name is today. */
+    coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)' AS is_satisfied,
     coalesce(current_setting('shared_preload_libraries', true), '(unreadable)')    AS observed,
     'auto_explain must be listed in shared_preload_libraries. On Aurora/RDS this is a custom CLUSTER '
         || 'parameter group plus a WRITER REBOOT - it cannot be turned on with SET or ALTER SYSTEM.'::text AS detail
@@ -123,8 +133,8 @@ UNION ALL
 
 SELECT
     'extension_available'::text,
-    EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'auto_explain'),
-    (SELECT coalesce(max(default_version), '(not present)') FROM pg_available_extensions WHERE name = 'auto_explain'),
+    EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain'),
+    (SELECT coalesce(max(default_version), '(not present)') FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain'),
     'Whether this server COULD load auto_explain at all, which is a different question from whether it '
         || 'currently does. If it is absent, plan capture by this mechanism is a platform limitation rather '
         || 'than a configuration step.'

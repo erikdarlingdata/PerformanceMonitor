@@ -105,7 +105,7 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgVacuumInnerTabIndex,
             "vacuum",
             "Vacuum",
-            new[] { "pg_session_states", "pg_xmin_horizon", "pg_autovacuum_stats", "pg_wraparound_stats" },
+            new[] { "pg_session_states", "pg_xmin_horizon", "pg_autovacuum_stats", "pg_wraparound_stats", "pg_plan_capture_readiness" },
             /* One tab, four panels, in causal order. Read separately each of the four looks survivable.
 
                Session states is FIRST rather than on a tab of its own because it is the link UPSTREAM of

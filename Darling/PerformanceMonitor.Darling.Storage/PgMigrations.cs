@@ -1982,7 +1982,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_plan_capture_readiness (
     collection_time timestamp NOT NULL,
     server_id integer NOT NULL,
     server_name text NOT NULL,
-    facet text NOT NULL,
+    facet text,
     is_satisfied boolean,
     observed text,
     detail text

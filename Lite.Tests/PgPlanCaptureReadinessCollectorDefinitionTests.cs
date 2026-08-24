@@ -216,6 +216,37 @@ public class PgPlanCaptureReadinessCollectorDefinitionTests
         Assert.Equal(CollectorColumnType.Varchar, observed.Type);
     }
 
+    /// <summary>
+    /// The library check is boundary-aware, not a substring. <c>shared_preload_libraries</c> is a
+    /// comma-separated list, and <c>LIKE '%auto_explain%'</c> reports true for any library whose name merely
+    /// CONTAINS it — measured against PostgreSQL 17, both <c>my_auto_explain_shim</c> and
+    /// <c>auto_explain_extra</c> false-positived under the substring form and are correctly rejected under
+    /// the boundary form. This facet's whole job is to be trustworthy about loaded-versus-not.
+    /// </summary>
+    [Fact]
+    public void TheLibraryCheck_IsBoundaryAware_NotASubstringMatch()
+    {
+        var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        Assert.DoesNotContain("LIKE '%auto_explain%'", sql, StringComparison.Ordinal);
+        Assert.Contains(@"~ '(^|,)\s*auto_explain\s*(,|$)'", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Catalog reads are schema-qualified, matching every other PostgreSQL collector here. pg_catalog is
+    /// searched implicitly but not necessarily FIRST, so an unqualified read can resolve to an object a user
+    /// created in a schema earlier in the monitoring login's search_path — which for this collector would
+    /// mean fabricating an answer about whether plan capture is possible at all.
+    /// </summary>
+    [Fact]
+    public void CatalogReads_AreSchemaQualified()
+    {
+        var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        Assert.DoesNotMatch(new Regex(@"FROM\s+pg_available_extensions"), sql);
+        Assert.Contains("pg_catalog.pg_available_extensions", sql, StringComparison.Ordinal);
+    }
+
     /// <summary>Every output column is aliased — an unaliased expression comes back named after the
     /// function, which makes the query undebuggable in psql, the one tool anyone reaches for.</summary>
     [Fact]
