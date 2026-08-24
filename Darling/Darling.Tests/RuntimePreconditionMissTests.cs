@@ -361,9 +361,13 @@ public sealed class CollectorRuntimePreconditionTests
         var source = File.ReadAllText(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpJobTools.cs"));
 
+        /* Anchor on CODE, never on the sentence. The first draft of this pin looked for the string
+           "No running SQL Agent jobs found" and matched the #2546 comment that QUOTES it, eleven lines above
+           the call — so the pin failed against source whose order was correct. A source-parsed assertion has
+           to key on something that cannot appear in prose about itself. */
         var recorded = source.IndexOf("DarlingRuntimePrecondition.StatusAsync", StringComparison.Ordinal);
         var gate = source.IndexOf("DarlingRuntimePrecondition.GatedOffStatusAsync", StringComparison.Ordinal);
-        var empty = source.IndexOf("No running SQL Agent jobs found", StringComparison.Ordinal);
+        var empty = source.IndexOf("McpHelpers.Status(\"empty\"", StringComparison.Ordinal);
 
         Assert.True(recorded > 0 && gate > 0 && empty > 0, "get_running_jobs no longer has all three arms");
         Assert.True(gate > recorded, "the gate inference must not pre-empt the collector's own recorded denial");

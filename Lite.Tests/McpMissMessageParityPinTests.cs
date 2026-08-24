@@ -34,6 +34,33 @@ namespace Lite.Tests;
 /// </summary>
 public sealed class McpMissMessageParityPinTests
 {
+    /// <summary>
+    /// #2559 wiring, per SKU. The shared builder guarantees the SENTENCES match; what it cannot guarantee is
+    /// that both tool bodies actually CALL it, which is the drift the review caught on the first draft of
+    /// that change — Darling grew the arm and Lite did not, so a Lite login with no msdb access kept getting
+    /// the affirmative "no jobs running" claim the arm exists to remove.
+    ///
+    /// <para>Order matters as much as presence: the gate inference must sit after the collector's own
+    /// recorded denial (specific evidence beats an inference from an absence) and before the empty miss.
+    /// Anchored on CODE rather than on the sentences, because both files contain comments that quote them.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Lite/Mcp/McpJobTools.cs", "McpRuntimePrecondition")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs", "DarlingRuntimePrecondition")]
+    public void BothSkus_AskAboutTheGate_AfterTheRecordedOutcome_AndBeforeTheEmptyMiss(string relativePath, string helper)
+    {
+        var source = File.ReadAllText(Path.Combine(ParitySource.RepoRoot(), relativePath));
+
+        var recorded = source.IndexOf($"{helper}.StatusAsync", StringComparison.Ordinal);
+        var gate = source.IndexOf($"{helper}.GatedOffStatusAsync", StringComparison.Ordinal);
+        var empty = source.IndexOf("McpHelpers.Status(\"empty\"", StringComparison.Ordinal);
+
+        Assert.True(gate > 0, $"{relativePath} never asks whether the collector is gated off (#2559)");
+        Assert.True(recorded > 0 && empty > 0, $"{relativePath} no longer has the arms this pin describes");
+        Assert.True(gate > recorded, $"{relativePath} lets the gate inference pre-empt a recorded denial");
+        Assert.True(empty > gate, $"{relativePath} no longer keeps the empty miss as the last resort");
+    }
+
     private const string LiteMcpDir = "Lite/Mcp";
     private const string DarlingMcpDir = "Darling/PerformanceMonitor.Darling.Service/Mcp";
 
@@ -96,6 +123,20 @@ public sealed class McpMissMessageParityPinTests
            close. */
         "`precondition` is the one that IS worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way",
         "It is re-derived on EVERY read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data",
+
+        /* #2559. The paragraph above USED to end "there is nothing to restart on the monitoring side" as a
+           flat promise, and for connect-scoped preconditions that is false — the fact that gates them is read
+           once at connect and cached for the connection's life, so an agent following the general case sends
+           the user round a loop that never terminates. The correction has to be identical on both SKUs or one
+           of them keeps teaching the wrong rule, which is exactly what this pin is for. */
+        "A few preconditions are the exception and SAY SO IN THEIR OWN MESSAGE: the fact that gates them is read once when the service connects to that server and cached for the connection's life",
+        "telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates",
+
+        /* The gated-off arm's GATE CANDIDATES (#2559). The message body itself comes from the shared
+           CollectorRuntimePrecondition and is byte-identical by construction, so it does not belong here —
+           but this sentence is supplied by each tool body at its own call site, lives twice, and is exactly
+           what drifts. A tree missing it is a tree whose get_running_jobs never grew the arm at all. */
+        "the monitoring login has no access to msdb",
     };
 
     [Theory]

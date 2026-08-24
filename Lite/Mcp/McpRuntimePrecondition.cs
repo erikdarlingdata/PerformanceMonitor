@@ -73,6 +73,44 @@ internal static class McpRuntimePrecondition
     }
 
     /// <summary>
+    /// The <c>precondition</c> envelope when the collector serving this read has never run against this
+    /// server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
+    /// <c>null</c> otherwise. Darling's twin (#2559).
+    ///
+    /// <para>Call this AFTER <see cref="StatusAsync"/>, never instead of it: a collector that ran and
+    /// recorded a denial has a specific sentence from the monitored server itself, which beats an inference
+    /// drawn from an absence.</para>
+    /// </summary>
+    /// <param name="gateCandidates">Operator-facing text naming what could switch this collector off. The
+    /// deciding facts are not persisted, so the caller supplies the candidates rather than this method
+    /// guessing which one applies.</param>
+    public static async Task<string?> GatedOffStatusAsync(
+        LocalDataService dataService,
+        int serverId,
+        string serverName,
+        string collectorName,
+        string gateCandidates)
+    {
+        bool everRan;
+        DateTime? serverLastCollectedUtc;
+
+        try
+        {
+            (everRan, serverLastCollectedUtc) =
+                await dataService.GetCollectorEverRanAsync(serverId, collectorName);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+
+        var message = CollectorRuntimePrecondition.GatedOffMessage(
+            serverName, collectorName, gateCandidates, everRan, serverLastCollectedUtc);
+
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+    }
+
+    /// <summary>
     /// The <c>precondition</c> envelope when this server's recorded Query Store configuration says the
     /// databases the read covered are not recording runtime statistics, or <c>null</c> when it says nothing
     /// of the kind (no snapshot yet, or at least one database in scope is READ_WRITE).

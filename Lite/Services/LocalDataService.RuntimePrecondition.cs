@@ -57,6 +57,50 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// Whether one collector has EVER run for one server, beside when that server last collected anything at
+    /// all. Both halves in one round trip, because the inference needs both and they must describe the same
+    /// instant: a collector with no rows on a server that is collecting normally is gated off by its
+    /// <c>AppliesTo</c>, while a collector with no rows on a server that has collected nothing is just a
+    /// collection outage. Mirrors Darling's <c>CollectorEverRanSql</c> — the SAME inference, because the gate
+    /// being read is the shared one in <c>PerformanceMonitor.Collectors</c> and a divergence here would mean
+    /// the two SKUs disagreed about whether a server was permitted to answer (#2559).
+    /// </summary>
+    public async Task<(bool EverRan, DateTime? ServerLastCollectedUtc)> GetCollectorEverRanAsync(
+        int serverId, string collectorName)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT EXISTS (
+           SELECT 1
+           FROM collection_log
+           WHERE server_id = $1
+           AND   collector_name = $2
+       ) AS collector_ever_ran,
+       (
+           SELECT MAX(collection_time)
+           FROM collection_log
+           WHERE server_id = $1
+       ) AS server_last_collected";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            /* Impossible for this shape (both halves are scalar subqueries), but "we cannot tell" keeps the
+               caller on its existing miss rather than asserting a gate that may not be there. */
+            return (true, null);
+        }
+
+        return (
+            !reader.IsDBNull(0) && reader.GetBoolean(0),
+            reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
+    }
+
+    /// <summary>
     /// The latest per-database Query Store configuration snapshot, optionally narrowed to the databases a
     /// read was scoped to. Reads <c>v_query_store_health</c> — the same relation the Query Store grid and
     /// <c>get_query_store_health</c> answer from, so this can never claim a state those would not confirm.
