@@ -705,9 +705,6 @@ public sealed class DarlingDeployRollbackRetentionTests
             try { File.Delete(path); } catch (IOException) { /* best-effort */ }
         }
     }
-
-    /// <summary>Returns the full <c>function NAME(...) { ... }</c> definition text from the script —
-    /// signature included, so the extracted copy takes its parameters the way the shipped one does.</summary>
     /// <summary>
     /// #2574: the rollback backup must RESTRICT the secrets it copies. `darling.json` holds every monitored
     /// server's `encryptedPassword` plus the MCP and web tokens, DPAPI LocalMachine with an entropy constant
@@ -748,6 +745,9 @@ public sealed class DarlingDeployRollbackRetentionTests
         Assert.DoesNotContain("InteractiveSid", script[harden..Math.Min(harden + 1200, script.Length)], StringComparison.Ordinal);
     }
 
+
+    /// <summary>Returns the full <c>function NAME(...) { ... }</c> definition text from the script —
+    /// signature included, so the extracted copy takes its parameters the way the shipped one does.</summary>
     private static string ExtractFunction(string script, string name)
     {
         var start = script.IndexOf("function " + name, StringComparison.Ordinal);
