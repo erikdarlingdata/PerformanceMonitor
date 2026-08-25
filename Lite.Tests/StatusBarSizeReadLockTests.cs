@@ -35,7 +35,7 @@ public class StatusBarSizeReadLockTests
     private static readonly TimeSpan WriteLockHold = TimeSpan.FromSeconds(10);
 
     [Fact]
-    public void GetUsedDataSizeMb_WhenTheWriteLockIsHeld_GivesUpInsteadOfBlocking()
+    public async Task GetUsedDataSizeMb_WhenTheWriteLockIsHeld_GivesUpInsteadOfBlocking()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "pmlite-statusbar-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
@@ -62,7 +62,7 @@ public class StatusBarSizeReadLockTests
             stopwatch.Stop();
 
             release.Set();
-            holder.Wait(TimeSpan.FromSeconds(15));
+            await holder.WaitAsync(TimeSpan.FromSeconds(15));
 
             /* Null, not a number: the caller renders the file size alone in this state, which is the
                degraded answer this is choosing on purpose. */

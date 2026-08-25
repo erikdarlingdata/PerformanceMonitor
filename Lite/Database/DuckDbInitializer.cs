@@ -148,6 +148,48 @@ public class DuckDbInitializer
     private static readonly TimeSpan ReadLockPollInterval = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
+    /// The read lock for a caller that would rather have NO answer than wait for one — returns null if
+    /// the lock is not free within <paramref name="timeout"/>, instead of blocking.
+    ///
+    /// <para>This exists for the status bar (#2594). Every other read here takes the lock and waits,
+    /// which is right when the caller needs the data; the status-bar size figure is cosmetic, refreshed
+    /// on a 30-second UI timer, and runs on the dispatcher thread — so waiting on a lock held by a long
+    /// archival would freeze the window to render a number nobody is reading. The two honest options for
+    /// that caller are "skip the lock" and "skip the read", and skipping the lock is how a connection
+    /// ends up open against a file the reset path deletes.</para>
+    ///
+    /// <para>A timeout rather than a token here, unlike <see cref="AcquireReadLock(CancellationToken)"/>,
+    /// because this caller genuinely has a number to pick: it is bounded by what a UI thread may spend,
+    /// not by a caller's remaining budget.</para>
+    /// </summary>
+    public IDisposable? TryAcquireReadLock(TimeSpan timeout)
+    {
+        try
+        {
+            if (!s_dbLock.TryEnterReadLock(timeout))
+            {
+                return null;
+            }
+        }
+        catch (LockRecursionException)
+        {
+            /* Already held by this thread — same reasoning as AcquireReadLock: we are protected, so
+               hand back a no-op rather than reporting a failure the caller cannot act on. */
+            return NoOpDisposable.Instance;
+        }
+
+        return new LockReleaser(s_dbLock, write: false);
+    }
+
+    /// <summary>
+    /// How long the status bar will wait for the read lock before giving up and reporting no used-size
+    /// figure. Short on purpose: this runs on the dispatcher thread, and the caller already renders the
+    /// file size alone when this returns null, so the degraded answer is a smaller status bar rather
+    /// than a stalled window.
+    /// </summary>
+    private static readonly TimeSpan StatusBarReadLockTimeout = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
     /// Acquires an exclusive write lock on the database. Blocks until all readers finish.
     /// Dispose the returned object to release the lock.
     /// When a timeout is specified, throws <see cref="TimeoutException"/> if the lock
@@ -1696,6 +1738,17 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// </summary>
     public double? GetUsedDataSizeMb()
     {
+        /* Under the read lock (#2594). This was the one periodic connection site that opened without it,
+           on the UI's 30-second timer, which put a live handle on the database file at moments the
+           archival path may be deleting and recreating it. Bounded rather than blocking - see
+           StatusBarReadLockTimeout for why this caller may give up where others may not. */
+        using var readLock = TryAcquireReadLock(StatusBarReadLockTimeout);
+
+        if (readLock is null)
+        {
+            return null;
+        }
+
         try
         {
             using var connection = CreateConnection();
