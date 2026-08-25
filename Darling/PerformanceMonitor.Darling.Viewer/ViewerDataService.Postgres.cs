@@ -362,4 +362,12 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgBufferUsageReader.PgBufferUsageRow>> GetPgBufferUsageAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgBufferUsageReader.GetPgBufferUsageAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Storage tab - MEASURED b-tree index bloat (#2561), latest per index. Ranked by estimated
+    /// reclaimable BYTES rather than by density, because a small index at 40% density is worth nothing next
+    /// to a large one at 70%. Indexes too large to measure sort to the TOP: unknown is not zero, and they
+    /// are the likeliest big win.</summary>
+    public Task<List<DarlingPgIndexBloatReader.PgIndexBloatRow>> GetPgIndexBloatAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        DarlingPgIndexBloatReader.GetPgIndexBloatAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

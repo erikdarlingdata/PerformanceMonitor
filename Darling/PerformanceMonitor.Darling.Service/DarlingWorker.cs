@@ -4677,6 +4677,7 @@ LIMIT 1";
         ["pg_column_stats"] = (r, s, ct) => r.RunAsync(PgColumnStatsCollector.Instance, s, ct),
         ["pg_replication_stats"] = (r, s, ct) => r.RunAsync(PgReplicationStatsCollector.Instance, s, ct),
         ["pg_buffer_usage"] = (r, s, ct) => r.RunAsync(PgBufferUsageCollector.Instance, s, ct),
+        ["pg_index_bloat"] = (r, s, ct) => r.RunAsync(PgIndexBloatCollector.Instance, s, ct),
     };
 
     /// <summary>

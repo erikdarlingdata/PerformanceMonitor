@@ -274,5 +274,12 @@ public static class CollectorScheduleDefaults
            lacks it. What is resident in the pool is slow-moving enough that an hour is the right resolution
            anyway. */
         ["pg_buffer_usage"] = new(60, 30),
+        /* #2561 index bloat. DAILY and 90 days, matching pg_index_usage_stats deliberately - the two answer
+           halves of one question (is this index earning its keep, and is it wasting space doing it) and a
+           read that joins them wants both grains to line up. Daily is also the affordable grain: pgstatindex
+           reads EVERY PAGE of an index, so the cost scales with the fleet's total btree size rather than
+           with anything that changes minute to minute. Bloat accumulates over days, so a finer grain would
+           pay repeatedly for an answer that had not moved. */
+        ["pg_index_bloat"] = new(1440, 90),
     };
 }

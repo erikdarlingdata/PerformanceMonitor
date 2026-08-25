@@ -150,6 +150,7 @@ public static class PgMigrations
         new Migration(91, "pg-column-stats", V91Sql),
         new Migration(92, "pg-replication-stats", V92Sql),
         new Migration(93, "pg-buffer-usage", V93Sql),
+        new Migration(94, "pg-index-bloat", V94Sql),
     };
 
     /// <summary>
@@ -2264,6 +2265,54 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V94 — <c>collect.pg_index_bloat</c> (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
+    /// rather than estimated from column statistics.
+    ///
+    /// <para>The issue proposed porting the ioguix estimator. Measured, that route is unusable for the role
+    /// this product runs as: <c>pg_stats</c> returns ZERO rows to a <c>pg_monitor</c>-only login because the
+    /// view filters on <c>has_column_privilege</c> — the same trap behind #2542's 88.59% reported against a
+    /// true 0.50%. <c>pgstatindex</c> DOES run for <c>pg_monitor</c>, because pgstattuple grants EXECUTE to
+    /// <c>pg_stat_scan_tables</c>. Under our permissions the exact function works and the estimator is
+    /// blind.</para>
+    ///
+    /// <para><b><c>avg_leaf_density</c> is stored RAW and is not a bloat percentage.</b> Measured across
+    /// seven freshly-built indexes it sits between 89.98 and 91.48, and between 87.07 and 90.81 after
+    /// <c>REINDEX</c> — so <c>100 - density</c> invents roughly ten points of bloat on a perfect index, and
+    /// there is no constant to subtract because the healthy value varies per index. The server's own numbers
+    /// are kept and interpretation is left to the read.</para>
+    ///
+    /// <para><c>skipped_reason</c> exists so a size cap can never masquerade as an absence of bloat: the
+    /// function reads every page of an index, so very large ones are recorded with NULL measurements and a
+    /// stated reason rather than being dropped from the result.</para>
+    ///
+    /// <para>Only b-tree indexes are collected. <c>pgstatindex</c> RAISES on anything else — verified on
+    /// GIN, BRIN and hash — so one GIN index would otherwise take the whole collection down every cycle.
+    /// </para>
+    /// </summary>
+    private const string V94Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_index_bloat (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    schema_name text,
+    table_name text,
+    index_name text,
+    index_bytes bigint,
+    tree_level integer,
+    internal_pages bigint,
+    leaf_pages bigint,
+    empty_pages bigint,
+    deleted_pages bigint,
+    avg_leaf_density double precision,
+    leaf_fragmentation double precision,
+    skipped_reason text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_index_bloat_time
+    ON collect.pg_index_bloat(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

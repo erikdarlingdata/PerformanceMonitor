@@ -4254,6 +4254,8 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgStorageNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -4345,6 +4347,34 @@
                         <DataGridTextColumn Header="Avg Width" Binding="{Binding AvgWidth}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Common Values" Binding="{Binding CommonValueCount}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2561 index bloat, MEASURED via pgstatindex rather than estimated. Sits under index
+                     usage because the two are halves of one question: is this index earning its keep, and
+                     is it wasting space doing it. Ranked by reclaimable BYTES, never by density. -->
+                <TextBlock Grid.Row="7" x:Name="PgIndexBloatNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="110"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="190"/>
+                        <DataGridTextColumn Header="Size (bytes)" Binding="{Binding IndexBytes}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Reclaimable (est.)" Binding="{Binding EstimatedReclaimableBytes}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <!-- The server's RAW figure. A healthy index sits near 90, so this is NOT
+                             100-minus-bloat and the header deliberately does not imply it is. -->
+                        <DataGridTextColumn Header="Leaf Density %" Binding="{Binding AvgLeafDensity}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Fragmentation %" Binding="{Binding LeafFragmentation}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Empty Pages" Binding="{Binding EmptyPages}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <DataGridTemplateColumn Header="Not Measured Because" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding SkippedReason}" TextTrimming="CharacterEllipsis" ToolTip="{Binding SkippedReason}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
