@@ -368,9 +368,9 @@ jobs:
       # and continuous-aggregate policy jobs, so without them this job tested a configuration no
       # customer runs and made scheduler-racing failures luck-of-the-slot instead of reproducible.
       # Values are the product's own derivation from the live hypertable count
-      # (TimescaleSupport.HypertableCount = the 55-collector catalog + collection_log = 56):
-      #   timescaledb.max_background_workers = HypertableCount + 2  = 57
-      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 69
+      # (TimescaleSupport.HypertableCount = the 56-collector catalog + collection_log = 57):
+      #   timescaledb.max_background_workers = HypertableCount + 2  = 59
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 70
       # Kept honest by CiClusterWorkerSizingTests (parses this file against the formula) and
       # CiClusterWorkerSizingLiveTests (asserts the running cluster serves them). Must configure
       # the cluster identically to build.yml's darling-pg job: that guard parses the appended
@@ -391,8 +391,8 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 58"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 69"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 59"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 70"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling

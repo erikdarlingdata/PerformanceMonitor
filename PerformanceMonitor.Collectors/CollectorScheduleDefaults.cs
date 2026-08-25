@@ -233,5 +233,13 @@ public static class CollectorScheduleDefaults
            answers, and a 1-minute grain would pay 60x for the same answer. Retained a year because "when
            did plan capture get turned on" is a question asked months later. */
         ["pg_plan_capture_readiness"] = new(60, 365),
+        /* #2544 write side - checkpoints, background writer, WAL. PER-MINUTE and 30 days, matching
+           pg_io_stats rather than the hourly readiness collector above, because these are cumulative
+           COUNTERS: the value a reader wants is a rate, and a rate is only as fine-grained as the sampling
+           interval that produced it. An hourly grain would smear a five-minute burst of requested
+           checkpoints into nothing, which is the exact event this collects to catch. Affordable at that
+           cadence for the same reason pg_io_stats is - all three source views are cluster-wide singletons,
+           so a snapshot is ONE row, not one per relation. */
+        ["pg_write_stats"] = new(1, 30),
     };
 }

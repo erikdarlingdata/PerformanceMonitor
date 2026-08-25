@@ -336,6 +336,45 @@ public partial class ViewerServerTab
             "No backend / object / context combination did any I/O in this window. This view needs "
             + "PostgreSQL 16 or newer, where pg_stat_io exists; below that the collector does not run and "
             + "the Overview tab says so.");
+
+        await LoadPgWriteStatsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The write-side panel under the I/O grid (#2544) — checkpoints, background writer and WAL as the
+    /// CHANGE across the window.
+    ///
+    /// <para>Three states, and they must not read alike. A gated-off collector says so; a null read means
+    /// fewer than two samples, which is a real and temporary state on a freshly added server rather than a
+    /// quiet one; and a row whose <c>ResetDuringWindow</c> is set has had at least one statistics family
+    /// reset underneath it, so those metrics are blank rather than wrong.</para>
+    /// </summary>
+    private async Task LoadPgWriteStatsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_write_stats"))
+        {
+            PgWriteStatsGrid.ItemsSource = null;
+            PgWriteStatsNote.Text = PanelNote("pg_write_stats", 0, string.Empty);
+            return;
+        }
+
+        var row = await _dataService.GetPgWriteStatsAsync(_server.ServerId, startUtc, endUtc);
+
+        PgWriteStatsGrid.ItemsSource = row is null ? null : PgDisplay.WriteStatsRows(row);
+        PgWriteStatsNote.Text = row is null
+            ? "Write-side counters need TWO collections before a change exists between them, so a server "
+              + "added in the last cycle has nothing here yet. This is not the same as a quiet server, "
+              + "which would show zeroes."
+            : row.ResetDuringWindow
+                ? "At least one statistics family was RESET inside this window, so its counters went "
+                  + "backwards. Those metrics are left blank rather than differenced across the reset — a "
+                  + "difference taken across one reports an enormous number that looks like a catastrophe "
+                  + "and means nothing. The families reset independently, so the untouched ones below are "
+                  + "still accurate."
+                : "Change across the window, not the counters' cumulative levels. Requested checkpoints "
+                  + "climbing against timed ones is the max_wal_size-too-small signal; full-page images "
+                  + "spiking right after each checkpoint points at checkpoint_timeout instead. A blank "
+                  + "value is a metric this PostgreSQL version does not expose, which is not zero.";
     }
 
     /// <summary>Replication — slot WAL retention and the xmin each slot pins.</summary>

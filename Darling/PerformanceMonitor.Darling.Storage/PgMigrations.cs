@@ -144,6 +144,7 @@ public static class PgMigrations
         new Migration(85, "pg-table-bloat-stats", V85Sql),
         new Migration(86, "pg-session-states", V86Sql),
         new Migration(87, "pg-plan-capture-readiness", V87Sql),
+        new Migration(88, "pg-write-stats", V88Sql),
     };
 
     /// <summary>
@@ -1990,6 +1991,68 @@ CREATE TABLE IF NOT EXISTS collect.pg_plan_capture_readiness (
 
 CREATE INDEX IF NOT EXISTS idx_pg_plan_capture_readiness_time
     ON collect.pg_plan_capture_readiness(server_id, collection_time);";
+
+    /// <summary>
+    /// V88 — <c>collect.pg_write_stats</c> (#2544): the write side of the cluster — checkpoints, background
+    /// writing and WAL, from <c>pg_stat_checkpointer</c>, <c>pg_stat_bgwriter</c> and <c>pg_stat_wal</c>.
+    ///
+    /// <para>ONE wide row, unlike every other recent PostgreSQL table here, because all three source views
+    /// are cluster-wide singletons — a snapshot is genuinely one row, and splitting three views that answer
+    /// one question would put the numerator and denominator of every useful ratio in different tables.</para>
+    ///
+    /// <para><b>The column set is the UNION across majors, and that is the point.</b> The source shape moves
+    /// twice: 17 took seven of <c>pg_stat_bgwriter</c>'s eleven columns (five renamed into the new
+    /// <c>pg_stat_checkpointer</c>, and <c>buffers_backend</c>/<c>buffers_backend_fsync</c> into
+    /// <c>pg_stat_io</c> instead), and 18 removed the four WAL timing columns while adding
+    /// <c>num_done</c>/<c>slru_written</c>. Every column is therefore NULLABLE and a major that does not
+    /// supply one stores NULL, so a store holding a 16 and an 18 target means the same thing in both rows.
+    /// The fleet this was written for is an even 26/26 split across the 16→17 break, so there is no majority
+    /// version to write against and fix up later.</para>
+    ///
+    /// <para><c>wal_bytes</c> is <c>numeric(38,0)</c> and not <c>bigint</c>: upstream types it
+    /// <c>numeric</c> precisely because cumulative WAL volume is allowed to exceed 2^63 over a long
+    /// uptime.</para>
+    ///
+    /// <para>All THREE <c>stats_reset</c> stamps are stored. <c>pg_stat_reset_shared</c> takes a target, so
+    /// they can be reset independently — a read differencing across a reset it could not see would report a
+    /// negative interval as an enormous positive one.</para>
+    /// </summary>
+    private const string V88Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_write_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    num_timed bigint,
+    num_requested bigint,
+    num_done bigint,
+    restartpoints_timed bigint,
+    restartpoints_req bigint,
+    restartpoints_done bigint,
+    checkpoint_write_time_ms double precision,
+    checkpoint_sync_time_ms double precision,
+    buffers_written_checkpoint bigint,
+    slru_written bigint,
+    checkpointer_stats_reset timestamp,
+    buffers_clean bigint,
+    maxwritten_clean bigint,
+    buffers_alloc bigint,
+    buffers_backend bigint,
+    buffers_backend_fsync bigint,
+    bgwriter_stats_reset timestamp,
+    wal_records bigint,
+    wal_fpi bigint,
+    wal_bytes numeric(38,0),
+    wal_buffers_full bigint,
+    wal_write bigint,
+    wal_sync bigint,
+    wal_write_time_ms double precision,
+    wal_sync_time_ms double precision,
+    wal_stats_reset timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_write_stats_time
+    ON collect.pg_write_stats(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

@@ -80,6 +80,7 @@ public static class CollectorCatalog
         PgTableBloatStatsCollector.Instance,
         PgSessionStatesCollector.Instance,
         PgPlanCaptureReadinessCollector.Instance,
+        PgWriteStatsCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
