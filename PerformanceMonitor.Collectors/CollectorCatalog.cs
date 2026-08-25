@@ -85,6 +85,7 @@ public static class CollectorCatalog
         PgLockStatsCollector.Instance,
         PgWaitSamplingCollector.Instance,
         PgKernelStatsCollector.Instance,
+        PgPredicateStatsCollector.Instance,
         PgColumnStatsCollector.Instance,
         PgReplicationStatsCollector.Instance,
         PgBufferUsageCollector.Instance,

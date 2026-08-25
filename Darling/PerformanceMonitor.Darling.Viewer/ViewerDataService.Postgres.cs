@@ -354,6 +354,14 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
         DarlingPgKernelStatsReader.GetPgKernelStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>
+    /// Which columns are filtered on and how badly the planner estimated them (#2603). Newest per
+    /// predicate rather than differenced — see the reader for why a rate is the wrong shape here.
+    /// </summary>
+    public Task<List<DarlingPgPredicateStatsReader.PgPredicateStatRow>> GetPgPredicateStatsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
+        DarlingPgPredicateStatsReader.GetPgPredicateStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
     /// <summary>Storage tab - per-column planner statistics (#2543), latest per column and ranked by
     /// suspicion rather than alphabetically: heavy skew first (the parameter-sensitivity signal), then low
     /// correlation (why an index scan was rejected). Zero rows has TWO causes - no qualifying table, or a

@@ -4676,6 +4676,7 @@ LIMIT 1";
         ["pg_lock_stats"] = (r, s, ct) => r.RunAsync(PgLockStatsCollector.Instance, s, ct),
         ["pg_wait_sampling"] = (r, s, ct) => r.RunAsync(PgWaitSamplingCollector.Instance, s, ct),
         ["pg_kernel_stats"] = (r, s, ct) => r.RunAsync(PgKernelStatsCollector.Instance, s, ct),
+        ["pg_predicate_stats"] = (r, s, ct) => r.RunAsync(PgPredicateStatsCollector.Instance, s, ct),
         ["pg_column_stats"] = (r, s, ct) => r.RunAsync(PgColumnStatsCollector.Instance, s, ct),
         ["pg_replication_stats"] = (r, s, ct) => r.RunAsync(PgReplicationStatsCollector.Instance, s, ct),
         ["pg_buffer_usage"] = (r, s, ct) => r.RunAsync(PgBufferUsageCollector.Instance, s, ct),
