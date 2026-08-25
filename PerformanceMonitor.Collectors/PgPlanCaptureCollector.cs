@@ -9,13 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
-using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
-using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -152,152 +145,35 @@ LIMIT 2000";
         new CollectorColumn("plan_json", CollectorColumnType.Varchar),
     };
 
-    /* Condition fields, where a bare number is a VALUE rather than part of a name. Enumerated rather than
-       inferred: getting this list wrong in the safe direction leaves a number in a filter, and in the unsafe
-       direction rewrites an object's name. */
-    private static readonly HashSet<string> s_conditionFields = new(StringComparer.Ordinal)
-    {
-        "Filter", "Index Cond", "Recheck Cond", "Join Filter", "Hash Cond", "Merge Cond",
-        "TID Cond", "One-Time Filter", "Cache Key", "Function Call", "Output", "Group Key",
-        "Sort Key", "Presorted Key", "Hash Key", "Conflict Filter", "Repeatable Seed",
-    };
-
-    private static readonly Regex s_quotedLiteral = new("'(?:[^']|'')*'", RegexOptions.Compiled);
-
-    /* Bare numbers, but NOT ones glued to an identifier character: 'transactionitems1' must survive intact
-       while '(id > 100)' must not. */
-    private static readonly Regex s_bareNumber = new(@"(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])", RegexOptions.Compiled);
-
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var queryId = reader.IsDBNull(0) ? 0 : reader.GetInt64(0);
-            var durationMs = reader.IsDBNull(1) ? 0 : reader.GetDouble(1);
-            var rawJson = reader.IsDBNull(2) ? null : reader.GetString(2);
+            /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API
+               transport (#2538). Two implementations of the redaction would eventually disagree, and the
+               cost of THAT divergence is customer data rather than a wrong number. */
+            var parsed = PgPlanLogParser.FromBlock(
+                reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
+                reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2));
 
-            if (string.IsNullOrWhiteSpace(rawJson))
+            /* Null is a block the bounded tail read cut in half, which is ordinary rather than
+               exceptional: the window can begin mid-plan. Skipped, not stored half-parsed. */
+            if (parsed is not null)
             {
-                continue;
+                rows.Add(new Row(
+                    QueryId: parsed.Value.QueryId,
+                    PlanHash: parsed.Value.PlanHash,
+                    DurationMs: parsed.Value.DurationMs,
+                    NodeCount: parsed.Value.NodeCount,
+                    TopNodeType: parsed.Value.TopNodeType,
+                    PlanJson: parsed.Value.PlanJson));
             }
-
-            JsonNode? parsed;
-
-            try
-            {
-                parsed = JsonNode.Parse(rawJson);
-            }
-            catch (JsonException)
-            {
-                /* A truncated block, which the bounded tail read makes ordinary rather than exceptional:
-                   the window can begin mid-plan. Skipped rather than stored half-parsed, and not logged as
-                   an error, because it is the expected cost of not reading the whole file. */
-                continue;
-            }
-
-            if (parsed is not JsonObject root || root["Plan"] is not JsonObject plan)
-            {
-                continue;
-            }
-
-            /* Dropped BEFORE anything else touches the tree, so no later step can accidentally carry it. */
-            root.Remove("Query Text");
-
-            Redact(plan);
-
-            var nodeCount = CountNodes(plan);
-            var topNodeType = plan["Node Type"]?.GetValue<string>();
-            var json = root.ToJsonString();
-
-            rows.Add(new Row(
-                QueryId: queryId,
-                PlanHash: Hash(json),
-                DurationMs: durationMs,
-                NodeCount: nodeCount,
-                TopNodeType: topNodeType,
-                PlanJson: json));
         }
 
         return rows;
-    }
-
-    /// <summary>
-    /// Strips values from a plan tree in place. Quoted literals go from every string; bare numbers go only
-    /// from condition fields, for the reason in the type header.
-    /// </summary>
-    private static void Redact(JsonObject node)
-    {
-        foreach (var property in node.ToList())
-        {
-            switch (property.Value)
-            {
-                case JsonObject child:
-                    Redact(child);
-                    break;
-
-                case JsonArray array:
-                    foreach (var element in array)
-                    {
-                        if (element is JsonObject arrayChild)
-                        {
-                            Redact(arrayChild);
-                        }
-                    }
-
-                    /* Arrays of STRINGS carry values too - Output and the various Key lists are arrays. */
-                    for (var i = 0; i < array.Count; i++)
-                    {
-                        if (array[i] is JsonValue value && value.TryGetValue<string>(out var text))
-                        {
-                            array[i] = JsonValue.Create(Scrub(text, property.Key));
-                        }
-                    }
-
-                    break;
-
-                case JsonValue value when value.TryGetValue<string>(out var text):
-                    node[property.Key] = JsonValue.Create(Scrub(text, property.Key));
-                    break;
-            }
-        }
-    }
-
-    private static string Scrub(string text, string fieldName)
-    {
-        var scrubbed = s_quotedLiteral.Replace(text, "'?'");
-
-        if (s_conditionFields.Contains(fieldName))
-        {
-            scrubbed = s_bareNumber.Replace(scrubbed, "?");
-        }
-
-        return scrubbed;
-    }
-
-    private static int CountNodes(JsonObject plan)
-    {
-        var count = 1;
-
-        if (plan["Plans"] is JsonArray children)
-        {
-            foreach (var child in children)
-            {
-                if (child is JsonObject childPlan)
-                {
-                    count += CountNodes(childPlan);
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private static string Hash(string json)
-    {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(json));
-        return Convert.ToHexString(bytes, 0, 16);
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
