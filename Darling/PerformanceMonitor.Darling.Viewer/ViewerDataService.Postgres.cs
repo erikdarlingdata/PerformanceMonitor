@@ -331,4 +331,11 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgExtensionAvailabilityReader.PgExtensionRow>> GetPgExtensionAvailabilityAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 200, CancellationToken cancellationToken = default) =>
         DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Activity tab - lock state by mode, type and relation over the window (#2544). Every row
+    /// carries the capture denominator, because these are SAMPLES: three ungranted rows means something
+    /// different in 60 captures than in 4. Ungranted sorts first, then by the worst wait anyone served.</summary>
+    public Task<List<DarlingPgLockStatsReader.PgLockStatRow>> GetPgLockStatsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        DarlingPgLockStatsReader.GetPgLockStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

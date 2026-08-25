@@ -146,6 +146,7 @@ public static class PgMigrations
         new Migration(87, "pg-plan-capture-readiness", V87Sql),
         new Migration(88, "pg-write-stats", V88Sql),
         new Migration(89, "pg-extension-availability", V89Sql),
+        new Migration(90, "pg-lock-stats", V90Sql),
     };
 
     /// <summary>
@@ -2091,6 +2092,48 @@ CREATE TABLE IF NOT EXISTS collect.pg_extension_availability (
 
 CREATE INDEX IF NOT EXISTS idx_pg_extension_availability_time
     ON collect.pg_extension_availability(server_id, collection_time);";
+
+    /// <summary>
+    /// V90 — <c>collect.pg_lock_stats</c> (#2544, the locks slice): lock state by mode, type and relation.
+    ///
+    /// <para>Does NOT duplicate <c>pg_blocking_edges</c>, which reads <c>pg_blocking_pids()</c> and stores
+    /// blocked/blocker PAIRS. That answers "who is stuck behind whom" and cannot answer "what lock, in what
+    /// mode, on which relation" — which is the half that decides the remedy. An ungranted
+    /// <c>AccessExclusiveLock</c> is a DDL queue; <c>RowExclusiveLock</c> contention is ordinary write
+    /// traffic; the pair shape is identical and the advice is opposite.</para>
+    ///
+    /// <para>Aggregated by <c>(database, locktype, mode, granted, relation)</c> rather than one row per
+    /// lock, so the row count is bounded by CONTENTION rather than by concurrency — a busy server holds
+    /// thousands of lock rows and that is not the grain anyone reasons at.</para>
+    ///
+    /// <para><b>Both relation columns exist because of a scope mismatch.</b> <c>pg_locks</c> is cluster-wide
+    /// while <c>pg_class</c> is per-database, so a lock on a relation in another database resolves to an OID
+    /// with no name. <c>relation_oid</c> is stored regardless and <c>relation_name</c> is left NULL, because
+    /// dropping the row would hide real contention and naming it from the connected database's catalog would
+    /// name the wrong table. <c>relation_oid</c> is <c>bigint</c>, not <c>integer</c>: OIDs are unsigned
+    /// 32-bit and one past 2^31 lands negative in a signed int.</para>
+    ///
+    /// <para><c>oldest_wait_ms</c> is NULL on granted rows rather than 0 — zero would read as "granted
+    /// instantly", which is a measurement, where NULL is the absence of one.</para>
+    /// </summary>
+    private const string V90Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_lock_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    lock_type text,
+    mode text,
+    granted boolean,
+    relation_oid bigint,
+    relation_name text,
+    backend_count bigint,
+    oldest_wait_ms double precision
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_lock_stats_time
+    ON collect.pg_lock_stats(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is
