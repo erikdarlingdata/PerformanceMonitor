@@ -246,10 +246,20 @@ public static class CollectorScheduleDefaults
            1440x for the same answer. The year of retention is the point of keeping history at all: "when did
            pg_stat_statements get installed" and "when did this extension get upgraded" are asked months
            later, usually right after a plan changed shape and nobody can explain why. */
-        ["pg_wait_sampling"] = new(5, 30),
-        ["pg_kernel_stats"] = new(5, 30),
+        /* HOURLY, not every five minutes, and the reason is the fleet rather than the collector. All
+           four of these need an extension or a readable server log, and Aurora offers neither - so on a
+           managed target they can only ever record a non-fatal skip, and at a five-minute cadence that
+           is roughly 900 skip rows per target per day saying the same thing.
+
+           Hourly costs nothing where they DO work: every one of these reads a CUMULATIVE counter
+           (pg_wait_sampling_profile, pg_stat_kcache, pg_qualstats) or an append-only log, so a longer
+           interval loses no events - it only widens the window each delta covers. That is the opposite
+           of a sampled collector like pg_blocking, where the cadence IS the resolution and stretching
+           it genuinely loses sightings. */
+        ["pg_wait_sampling"] = new(60, 30),
+        ["pg_kernel_stats"] = new(60, 30),
         ["pg_predicate_stats"] = new(60, 30),
-        ["pg_plan_capture"] = new(5, 14),
+        ["pg_plan_capture"] = new(60, 14),
         ["pg_extension_availability"] = new(1440, 365),
         /* #2544 lock state. PER-MINUTE and 30 days, matching pg_blocking - this is a SAMPLE of instantaneous
            state, not a counter, so the cadence IS the resolution. A lock queue that forms and clears inside
