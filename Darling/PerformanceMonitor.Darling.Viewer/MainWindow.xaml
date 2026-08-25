@@ -339,6 +339,24 @@
                                 <TextBlock Text="Manage Servers" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
+                        <!-- #2595: tag management had NO discoverable entry point here. Its only door was
+                             the group-header context menu, which means right-clicking a row labelled
+                             "Untagged" — and that row only renders when at least one server is untagged, so
+                             on a viewer with no servers yet tag management was unreachable entirely. Lite has
+                             carried a visible Manage Tags button in this same footer all along, so this is a
+                             parity gap rather than a new surface. ManageTags_Click already carries its own
+                             read-only backstop (#2008), so the button needs no gating of its own. -->
+                        <Button Click="ManageTags_Click"
+                                Style="{StaticResource DarkButton}"
+                                Padding="8,5"
+                                Margin="0,8,0,0"
+                                ToolTip="Create, rename, nest, and assign tags across the fleet">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE8EC;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="Manage Tags" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
                         <Button Click="OpenPlanViewerButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
