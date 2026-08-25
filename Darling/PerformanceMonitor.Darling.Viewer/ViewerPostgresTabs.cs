@@ -155,8 +155,14 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgReplicationInnerTabIndex,
             "replication",
             "Replication",
-            new[] { "pg_replication_slots" },
-            null),
+            new[] { "pg_replication_slots", "pg_replication_stats" },
+            /* Slots and connections are different facts and the tab carries both because either alone
+               misleads: a slot with no standby attached is the classic way to fill a disk, and a standby
+               streaming without a slot can be cut off the moment the primary recycles WAL it still needed. */
+            "Two halves of one question. A SLOT is a promise to retain WAL and exists whether or not "
+            + "anybody is attached; a CONNECTION is a standby actually streaming. The connection panel "
+            + "reports the worst each standby reached across the window, not just where it is now - a "
+            + "replica that falls far behind and recovers looks perfect in any single sample."),
 
         new ViewerPostgresTab(
             ViewerServerTab.PgStorageInnerTabIndex,

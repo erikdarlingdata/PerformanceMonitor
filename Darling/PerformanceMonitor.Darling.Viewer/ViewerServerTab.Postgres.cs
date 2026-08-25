@@ -475,6 +475,53 @@ public partial class ViewerServerTab
         PgReplicationNote.Text = PanelNote("pg_replication_slots", rows.Count,
             "This server has no replication slots, so nothing is retaining WAL or pinning an xmin on their "
             + "account. Zero rows is the healthy answer here, not a missing read.");
+
+        await LoadPgReplicationStatsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// Connected standbys (#2544), beneath the slots grid — the other half of "is replication healthy".
+    ///
+    /// <para><b>Zero rows on a REPLICA is correct, not a fault.</b> <c>pg_stat_replication</c> is the
+    /// primary-side view, so a standby reports nothing unless it is cascading to a downstream of its own.
+    /// The note says which of those it is looking at rather than reporting an absence of replication.</para>
+    ///
+    /// <para>The note leads with the WORST distance reached, not the current one: a replica that drifts
+    /// hundreds of megabytes behind every afternoon and recovers by evening reads as perfectly healthy in
+    /// every single sample, and it is the one most likely to be useless at the moment somebody needs to fail
+    /// over to it.</para>
+    /// </summary>
+    private async Task LoadPgReplicationStatsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_replication_stats"))
+        {
+            PgReplicationStatsGrid.ItemsSource = null;
+            PgReplicationStatsNote.Text = PanelNote("pg_replication_stats", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgReplicationStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgReplicationStatsGrid.ItemsSource = rows;
+
+        var worst = rows.Count == 0 ? 0L : rows.Max(r => r.WorstReplayBytesBehind ?? 0L);
+        var flapping = rows.Count(r => r.TotalSamples > 0 && r.Samples < r.TotalSamples);
+
+        PgReplicationStatsNote.Text = rows.Count == 0
+            ? "No standby was streaming from this server in this window. On a REPLICA that is the expected "
+              + "answer — pg_stat_replication is the primary-side view and reports nothing unless this "
+              + "server is cascading to a downstream of its own. On a primary it means nothing is "
+              + "replicating from it, which is either correct or the finding."
+            : $"{rows.Count:N0} standby connection(s). The worst any of them fell behind in this window was "
+              + $"{worst:N0} bytes of unapplied WAL — that column, not the current one, is what catches a "
+              + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
+              + "the lag columns: measured against a stalled standby, the time lag read 2.8 seconds for a "
+              + "33.7 MB backlog, because it times the round trip of the last replayed record rather than "
+              + "sizing the backlog."
+              + (flapping > 0
+                  ? $"  {flapping:N0} standby(s) appeared in fewer samples than were taken, which means they "
+                    + "have been DISCONNECTING — every other column shows that as healthy."
+                  : string.Empty);
     }
 
     /// <summary>

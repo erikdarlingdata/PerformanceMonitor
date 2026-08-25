@@ -148,6 +148,7 @@ public static class PgMigrations
         new Migration(89, "pg-extension-availability", V89Sql),
         new Migration(90, "pg-lock-stats", V90Sql),
         new Migration(91, "pg-column-stats", V91Sql),
+        new Migration(92, "pg-replication-stats", V92Sql),
     };
 
     /// <summary>
@@ -2178,6 +2179,49 @@ CREATE TABLE IF NOT EXISTS collect.pg_column_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_column_stats_time
     ON collect.pg_column_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V92 — <c>collect.pg_replication_stats</c> (#2544, the replication slice): connected standbys and how
+    /// far behind each one is.
+    ///
+    /// <para>Distinct from <c>pg_replication_slots</c>, which records a promise to RETAIN WAL that exists
+    /// whether or not anybody is attached. This is the live connection. A server can have a slot with no
+    /// standby, a standby with no slot, or both.</para>
+    ///
+    /// <para><b>Four byte distances AND three time lags, because they answer differently.</b> Measured
+    /// against a real standby holding <c>pg_wal_replay_pause()</c>: <c>sent</c>, <c>write</c> and
+    /// <c>flush</c> were all ZERO while <c>replay</c> was <b>33.7 MB</b> behind — so the WAL had been
+    /// shipped, written and fsynced and the fault was purely apply, which no single column would have shown.
+    /// Meanwhile <c>state</c> still read <c>streaming</c>. The time lag moved to only 2.8 seconds for that
+    /// same 33.7 MB, because it times the round-trip of the most recently replayed record rather than
+    /// measuring the backlog; the byte distance is the proportionate one and the one to alert on.</para>
+    ///
+    /// <para>Every distance is measured from <c>pg_current_wal_lsn()</c> rather than from <c>sent_lsn</c>,
+    /// so a sender that has itself fallen behind is visible instead of being used as the baseline.</para>
+    /// </summary>
+    private const string V92Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_replication_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    application_name text,
+    client_addr text,
+    state text,
+    sync_state text,
+    sync_priority integer,
+    sent_bytes_behind bigint,
+    write_bytes_behind bigint,
+    flush_bytes_behind bigint,
+    replay_bytes_behind bigint,
+    write_lag_ms double precision,
+    flush_lag_ms double precision,
+    replay_lag_ms double precision,
+    backend_start timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_replication_stats_time
+    ON collect.pg_replication_stats(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

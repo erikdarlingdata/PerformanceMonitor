@@ -347,4 +347,12 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgColumnStatsReader.PgColumnStatRow>> GetPgColumnStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 100, CancellationToken cancellationToken = default) =>
         DarlingPgColumnStatsReader.GetPgColumnStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Replication tab - connected standbys and how far behind each got (#2544). Returns the latest
+    /// sample AND the window's worst, because a replica that drifts hundreds of MB behind and recovers reads
+    /// as healthy in any single sample - and it is the one most likely to be useless when somebody needs to
+    /// fail over to it. Ranked by worst REPLAY bytes, never by the time lag, which understates a stall.</summary>
+    public Task<List<DarlingPgReplicationStatsReader.PgReplicationStatRow>> GetPgReplicationStatsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        DarlingPgReplicationStatsReader.GetPgReplicationStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

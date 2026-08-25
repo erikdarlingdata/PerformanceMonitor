@@ -4143,6 +4143,8 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgReplicationNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -4181,6 +4183,33 @@
                         <DataGridTextColumn Header="Plugin" Binding="{Binding Plugin}" Width="140"/>
                         <DataGridTextColumn Header="Invalidation" Binding="{Binding InvalidationReason}" Width="220"/>
                         <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2544 replication CONNECTIONS, beneath the slots grid. A slot is a promise to retain
+                     WAL and exists with nobody attached; this is who is actually streaming. Worst-in-window
+                     rides beside the latest value because a replica that drifts far behind and recovers
+                     looks perfect in any single sample. -->
+                <TextBlock Grid.Row="2" x:Name="PgReplicationStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="3" x:Name="PgReplicationStatsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Standby" Binding="{Binding ApplicationName}" Width="150"/>
+                        <DataGridTextColumn Header="Client" Binding="{Binding ClientAddr}" Width="140"/>
+                        <DataGridTextColumn Header="State" Binding="{Binding State}" Width="110"/>
+                        <!-- A sync standby falling behind BLOCKS COMMITS on the primary, so the same lag is
+                             a different severity here than for an async one. -->
+                        <DataGridTextColumn Header="Sync" Binding="{Binding SyncState}" Width="90"/>
+                        <DataGridTextColumn Header="Replay Behind (bytes)" Binding="{Binding ReplayBytesBehind}" ElementStyle="{StaticResource NumericCell}" Width="160"/>
+                        <DataGridTextColumn Header="Worst Behind (bytes)" Binding="{Binding WorstReplayBytesBehind}" ElementStyle="{StaticResource NumericCell}" Width="160"/>
+                        <DataGridTextColumn Header="Replay Lag (ms)" Binding="{Binding ReplayLagMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Worst Lag (ms)" Binding="{Binding WorstReplayLagMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <!-- Seen in far fewer samples than were taken means the standby has been
+                             DISCONNECTING, which every other column reports as healthy. -->
+                        <DataGridTextColumn Header="Seen In" Binding="{Binding Samples}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="Of Samples" Binding="{Binding TotalSamples}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Connected Since" Binding="{Binding BackendStart}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
