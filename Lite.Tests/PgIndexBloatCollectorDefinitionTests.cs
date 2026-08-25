@@ -135,4 +135,53 @@ public class PgIndexBloatCollectorDefinitionTests
         Assert.Contains("x.indisvalid", sql, StringComparison.Ordinal);
         Assert.Contains("x.indisready", sql, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The CYCLE has a work budget, not just each index (#2617).
+    ///
+    /// <para><b>This is the assertion that would have caught a collector which never returned a row.</b>
+    /// <c>pgstatindex</c> reads every page it is pointed at, and the 20 GB ceiling bounds one index while
+    /// nothing bounded the statement. Measured on a live Aurora target: 1,517 indexes totalling 461 GB in a
+    /// single statement, which never finished and dropped the connection mid-read — <c>rows_ever = 0</c> for
+    /// the collector's entire life. The local rig had two indexes, so the question never arose there.</para>
+    /// </summary>
+    [Fact]
+    public void TheCycleHasAWorkBudget_NotJustAPerIndexCeiling()
+    {
+        var sql = Sql();
+
+        /* Ranked by size so the measured ones are where bloat is worth reclaiming. */
+        Assert.Contains("row_number() OVER (ORDER BY k.index_bytes DESC", sql, StringComparison.Ordinal);
+
+        /* And the budget gates the LATERAL, which is the thing that costs pages. Gating only the
+           skipped_reason would label rows correctly while still reading every index. */
+        Assert.Matches(new Regex(@"LEFT JOIN LATERAL[\s\S]*?size_rank\s*<=\s*\d+"), sql);
+    }
+
+    /// <summary>
+    /// Over-budget indexes are RETURNED with a reason, never dropped. An index missing from the result
+    /// reads as one that does not exist; an index present with a stated reason cannot be mistaken for
+    /// healthy — the same argument that put <c>skipped_reason</c> on the size ceiling.
+    /// </summary>
+    [Fact]
+    public void OverBudgetIndexesAreReturnedWithAReason()
+    {
+        var sql = Sql();
+
+        Assert.Contains("not measured this cycle (work budget)", sql, StringComparison.Ordinal);
+
+        /* No WHERE that would remove them from the result set. */
+        Assert.DoesNotMatch(new Regex(@"WHERE[^;]*size_rank\s*<="), sql);
+    }
+
+    /// <summary>
+    /// A command-timeout override, so a slow single index yields a CLASSIFIED timeout rather than the
+    /// unclassified <c>Exception while reading from stream</c> that #2617 actually surfaced as.
+    /// </summary>
+    [Fact]
+    public void ItOverridesTheCommandTimeout()
+    {
+        Assert.NotNull(PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride);
+        Assert.True(PgIndexBloatCollector.Instance.CommandTimeoutSecondsOverride >= 120);
+    }
 }

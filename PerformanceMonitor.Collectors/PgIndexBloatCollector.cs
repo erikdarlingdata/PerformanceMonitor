@@ -127,6 +127,21 @@ WITH candidates AS (
     AND   x.indisready
     AND   n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
     OFFSET 0
+),
+/* THE WORK BUDGET (#2617). The per-index ceiling below bounds one index; this bounds the CYCLE.
+   pgstatindex reads every page it is pointed at, so without this the statement reads the whole
+   instance: measured on a live Aurora target, 1,517 indexes totalling 461 GB in a single
+   statement, which never finished and dropped the connection mid-read. The collector had
+   returned zero rows for its entire life.
+
+   Ranked by size and measured largest-first, because bloat that matters is concentrated in big
+   indexes - a small index at 40% density is worth kilobytes. Everything past the budget is still
+   RETURNED, with a reason, so the read never mistakes unmeasured for healthy. */
+ranked AS (
+    SELECT
+        k.*,
+        row_number() OVER (ORDER BY k.index_bytes DESC, k.index_name) AS size_rank
+    FROM candidates AS k
 )
 SELECT
     current_database()::text            AS database_name,
@@ -145,13 +160,34 @@ SELECT
         WHEN k.index_bytes >= " + CeilingLiteral + @"
             THEN 'index is larger than the measurement ceiling; pgstatindex reads every page, so it is '
                  || 'recorded but not measured'
+        WHEN k.size_rank > " + BudgetLiteral + @"
+            THEN 'not measured this cycle (work budget): pgstatindex reads every page, so only the '
+                 || 'largest ' || " + BudgetLiteral + @" || ' indexes are measured per run. This one is '
+                 || 'recorded at its size so it is never mistaken for healthy.'
     END::text                           AS skipped_reason
-FROM candidates AS k
+FROM ranked AS k
 LEFT JOIN LATERAL public.pgstatindex(k.index_oid::regclass) AS s
-  ON k.index_bytes < " + CeilingLiteral + @"
+  ON  k.index_bytes < " + CeilingLiteral + @"
+  AND k.size_rank  <= " + BudgetLiteral + @"
 ORDER BY k.index_bytes DESC";
 
     private const string CeilingLiteral = "21474836480";
+
+    /* How many indexes one cycle will actually MEASURE, largest first. 200 rather than a byte budget
+       because the cost is per PAGE and the sizes are wildly uneven: a byte cap would measure three
+       large indexes on one server and four hundred small ones on another, and neither operator could
+       predict what they were getting. A count is legible, and the ORDER BY means the 200 measured are
+       always the ones where bloat is worth reclaiming. */
+    private const string BudgetLiteral = "200";
+
+    /// <summary>
+    /// Five minutes, because even 200 indexes of pages is real work and a slow single index should
+    /// yield a CLASSIFIED timeout rather than a dropped connection. #2617 surfaced as
+    /// <c>Exception while reading from stream</c> - an unclassified Npgsql failure - precisely because
+    /// there was no budget and no override; index_object_stats took the same override for the same
+    /// reason (#1135).
+    /// </summary>
+    public override int? CommandTimeoutSecondsOverride => 300;
 
     public override string Name => "pg_index_bloat";
 
