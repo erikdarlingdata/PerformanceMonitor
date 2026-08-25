@@ -43,13 +43,14 @@ public sealed class PgSchemaGeneratorTests
            capability axis) = 57, plus pg_lock_stats (#2544, lock state by mode and relation -
            which pg_blocking_edges cannot give) = 58, plus pg_column_stats (#2543,
            the planner statistics that explain WHY a plan was chosen) = 59, plus
-           pg_replication_stats (#2544, connected standbys as distinct from slots) = 60. The catalog is
+           pg_replication_stats (#2544, connected standbys as distinct from slots) = 60, plus
+           pg_buffer_usage (#2544, what is resident in shared buffers) = 61. The catalog is
            deliberately
            engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(60, CollectorCatalog.All.Count);
+        Assert.Equal(61, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -628,6 +629,7 @@ public sealed class PgSchemaGeneratorTests
             (90, PgLockStatsCollector.Instance),
             (91, PgColumnStatsCollector.Instance),
             (92, PgReplicationStatsCollector.Instance),
+            (93, PgBufferUsageCollector.Instance),
         };
 
         /* Every PostgreSQL collector must appear above. One added without a rung listed here would

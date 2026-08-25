@@ -266,5 +266,13 @@ public static class CollectorScheduleDefaults
            and only a fine grain tells them apart. Row count is the number of connected standbys, so single
            digits on any real topology. */
         ["pg_replication_stats"] = new(1, 30),
+        /* #2544 buffer pool contents. HOURLY, for two reasons that point the same way. The full
+           pg_buffercache view is a scan of every buffer - measured at 6.1 ms for a 512 MB pool, which scales
+           linearly to roughly 780 ms at 64 GB of shared_buffers - so it is affordable hourly and not per
+           minute. And a server WITHOUT the pg_buffercache extension records an ObjectMissing outcome every
+           cycle, which at a minute grain would be thousands of rows a day of noise on a fleet that mostly
+           lacks it. What is resident in the pool is slow-moving enough that an hour is the right resolution
+           anyway. */
+        ["pg_buffer_usage"] = new(60, 30),
     };
 }
