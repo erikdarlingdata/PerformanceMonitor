@@ -323,4 +323,12 @@ public sealed partial class ViewerDataService
     public Task<DarlingPgWriteStatsReader.PgWriteStatsRow?> GetPgWriteStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
         DarlingPgWriteStatsReader.GetPgWriteStatsAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+
+    /// <summary>Overview tab - which extensions this target has, could have, or cannot have (#2545). Latest
+    /// state per extension rather than the history: installing one is a rare deliberate act, so the window
+    /// holds the same answer repeated daily. Monitoring-relevant extensions sort first, and within them the
+    /// ACTIONABLE state (available but not installed) sorts above the rest.</summary>
+    public Task<List<DarlingPgExtensionAvailabilityReader.PgExtensionRow>> GetPgExtensionAvailabilityAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 200, CancellationToken cancellationToken = default) =>
+        DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

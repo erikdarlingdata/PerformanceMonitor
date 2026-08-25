@@ -145,6 +145,7 @@ public static class PgMigrations
         new Migration(86, "pg-session-states", V86Sql),
         new Migration(87, "pg-plan-capture-readiness", V87Sql),
         new Migration(88, "pg-write-stats", V88Sql),
+        new Migration(89, "pg-extension-availability", V89Sql),
     };
 
     /// <summary>
@@ -2053,6 +2054,43 @@ CREATE TABLE IF NOT EXISTS collect.pg_write_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_write_stats_time
     ON collect.pg_write_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V89 — <c>collect.pg_extension_availability</c> (#2545): which extensions this target has, could
+    /// have, or cannot have — the third capability axis after engine kind and engine edition, and the only
+    /// one whose answer a customer can act on.
+    ///
+    /// <para>Four states rather than a boolean: <c>installed</c>, <c>outdated</c> (a newer
+    /// <c>default_version</c> exists, which matters because a stale extension can be missing columns a
+    /// collector reads), <c>available</c> (one <c>CREATE EXTENSION</c> away — the actionable one), and
+    /// <c>absent</c> (the server does not offer it at all).</para>
+    ///
+    /// <para><b>Scope warning carried in the column names.</b> <c>installed_version</c> is a claim about the
+    /// CONNECTED DATABASE only — <c>pg_extension</c> is per-database while <c>pg_available_extensions</c> is
+    /// cluster-wide, measured on one cluster reporting an extension installed in one database and not in
+    /// another. <c>default_version</c> is the cluster-wide half. A read that treats the two as the same
+    /// scope will report "not installed" about an extension living in the application database.</para>
+    ///
+    /// <para>Both version columns are TEXT and are compared for equality only, never ordered: extension
+    /// versions are free-form strings and deciding that 1.10 is newer than 1.9 needs a parser this has no
+    /// business carrying, when the server already names the default.</para>
+    /// </summary>
+    private const string V89Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_extension_availability (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    extension_name text,
+    state text,
+    installed_version text,
+    default_version text,
+    is_monitoring_relevant boolean,
+    comment text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_extension_availability_time
+    ON collect.pg_extension_availability(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is
