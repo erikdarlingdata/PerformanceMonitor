@@ -121,11 +121,6 @@ LIMIT 2000";
     public override string TargetTable => "pg_plan_capture";
 
     /// <summary>
-    /// Any PostgreSQL target. Absent grant, absent module or a log directory that cannot be listed all
-    /// raise errors the host classifies as non-fatal skips, and
-    /// <c>pg_plan_capture_readiness</c> already reports which precondition is missing.
-    /// </summary>
-    /// <summary>
     /// Every PostgreSQL target — including Aurora and RDS, which reach the same table by a different road.
     ///
     /// <para><b>This deliberately does NOT gate on the engine, and the reason is worth stating.</b> Gating

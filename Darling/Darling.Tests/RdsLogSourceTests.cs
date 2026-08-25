@@ -183,19 +183,6 @@ public class PlanCaptureRouteTests
     private static CollectorTargetInfo Target(bool aurora = false, bool rds = false)
         => new() { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 17, IsAurora = aurora, IsAwsRds = rds };
 
-    /// <summary>
-    /// The SQL collector is excluded from managed targets, and that is a ROUTE decision rather than a
-    /// capability one. Aurora and RDS have no filesystem, <c>pg_read_server_files</c> is not grantable and
-    /// <c>pg_read_file</c> is denied — so left enabled it would record a permission failure every cycle
-    /// forever, on a target where nothing is wrong and no grant exists to fix it.
-    /// </summary>
-    [Fact]
-    public void TheFileRouteIsSelfHostedOnly()
-    {
-        Assert.True(PgPlanCaptureCollector.Instance.AppliesTo(Target()));
-        Assert.False(PgPlanCaptureCollector.Instance.AppliesTo(Target(aurora: true)));
-        Assert.False(PgPlanCaptureCollector.Instance.AppliesTo(Target(rds: true)));
-    }
 
     /// <summary>
     /// Both routes write through the SAME definition, so the column order, the COPY command and the
