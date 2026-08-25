@@ -8,6 +8,7 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
+    <PackageVersion Include="AWSSDK.RDS" Version="4.0.104.4" />
     <PackageVersion Include="CredentialManagement" Version="1.0.2" />
     <PackageVersion Include="DuckDB.NET.Bindings.Full" Version="1.5.5" />
     <PackageVersion Include="DuckDB.NET.Data" Version="1.5.5" />
