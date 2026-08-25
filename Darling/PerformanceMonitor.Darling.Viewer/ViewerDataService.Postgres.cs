@@ -339,6 +339,14 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgLockStatsReader.GetPgLockStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>
+    /// Wait events attributed to the query that waited (#2603). Deltas and the samples-to-milliseconds
+    /// inference both live in the reader, beside the numbers they derive from.
+    /// </summary>
+    public Task<List<DarlingPgWaitSamplingReader.PgWaitSamplingRow>> GetPgWaitSamplingAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
+        DarlingPgWaitSamplingReader.GetPgWaitSamplingAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
     /// <summary>Storage tab - per-column planner statistics (#2543), latest per column and ranked by
     /// suspicion rather than alphabetically: heavy skew first (the parameter-sensitivity signal), then low
     /// correlation (why an index scan was rejected). Zero rows has TWO causes - no qualifying table, or a

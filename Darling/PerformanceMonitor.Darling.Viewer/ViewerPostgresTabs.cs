@@ -133,7 +133,10 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgWaitsInnerTabIndex,
             "waits",
             "Waits",
-            new[] { "pg_wait_stats" },
+            /* Two instruments for one question, and which of them has rows says what the server
+               offers: pg_wait_stats is Aurora-native, pg_wait_sampling is the extension (#2603) that
+               brings wait analysis to everything else. */
+            new[] { "pg_wait_stats", "pg_wait_sampling" },
             null),
 
         new ViewerPostgresTab(

@@ -246,6 +246,7 @@ public static class CollectorScheduleDefaults
            1440x for the same answer. The year of retention is the point of keeping history at all: "when did
            pg_stat_statements get installed" and "when did this extension get upgraded" are asked months
            later, usually right after a plan changed shape and nobody can explain why. */
+        ["pg_wait_sampling"] = new(5, 30),
         ["pg_extension_availability"] = new(1440, 365),
         /* #2544 lock state. PER-MINUTE and 30 days, matching pg_blocking - this is a SAMPLE of instantaneous
            state, not a counter, so the cadence IS the resolution. A lock queue that forms and clears inside

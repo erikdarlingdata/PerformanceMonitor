@@ -152,6 +152,7 @@ public static class PgMigrations
         new Migration(93, "pg-buffer-usage", V93Sql),
         new Migration(94, "pg-index-bloat", V94Sql),
         new Migration(95, "pg-per-database-attribution", V95Sql),
+        new Migration(96, "pg-wait-sampling", V96Sql),
     };
 
     /// <summary>
@@ -2268,6 +2269,46 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V96 — <c>collect.pg_wait_sampling</c> (#2603): wait events attributed to the query that waited.
+    ///
+    /// <para>Wait analysis existed ONLY on Aurora before this. <c>PgWaitStatsCollector</c> reads
+    /// <c>aurora_stat_system_waits()</c>, so every self-hosted, on-prem and plain-RDS target had no wait
+    /// data at all — backwards, because self-hosted is where the extension story is richest.</para>
+    ///
+    /// <para><b><c>sample_count</c> is a tally of observations, not a duration</b>, and
+    /// <c>profile_period_ms</c> travels beside it because the count is uninterpretable alone. Storing a
+    /// derived millisecond figure would bake today's sampling period into history that outlives it.</para>
+    ///
+    /// <para><b>Cumulative, like <c>pg_statement_stats</c>.</b> A counter that goes backwards is a reset —
+    /// <c>pg_wait_sampling_reset_profile()</c> or a restart — rather than a negative wait, and the read owns
+    /// that subtraction so it can recognise the difference.</para>
+    ///
+    /// <para><b>No <c>database_name</c>, deliberately.</b> The profile is cluster-wide and version 1.1
+    /// exposes no database column, so attributing these rows to a database would be exactly the scope error
+    /// V95 removed from three other tables.</para>
+    ///
+    /// <para><c>event_type = 'Activity'</c> never reaches this table: those are background processes idling,
+    /// and they dominate a raw profile permanently BECAUSE nothing is happening. A backend that was not
+    /// waiting is stored as <c>CPU</c>/<c>Running</c> rather than as a blank row.</para>
+    /// </summary>
+    private const string V96Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_wait_sampling (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    event_type text,
+    event text,
+    query_id bigint,
+    sample_count bigint,
+    profile_period_ms integer,
+    backend_count integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_wait_sampling_time
+    ON collect.pg_wait_sampling(server_id, collection_time);";
 
     /// <summary>
     /// V95 — <c>database_name</c> on the three per-database PostgreSQL tables (#2599).
