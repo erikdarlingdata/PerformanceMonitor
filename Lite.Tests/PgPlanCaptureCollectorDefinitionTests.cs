@@ -186,28 +186,32 @@ public class PgPlanCaptureCollectorDefinitionTests
 /// </summary>
 public class PgPlanLogParserTests
 {
-    private const string RawLog = """
-        2026-08-25 14:50:05.299 UTC [58] -3560200806914842915 LOG:  duration: 0.006 ms  plan:
-        	{
-        	  "Query Text": "SELECT 1 FROM accounts WHERE email = 'someone@example.com';",
-        	  "Plan": {
-        	    "Node Type": "Seq Scan",
-        	    "Relation Name": "accounts1",
-        	    "Filter": "((email = 'someone@example.com'::text) AND (id > 100))"
-        	  }
-        	}
-        2026-08-25 14:50:05.300 UTC [48] 0 LOG:  received fast shutdown request
-        2026-08-25 14:50:11.111 UTC [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:
-        	{
-        	  "Query Text": "SELECT 2;",
-        	  "Plan": { "Node Type": "Result" }
-        	}
-        """;
+    /* Built with explicit \t escapes rather than a raw string literal. auto_explain indents the JSON
+       block with real TABS and the parser keys on them, but inside a raw literal \t is two characters
+       rather than one - so a raw-literal fixture silently stops looking like a log and the extraction
+       finds nothing. Caught by this test failing 1 != 2 after passing in a scratch harness that used
+       escaped strings. */
+    private const string RawLog =
+        "2026-08-25 14:50:05.299 UTC [58] -3560200806914842915 LOG:  duration: 0.006 ms  plan:\n"
+        + "\t{\n"
+        + "\t  \"Query Text\": \"SELECT 1 FROM accounts WHERE email = 'someone@example.com';\",\n"
+        + "\t  \"Plan\": {\n"
+        + "\t    \"Node Type\": \"Seq Scan\",\n"
+        + "\t    \"Relation Name\": \"accounts1\",\n"
+        + "\t    \"Filter\": \"((email = 'someone@example.com'::text) AND (id > 100))\"\n"
+        + "\t  }\n"
+        + "\t}\n"
+        + "2026-08-25 14:50:05.300 UTC [48] 0 LOG:  received fast shutdown request\n"
+        + "2026-08-25 14:50:11.111 UTC [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:\n"
+        + "\t{\n"
+        + "\t  \"Query Text\": \"SELECT 2;\",\n"
+        + "\t  \"Plan\": { \"Node Type\": \"Result\" }\n"
+        + "\t}\n";
 
     [Fact]
     public void ExtractPullsEveryPlanAndIgnoresOrdinaryLogLines()
     {
-        var plans = PgPlanLogParser.Extract(RawLog.Replace("        ", string.Empty));
+        var plans = PgPlanLogParser.Extract(RawLog);
 
         Assert.Equal(2, plans.Count);
         Assert.Equal(-3560200806914842915, plans[0].QueryId);
@@ -221,7 +225,7 @@ public class PgPlanLogParserTests
     [Fact]
     public void ExtractRedactsEveryPlanItReturns()
     {
-        var plans = PgPlanLogParser.Extract(RawLog.Replace("        ", string.Empty));
+        var plans = PgPlanLogParser.Extract(RawLog);
 
         foreach (var plan in plans)
         {
