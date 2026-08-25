@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
@@ -170,5 +171,44 @@ public class RdsLogSourceTests
 
         Assert.Null(await source.ReadNewestAsync("db.internal.example.com"));
         Assert.Empty(client.Downloads);
+    }
+}
+
+/// <summary>
+/// The route split (#2538): one table, two transports, and neither target type left without a road.
+/// </summary>
+public class PlanCaptureRouteTests
+{
+    private static CollectorTargetInfo Target(bool aurora = false, bool rds = false)
+        => new() { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 17, IsAurora = aurora, IsAwsRds = rds };
+
+    /// <summary>
+    /// The SQL collector is excluded from managed targets, and that is a ROUTE decision rather than a
+    /// capability one. Aurora and RDS have no filesystem, <c>pg_read_server_files</c> is not grantable and
+    /// <c>pg_read_file</c> is denied — so left enabled it would record a permission failure every cycle
+    /// forever, on a target where nothing is wrong and no grant exists to fix it.
+    /// </summary>
+    [Fact]
+    public void TheFileRouteIsSelfHostedOnly()
+    {
+        Assert.True(PgPlanCaptureCollector.Instance.AppliesTo(Target()));
+        Assert.False(PgPlanCaptureCollector.Instance.AppliesTo(Target(aurora: true)));
+        Assert.False(PgPlanCaptureCollector.Instance.AppliesTo(Target(rds: true)));
+    }
+
+    /// <summary>
+    /// Both routes write through the SAME definition, so the column order, the COPY command and the
+    /// standard prefix have one owner. A second writer with its own opinion about the table is how the two
+    /// halves would drift into storing subtly different rows.
+    /// </summary>
+    [Fact]
+    public void BothRoutesShareOneTableDefinition()
+    {
+        Assert.Equal("pg_plan_capture", PgPlanCaptureCollector.Instance.TargetTable);
+
+        /* The ingestor builds PgPlanCaptureCollector.Row values and hands them to the definition's own
+           WritePayload; if the payload shape moved, this count moves with it rather than silently
+           disagreeing. */
+        Assert.Equal(6, PgPlanCaptureCollector.Instance.PayloadColumns.Count);
     }
 }

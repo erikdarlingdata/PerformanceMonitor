@@ -125,7 +125,21 @@ LIMIT 2000";
     /// raise errors the host classifies as non-fatal skips, and
     /// <c>pg_plan_capture_readiness</c> already reports which precondition is missing.
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => true;
+    /// <summary>
+    /// Self-hosted PostgreSQL only, and the exclusion is a ROUTE decision rather than a capability one.
+    ///
+    /// <para>Aurora and RDS have no filesystem: <c>pg_read_server_files</c> is not grantable and
+    /// <c>pg_read_file</c> is denied, so this query could only ever record a permission failure there —
+    /// every cycle, forever, on a target where nothing is actually wrong. Those targets get their plans
+    /// from the RDS log API instead (<c>RdsPlanIngestor</c>, #2538), which writes to this same table
+    /// through this same definition.</para>
+    ///
+    /// <para>Gating here rather than letting it fail is what keeps the two routes from both claiming the
+    /// same target — and stops an operator reading a real permission error as a missing grant they could
+    /// fix, when the grant does not exist to give.</para>
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target)
+        => target is not null && !target.IsAurora && !target.IsAwsRds;
 
     /// <summary>Server-wide: one log holds every database's plans.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;

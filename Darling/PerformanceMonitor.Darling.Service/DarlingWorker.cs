@@ -4677,7 +4677,15 @@ LIMIT 1";
         ["pg_wait_sampling"] = (r, s, ct) => r.RunAsync(PgWaitSamplingCollector.Instance, s, ct),
         ["pg_kernel_stats"] = (r, s, ct) => r.RunAsync(PgKernelStatsCollector.Instance, s, ct),
         ["pg_predicate_stats"] = (r, s, ct) => r.RunAsync(PgPredicateStatsCollector.Instance, s, ct),
-        ["pg_plan_capture"] = (r, s, ct) => r.RunAsync(PgPlanCaptureCollector.Instance, s, ct),
+        /* TWO TRANSPORTS, one table. Self-hosted reads the server log with pg_read_file; Aurora and RDS
+           have no filesystem and pg_read_server_files is not grantable, so those go through the AWS log
+           API instead (#2538). The collector's own AppliesTo excludes managed targets, so without this
+           branch they would simply never capture a plan - and would look like they had nothing to say
+           rather than like they were on a different road. */
+        ["pg_plan_capture"] = (r, s, ct) =>
+            s.Target.IsAurora || s.Target.IsAwsRds
+                ? r.IngestRdsPlansAsync(s, ct)
+                : r.RunAsync(PgPlanCaptureCollector.Instance, s, ct),
         ["pg_column_stats"] = (r, s, ct) => r.RunAsync(PgColumnStatsCollector.Instance, s, ct),
         ["pg_replication_stats"] = (r, s, ct) => r.RunAsync(PgReplicationStatsCollector.Instance, s, ct),
         ["pg_buffer_usage"] = (r, s, ct) => r.RunAsync(PgBufferUsageCollector.Instance, s, ct),
