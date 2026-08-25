@@ -77,7 +77,7 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgOverviewInnerTabIndex,
             "overview",
             "Overview",
-            Array.Empty<string>(),
+            new[] { "pg_extension_availability" },
             /* No collector of its own: it reports on every one of them, from collection_log joined to the
                catalog.
                That join is the point — a collector gated off for this engine writes NO collection_log row
@@ -86,7 +86,9 @@ internal static class ViewerPostgresTabs
                operator one row short and never mention the missing collector. Derived from the catalog, it
                appears with the reason it is missing. */
             "Every PostgreSQL collector for this server: when it last ran, what it returned, and — for a "
-            + "collector this engine cannot run at all — why it never will."),
+            + "collector this engine cannot run at all — why it never will. The extension panel below is the "
+            + "third capability axis (#2545) and the only one that is ACTIONABLE: engine kind and edition "
+            + "are walls, but an extension that is available and not installed is one command away."),
 
         new ViewerPostgresTab(
             ViewerServerTab.PgActivityInnerTabIndex,

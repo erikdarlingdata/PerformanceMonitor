@@ -241,5 +241,11 @@ public static class CollectorScheduleDefaults
            cadence for the same reason pg_io_stats is - all three source views are cluster-wide singletons,
            so a snapshot is ONE row, not one per relation. */
         ["pg_write_stats"] = new(1, 30),
+        /* #2545 extension availability. DAILY, and retained a year. An extension appearing or being upgraded
+           is a rare, deliberate act - nobody installs one twice an hour - so a per-minute cadence would pay
+           1440x for the same answer. The year of retention is the point of keeping history at all: "when did
+           pg_stat_statements get installed" and "when did this extension get upgraded" are asked months
+           later, usually right after a plan changed shape and nobody can explain why. */
+        ["pg_extension_availability"] = new(1440, 365),
     };
 }

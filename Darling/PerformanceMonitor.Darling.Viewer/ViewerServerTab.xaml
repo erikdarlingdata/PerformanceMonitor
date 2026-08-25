@@ -3624,6 +3624,8 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgEngineBanner" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,4" TextWrapping="Wrap"/>
                 <TextBlock Grid.Row="1" x:Name="PgOverviewNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
@@ -3659,6 +3661,28 @@
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding Explanation}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Explanation}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2545 the extension axis. Sits under the collector grid because it answers the question
+                     that grid raises and cannot: a collector missing for want of an extension is a SETUP
+                     step rather than a wall, and this is where the step is named. -->
+                <TextBlock Grid.Row="3" x:Name="PgExtensionsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="4" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Extension" Binding="{Binding ExtensionName}" Width="200"/>
+                        <DataGridTextColumn Header="State" Binding="{Binding State}" Width="130"/>
+                        <DataGridTextColumn Header="Installed (this database)" Binding="{Binding InstalledVersion}" Width="170"/>
+                        <DataGridTextColumn Header="Server Offers" Binding="{Binding DefaultVersion}" Width="130"/>
+                        <DataGridTemplateColumn Header="What It Would Give Us" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Comment}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Comment}"/>
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>

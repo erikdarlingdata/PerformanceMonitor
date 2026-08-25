@@ -154,6 +154,48 @@ public partial class ViewerServerTab
 
         PgCollectorHealthGrid.ItemsSource =
             ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts);
+
+        await LoadPgExtensionsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The extension capability axis (#2545), under the collector grid because it answers the question that
+    /// grid raises and cannot: a collector missing for want of an extension is a SETUP step rather than a
+    /// permanent gap, and this names the step.
+    ///
+    /// <para>The note leads with the ACTIONABLE count — extensions this product can use that are available
+    /// on the server and simply not installed — because that number is the entire reason to look. Zero of
+    /// them is also worth saying: it means the gap is a platform limit rather than a missed install.</para>
+    /// </summary>
+    private async Task LoadPgExtensionsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_extension_availability"))
+        {
+            PgExtensionsGrid.ItemsSource = null;
+            PgExtensionsNote.Text = PanelNote("pg_extension_availability", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgExtensionAvailabilityAsync(_server.ServerId, startUtc, endUtc);
+
+        PgExtensionsGrid.ItemsSource = rows;
+
+        var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
+        var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
+
+        PgExtensionsNote.Text = PanelNote("pg_extension_availability", rows.Count,
+            "The extension collector runs daily, so a server added in the last day has nothing here yet.")
+            + (rows.Count == 0
+                ? string.Empty
+                : $"  {actionable} extension(s) this product can use are available on this server and NOT "
+                  + "installed — each is one CREATE EXTENSION away."
+                  + (outdated > 0
+                      ? $"  {outdated} are installed but behind the version the server offers, which is worth "
+                        + "fixing with ALTER EXTENSION … UPDATE: a stale extension can be missing columns a "
+                        + "collector reads, and that surfaces as a confusing error rather than as a gap."
+                      : string.Empty)
+                  + "  \u201cInstalled\u201d is scoped to the database this server entry connects to — "
+                  + "pg_extension is per-database while the server's offer is cluster-wide.");
     }
 
     /// <summary>

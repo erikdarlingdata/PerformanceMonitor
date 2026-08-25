@@ -81,6 +81,7 @@ public static class CollectorCatalog
         PgSessionStatesCollector.Instance,
         PgPlanCaptureReadinessCollector.Instance,
         PgWriteStatsCollector.Instance,
+        PgExtensionAvailabilityCollector.Instance,
     };
 
     /// <summary>Name → definition, for the by-name target-gate lookup. Built once from <see cref="All"/>.</summary>
