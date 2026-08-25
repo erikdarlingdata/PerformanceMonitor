@@ -187,6 +187,40 @@ public sealed class DarlingCollectorRunner
         _compressPlanContent = compressPlanContent ?? (() => true);
     }
 
+    /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
+       in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
+       forever while looking like it was making progress. */
+    private RdsPlanIngestor? _rdsPlans;
+
+    /// <summary>
+    /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
+    ///
+    /// <para>Reported as a normal <see cref="CollectorRunResult"/> so the cycle accounts for it exactly like
+    /// a collector: same <c>collection_log</c> row, same rows-collected number, same health surface. The
+    /// TRANSPORT differs; the bookkeeping should not, or an operator would have to know which route a
+    /// target used before they could read its collection history.</para>
+    /// </summary>
+    public async Task<CollectorRunResult> IngestRdsPlansAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger);
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        var started = Stopwatch.GetTimestamp();
+
+        var rows = await _rdsPlans.IngestAsync(
+            server.ServerId, server.StorageName, host, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
+           filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
+           different from every other target's. */
+        return new CollectorRunResult(rows, 0, elapsedMs,
+            rows == 0 ? "no new auto_explain plans in the RDS log window" : null);
+    }
+
     public async Task<CollectorRunResult> RunAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,

@@ -12,6 +12,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using PerformanceMonitor.Collectors;
+
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
@@ -170,5 +172,46 @@ public class RdsLogSourceTests
 
         Assert.Null(await source.ReadNewestAsync("db.internal.example.com"));
         Assert.Empty(client.Downloads);
+    }
+}
+
+/// <summary>
+/// The route split (#2538): one table, two transports, and neither target type left without a road.
+/// </summary>
+public class PlanCaptureRouteTests
+{
+    private static CollectorTargetInfo Target(bool aurora = false, bool rds = false)
+        => new() { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 17, IsAurora = aurora, IsAwsRds = rds };
+
+
+    /// <summary>
+    /// Both routes write through the SAME definition, so the column order, the COPY command and the
+    /// standard prefix have one owner. A second writer with its own opinion about the table is how the two
+    /// halves would drift into storing subtly different rows.
+    /// </summary>
+    [Fact]
+    public void BothRoutesShareOneTableDefinition()
+    {
+        Assert.Equal("pg_plan_capture", PgPlanCaptureCollector.Instance.TargetTable);
+
+        /* The ingestor builds PgPlanCaptureCollector.Row values and hands them to the definition's own
+           WritePayload; if the payload shape moved, this count moves with it rather than silently
+           disagreeing. */
+        Assert.Equal(6, PgPlanCaptureCollector.Instance.PayloadColumns.Count);
+    }
+
+    /// <summary>
+    /// The collector is NOT gated on the engine, and that is deliberate. Gating would make the capability
+    /// model report plan capture as a PERMANENT GAP on Aurora, which is false - those targets do capture
+    /// plans, through the RDS log API. The ROUTE is chosen at dispatch instead, so the definition never
+    /// executes against a managed target and cannot raise the permission failure a gate would have been
+    /// avoiding. Four capability tests caught the first attempt at this.
+    /// </summary>
+    [Fact]
+    public void TheCollectorIsNotAPermanentGapOnManagedTargets()
+    {
+        Assert.True(PgPlanCaptureCollector.Instance.AppliesTo(Target()));
+        Assert.True(PgPlanCaptureCollector.Instance.AppliesTo(Target(aurora: true)));
+        Assert.True(PgPlanCaptureCollector.Instance.AppliesTo(Target(rds: true)));
     }
 }

@@ -121,9 +121,17 @@ LIMIT 2000";
     public override string TargetTable => "pg_plan_capture";
 
     /// <summary>
-    /// Any PostgreSQL target. Absent grant, absent module or a log directory that cannot be listed all
-    /// raise errors the host classifies as non-fatal skips, and
-    /// <c>pg_plan_capture_readiness</c> already reports which precondition is missing.
+    /// Every PostgreSQL target — including Aurora and RDS, which reach the same table by a different road.
+    ///
+    /// <para><b>This deliberately does NOT gate on the engine, and the reason is worth stating.</b> Gating
+    /// here would make the capability model report plan capture as a PERMANENT GAP on Aurora, which is a
+    /// lie: those targets do capture plans, through the RDS log API (<c>RdsPlanIngestor</c>, #2538). The
+    /// route is chosen at dispatch, so this definition never actually executes against a managed target and
+    /// cannot produce the permission failure that gating was meant to avoid.</para>
+    ///
+    /// <para>An absent grant, an unloaded module or an unlistable log directory all raise errors the host
+    /// classifies as non-fatal skips, and <c>pg_plan_capture_readiness</c> already reports which
+    /// precondition is missing.</para>
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
