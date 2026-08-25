@@ -253,6 +253,7 @@ public partial class ViewerServerTab
             "No database counter moved in this window.");
 
         await LoadPgLockStatsAsync(startUtc, endUtc);
+        await LoadPgWaitSamplingAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -296,6 +297,47 @@ public partial class ViewerServerTab
                   + "and one seen in 55 is a standing problem. The Mode column decides the remedy — an "
                   + "ungranted AccessExclusiveLock is a DDL everything else is queued behind. A blank "
                   + "Relation with an OID is a lock in a different database, not a missing name.";
+    }
+
+    /// <summary>
+    /// Wait events attributed to the query that waited (#2603).
+    ///
+    /// <para>An empty grid here has THREE causes and they need different actions, so the note names
+    /// which one it is: the module is not loaded (an install step), the collector is gated off, or the
+    /// server genuinely waited on nothing. Collapsing those into &quot;no data&quot; is how a missing
+    /// extension reads as a healthy server.</para>
+    /// </summary>
+    private async Task LoadPgWaitSamplingAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_wait_sampling"))
+        {
+            PgWaitSamplingGrid.ItemsSource = null;
+            PgWaitSamplingNote.Text = PanelNote("pg_wait_sampling", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgWaitSamplingAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgWaitSamplingGrid.ItemsSource = rows;
+
+        var attributed = rows.Count(r => r.QueryId != 0);
+        var reset = rows.Any(r => r.CounterReset);
+
+        PgWaitSamplingNote.Text = rows.Count == 0
+            ? PanelNote("pg_wait_sampling", 0,
+                "No wait samples for this server in this window. The usual cause is that "
+                + "pg_wait_sampling is not in shared_preload_libraries — check the Extensions panel, "
+                + "which says whether it is installed, available or absent. If it IS loaded, an empty "
+                + "grid means the server waited on nothing worth sampling, which is the healthy answer.")
+            : $"{rows.Count:N0} wait event(s), {attributed:N0} attributed to a query. "
+              + "Est. Wait is samples multiplied by the profile period — an estimate from a sampling "
+              + "profiler, not a measured duration, so treat it as a ranking rather than a stopwatch. "
+              + "A Query ID of 0 is a background process rather than an unknown query, and CPU/Running "
+              + "is the backend on processor rather than waiting."
+              + (reset
+                  ? " One or more counters RESET inside this window (a restart, or "
+                    + "pg_wait_sampling_reset_profile), so those rows cover only the time since the reset."
+                  : string.Empty);
     }
 
     /// <summary>

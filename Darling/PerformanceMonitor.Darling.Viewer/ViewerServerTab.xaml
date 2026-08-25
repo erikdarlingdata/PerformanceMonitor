@@ -3797,6 +3797,42 @@
                             </DataGrid>
                         </Grid>
                     </TabItem>
+                    <!-- #2603 wait sampling. The counterpart to Waits, which reads Aurora's own
+                         aurora_stat_system_waits() and therefore exists ONLY on Aurora. This one comes from
+                         pg_wait_sampling and attributes each wait to the QUERY that waited, on any
+                         PostgreSQL that loads the module. Ranked by estimated wait rather than by sample
+                         count so a long-period profile does not out-rank a short-period one for no reason. -->
+                    <TabItem Header="Wait Sampling">
+                        <Grid Margin="0,8,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" x:Name="PgWaitSamplingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="1" x:Name="PgWaitSamplingGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <!-- CPU/Running is not a wait: it is the backend on processor, which the
+                                         module reports as a NULL event and this labels rather than leaving blank. -->
+                                    <DataGridTextColumn Header="Class" Binding="{Binding EventType}" Width="110"/>
+                                    <DataGridTextColumn Header="Event" Binding="{Binding Event}" Width="200"/>
+                                    <!-- ESTIMATED, and the header says so: this is samples x profile period
+                                         from a sampling profiler, not a measured duration. -->
+                                    <DataGridTextColumn Header="Est. Wait (ms)" Binding="{Binding EstimatedWaitMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                                    <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Backends" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <!-- Zero means the wait belonged to no statement - a background process -
+                                         rather than an unknown query. Joins pg_statement_stats.queryid. -->
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="180"/>
+                                    <!-- True means the profile was reset inside the window, so the figure
+                                         covers only the time since the reset. -->
+                                    <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
+                                    <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
                     <TabItem Header="Query Shapes">
                         <Grid Margin="0,8,0,0">
                             <Grid.RowDefinitions>
