@@ -619,6 +619,7 @@ public sealed class PgSchemaGeneratorTests
             (85, PgTableBloatStatsCollector.Instance),
             (86, PgSessionStatesCollector.Instance),
             (87, PgPlanCaptureReadinessCollector.Instance),
+            (88, PgWriteStatsCollector.Instance),
         };
 
         /* Every PostgreSQL collector must appear above. One added without a rung listed here would
