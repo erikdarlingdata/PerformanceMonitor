@@ -1352,10 +1352,21 @@ public static class DarlingWebEndpoints
 
     /* Representative target profiles a measure's collector AppliesTo gate is evaluated against (design D4).
        SqlMajorVersion is pinned to a supported major (16 = SQL 2022) so the version-gated collectors
-       (query_stats/query_store, 2016+) read as available; the msdb-less on-prem profile isolates the SQL-Agent
-       dependency for the needsMsdb flag. */
+       (query_stats/query_store, 2016+) read as available. */
     private static readonly CollectorTargetInfo s_onPremTarget = new() { SqlMajorVersion = 16, HasMsdbAccess = true };
-    private static readonly CollectorTargetInfo s_onPremNoMsdbTarget = new() { SqlMajorVersion = 16, HasMsdbAccess = false };
+
+    /* The SQL-Agent collectors, NAMED rather than probed. This used to be detected by evaluating the gate
+       against an msdb-less profile - "available with msdb, gated without it" - which stopped working when
+       #2559 removed HasMsdbAccess from those gates. The dependency itself did not go away: these three read
+       msdb.dbo.sysjobs and friends, so a panel built on them still needs the grant. What changed is what its
+       absence produces - a PERMISSIONS row rather than no dispatch - which arguably makes the badge MORE
+       useful, since the data starts flowing the moment the grant lands with no reconnect.
+
+       Honest limit: this cannot notice a NEW collector that reads msdb. DarlingComposeTests pins that the set
+       is exactly these three and that each one's query really does reference msdb, which catches a rename or
+       a collector that stopped reading it - not an addition. */
+    private static readonly HashSet<string> s_msdbBackedTables =
+        new(StringComparer.Ordinal) { "running_jobs", "job_history", "agent_status" };
     private static readonly CollectorTargetInfo s_azureSqlDbTarget = new() { IsAzureSqlDb = true, SqlMajorVersion = 16, HasMsdbAccess = false };
     private static readonly CollectorTargetInfo s_azureMiTarget = new() { IsAzureManagedInstance = true, SqlMajorVersion = 16, HasMsdbAccess = true };
     private static readonly CollectorTargetInfo s_awsRdsTarget = new() { IsAwsRds = true, SqlMajorVersion = 16, HasMsdbAccess = true };
@@ -1363,8 +1374,9 @@ public static class DarlingWebEndpoints
     /// <summary>The per-server-type availability of a measure (design D4), derived from its owning collector's
     /// <see cref="ICollectorSchemaInfo.AppliesTo"/> gate — the single authoritative target gate — so the composer
     /// can label/grey a measure a given server type can't collect. <c>needsMsdb</c> is the SQL-Agent dependency
-    /// (job/agent measures), detected as "available with msdb, gated without it" on an otherwise-capable on-prem
-    /// target. Returns null only if a measure's source has no collector (impossible — pinned by test).</summary>
+    /// (job/agent measures), taken from the named SQL-Agent set rather than probed from the gate - see the
+    /// note there on why #2559 made probing impossible and why the badge still earns its place.
+    /// Returns null only if a measure's source has no collector (impossible — pinned by test).</summary>
     private static JsonObject? BuildAppliesToNode(string sourceTable)
     {
         if (!s_collectorByTable.TryGetValue(sourceTable, out var collector))
@@ -1378,7 +1390,7 @@ public static class DarlingWebEndpoints
             ["azureSqlDb"] = collector.AppliesTo(s_azureSqlDbTarget),
             ["azureMi"] = collector.AppliesTo(s_azureMiTarget),
             ["awsRds"] = collector.AppliesTo(s_awsRdsTarget),
-            ["needsMsdb"] = collector.AppliesTo(s_onPremTarget) && !collector.AppliesTo(s_onPremNoMsdbTarget),
+            ["needsMsdb"] = s_msdbBackedTables.Contains(sourceTable),
         };
     }
 

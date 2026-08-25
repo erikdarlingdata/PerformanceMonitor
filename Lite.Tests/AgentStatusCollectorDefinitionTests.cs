@@ -71,9 +71,12 @@ public sealed class AgentStatusCollectorDefinitionTests
            empty snapshot that would drive a false "Agent Not Running" alert. */
         Assert.False(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.False(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAwsRds = true }));
-        /* No msdb access → the sysjobschedules next-run decode can't run; skip (gate collapsed from
-           IsCollectorSupported into the shared AppliesTo — #1: one authoritative gate surface). */
-        Assert.False(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { HasMsdbAccess = false }));
+        /* NOT gated on msdb access (#2559). It is a GRANT rather than an engine capability, and it was
+           probed once and cached for the connection's life - so running the GRANT we advise did nothing
+           until a restart. This now attempts and fails into PERMISSIONS, which error 916 already maps to,
+           and CollectorHealthClassifier bands a never-permitted collector as NO_PERMISSIONS ahead of
+           FAILING, so it does not read as broken. */
+        Assert.True(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { HasMsdbAccess = false }));
         /* Managed Instance has Agent; on-prem collects too. Bare target = msdb assumed accessible. */
         Assert.True(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo { IsAzureManagedInstance = true }));
         Assert.True(AgentStatusCollector.Instance.AppliesTo(new CollectorTargetInfo()));

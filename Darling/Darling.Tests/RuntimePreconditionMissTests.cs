@@ -270,14 +270,18 @@ public sealed class CollectorRuntimePreconditionTests
     [Fact]
     public void AGatedOffCollector_IsReportedAsAPrecondition_NotAsNothingToReport()
     {
+        /* The candidate text is the caller's, so this passes what the shipped tool passes rather than a
+           string invented here. Since the dispatch half of #2559 removed HasMsdbAccess from the gate, that
+           is AWS RDS alone — a login without msdb access now dispatches and is denied, so it never reaches
+           this arm. */
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            Server, "running_jobs", "the login has no msdb access, or this is AWS RDS.",
+            Server, "running_jobs", "this is an AWS RDS instance.",
             collectorEverRan: false, serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3));
 
         Assert.NotNull(message);
         Assert.Contains("never run", message, StringComparison.Ordinal);
         Assert.Contains("never permitted to look", message, StringComparison.Ordinal);
-        Assert.Contains("msdb", message, StringComparison.Ordinal);
+        Assert.Contains("AWS RDS", message, StringComparison.Ordinal);
     }
 
     /// <summary>

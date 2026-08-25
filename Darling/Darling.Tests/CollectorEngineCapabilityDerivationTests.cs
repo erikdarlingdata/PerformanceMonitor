@@ -949,7 +949,6 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
            silently returned nothing cannot pass. */
         Assert.Contains(nameof(CollectorTargetInfo.IsAzureSqlDb), read.Keys);
         Assert.Contains(nameof(CollectorTargetInfo.IsAzureManagedInstance), read.Keys);
-        Assert.Contains(nameof(CollectorTargetInfo.HasMsdbAccess), read.Keys);
         Assert.Contains(nameof(CollectorTargetInfo.IsAwsRds), read.Keys);
         Assert.Contains(nameof(CollectorTargetInfo.SqlMajorVersion), read.Keys);
 
@@ -960,11 +959,13 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
             new[] { nameof(CollectorTargetInfo.IsAzureSqlDb) },
             FactsReadByGateOf(byName["system_health_events"]).ToArray());
 
-        /* Three facts in one gate, so the decoder is not stopping at the first call it finds. */
+        /* Two facts in one gate, so the decoder is not stopping at the first call it finds. This read three
+           until #2559 removed HasMsdbAccess from it — msdb access is a grant rather than an engine
+           capability, so the collector attempts and fails into PERMISSIONS instead of gating off a probe
+           cached for the connection's life. */
         Assert.Equal(
             new[]
             {
-                nameof(CollectorTargetInfo.HasMsdbAccess),
                 nameof(CollectorTargetInfo.IsAwsRds),
                 nameof(CollectorTargetInfo.IsAzureSqlDb),
             },
@@ -1135,8 +1136,13 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
         /* No SQL Server fact leaks into the PostgreSQL scan. The two halves differ only by the filter, so a
            filter that stopped filtering would look exactly like a guard that was working. */
         Assert.DoesNotContain(nameof(CollectorTargetInfo.IsAzureSqlDb), read.Keys);
-        Assert.DoesNotContain(nameof(CollectorTargetInfo.HasMsdbAccess), read.Keys);
         Assert.DoesNotContain(nameof(CollectorTargetInfo.SqlMajorVersion), read.Keys);
+
+        /* HasMsdbAccess was a third assertion here and has been REMOVED rather than left passing. Since
+           #2559 no SQL Server gate reads it either, so the line could no longer fail for the reason it was
+           written — a filter that stopped filtering would still not have surfaced it. A pin that cannot go
+           red is worse than no pin, because it reads as coverage. The two facts left are both genuinely
+           SQL-Server-only and still discriminate. */
     }
 
     /// <summary>

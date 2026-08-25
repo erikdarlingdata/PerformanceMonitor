@@ -156,7 +156,7 @@ OPTION(RECOMPILE);";
     /// failed-jobs alert path's Azure/msdb skip).
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        !target.IsAzureSqlDb && !target.IsAwsRds && target.HasMsdbAccess;
+        !target.IsAzureSqlDb && !target.IsAwsRds;
 
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 

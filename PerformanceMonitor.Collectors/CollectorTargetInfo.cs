@@ -62,16 +62,28 @@ public sealed class CollectorTargetInfo
     public int SqlMajorVersion { get; init; }
 
     /// <summary>
-    /// True when the monitored login can read msdb (<c>HAS_DBACCESS('msdb') = 1</c>). The SQL-Agent
-    /// collectors — running_jobs, job_history, agent_status — read <c>msdb.dbo.sysjobs</c>,
-    /// <c>sysjobhistory</c>, <c>sysjobschedules</c>, etc., so each gates off via <see cref="AppliesTo"/>
-    /// when this is false; a login without msdb access would otherwise fail every cycle (error 229/916)
-    /// and pollute collection-health. Both hosts probe this (Lite's ServerManager and Darling's
-    /// DarlingServerConnector, verbatim <c>HAS_DBACCESS(N'msdb')</c>) and wire it in here.
-    /// <para>Defaults to <c>true</c> so a target the probe never classified (the SqlMajorVersion == 0 /
-    /// unknown path, and every bare <c>new CollectorTargetInfo()</c>) still attempts the Agent
-    /// collectors — matching the probe's own NULL-means-assume-access default, so "unknown" never
-    /// silently gates collection off.</para>
+    /// True when the monitored login can read msdb (<c>HAS_DBACCESS('msdb') = 1</c>), as probed at
+    /// connect by both hosts (Lite's ServerManager and Darling's DarlingServerConnector, verbatim
+    /// <c>HAS_DBACCESS(N'msdb')</c>).
+    ///
+    /// <para><b>This is reported, not dispatched on (#2559).</b> The three SQL-Agent collectors —
+    /// running_jobs, job_history, agent_status — used to gate off via <see cref="AppliesTo"/> when it was
+    /// false. The trouble is that msdb access is a GRANT rather than an engine capability, and this value
+    /// is probed once and cached for the connection's life. So the sequence a user actually follows was
+    /// broken: read our advice, run the <c>GRANT</c>, and nothing happens until the service restarts,
+    /// with no indication why.</para>
+    ///
+    /// <para>The collectors now attempt and fail into <c>PERMISSIONS</c>, which is a first-class outcome
+    /// rather than a defect: error 916 is already in <see cref="SqlServerPermissionErrors"/>, so the run
+    /// is classified as a permission denial and never as an ERROR, and <c>CollectorHealthClassifier</c>
+    /// bands a collector that has only ever been denied as <c>NO_PERMISSIONS</c> — checked BEFORE
+    /// FAILING/STALE, so a server that will never have the grant does not read as broken and raises no
+    /// alert. The cost is three fast-failing statements per cycle on such a server, which is a compile-time
+    /// permission check with no execution behind it, and the grant now takes effect on the next cycle
+    /// instead of the next restart.</para>
+    ///
+    /// <para>Defaults to <c>true</c>, still matching the probe's NULL-means-assume-access default. It no
+    /// longer changes dispatch, but it remains the honest value to report on a connection surface.</para>
     /// </summary>
     public bool HasMsdbAccess { get; init; } = true;
 
