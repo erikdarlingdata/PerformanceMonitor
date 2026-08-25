@@ -197,10 +197,18 @@ public class PgPlanCaptureReadinessCollectorDefinitionTests
     {
         var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
 
-        /* A CASE over the observed value, not a literal. */
+        /* A CASE over the observed value, not a literal. Anchored on the threshold COLUMN rather than on an
+           inline current_setting call: the settings are now read once into a CTE (#2605), so matching the
+           call text here pinned the plumbing rather than the behaviour and broke on a refactor that kept
+           every branch intact. */
         Assert.Contains("CASE", sql, StringComparison.Ordinal);
-        Assert.Contains("WHEN current_setting('auto_explain.log_min_duration', true) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("WHEN current_setting('auto_explain.log_min_duration', true) = '-1'", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN p.threshold IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN p.threshold = '-1'", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN p.threshold = '0'", sql, StringComparison.Ordinal);
+
+        /* The state that made this facet wrong on a live target: a threshold set with no library behind it
+           (#2605). It must reach its own branch and not fall through to the satisfied wording. */
+        Assert.Contains("WHEN NOT p.loaded AND p.threshold IS NOT NULL", sql, StringComparison.Ordinal);
 
         /* And the satisfied arm must not repeat the -1 sentence, which is the exact contradiction found. */
         var elseArm = sql[sql.IndexOf("ELSE 'auto_explain is loaded and capturing", StringComparison.Ordinal)..];
@@ -265,5 +273,80 @@ public class PgPlanCaptureReadinessCollectorDefinitionTests
         {
             Assert.Contains($"AS {name}", sql, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The <c>shared_preload_libraries</c> test is computed EXACTLY ONCE, and every facet that judges an
+    /// <c>auto_explain.*</c> setting reads that one value.
+    ///
+    /// <para><b>This is the assertion that would have caught the shipped bug.</b> A GUC named
+    /// <c>auto_explain.*</c> can exist with no auto_explain behind it — PostgreSQL accepts any qualified
+    /// custom variable, so a parameter group or a plain <c>SET</c> defines one on a server that never
+    /// loaded the module. <c>capture_threshold</c> inferred "loaded" from the GUC merely existing, and on a
+    /// live Aurora target reported SATISFIED with the words "auto_explain is loaded and capturing at this
+    /// threshold" while <c>library_loaded</c> in the same result set said false. Reproduced on PostgreSQL 17
+    /// with one <c>SET</c>.</para>
+    ///
+    /// <para>The root cause was one fact derived in five places, and the fifth forgot. Pinning the count at
+    /// one is what makes a sixth copy impossible rather than merely discouraged — the same shape as #2599,
+    /// where two collectors derived "is this extension installed" from different sources and disagreed.</para>
+    /// </summary>
+    [Fact]
+    public void PreloadDetection_IsComputedOnce_AndGatesEveryAutoExplainFacet()
+    {
+        var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        var preloadReads = Regex.Matches(sql, @"current_setting\(\s*'shared_preload_libraries'").Count;
+
+        Assert.True(
+            preloadReads == 1,
+            $"shared_preload_libraries is read {preloadReads} times. It must be read once and shared, or two "
+            + "facets will eventually disagree about whether auto_explain is loaded.");
+
+        /* Every auto_explain.* GUC is read inside that same single row, so no facet can reach one without
+           also having the loaded flag beside it. */
+        foreach (Match read in Regex.Matches(sql, @"current_setting\(\s*'auto_explain\.[a-z_]+'"))
+        {
+            var before = sql.Substring(0, read.Index);
+            Assert.True(
+                before.LastIndexOf("UNION ALL", StringComparison.Ordinal) < 0,
+                $"{read.Value} is read inside a facet branch rather than the shared row, so that facet can "
+                + "judge it without consulting whether the library is loaded.");
+        }
+    }
+
+    /// <summary>
+    /// A setting that exists while the library does not is called out as a placeholder rather than reported
+    /// as working configuration. The wording matters more than usual here: the reader's next action is
+    /// different for "not set" (set it) than for "set but inert" (load the library first, then this starts
+    /// mattering), and the old text sent them to the wrong one.
+    /// </summary>
+    [Fact]
+    public void AnUnloadedLibrary_ReportsItsSettingsAsPlaceholders()
+    {
+        var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        Assert.Contains("PLACEHOLDER", sql, StringComparison.Ordinal);
+
+        /* The claim that must never be reachable without the loaded flag. */
+        var claim = "auto_explain is loaded and capturing at this threshold";
+        Assert.Contains(claim, sql, StringComparison.Ordinal);
+
+        /* Scoped to the facet's is_satisfied EXPRESSION - between the facet literal and the `observed`
+           column that follows it - rather than to the whole branch. Searching the branch for the word
+           "loaded" passes on the buggy version too, because its prose says "library not loaded": the
+           assertion has to look where the decision is made, not where the word appears. */
+        var branchStart = sql.IndexOf("'capture_threshold'::text", StringComparison.Ordinal);
+        Assert.True(branchStart >= 0, "the capture_threshold facet is missing");
+
+        var observedAt = sql.IndexOf("coalesce(p.threshold", branchStart, StringComparison.Ordinal);
+        Assert.True(observedAt > branchStart, "capture_threshold's observed column moved; rescope this test");
+
+        var satisfiedExpression = sql[branchStart..observedAt];
+
+        Assert.True(
+            satisfiedExpression.Contains("p.loaded", StringComparison.Ordinal),
+            "capture_threshold decides is_satisfied without consulting the shared loaded flag, so a "
+            + "placeholder auto_explain.* GUC on a server with no auto_explain reports as working capture.");
     }
 }
