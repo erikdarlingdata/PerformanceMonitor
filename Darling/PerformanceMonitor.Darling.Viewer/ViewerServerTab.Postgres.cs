@@ -616,6 +616,53 @@ public partial class ViewerServerTab
                   + "exactly like a dead index over seven days.";
 
         await LoadPgColumnStatsAsync(startUtc, endUtc);
+        await LoadPgIndexBloatAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// Measured index bloat (#2561), under index usage — the two are halves of one question.
+    ///
+    /// <para>The note leads with RECLAIMABLE BYTES rather than a worst-density figure, because density
+    /// alone ranks the wrong thing: a tiny index at 20% looks alarming and is worth kilobytes. It also has
+    /// to say that a healthy index measures near 90 rather than 100, or the first person to read the density
+    /// column concludes every index in the fleet is 10% bloated.</para>
+    /// </summary>
+    private async Task LoadPgIndexBloatAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_index_bloat"))
+        {
+            PgIndexBloatGrid.ItemsSource = null;
+            PgIndexBloatNote.Text = PanelNote("pg_index_bloat", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgIndexBloatAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgIndexBloatGrid.ItemsSource = rows;
+
+        var reclaimable = 0L;
+        foreach (var r in rows)
+        {
+            reclaimable += r.EstimatedReclaimableBytes ?? 0L;
+        }
+
+        var skipped = rows.Count(r => r.SkippedReason is not null);
+
+        PgIndexBloatNote.Text = rows.Count == 0
+            ? "Nothing recorded. This panel needs the pgstattuple extension — without it the collector "
+              + "reports the function as missing rather than failing, and the Overview tab's extension panel "
+              + "says whether it is available on this server and one CREATE EXTENSION away. Only B-TREE "
+              + "indexes are measured; pgstatindex raises on GIN, BRIN and hash."
+            : $"MEASURED, not estimated from column statistics — every page of each index was read. About "
+              + $"{reclaimable:N0} bytes look reclaimable across {rows.Count:N0} index(es), and that is what "
+              + "the grid is ranked by: density alone ranks the wrong thing, since a tiny index at 20% is "
+              + "worth kilobytes next to a large one at 70%. **Leaf density is the server's raw figure and "
+              + "is not 100-minus-bloat** — a freshly built index measures around 90, so the reclaimable "
+              + "estimate is computed against that floor rather than against a full page."
+              + (skipped > 0
+                  ? $"  {skipped:N0} index(es) were too large to read and are listed FIRST with their reason: "
+                    + "their bloat is unknown rather than zero, and they are the likeliest big win."
+                  : string.Empty);
     }
 
     /// <summary>
