@@ -631,7 +631,22 @@ public partial class RemoteCollectorService
                 ? "PERMISSIONS"
                 : "ERROR";
             xeSessionUnavailable = true;
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+
+            /* Logged at the level the CLASSIFICATION implies, not always Error. A denied XE session is a
+               least-privilege choice a customer is entitled to make (#1823), and the arm above already
+               records it as PERMISSIONS and flags the collector so the scheduler stops retrying it for the
+               session. Logging that at Error made a deliberate posture read as a fault: a field log showed
+               three consecutive Error lines - two from the XE layer, one from here - for a login that was
+               simply not granted ALTER ANY EVENT SESSION, while every other permission denial in this method
+               logs at Warn. Only a genuine ERROR status stays at Error. */
+            if (status == "PERMISSIONS")
+            {
+                AppLogger.Warn("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+            }
+            else
+            {
+                AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+            }
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
