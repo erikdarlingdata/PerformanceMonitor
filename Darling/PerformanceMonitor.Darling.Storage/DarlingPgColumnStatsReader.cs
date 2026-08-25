@@ -50,6 +50,7 @@ public static class DarlingPgColumnStatsReader
     /// <param name="TopValueFrequency">Share of the table held by the single most common value. The
     /// parameter-sensitivity signal; carries no value itself, by design.</param>
     public sealed record PgColumnStatRow(
+        string? DatabaseName,
         string? SchemaName,
         string? TableName,
         string? ColumnName,
@@ -68,26 +69,30 @@ public static class DarlingPgColumnStatsReader
        ORDER BY to lead with the distinct key, so picking the newest and ranking by interest are two
        different sorts and need the subquery. Same shape as the readiness and extension readers.
 
+       database_name LEADS the distinct key (#2599). It is not decorative: this collector runs once per
+       database, so without it two databases sharing a schema collapse to one row here and the newest
+       collection_time silently decides which database the grid is describing.
+
        NULLS LAST on both ranking keys: a column with no MCV list has no skew to report, and sorting NULL
        first would put the least informative rows at the top of a grid whose whole job is to rank. */
     public const string PgColumnStatsSql = """
-        SELECT schema_name, table_name, column_name,
+        SELECT database_name, schema_name, table_name, column_name,
                n_distinct, null_frac, avg_width, correlation,
                top_value_frequency, common_value_count, collection_time
         FROM (
-            SELECT DISTINCT ON (schema_name, table_name, column_name)
-                   schema_name, table_name, column_name,
+            SELECT DISTINCT ON (database_name, schema_name, table_name, column_name)
+                   database_name, schema_name, table_name, column_name,
                    n_distinct, null_frac, avg_width, correlation,
                    top_value_frequency, common_value_count, collection_time
             FROM pg_column_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            ORDER BY schema_name, table_name, column_name, collection_time DESC
+            ORDER BY database_name, schema_name, table_name, column_name, collection_time DESC
         ) AS latest
         ORDER BY top_value_frequency DESC NULLS LAST,
                  abs(correlation) ASC NULLS LAST,
-                 schema_name, table_name, column_name
+                 database_name, schema_name, table_name, column_name
         LIMIT $4
         """;
 
@@ -112,18 +117,19 @@ public static class DarlingPgColumnStatsReader
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new PgColumnStatRow(
-                SchemaName: reader.IsDBNull(0) ? null : reader.GetString(0),
-                TableName: reader.IsDBNull(1) ? null : reader.GetString(1),
-                ColumnName: reader.IsDBNull(2) ? null : reader.GetString(2),
-                NDistinct: reader.IsDBNull(3) ? null : reader.GetDouble(3),
-                NullFrac: reader.IsDBNull(4) ? null : reader.GetDouble(4),
-                AvgWidth: reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                Correlation: reader.IsDBNull(6) ? null : reader.GetDouble(6),
-                TopValueFrequency: reader.IsDBNull(7) ? null : reader.GetDouble(7),
-                CommonValueCount: reader.IsDBNull(8) ? null : reader.GetInt32(8),
-                CaptureTime: reader.IsDBNull(9)
+                DatabaseName: reader.IsDBNull(0) ? null : reader.GetString(0),
+                SchemaName: reader.IsDBNull(1) ? null : reader.GetString(1),
+                TableName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                ColumnName: reader.IsDBNull(3) ? null : reader.GetString(3),
+                NDistinct: reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                NullFrac: reader.IsDBNull(5) ? null : reader.GetDouble(5),
+                AvgWidth: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                Correlation: reader.IsDBNull(7) ? null : reader.GetDouble(7),
+                TopValueFrequency: reader.IsDBNull(8) ? null : reader.GetDouble(8),
+                CommonValueCount: reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                CaptureTime: reader.IsDBNull(10)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
         }
 
         return rows;

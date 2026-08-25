@@ -3675,6 +3675,9 @@
                 <DataGrid Grid.Row="4" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
+                        <!-- installed/outdated are per-database facts and available/absent are cluster-wide,
+                             so the database this row was read in is what makes the State column legible. -->
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
                         <DataGridTextColumn Header="Extension" Binding="{Binding ExtensionName}" Width="200"/>
                         <DataGridTextColumn Header="State" Binding="{Binding State}" Width="130"/>
                         <DataGridTextColumn Header="Installed (this database)" Binding="{Binding InstalledVersion}" Width="170"/>
@@ -4335,6 +4338,9 @@
                 <DataGrid Grid.Row="6" x:Name="PgColumnStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
+                        <!-- These statistics describe ONE database and the collector sweeps every database
+                             on the target, so the schema/table pair alone does not identify a row. -->
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
                         <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="120"/>
                         <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="180"/>
                         <DataGridTextColumn Header="Column" Binding="{Binding ColumnName}" Width="160"/>
@@ -4358,6 +4364,7 @@
                 <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
                         <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="110"/>
                         <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
                         <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="190"/>

@@ -59,6 +59,9 @@ public sealed class PgColumnStatsCollector : PostgresCollectorDefinitionBase<PgC
     {
     }
 
+    /// <param name="DatabaseName">The database these statistics describe. Load-bearing, not decorative:
+    /// this collector runs once per database, and <c>pg_stats</c> describes the connected database only, so
+    /// without it rows from two databases that share a schema collide indistinguishably (#2599).</param>
     /// <param name="NDistinct">Negative values are a RATIO of row count, not a quantity. See the type
     /// header.</param>
     /// <param name="Correlation">Physical/logical ordering correlation. Near zero is why an index scan was
@@ -68,6 +71,7 @@ public sealed class PgColumnStatsCollector : PostgresCollectorDefinitionBase<PgC
     /// <param name="CommonValueCount">How many entries the MCV list holds — the shape of the skew, again
     /// without the values.</param>
     public readonly record struct Row(
+        string? DatabaseName,
         string? SchemaName,
         string? TableName,
         string? ColumnName,
@@ -94,6 +98,7 @@ public sealed class PgColumnStatsCollector : PostgresCollectorDefinitionBase<PgC
        the shortfall is reported by the read instead. */
     private const string QueryText = @"
 SELECT
+    current_database()::text                AS database_name,
     s.schemaname::text                      AS schema_name,
     s.tablename::text                       AS table_name,
     s.attname::text                         AS column_name,
@@ -137,6 +142,7 @@ ORDER BY c.relpages DESC, s.schemaname, s.tablename, s.attname";
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
+        new CollectorColumn("database_name", CollectorColumnType.Varchar),
         new CollectorColumn("schema_name", CollectorColumnType.Varchar),
         new CollectorColumn("table_name", CollectorColumnType.Varchar),
         new CollectorColumn("column_name", CollectorColumnType.Varchar),
@@ -162,18 +168,19 @@ ORDER BY c.relpages DESC, s.schemaname, s.tablename, s.attname";
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new Row(
-                SchemaName: reader.IsDBNull(0) ? null : reader.GetString(0),
-                TableName: reader.IsDBNull(1) ? null : reader.GetString(1),
-                ColumnName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                DatabaseName: reader.IsDBNull(0) ? null : reader.GetString(0),
+                SchemaName: reader.IsDBNull(1) ? null : reader.GetString(1),
+                TableName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                ColumnName: reader.IsDBNull(3) ? null : reader.GetString(3),
                 /* Nullable throughout and never a sentinel. These are planner inputs a reader interprets
                    directly, and every one of them has a meaningful zero - null_frac 0, correlation 0 - so a
                    sentinel would collide with a real answer. */
-                NDistinct: reader.IsDBNull(3) ? null : reader.GetFloat(3),
-                NullFrac: reader.IsDBNull(4) ? null : reader.GetFloat(4),
-                AvgWidth: reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                Correlation: reader.IsDBNull(6) ? null : reader.GetFloat(6),
-                TopValueFrequency: reader.IsDBNull(7) ? null : reader.GetFloat(7),
-                CommonValueCount: reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                NDistinct: reader.IsDBNull(4) ? null : reader.GetFloat(4),
+                NullFrac: reader.IsDBNull(5) ? null : reader.GetFloat(5),
+                AvgWidth: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                Correlation: reader.IsDBNull(7) ? null : reader.GetFloat(7),
+                TopValueFrequency: reader.IsDBNull(8) ? null : reader.GetFloat(8),
+                CommonValueCount: reader.IsDBNull(9) ? null : reader.GetInt32(9)));
         }
 
         return rows;

@@ -39,6 +39,7 @@ public static class DarlingPgExtensionAvailabilityReader
     /// <param name="IsMonitoringRelevant">Whether this product can actually use it, as opposed to it merely
     /// being present on the server.</param>
     public sealed record PgExtensionRow(
+        string? DatabaseName,
         string ExtensionName,
         string State,
         string? InstalledVersion,
@@ -51,23 +52,27 @@ public static class DarlingPgExtensionAvailabilityReader
        pass - the standard PostgreSQL idiom, and cheaper than a correlated MAX per name on a hypertable.
 
        The outer ORDER BY re-sorts for reading, which the inner one cannot do: DISTINCT ON requires its
+       database_name leads the distinct key (#2599). installed/outdated are read from pg_extension, which
+       describes the CONNECTED database only, so one row per extension per SERVER would collapse databases
+       that genuinely disagree and let collection_time pick the winner.
+
        ORDER BY to lead with the distinct key, so picking the newest and presenting in useful order are two
        different sorts and need the subquery. Same shape as DarlingPgPlanCaptureReadinessReader.
 
        State order is spelled as a CASE rather than left to alphabetical, which would give
        absent, available, installed, outdated - putting the thing you cannot fix above the thing you can. */
     public const string PgExtensionAvailabilitySql = """
-        SELECT extension_name, state, installed_version, default_version,
+        SELECT database_name, extension_name, state, installed_version, default_version,
                is_monitoring_relevant, comment, collection_time
         FROM (
-            SELECT DISTINCT ON (extension_name)
-                   extension_name, state, installed_version, default_version,
+            SELECT DISTINCT ON (database_name, extension_name)
+                   database_name, extension_name, state, installed_version, default_version,
                    is_monitoring_relevant, comment, collection_time
             FROM pg_extension_availability
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            ORDER BY extension_name, collection_time DESC
+            ORDER BY database_name, extension_name, collection_time DESC
         ) AS latest
         ORDER BY is_monitoring_relevant DESC,
                  CASE state
@@ -77,7 +82,7 @@ public static class DarlingPgExtensionAvailabilityReader
                      WHEN 'absent'    THEN 4
                      ELSE 5
                  END,
-                 extension_name
+                 database_name, extension_name
         LIMIT $4
         """;
 
@@ -102,15 +107,16 @@ public static class DarlingPgExtensionAvailabilityReader
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new PgExtensionRow(
-                ExtensionName: reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
-                State: reader.IsDBNull(1) ? "absent" : reader.GetString(1),
-                InstalledVersion: reader.IsDBNull(2) ? null : reader.GetString(2),
-                DefaultVersion: reader.IsDBNull(3) ? null : reader.GetString(3),
-                IsMonitoringRelevant: !reader.IsDBNull(4) && reader.GetBoolean(4),
-                Comment: reader.IsDBNull(5) ? null : reader.GetString(5),
-                CaptureTime: reader.IsDBNull(6)
+                DatabaseName: reader.IsDBNull(0) ? null : reader.GetString(0),
+                ExtensionName: reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                State: reader.IsDBNull(2) ? "absent" : reader.GetString(2),
+                InstalledVersion: reader.IsDBNull(3) ? null : reader.GetString(3),
+                DefaultVersion: reader.IsDBNull(4) ? null : reader.GetString(4),
+                IsMonitoringRelevant: !reader.IsDBNull(5) && reader.GetBoolean(5),
+                Comment: reader.IsDBNull(6) ? null : reader.GetString(6),
+                CaptureTime: reader.IsDBNull(7)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)));
         }
 
         return rows;
