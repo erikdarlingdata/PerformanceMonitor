@@ -591,6 +591,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                    pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
                    peak memory, neither of which the SQL Server tools have an equivalent for. */
                 .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
+                /* get_pg_plans — the plan itself, not a pointer to one (#2567). Registered beside the
+                   statement tools because that is the join: a plan is read alongside the statement it
+                   belongs to, on query_id. */
+                .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
                 /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
                    PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */
                 .WithGeminiCompatibleTools<DarlingMcpPgWraparoundTools>()

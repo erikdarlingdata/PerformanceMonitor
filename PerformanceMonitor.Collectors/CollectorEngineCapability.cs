@@ -162,6 +162,11 @@ public static class CollectorEngineCapability
                mechanism that engine does not have. */
             ["pg_wait_stats"] = "the aurora_stat_system_waits() cumulative wait counters",
             ["pg_statement_stats"] = "the aurora_stat_statements() per-statement history",
+            /* Named for the LOG, because that is where the gap actually is: auto_explain writes
+               plans nowhere else, and on Aurora and RDS there is no filesystem to read them from
+               (#2538). A generic phrasing here would say the collector did not run and leave the
+               reader to guess whether that is fixable. */
+            ["pg_plan_capture"] = "the auto_explain plans written to the server log",
             ["pg_blocking"] = "the pg_blocking_pids() lock-wait samples",
             ["pg_io_stats"] = "the pg_stat_io per-backend I/O counters",
             ["pg_autovacuum_stats"] = "the pg_stat_user_tables autovacuum backlog",

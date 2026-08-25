@@ -343,6 +343,7 @@ public sealed class ServerPageTabsTests
         {
             ["get_pg_wait_stats"] = "pg_wait_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",
+            ["get_pg_plans"] = "pg_plan_capture",
             ["get_pg_blocking"] = "pg_blocking",
             ["get_pg_io_stats"] = "pg_io_stats",
             ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",

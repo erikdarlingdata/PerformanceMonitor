@@ -63,6 +63,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
         "get_pg_top_queries",
+        "get_pg_plans",
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_pg_replication_slots",
