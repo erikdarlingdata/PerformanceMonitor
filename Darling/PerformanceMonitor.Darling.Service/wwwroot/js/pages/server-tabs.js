@@ -1495,6 +1495,19 @@ export const POSTGRES_TABS = [
         ctx.label + ", by total execution time",
         "No query statistics in this window."
       ),
+      /* Directly under the query shapes, joined on queryid: a plan only means something beside the
+         statement it belongs to. The plan JSON is REDACTED at collection - query text dropped, literals
+         replaced - so nothing customer-specific reaches this grid, and the empty text names the usual
+         cause rather than implying the server is quiet. */
+      table(
+        "Captured Plans",
+        "get_pg_plans",
+        { server, hours: ctx.hours, limit: 10 },
+        "plans",
+        PG_PLAN_COLUMNS,
+        ctx.label + ", grouped by plan shape - plans are redacted at collection",
+        "No captured plans. Usually auto_explain is not loaded, or the monitoring login cannot read the server log; on Aurora and RDS there is no log file to read at all."
+      ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
          only evidence of that we collect — the statement stats themselves cannot see it. The deadlock and
@@ -2745,6 +2758,20 @@ const PG_WAIT_COLUMNS = [
 /* queryid, calls and the three time columns are the answer; the block counters are not on this grid. Temp
    blocks written IS, because a spill is the explanation for a statement whose time makes no sense from its
    row count, and it is the one counter PostgreSQL exposes that changes what you would do next. */
+const PG_PLAN_COLUMNS = [
+  { key: "queryid", label: "Query ID", mono: true },
+  { key: "top_node_type", label: "Top Node" },
+  { key: "node_count", label: "Nodes", format: "int" },
+  { key: "total_duration_ms", label: "Total", format: "ms" },
+  { key: "max_duration_ms", label: "Max", format: "ms" },
+  { key: "avg_duration_ms", label: "Avg", format: "ms" },
+  /* CAPTURES, not executions: the collector reads an overlapping tail of the server log, so one
+     execution can be seen twice. The Calls column on the grid above is the authority on how often a
+     statement actually ran, and this label has to keep the two apart. */
+  { key: "captures", label: "Captures", format: "int" },
+  { key: "plan_hash", label: "Plan Hash", mono: true },
+];
+
 const PG_TOP_QUERY_COLUMNS = [
   { key: "queryid", label: "Query ID", mono: true },
   { key: "calls", label: "Calls", format: "int" },
