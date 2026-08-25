@@ -178,6 +178,8 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 `install-darling.ps1` registers a service; it does not lay a new build over an old one. That step — stop, back up, copy, start, verify — is `upgrade-darling.ps1`, shipped in the same zip.
 
+> **`upgrade-darling.ps1` does not exist in 3.5.0 or earlier.** It was added after 3.5.0 was tagged, so a build up to and including 3.5.0 does not contain it and neither does its zip. If you are upgrading FROM one of those, see [upgrading from a build that predates the script](#upgrading-from-a-build-that-predates-the-script) below and use the manual procedure — the steps in this section describe a script you will not have.
+
 Extract the new zip to a **staging** folder and run *its* copy:
 
 ```powershell
@@ -207,6 +209,38 @@ C:\PerformanceMonitorDarling\upgrade-darling.ps1 -PruneOnly       # remove all b
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
 
 **The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints the post-start checklist; work it about 10–15 minutes later against the store, and hold the upgrade unverified until every line passes.
+
+#### Upgrading from a build that predates the script
+
+`upgrade-darling.ps1` was added after 3.5.0, so upgrading **from 3.5.0 or earlier** is a manual
+procedure. It is the same sequence the script automates ([#2593](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2593)).
+
+**Nothing you need to preserve lives in the install directory.** The managed store, the DPAPI
+credential blobs and the logs are all under `C:\ProgramData\PerformanceMonitorDarling`, and anything
+encrypted with `--encrypt-password` survives because those blobs are DPAPI **machine** scope rather than
+account scope. The only file that has to travel is `darling.json`. That also means renaming the install
+folder does **not** back up your data — if you want a data rollback point, snapshot the volume or stop
+the service and copy that ProgramData folder.
+
+1. **Verify the download first.** `Get-FileHash <zip> -Algorithm SHA256` against `SHA256SUMS.txt` from the
+   same release page. This is the one step with no recovery if it is skipped.
+2. `Stop-Service 'PerformanceMonitor Darling' -Force`, then **poll until `Status` is actually `Stopped`**.
+   Requesting a stop is not the same as it having stopped, and laying a build over a live tree is where
+   this goes wrong.
+3. Rename the current install folder aside (e.g. `...\PerformanceMonitorDarling_3.3`). This is your
+   rollback.
+4. Extract the new zip to the **original** folder name.
+5. Copy `darling.json` from the renamed folder into the new one, then **hash it on both sides and confirm
+   they match**. A config silently altered mid-upgrade is very hard to notice afterwards.
+6. Run `.\install-darling.ps1` from the new folder. For an existing install it re-points the service's
+   binPath in place and preserves config, store and credentials.
+7. Start the service, then **verify** — see the post-start checklist below. Reaching `Running` means the
+   process started, not that it collects, and an upgrade that crosses several schema migrations has more
+   than usual to get wrong on first start.
+
+A clean extract like this has one advantage over the scripted overlay: files a newer build stopped
+shipping cannot accumulate, which is the problem `-RemoveStaleFiles` exists to clean up on an
+overlay-upgraded tree.
 
 #### The install location has to be machine-scoped
 
