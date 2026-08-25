@@ -260,5 +260,11 @@ public static class CollectorScheduleDefaults
            nothing from a finer grain. This is also the widest per-row fan-out here (columns x tables x
            databases), which the 128-page floor in the query bounds. */
         ["pg_column_stats"] = new(1440, 365),
+        /* #2544 replication connections. PER-MINUTE and 30 days, matching the slot collector it sits beside.
+           This is instantaneous state, so the cadence IS the resolution - a standby that drifts away and
+           catches up inside five minutes is a different and more worrying animal than one steadily behind,
+           and only a fine grain tells them apart. Row count is the number of connected standbys, so single
+           digits on any real topology. */
+        ["pg_replication_stats"] = new(1, 30),
     };
 }
