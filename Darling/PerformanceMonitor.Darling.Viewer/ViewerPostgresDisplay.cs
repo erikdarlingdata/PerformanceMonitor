@@ -1000,4 +1000,106 @@ internal static class PgDisplay
             StateUnknown = unknown,
         };
     }
+
+    /// <summary>One write-side metric, as a display row.</summary>
+    internal sealed class WriteStatRow
+    {
+        public string Group { get; init; } = "";
+        public string Metric { get; init; } = "";
+
+        /// <summary>The change across the window, or an em dash when the value is NULL. The dash is
+        /// deliberate and is NOT rendered as 0 — a metric can be null because this PostgreSQL major does not
+        /// expose it, or because its statistics family was reset inside the window, and both of those are
+        /// "we do not know" rather than "nothing happened".</summary>
+        public string Value { get; init; } = "";
+
+        public string Note { get; init; } = "";
+    }
+
+    /// <summary>
+    /// Projects the single write-side row into one display row per metric (#2544), in causal reading order:
+    /// checkpoints, then what the background writer did between them, then the WAL they were driven by.
+    ///
+    /// <para>A metric whose value is NULL is kept rather than dropped, and carries the reason in its note.
+    /// Hiding it would answer the reader's next question ("where is buffers_backend?") with silence, and on
+    /// a mixed-version fleet the answer differs per target: PostgreSQL 17 moved that counter to
+    /// <c>pg_stat_io</c>, and 18 removed the WAL timing columns outright.</para>
+    /// </summary>
+    internal static List<WriteStatRow> WriteStatsRows(DarlingPgWriteStatsReader.PgWriteStatsRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+
+        return new List<WriteStatRow>
+        {
+            Metric("Checkpoints", "Timed", row.CheckpointsTimed,
+                "Checkpoints that began because checkpoint_timeout elapsed. This is the healthy kind."),
+            Metric("Checkpoints", "Requested", row.CheckpointsRequested,
+                "Began because WAL volume demanded one. Climbing against Timed is the classic "
+                + "max_wal_size-too-small signal."),
+            Metric("Checkpoints", "Completed", row.CheckpointsDone,
+                "PostgreSQL 18+. Blank on earlier majors, which do not expose it."),
+            MetricMs("Checkpoints", "Write Time (ms)", row.CheckpointWriteTimeMs,
+                "Time spent writing buffers during checkpoints."),
+            MetricMs("Checkpoints", "Sync Time (ms)", row.CheckpointSyncTimeMs,
+                "Time spent in fsync during checkpoints. High here with low write time points at the "
+                + "storage rather than at the volume."),
+            Metric("Checkpoints", "Buffers Written", row.BuffersWrittenCheckpoint,
+                "Buffers written by the checkpointer."),
+            Metric("Checkpoints", "SLRU Written", row.SlruWritten,
+                "PostgreSQL 18+. Blank on earlier majors."),
+            Metric("Restartpoints", "Timed", row.RestartpointsTimed,
+                "A standby's equivalent of a checkpoint. PostgreSQL 17+, and zero on a primary."),
+            Metric("Restartpoints", "Requested", row.RestartpointsRequested,
+                "PostgreSQL 17+, and zero on a primary."),
+            Metric("Restartpoints", "Completed", row.RestartpointsDone,
+                "PostgreSQL 17+. A standby where requested climbs and completed does not is falling behind "
+                + "on replay."),
+            Metric("Background Writer", "Buffers Cleaned", row.BuffersClean,
+                "Buffers the background writer wrote out ahead of demand."),
+            Metric("Background Writer", "Hit Max Written", row.MaxwrittenClean,
+                "Cleaning rounds that stopped early because bgwriter_lru_maxpages was reached. Sustained "
+                + "non-zero means the background writer is CAPPED rather than idle."),
+            Metric("Background Writer", "Buffers Allocated", row.BuffersAlloc,
+                "Buffers handed out — the denominator for how hard the pool is being churned."),
+            Metric("Background Writer", "Buffers Written By Backends", row.BuffersBackend,
+                "Queries writing their own buffers because nothing else kept up. Blank on PostgreSQL 17+, "
+                + "which moved this to pg_stat_io — see the grid above, not a zero here."),
+            Metric("Background Writer", "Backend fsyncs", row.BuffersBackendFsync,
+                "Blank on PostgreSQL 17+ for the same reason."),
+            Metric("WAL", "Records", row.WalRecords, "WAL records generated."),
+            Metric("WAL", "Full Page Images", row.WalFpi,
+                "Full-page writes. Spiking right after each checkpoint is the checkpoint_timeout-too-low "
+                + "shape, and it is only legible next to the checkpoint counts above."),
+            MetricBytes("WAL", "Bytes", row.WalBytes, "WAL volume generated across the window."),
+            Metric("WAL", "Buffers Full", row.WalBuffersFull,
+                "Times a backend had to flush WAL because wal_buffers was full."),
+            Metric("WAL", "Writes", row.WalWrite,
+                "Blank on PostgreSQL 18+, which removed the WAL write/sync counters."),
+            Metric("WAL", "Syncs", row.WalSync, "Blank on PostgreSQL 18+."),
+            MetricMs("WAL", "Write Time (ms)", row.WalWriteTimeMs, "Blank on PostgreSQL 18+."),
+            MetricMs("WAL", "Sync Time (ms)", row.WalSyncTimeMs, "Blank on PostgreSQL 18+."),
+        };
+
+        /* Three overloads rather than one taking a formatted string, so a caller cannot accidentally pass
+           "0" where the value was null. The em dash is produced HERE, once, from an actual null. */
+        static WriteStatRow Metric(string group, string metric, long? value, string note) =>
+            Row(group, metric, value?.ToString("N0", CultureInfo.CurrentCulture), note);
+
+        static WriteStatRow MetricMs(string group, string metric, double? value, string note) =>
+            Row(group, metric, value?.ToString("N1", CultureInfo.CurrentCulture), note);
+
+        static WriteStatRow MetricBytes(string group, string metric, decimal? value, string note) =>
+            Row(group, metric, value?.ToString("N0", CultureInfo.CurrentCulture), note);
+
+        static WriteStatRow Row(string group, string metric, string? formatted, string note) => new()
+        {
+            Group = group,
+            Metric = metric,
+            /* EM DASH, never "0". A null here means either that this PostgreSQL major does not expose the
+               counter or that its statistics family was reset inside the window - both "unknown", and both
+               the opposite of "nothing happened". */
+            Value = formatted ?? "\u2014",
+            Note = note,
+        };
+    }
 }

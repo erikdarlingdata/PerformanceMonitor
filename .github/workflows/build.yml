@@ -724,9 +724,9 @@ jobs:
       # unrecognizably different ways and could not be reproduced locally at all.
       #
       # The values are the product's own derivation from the live hypertable count
-      # (TimescaleSupport.HypertableCount = the 55-collector catalog + collection_log = 56):
-      #   timescaledb.max_background_workers = HypertableCount + 2       = 58
-      #   max_worker_processes = 3 + (HypertableCount + 2) + 8           = 69
+      # (TimescaleSupport.HypertableCount = the 56-collector catalog + collection_log = 57):
+      #   timescaledb.max_background_workers = HypertableCount + 2       = 59
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8           = 70
       # Hard-coded here because a workflow cannot call into the product — so
       # CiClusterWorkerSizingTests parses THIS FILE and fails the build if either number stops
       # matching the formula as collectors are added, and CiClusterWorkerSizingLiveTests asserts
@@ -744,8 +744,8 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 58"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 69"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 59"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 70"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling

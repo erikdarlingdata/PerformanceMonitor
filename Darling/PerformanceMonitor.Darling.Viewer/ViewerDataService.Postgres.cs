@@ -314,4 +314,13 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow>> GetPgPlanCaptureReadinessAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgPlanCaptureReadinessReader.GetPgPlanCaptureReadinessAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Waits tab, write-side panel - checkpoints, background writer and WAL over the window (#2544).
+    /// Returns a SINGLE row or null: the three source views are cluster-wide singletons, and what is reported
+    /// is the CHANGE across the window rather than the cumulative levels, so there is one answer rather than a
+    /// series. Null means fewer than two samples, which is a real state on a freshly added server and is not
+    /// the same as a quiet one.</summary>
+    public Task<DarlingPgWriteStatsReader.PgWriteStatsRow?> GetPgWriteStatsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingPgWriteStatsReader.GetPgWriteStatsAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
 }

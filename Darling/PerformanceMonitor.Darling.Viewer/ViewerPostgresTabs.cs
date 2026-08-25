@@ -138,8 +138,16 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgIoInnerTabIndex,
             "io",
             "I/O",
-            new[] { "pg_io_stats" },
-            null),
+            new[] { "pg_io_stats", "pg_write_stats" },
+            /* The write side sits on the I/O tab rather than a tab of its own because it is the same
+               subject from the other end. pg_stat_io says WHO issued an I/O and in what context; the write
+               panel says whether the server is keeping up with the writes it was given. They also complete
+               each other on 17+, where buffers_backend left pg_stat_bgwriter and its successor information
+               lives only in pg_stat_io - so on a modern target the two panels together are the answer that
+               either alone stopped being. */
+            "Two ends of the same subject: what issued the I/O, and whether the server kept up with it. "
+            + "The write panel reports the CHANGE across the window rather than the counters' levels, "
+            + "because a cumulative total since the last stats reset answers nothing on its own."),
 
         new ViewerPostgresTab(
             ViewerServerTab.PgReplicationInnerTabIndex,
