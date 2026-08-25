@@ -514,7 +514,7 @@ public partial class ViewerServerTab
         PgWraparoundNote.Text = PanelNote("pg_wraparound_stats", wraparoundTask.Result.Count,
             "No per-database freeze headroom has been collected in this window.");
 
-        PgCapturedPlansGrid.ItemsSource = planCaptureTask.Result
+        PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result
             .Select(r => new
             {
                 r.Facet,
@@ -533,7 +533,7 @@ public partial class ViewerServerTab
            and "not ready" look identical. And when rows exist the panel says whether every facet is
            satisfied, because the useful summary is the AND of them: one unsatisfied facet is enough to mean
            no plans. */
-        PgCapturedPlansNote.Text = PgCollectorIsGatedOff("pg_plan_capture_readiness")
+        PgPlanCaptureNote.Text = PgCollectorIsGatedOff("pg_plan_capture_readiness")
             ? PanelNote("pg_plan_capture_readiness", 0, string.Empty)
             : planCaptureTask.Result.Count == 0
                 ? "Plan-capture readiness has not been collected for this server yet. This is an hourly "
