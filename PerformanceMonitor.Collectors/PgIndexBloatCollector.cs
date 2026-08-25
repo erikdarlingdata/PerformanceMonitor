@@ -72,6 +72,7 @@ public sealed class PgIndexBloatCollector : PostgresCollectorDefinitionBase<PgIn
     /// <param name="SkippedReason">Null when measured. Populated when the index was too large to read, so a
     /// cap can never masquerade as an absence of bloat.</param>
     public readonly record struct Row(
+        string? DatabaseName,
         string? SchemaName,
         string? TableName,
         string? IndexName,
@@ -128,6 +129,7 @@ WITH candidates AS (
     OFFSET 0
 )
 SELECT
+    current_database()::text            AS database_name,
     k.schema_name::text                 AS schema_name,
     k.table_name::text                  AS table_name,
     k.index_name::text                  AS index_name,
@@ -169,6 +171,9 @@ ORDER BY k.index_bytes DESC";
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
+        /* This collector runs once per database and pgstatindex measures the connected database only, so
+           without this the same index name in two databases is one indistinguishable row (#2599). */
+        new CollectorColumn("database_name", CollectorColumnType.Varchar),
         new CollectorColumn("schema_name", CollectorColumnType.Varchar),
         new CollectorColumn("table_name", CollectorColumnType.Varchar),
         new CollectorColumn("index_name", CollectorColumnType.Varchar),
@@ -194,20 +199,21 @@ ORDER BY k.index_bytes DESC";
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new Row(
-                SchemaName: reader.IsDBNull(0) ? null : reader.GetString(0),
-                TableName: reader.IsDBNull(1) ? null : reader.GetString(1),
-                IndexName: reader.IsDBNull(2) ? null : reader.GetString(2),
-                IndexBytes: reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                DatabaseName: reader.IsDBNull(0) ? null : reader.GetString(0),
+                SchemaName: reader.IsDBNull(1) ? null : reader.GetString(1),
+                TableName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                IndexName: reader.IsDBNull(3) ? null : reader.GetString(3),
+                IndexBytes: reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 /* Every measurement is nullable because a skipped index has none of them, and NULL is the
                    honest representation of "not measured" where 0 would read as a measured emptiness. */
-                TreeLevel: reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                InternalPages: reader.IsDBNull(5) ? null : reader.GetInt64(5),
-                LeafPages: reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                EmptyPages: reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                DeletedPages: reader.IsDBNull(8) ? null : reader.GetInt64(8),
-                AvgLeafDensity: reader.IsDBNull(9) ? null : reader.GetDouble(9),
-                LeafFragmentation: reader.IsDBNull(10) ? null : reader.GetDouble(10),
-                SkippedReason: reader.IsDBNull(11) ? null : reader.GetString(11)));
+                TreeLevel: reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                InternalPages: reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                LeafPages: reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                EmptyPages: reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                DeletedPages: reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                AvgLeafDensity: reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                LeafFragmentation: reader.IsDBNull(11) ? null : reader.GetDouble(11),
+                SkippedReason: reader.IsDBNull(12) ? null : reader.GetString(12)));
         }
 
         return rows;

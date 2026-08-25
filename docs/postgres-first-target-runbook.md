@@ -327,16 +327,25 @@ Five results that look like bugs and are not:
 
 ### The one grant `pg_monitor` does not cover
 
-`pg_monitor` is enough for every collector here except the bloat estimate, and the way it fails is worth
-knowing because it does not look like a failure. `pg_stats` is filtered by `has_column_privilege(...,
-'select')`, and `pg_monitor` confers **no** SELECT on user tables — so the monitoring role sees **zero**
+`pg_monitor` is enough for every collector here except the two that read `pg_stats` — the bloat estimate
+and per-column statistics — and the way it fails is worth knowing because it does not look like a
+failure. `pg_stats` is filtered by `has_column_privilege(..., 'select')`, and `pg_monitor` confers
+**no** SELECT on user tables — so the monitoring role sees **zero**
 rows in `pg_stats` and the estimator, fed nothing, returns confident large numbers. Measured against a
 `pg_monitor`-only role on a live PostgreSQL 16 target: 88.59% reported for a table whose true bloat is
 0.50%, 95.03% for one that is really 74.82%, 22.57% for one that is really 0.46%.
 
 Darling does not publish those numbers — `estimate_unavailable` is set on every such row and the read
 suppresses the figure rather than captioning it — but the result is a bloat surface that reports nothing
-useful. The fix is one grant:
+useful.
+
+The `pg_column_stats` collector has the same dependency and fails more quietly still: it reads `pg_stats`
+directly, so without this grant it returns **zero rows** and logs `SUCCESS`. Measured on a live Aurora
+target carrying 361 tables over the collector's size floor, 107 of them analyzed: the collector ran, succeeded,
+and collected nothing. An empty per-column statistics panel on a busy database means this grant is missing,
+not that the planner has no statistics.
+
+The fix is one grant:
 
 ```sql
 -- PostgreSQL 14 and newer
@@ -352,7 +361,7 @@ Verified on the live rig: with `pg_read_all_data` added, a `pg_monitor` role's e
 byte-identical to a superuser's. This is a genuine widening of what the monitoring role can read, so it is
 a decision to take deliberately rather than a step to run — every other collector works without it, and a
 fleet that does not want it simply gets measured sizes and dead-tuple counts from this surface instead of
-an estimate.
+an estimate, and an empty per-column statistics panel.
 
 ## 9. Alerting
 

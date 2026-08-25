@@ -151,6 +151,7 @@ public static class PgMigrations
         new Migration(92, "pg-replication-stats", V92Sql),
         new Migration(93, "pg-buffer-usage", V93Sql),
         new Migration(94, "pg-index-bloat", V94Sql),
+        new Migration(95, "pg-per-database-attribution", V95Sql),
     };
 
     /// <summary>
@@ -2086,6 +2087,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_extension_availability (
     collection_time timestamp NOT NULL,
     server_id integer NOT NULL,
     server_name text NOT NULL,
+    database_name text,
     extension_name text,
     state text,
     installed_version text,
@@ -2168,6 +2170,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_column_stats (
     collection_time timestamp NOT NULL,
     server_id integer NOT NULL,
     server_name text NOT NULL,
+    database_name text,
     schema_name text,
     table_name text,
     column_name text,
@@ -2267,6 +2270,47 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
 
     /// <summary>
+    /// V95 — <c>database_name</c> on the three per-database PostgreSQL tables (#2599).
+    ///
+    /// <para>Three collectors ran once per database and wrote rows that could not be attributed to one.
+    /// <c>pg_column_stats</c> and <c>pg_index_bloat</c> both declared <c>RunsPerDatabase</c> and no
+    /// <c>database_name</c>, so on any cluster carrying the same schema in two databases — the ordinary
+    /// multi-tenant shape — their rows collided on (server, schema, object) with nothing to separate them.
+    /// <c>pg_extension_availability</c> had the inverse problem: it ran ONCE and reported
+    /// <c>installed</c>/<c>outdated</c>, which are per-database facts read from <c>pg_extension</c>, so its
+    /// answer depended on which database the target was configured for.</para>
+    ///
+    /// <para><b>How it surfaced.</b> On a live Aurora target two of our own collectors read
+    /// <c>pg_extension</c> for <c>pgstattuple</c> in the same cycle and disagreed:
+    /// <c>pg_table_bloat_stats</c> (already per-database) saw it installed, <c>pg_extension_availability</c>
+    /// reported it merely available. Both were right about their own database and neither row said which
+    /// database that was.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill: it is a catalog-only change in PostgreSQL, so it
+    /// stays instant on a compressed hypertable, and rows collected before this rung genuinely do not know
+    /// which database they came from. NULL is the honest value for them rather than a guess at the
+    /// target's default database, which would be wrong for every row the sweep collected elsewhere.</para>
+    ///
+    /// <para><b>The column is ALSO added to the V89, V91 and V94 CREATE statements, and that is deliberate
+    /// rather than redundant.</b> Those rungs are hand-written literals held identical to the schema
+    /// generator's output by <c>EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>, and the generator now
+    /// emits the column — so leaving them alone would fail that assertion. The two paths converge either
+    /// way: a store new enough to create the tables here gets the column from the CREATE and this rung's
+    /// <c>ADD COLUMN IF NOT EXISTS</c> no-ops, while a store that already ran V89/V91/V94 without it gets it
+    /// from this rung. Neither path can reference a column before something establishes it, which is the
+    /// #2119 hazard these rungs are pinned against.</para>
+    /// </summary>
+    private const string V95Sql = @"
+ALTER TABLE collect.pg_column_stats
+    ADD COLUMN IF NOT EXISTS database_name text;
+
+ALTER TABLE collect.pg_index_bloat
+    ADD COLUMN IF NOT EXISTS database_name text;
+
+ALTER TABLE collect.pg_extension_availability
+    ADD COLUMN IF NOT EXISTS database_name text;";
+
+    /// <summary>
     /// V94 — <c>collect.pg_index_bloat</c> (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
     /// rather than estimated from column statistics.
     ///
@@ -2297,6 +2341,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_index_bloat (
     collection_time timestamp NOT NULL,
     server_id integer NOT NULL,
     server_name text NOT NULL,
+    database_name text,
     schema_name text,
     table_name text,
     index_name text,

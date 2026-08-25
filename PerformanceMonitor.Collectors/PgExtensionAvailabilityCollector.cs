@@ -72,6 +72,7 @@ public sealed class PgExtensionAvailabilityCollector : PostgresCollectorDefiniti
     /// <param name="IsMonitoringRelevant">Whether this is one of the extensions this product can actually
     /// use, as opposed to one that merely happens to be on the server.</param>
     public readonly record struct Row(
+        string? DatabaseName,
         string ExtensionName,
         string State,
         string? InstalledVersion,
@@ -118,6 +119,7 @@ present AS (
       ON e.extname = a.name
 )
 SELECT
+    current_database()::text       AS database_name,
     coalesce(p.name, r.name)::text AS extension_name,
     CASE
         WHEN p.installed_version IS NULL AND p.default_version IS NULL THEN 'absent'
@@ -146,10 +148,31 @@ ORDER BY (r.name IS NOT NULL) DESC, coalesce(p.name, r.name)";
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
+    /// <summary>
+    /// Per database, because half of what this collector reports is a per-database fact.
+    ///
+    /// <para>This started as a once-per-target collector and that was wrong (#2599). <c>installed</c> and
+    /// <c>outdated</c> are derived from <c>pg_extension</c>, which describes the CONNECTED database only;
+    /// <c>available</c> and <c>absent</c> come from <c>pg_available_extensions</c> and are genuinely
+    /// cluster-wide. Reading both through a single connection produced a table whose answer depended on
+    /// which database the target happened to be configured for, with nothing in the row to say which.</para>
+    ///
+    /// <para>Measured on a live Aurora target: this collector reported <c>pgstattuple</c> as
+    /// <c>available</c> while <c>pg_table_bloat_stats</c> — which already ran per database — reported a
+    /// <c>pg_extension</c> row for it in the database holding the application's tables. Both reads were
+    /// correct; they were looking at different databases. The cluster-wide half is now duplicated once per
+    /// database, which is the honest cost of making the per-database half attributable, and it is cheap at
+    /// this collector's daily cadence.</para>
+    /// </summary>
+    public override bool RunsPerDatabase(CollectorTargetInfo target) => true;
+
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
+        /* Two of the four states are per-database claims and two are cluster-wide, so the row is only
+           interpretable alongside the database it was read in (#2599). See RunsPerDatabase below. */
+        new CollectorColumn("database_name", CollectorColumnType.Varchar),
         new CollectorColumn("extension_name", CollectorColumnType.Varchar),
         new CollectorColumn("state", CollectorColumnType.Varchar),
         /* Both versions are TEXT and neither is parsed. PostgreSQL extension versions are free-form strings
@@ -169,15 +192,16 @@ ORDER BY (r.name IS NOT NULL) DESC, coalesce(p.name, r.name)";
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new Row(
-                ExtensionName: reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
-                State: reader.IsDBNull(1) ? "absent" : reader.GetString(1),
-                InstalledVersion: reader.IsDBNull(2) ? null : reader.GetString(2),
-                DefaultVersion: reader.IsDBNull(3) ? null : reader.GetString(3),
+                DatabaseName: reader.IsDBNull(0) ? null : reader.GetString(0),
+                ExtensionName: reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                State: reader.IsDBNull(2) ? "absent" : reader.GetString(2),
+                InstalledVersion: reader.IsDBNull(3) ? null : reader.GetString(3),
+                DefaultVersion: reader.IsDBNull(4) ? null : reader.GetString(4),
                 /* An unreadable flag defaults to NOT relevant. The flag only decides whether we attach
                    advice, and claiming an extension is one we can use when we do not know is the direction
                    that produces a recommendation nobody can act on. */
-                IsMonitoringRelevant: !reader.IsDBNull(4) && reader.GetBoolean(4),
-                Comment: reader.IsDBNull(5) ? null : reader.GetString(5)));
+                IsMonitoringRelevant: !reader.IsDBNull(5) && reader.GetBoolean(5),
+                Comment: reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
 
         return rows;

@@ -44,6 +44,7 @@ public static class DarlingPgIndexBloatReader
     /// <param name="SkippedReason">Non-null means this index was NOT measured — its bloat is unknown rather
     /// than zero.</param>
     public sealed record PgIndexBloatRow(
+        string? DatabaseName,
         string? SchemaName,
         string? TableName,
         string? IndexName,
@@ -60,6 +61,10 @@ public static class DarlingPgIndexBloatReader
     /* DISTINCT ON the index identity ordered by collection_time DESC gives the newest measurement per index
        in one pass. The outer ORDER BY then ranks for reading, which the inner one cannot do.
 
+       database_name leads the distinct key (#2599) - this collector runs once per database, and an index
+       name is only unique within one, so without it the newest collection_time silently picks which
+       database's copy of a shared schema the grid shows.
+
        The reclaimable estimate uses GREATEST(0, ...) so an index measuring ABOVE the healthy floor reports
        zero rather than a negative saving - which is a real case, since freshly built indexes measured up to
        91.48.
@@ -67,7 +72,7 @@ public static class DarlingPgIndexBloatReader
        NULLIF guards the division: a density of 0 is not something pgstatindex returns for a live index, but
        a divide-by-zero would turn one odd row into a failed read for the whole grid. */
     public const string PgIndexBloatSql = """
-        SELECT schema_name, table_name, index_name, index_bytes, tree_level,
+        SELECT database_name, schema_name, table_name, index_name, index_bytes, tree_level,
                empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation,
                CASE
                    WHEN avg_leaf_density IS NULL THEN NULL
@@ -78,15 +83,15 @@ public static class DarlingPgIndexBloatReader
                skipped_reason,
                collection_time
         FROM (
-            SELECT DISTINCT ON (schema_name, table_name, index_name)
-                   schema_name, table_name, index_name, index_bytes, tree_level,
+            SELECT DISTINCT ON (database_name, schema_name, table_name, index_name)
+                   database_name, schema_name, table_name, index_name, index_bytes, tree_level,
                    empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation,
                    skipped_reason, collection_time
             FROM pg_index_bloat
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            ORDER BY schema_name, table_name, index_name, collection_time DESC
+            ORDER BY database_name, schema_name, table_name, index_name, collection_time DESC
         ) AS latest
         /* Unmeasured first - a skipped index is the likeliest big win and must not be ranked below measured
            ones by a reclaimable figure it does not have. Then by reclaimable bytes, never by density: a
@@ -120,20 +125,21 @@ public static class DarlingPgIndexBloatReader
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new PgIndexBloatRow(
-                SchemaName: reader.IsDBNull(0) ? null : reader.GetString(0),
-                TableName: reader.IsDBNull(1) ? null : reader.GetString(1),
-                IndexName: reader.IsDBNull(2) ? null : reader.GetString(2),
-                IndexBytes: reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                TreeLevel: reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                EmptyPages: reader.IsDBNull(5) ? null : reader.GetInt64(5),
-                DeletedPages: reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                AvgLeafDensity: reader.IsDBNull(7) ? null : reader.GetDouble(7),
-                LeafFragmentation: reader.IsDBNull(8) ? null : reader.GetDouble(8),
-                EstimatedReclaimableBytes: reader.IsDBNull(9) ? null : reader.GetInt64(9),
-                SkippedReason: reader.IsDBNull(10) ? null : reader.GetString(10),
-                CaptureTime: reader.IsDBNull(11)
+                DatabaseName: reader.IsDBNull(0) ? null : reader.GetString(0),
+                SchemaName: reader.IsDBNull(1) ? null : reader.GetString(1),
+                TableName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                IndexName: reader.IsDBNull(3) ? null : reader.GetString(3),
+                IndexBytes: reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                TreeLevel: reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                EmptyPages: reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                DeletedPages: reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                AvgLeafDensity: reader.IsDBNull(8) ? null : reader.GetDouble(8),
+                LeafFragmentation: reader.IsDBNull(9) ? null : reader.GetDouble(9),
+                EstimatedReclaimableBytes: reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                SkippedReason: reader.IsDBNull(11) ? null : reader.GetString(11),
+                CaptureTime: reader.IsDBNull(12)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(11), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc)));
         }
 
         return rows;
