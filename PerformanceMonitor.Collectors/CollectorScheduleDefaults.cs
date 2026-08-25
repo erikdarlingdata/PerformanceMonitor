@@ -247,5 +247,12 @@ public static class CollectorScheduleDefaults
            pg_stat_statements get installed" and "when did this extension get upgraded" are asked months
            later, usually right after a plan changed shape and nobody can explain why. */
         ["pg_extension_availability"] = new(1440, 365),
+        /* #2544 lock state. PER-MINUTE and 30 days, matching pg_blocking - this is a SAMPLE of instantaneous
+           state, not a counter, so the cadence IS the resolution. A lock queue that forms and clears inside
+           five minutes is the interesting one, and an hourly grain would miss it entirely while reporting
+           the server as quiet. Row count is bounded by CONTENTION rather than by concurrency, because the
+           snapshot aggregates by (database, locktype, mode, granted, relation) - an idle server produces a
+           handful of rows. */
+        ["pg_lock_stats"] = new(1, 30),
     };
 }

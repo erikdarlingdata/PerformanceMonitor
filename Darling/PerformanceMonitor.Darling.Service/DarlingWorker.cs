@@ -4673,6 +4673,7 @@ LIMIT 1";
         ["pg_plan_capture_readiness"] = (r, s, ct) => r.RunAsync(PgPlanCaptureReadinessCollector.Instance, s, ct),
         ["pg_write_stats"] = (r, s, ct) => r.RunAsync(PgWriteStatsCollector.Instance, s, ct),
         ["pg_extension_availability"] = (r, s, ct) => r.RunAsync(PgExtensionAvailabilityCollector.Instance, s, ct),
+        ["pg_lock_stats"] = (r, s, ct) => r.RunAsync(PgLockStatsCollector.Instance, s, ct),
     };
 
     /// <summary>

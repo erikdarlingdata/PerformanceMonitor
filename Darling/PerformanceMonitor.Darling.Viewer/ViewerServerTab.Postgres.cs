@@ -251,6 +251,51 @@ public partial class ViewerServerTab
         PgDatabaseStatsGrid.ItemsSource = databasesTask.Result.Select(PgDisplay.Database).ToList();
         PgDatabasesNote.Text = PanelNote("pg_database_stats", databasesTask.Result.Count,
             "No database counter moved in this window.");
+
+        await LoadPgLockStatsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The Locks sub-tab (#2544) — lock state by mode and relation, beside Blocking rather than inside it.
+    ///
+    /// <para>The two answer different questions about the same event: Blocking has the blocked/blocker
+    /// pairs, and this has the MODE, which is what decides the remedy. An ungranted
+    /// <c>AccessExclusiveLock</c> is a DDL queue and everything arriving behind it will also queue;
+    /// <c>RowExclusiveLock</c> contention is ordinary write traffic. Identical pair shape, opposite
+    /// advice.</para>
+    ///
+    /// <para>The note leads with the QUEUE count rather than the row count, because a granted lock is not a
+    /// finding — a healthy server holds thousands — and a panel that opened with "412 rows" would bury the
+    /// three that matter.</para>
+    /// </summary>
+    private async Task LoadPgLockStatsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_lock_stats"))
+        {
+            PgLockStatsGrid.ItemsSource = null;
+            PgLockStatsNote.Text = PanelNote("pg_lock_stats", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgLockStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgLockStatsGrid.ItemsSource = rows;
+
+        var queued = rows.Where(r => !r.Granted).ToList();
+        var totalCaptures = rows.Count == 0 ? 0 : rows[0].TotalCaptures;
+
+        PgLockStatsNote.Text = rows.Count == 0
+            ? PanelNote("pg_lock_stats", 0,
+                "No lock sample was taken for this server in this window, so an empty grid says nothing "
+                + "about whether anything contended. Check the pg_lock_stats collector on the Overview tab.")
+            : queued.Count == 0
+                ? $"No lock was waiting in any of {totalCaptures:N0} captures — every lock held in this "
+                  + "window was granted, which is the healthy answer rather than a missing read."
+                : $"{queued.Count:N0} lock queue(s) across {totalCaptures:N0} captures. These are SAMPLES, "
+                  + "so the capture columns are the denominator: a queue seen once in 60 captures is a blip, "
+                  + "and one seen in 55 is a standing problem. The Mode column decides the remedy — an "
+                  + "ungranted AccessExclusiveLock is a DDL everything else is queued behind. A blank "
+                  + "Relation with an OID is a lock in a different database, not a missing name.";
     }
 
     /// <summary>

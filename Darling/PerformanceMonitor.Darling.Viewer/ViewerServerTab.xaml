@@ -3760,6 +3760,40 @@
                             </Expander>
                         </Grid>
                     </TabItem>
+                    <!-- #2544 locks. A SIBLING of Blocking rather than part of it, because they answer
+                         different questions from the same event: Blocking has the blocked/blocker PAIRS from
+                         pg_blocking_pids(), and this has the MODE and RELATION from pg_locks, which is what
+                         decides the remedy. An ungranted AccessExclusiveLock is a DDL queue; RowExclusiveLock
+                         contention is ordinary write traffic; the pair shape is identical. -->
+                    <TabItem Header="Locks">
+                        <Grid Margin="0,8,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" x:Name="PgLockStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="1" x:Name="PgLockStatsGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Granted" Binding="{Binding Granted}" Width="80"/>
+                                    <DataGridTextColumn Header="Mode" Binding="{Binding Mode}" Width="180"/>
+                                    <DataGridTextColumn Header="Lock Type" Binding="{Binding LockType}" Width="120"/>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                                    <!-- Relation name is legitimately blank for a lock in ANOTHER database
+                                         (pg_locks is cluster-wide, pg_class is not), so the OID rides beside
+                                         it rather than the row being dropped or given a name it does not have. -->
+                                    <DataGridTextColumn Header="Relation" Binding="{Binding RelationName}" Width="180"/>
+                                    <DataGridTextColumn Header="Relation OID" Binding="{Binding RelationOid}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Max Backends" Binding="{Binding MaxBackends}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                                    <DataGridTextColumn Header="Max Wait (ms)" Binding="{Binding MaxWaitMs}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                                    <DataGridTextColumn Header="Seen In" Binding="{Binding Captures}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Of Captures" Binding="{Binding TotalCaptures}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeen}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
                     <TabItem Header="Query Shapes">
                         <Grid Margin="0,8,0,0">
                             <Grid.RowDefinitions>
