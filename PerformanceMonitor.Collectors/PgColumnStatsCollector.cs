@@ -119,7 +119,13 @@ JOIN pg_catalog.pg_namespace AS n
 WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema')
 AND   c.relkind IN ('r', 'm', 'p')
 AND   c.relpages >= 128
-ORDER BY c.relpages DESC, s.schemaname, s.tablename, s.attname";
+ORDER BY c.relpages DESC, s.schemaname, s.tablename, s.attname
+/* Bounded (#2617's lesson applied before it bites). This is a catalog read rather than a page scan, so
+   it is nowhere near as costly as pg_index_bloat was - but it was still unbounded, and row count here is
+   tables x columns: 361 tables over the size floor on one measured target, and a wide schema turns that
+   into five figures per database per DAY. The ORDER BY already puts the biggest tables first, so the cap
+   keeps exactly the columns a plan-shape question is asked about. */
+LIMIT 5000";
 
     public override string Name => "pg_column_stats";
 
