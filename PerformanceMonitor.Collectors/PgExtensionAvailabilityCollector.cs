@@ -212,6 +212,7 @@ ORDER BY (r.name IS NOT NULL) DESC, coalesce(p.name, r.name)";
         /* No deltas. Every column is a current state; the history exists so somebody can see when an
            extension appeared, which is exactly the question asked after a plan changed shape. */
         writer
+            .Value(row.DatabaseName)
             .Value(row.ExtensionName)
             .Value(row.State)
             .Value(row.InstalledVersion)
