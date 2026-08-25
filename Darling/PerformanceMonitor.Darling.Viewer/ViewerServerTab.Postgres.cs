@@ -530,5 +530,46 @@ public partial class ViewerServerTab
                   + "scans is a CANDIDATE, never a conclusion: check the Can It Go? column, and widen the "
                   + "window past the slowest scheduled job you have before acting - a monthly report looks "
                   + "exactly like a dead index over seven days.";
+
+        await LoadPgColumnStatsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The column-statistics panel (#2543) — the planner inputs that explain WHY a plan was chosen, and the
+    /// same statistics the bloat estimate above is computed from.
+    ///
+    /// <para><b>Zero rows has two causes and the note must not collapse them.</b> <c>pg_stats</c> filters on
+    /// <c>has_column_privilege</c>, so a monitoring login without SELECT on a table sees nothing for it —
+    /// measured: a <c>pg_monitor</c>-only role gets zero rows where a superuser gets all of them. Row-level
+    /// security empties it the same way. Neither is an absence of problems, and reporting "no statistics" as
+    /// though the data were clean is the exact claim the miss vocabulary exists to prevent.</para>
+    /// </summary>
+    private async Task LoadPgColumnStatsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_column_stats"))
+        {
+            PgColumnStatsGrid.ItemsSource = null;
+            PgColumnStatsNote.Text = PanelNote("pg_column_stats", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgColumnStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgColumnStatsGrid.ItemsSource = rows;
+
+        var skewed = rows.Count(r => r.TopValueFrequency >= 0.25);
+
+        PgColumnStatsNote.Text = rows.Count == 0
+            ? "No column statistics were collected. That is NOT the same as clean statistics, and it has two "
+              + "causes worth telling apart: pg_stats is filtered by SELECT privilege, so a monitoring login "
+              + "without it on a table sees nothing for that table (row-level security empties the view the "
+              + "same way) — or the server genuinely has no table above the 1 MB floor this collects at."
+            : $"Ranked by suspicion, not alphabetically. {skewed:N0} column(s) have a single value covering "
+              + "a quarter or more of the table, which is the PostgreSQL analogue of parameter sniffing: a "
+              + "plan that suits most values is catastrophic for that one. Low correlation on a wide column "
+              + "is the other shape, and it is why an index scan was rejected on a column that obviously "
+              + "has an index. Distinct is NEGATIVE when it is a ratio of row count — -1 means nearly every "
+              + "row is unique, not minus one value. Most-common VALUES and histogram bounds are "
+              + "deliberately not collected: they hold raw column data.";
     }
 }

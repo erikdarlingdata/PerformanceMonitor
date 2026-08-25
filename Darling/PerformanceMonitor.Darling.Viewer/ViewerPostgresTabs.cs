@@ -162,7 +162,7 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgStorageInnerTabIndex,
             "storage",
             "Storage",
-            new[] { "pg_table_bloat_stats", "pg_index_usage_stats" },
+            new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_column_stats" },
             /* One tab, because both panels answer the same question — where is the space going and is it
                earning its keep — and the two remedies compete for the same maintenance window. Bloat is
                deliberately NOT on the Vacuum tab despite being what vacuum lag costs: that tab is the
@@ -176,7 +176,9 @@ internal static class ViewerPostgresTabs
             "Where the space went, and whether it is earning its keep. The bloat figures are ESTIMATES "
             + "computed from column-width statistics — the table itself is never read — so confirm one with "
             + "pgstattuple before rewriting anything. An index nothing scans is a candidate, never a "
-            + "conclusion: check the constraint and validity columns beside it first."),
+            + "conclusion: check the constraint and validity columns beside it first. The column-statistics "
+            + "panel is the INPUT those bloat estimates are computed from, and it answers a different "
+            + "question of its own: why the planner chose what it chose."),
     };
 
     /// <summary>The first PostgreSQL tab's index — what a PostgreSQL server's tab strip selects, since
