@@ -197,10 +197,18 @@ public class PgPlanCaptureReadinessCollectorDefinitionTests
     {
         var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
 
-        /* A CASE over the observed value, not a literal. */
+        /* A CASE over the observed value, not a literal. Anchored on the threshold COLUMN rather than on an
+           inline current_setting call: the settings are now read once into a CTE (#2605), so matching the
+           call text here pinned the plumbing rather than the behaviour and broke on a refactor that kept
+           every branch intact. */
         Assert.Contains("CASE", sql, StringComparison.Ordinal);
-        Assert.Contains("WHEN current_setting('auto_explain.log_min_duration', true) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("WHEN current_setting('auto_explain.log_min_duration', true) = '-1'", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN p.threshold IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN p.threshold = '-1'", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN p.threshold = '0'", sql, StringComparison.Ordinal);
+
+        /* The state that made this facet wrong on a live target: a threshold set with no library behind it
+           (#2605). It must reach its own branch and not fall through to the satisfied wording. */
+        Assert.Contains("WHEN NOT p.loaded AND p.threshold IS NOT NULL", sql, StringComparison.Ordinal);
 
         /* And the satisfied arm must not repeat the -1 sentence, which is the exact contradiction found. */
         var elseArm = sql[sql.IndexOf("ELSE 'auto_explain is loaded and capturing", StringComparison.Ordinal)..];
