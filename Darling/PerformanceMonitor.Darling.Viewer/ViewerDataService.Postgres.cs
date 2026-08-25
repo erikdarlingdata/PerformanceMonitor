@@ -362,6 +362,14 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
         DarlingPgPredicateStatsReader.GetPgPredicateStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>
+    /// Plans captured by auto_explain (#2566), grouped by shape. The JSON is redacted at collection — there
+    /// is no un-redacted copy in the store for this read to expose.
+    /// </summary>
+    public Task<List<DarlingPgPlanCaptureReader.PgPlanCaptureRow>> GetPgPlanCaptureAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
+        DarlingPgPlanCaptureReader.GetPgPlanCaptureAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
     /// <summary>Storage tab - per-column planner statistics (#2543), latest per column and ranked by
     /// suspicion rather than alphabetically: heavy skew first (the parameter-sensitivity signal), then low
     /// correlation (why an index scan was rejected). Zero rows has TWO causes - no qualifying table, or a

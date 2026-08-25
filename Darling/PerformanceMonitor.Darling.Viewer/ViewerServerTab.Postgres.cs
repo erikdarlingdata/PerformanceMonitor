@@ -256,6 +256,7 @@ public partial class ViewerServerTab
         await LoadPgWaitSamplingAsync(startUtc, endUtc);
         await LoadPgKernelStatsAsync(startUtc, endUtc);
         await LoadPgPredicateStatsAsync(startUtc, endUtc);
+        await LoadPgPlanCaptureAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -414,6 +415,45 @@ public partial class ViewerServerTab
               + $"{misestimated:N0} predicate(s) show an estimate error of 10x or worse, which is a "
               + "different problem: the planner does not understand that column, and an index will not "
               + "fix a plan built on a wrong row count.";
+    }
+
+    /// <summary>
+    /// Plans captured by auto_explain (#2566).
+    ///
+    /// <para>An empty grid here almost always means a MISSING GRANT rather than a quiet server, so the
+    /// note says so: reading the log needs pg_read_server_files plus an explicit EXECUTE on pg_read_file,
+    /// and on Aurora or RDS the route does not exist at all.</para>
+    /// </summary>
+    private async Task LoadPgPlanCaptureAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_plan_capture"))
+        {
+            PgCapturedPlansGrid.ItemsSource = null;
+            PgCapturedPlansNote.Text = PanelNote("pg_plan_capture", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgPlanCaptureAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgCapturedPlansGrid.ItemsSource = rows;
+
+        var orphans = rows.Count(r => r.QueryId == 0);
+
+        PgCapturedPlansNote.Text = rows.Count == 0
+            ? PanelNote("pg_plan_capture", 0,
+                "No captured plans. The Plan Capture Readiness panel says which precondition is missing - "
+                + "usually auto_explain is not loaded, or the monitoring login cannot read the server log. "
+                + "That read needs pg_read_server_files AND an explicit GRANT EXECUTE on pg_read_file; the "
+                + "role alone does not carry it. On Aurora and RDS there is no filesystem to read, so this "
+                + "panel stays empty by design.")
+            : $"{rows.Count:N0} plan shape(s), ranked by TOTAL time - a plan that takes 40ms constantly "
+              + "costs more than one that took 900ms once. Captures counts how often the collector SAW "
+              + "the plan, not how often it ran. Plan JSON is redacted at collection: query text is "
+              + "dropped and literals are replaced, so nothing here carries customer values."
+              + (orphans > 0
+                  ? $" {orphans:N0} plan(s) have no query id, which means log_line_prefix lacks %Q - they "
+                    + "cannot be joined to a statement until that is fixed."
+                  : string.Empty);
     }
 
     /// <summary>

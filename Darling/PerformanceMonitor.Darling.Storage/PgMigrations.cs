@@ -155,6 +155,7 @@ public static class PgMigrations
         new Migration(96, "pg-wait-sampling", V96Sql),
         new Migration(97, "pg-kernel-stats", V97Sql),
         new Migration(98, "pg-predicate-stats", V98Sql),
+        new Migration(99, "pg-plan-capture", V99Sql),
     };
 
     /// <summary>
@@ -2271,6 +2272,48 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V99 — <c>collect.pg_plan_capture</c> (#2566, part of #2538): execution plans captured by
+    /// <c>auto_explain</c> and read out of the server log.
+    ///
+    /// <para><b>Its own table, NOT <c>query_plan_dim</c>.</b> That table holds SQL Server plan XML and
+    /// <c>plan_xml_compression = none</c> is a documented contract with direct-SQL consumers who read the
+    /// column as XML. Introducing JSON rows into it would break those readers silently — no schema change to
+    /// notice, no error, no version to key off. The compression codec and
+    /// <c>plan_content_retention_days</c> machinery is shared; the table is not.</para>
+    ///
+    /// <para><b>No query text and no literals, and that is the load-bearing part.</b> <c>auto_explain</c>
+    /// emits <c>Query Text</c> verbatim, and <c>auto_explain.log_parameter_max_length = 0</c> does NOT
+    /// suppress it — that setting covers bind parameters only (measured, #2565). Literals also sit inside the
+    /// plan tree in <c>Filter</c> and its relatives. So the text is dropped — statement identity is
+    /// <c>query_id</c>, whose normalised text already lives in <c>pg_statement_stats</c> — and every
+    /// remaining string is redacted before storage. Verified against 25 captured plans: zero literals
+    /// survived, while a relation genuinely named <c>transactionitems1</c> kept its name.</para>
+    ///
+    /// <para><b><c>plan_hash</c> is of the REDACTED plan</b>, so the same plan shape recurs to the same hash
+    /// whatever values it ran with. Hashing the raw text would defeat dedup exactly where it matters most.</para>
+    ///
+    /// <para>Self-hosted only in practice: reading the log needs <c>pg_read_server_files</c> AND an explicit
+    /// <c>GRANT EXECUTE ON FUNCTION pg_read_file</c> (the role alone does not carry it — measured). Aurora and
+    /// RDS have no filesystem and require the RDS API instead, which is a different integration (#2538).</para>
+    /// </summary>
+    private const string V99Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_plan_capture (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    query_id bigint,
+    plan_hash text,
+    duration_ms double precision,
+    node_count integer,
+    top_node_type text,
+    plan_json text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_plan_capture_time
+    ON collect.pg_plan_capture(server_id, collection_time);";
 
     /// <summary>
     /// V98 — <c>collect.pg_predicate_stats</c> (#2603): which columns are filtered on, how selectively, and

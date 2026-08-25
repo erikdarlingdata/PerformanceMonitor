@@ -94,7 +94,7 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgActivityInnerTabIndex,
             "activity",
             "Activity",
-            new[] { "pg_blocking", "pg_lock_stats", "pg_statement_stats", "pg_database_stats", "pg_kernel_stats" },
+            new[] { "pg_blocking", "pg_lock_stats", "pg_statement_stats", "pg_database_stats", "pg_kernel_stats", "pg_plan_capture" },
             /* pg_database_stats sits under the statement grid rather than on a tab of its own because it
                answers the question the statement grid raises and cannot answer: a statement whose time
                makes no sense from its row count usually spilled, and pg_stat_database's temp counters are

@@ -3810,6 +3810,9 @@
                                 <RowDefinition Height="*"/>
                                                             <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                                            <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -3877,6 +3880,36 @@
                                     <DataGridTextColumn Header="Disk Write (bytes)" Binding="{Binding ExecWriteBytes}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                                     <DataGridTextColumn Header="Major Faults" Binding="{Binding MajorFaults}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <!-- #2566 captured plans. Under the statement grid because a plan only means
+                                 something next to the statement it belongs to, joined on query_id. The
+                                 JSON here is REDACTED at collection - auto_explain emits query text and
+                                 filter literals verbatim, and neither reaches the store. -->
+                            <TextBlock Grid.Row="8" Text="Captured execution plans - grouped by plan shape" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                            <TextBlock Grid.Row="9" x:Name="PgCapturedPlansNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="10" x:Name="PgCapturedPlansGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="Top Node" Binding="{Binding TopNodeType}" Width="150"/>
+                                    <DataGridTextColumn Header="Nodes" Binding="{Binding NodeCount}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                                    <!-- Ranked by total: a plan that takes 40ms constantly costs more than
+                                         one that took 900ms once, which is usually a cold cache. -->
+                                    <DataGridTextColumn Header="Total (ms)" Binding="{Binding TotalDurationMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Max (ms)" Binding="{Binding MaxDurationMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTextColumn Header="Avg (ms)" Binding="{Binding AvgDurationMs}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <!-- CAPTURES, not executions: the collector reads an overlapping tail
+                                         of the log, so this is a frequency signal rather than a count. -->
+                                    <DataGridTextColumn Header="Captures" Binding="{Binding Captures}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                                    <DataGridTemplateColumn Header="Plan (redacted)" Width="*">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding PlanJson}" TextTrimming="CharacterEllipsis" ToolTip="{Binding PlanJson}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                         </Grid>
