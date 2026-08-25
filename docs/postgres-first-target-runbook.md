@@ -363,6 +363,43 @@ a decision to take deliberately rather than a step to run — every other collec
 fleet that does not want it simply gets measured sizes and dead-tuple counts from this surface instead of
 an estimate, and an empty per-column statistics panel.
 
+### The other way to do it: a helper function
+
+`pg_read_all_data` is not the only route, and it is worth knowing the alternative exists before deciding,
+because the two fail in different directions.
+
+**Datadog takes the other route.** Its PostgreSQL setup has you create a `datadog` schema in **each**
+monitored database holding a `SECURITY DEFINER` function, and grant the monitoring role EXECUTE on that
+rather than SELECT on the data. A `SECURITY DEFINER` function runs with its OWNER's privileges, so a
+low-privilege login can obtain one specific privileged answer without being able to read anything else.
+
+Applied here, that would be a function returning `pg_stats` rows for a table â the monitoring role gets
+column statistics and still cannot `SELECT` a single row of customer data.
+
+| | `GRANT pg_read_all_data` | helper function |
+|---|---|---|
+| what it widens | SELECT on **all data**, cluster-wide | EXECUTE on one function |
+| objects created in the customer's database | **none** | one schema + one function, **per database** |
+| install | one statement, once | DDL in every database, repeated for every database added later |
+| upgrade | nothing to upgrade | the function is versioned code that ships with the product |
+| removal | `REVOKE` | `DROP`, and something has to remember it is there |
+| PostgreSQL 13 | role does not exist â explicit `GRANT SELECT` per schema | works |
+| who must run it | someone who can grant a role | someone who can create objects and own the definer |
+
+**The honest summary of the trade.** The grant is one statement and no footprint, and it hands over more
+than the collector needs. The helper hands over exactly what the collector needs and puts product-owned
+code inside the customer's database forever â which is a support obligation, not just an install step:
+it has to be versioned, upgraded in place, and removable, and a database created after onboarding silently
+has no helper until something notices.
+
+Which is why a monitoring vendor might reasonably choose either. A product that cannot ask for
+`pg_read_all_data` â because its customers will not grant it, or because it must work on PostgreSQL 13
+where the role does not exist â has the helper as its only route to the same data.
+
+**Darling ships neither today.** The grant is documented above and the helper is not implemented. If a
+fleet will not widen the role, the current behaviour is the honest one: `pg_column_stats` collects nothing,
+the bloat estimate reports `estimate_unavailable`, and every other collector is unaffected.
+
 ## 9. Alerting
 
 The three outage predictors alert; the other nine collectors are read-only signals.
