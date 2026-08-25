@@ -135,6 +135,20 @@ ORDER BY count(*) DESC";
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
+    /// <summary>
+    /// Two minutes, because the COST here is the input scan and no LIMIT can reduce it.
+    ///
+    /// <para><c>pg_buffercache</c> materialises one row per shared buffer and takes buffer partition locks
+    /// while it does — on a large instance that is millions of rows, and the aggregate needs all of them,
+    /// so the usual trick of capping output does nothing. The output IS bounded (grouped per relation,
+    /// with an eight-buffer floor); the read is not.</para>
+    ///
+    /// <para>Without an override a slow scan ends as <c>Exception while reading from stream</c>, an
+    /// unclassified Npgsql failure — which is exactly how #2617 presented and why it went unnoticed for a
+    /// collector that had never once succeeded. A classified timeout says which collector was too slow.</para>
+    /// </summary>
+    public override int? CommandTimeoutSecondsOverride => 120;
+
     public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
