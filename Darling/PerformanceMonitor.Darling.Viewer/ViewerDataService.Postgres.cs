@@ -347,6 +347,13 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
         DarlingPgWaitSamplingReader.GetPgWaitSamplingAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>
+    /// The kernel's own CPU and disk per query (#2603). Deltas and reset detection live in the reader.
+    /// </summary>
+    public Task<List<DarlingPgKernelStatsReader.PgKernelStatRow>> GetPgKernelStatsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
+        DarlingPgKernelStatsReader.GetPgKernelStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
     /// <summary>Storage tab - per-column planner statistics (#2543), latest per column and ranked by
     /// suspicion rather than alphabetically: heavy skew first (the parameter-sensitivity signal), then low
     /// correlation (why an index scan was rejected). Zero rows has TWO causes - no qualifying table, or a

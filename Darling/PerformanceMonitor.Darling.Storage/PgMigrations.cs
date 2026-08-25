@@ -153,6 +153,7 @@ public static class PgMigrations
         new Migration(94, "pg-index-bloat", V94Sql),
         new Migration(95, "pg-per-database-attribution", V95Sql),
         new Migration(96, "pg-wait-sampling", V96Sql),
+        new Migration(97, "pg-kernel-stats", V97Sql),
     };
 
     /// <summary>
@@ -2269,6 +2270,47 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V97 — <c>collect.pg_kernel_stats</c> (#2603): operating-system CPU and disk per query, from
+    /// <c>pg_stat_kcache</c>.
+    ///
+    /// <para><c>pg_stat_statements</c> reports elapsed time, which cannot separate a query that was WAITING
+    /// from one that was burning processor. These are the kernel's own numbers for the same
+    /// <c>queryid</c>, so the two compose.</para>
+    ///
+    /// <para><b><c>exec_read_bytes = 0</c> does not mean nothing was read.</b> The counters come from
+    /// <c>getrusage</c> and measure I/O that reached the DEVICE, so a read served by the OS page cache is
+    /// genuinely zero — measured that way across every row on the rig while writes were not zero. It is not
+    /// comparable to a logical-read figure and the column name says bytes for that reason.</para>
+    ///
+    /// <para>Only top-level statements. With <c>pg_stat_statements.track = 'all'</c> a nested statement
+    /// appears both on its own row and inside its caller's, and summing them double-counts every function
+    /// body on the server.</para>
+    ///
+    /// <para>Cumulative, differenced by the read. <c>stats_since</c> is stored so a reset is a recorded fact
+    /// rather than something inferred from a counter that went backwards.</para>
+    /// </summary>
+    private const string V97Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_kernel_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    query_id bigint,
+    exec_user_time_ms double precision,
+    exec_system_time_ms double precision,
+    plan_cpu_time_ms double precision,
+    exec_read_bytes bigint,
+    exec_write_bytes bigint,
+    minor_faults bigint,
+    major_faults bigint,
+    stats_since timestamp
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_kernel_stats_time
+    ON collect.pg_kernel_stats(server_id, collection_time);";
 
     /// <summary>
     /// V96 — <c>collect.pg_wait_sampling</c> (#2603): wait events attributed to the query that waited.
