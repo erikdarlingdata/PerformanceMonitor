@@ -4312,6 +4312,9 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgStorageNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -4406,6 +4409,33 @@
                         <DataGridTextColumn Header="Avg Width" Binding="{Binding AvgWidth}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Common Values" Binding="{Binding CommonValueCount}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <!-- #2603 qualstats. The other half of the index question: the grids above record
+                     indexes that were USED, this records predicates that were EVALUATED - including the
+                     ones with no index behind them, which nothing else here can see because nothing
+                     records a scan that had no index to record. -->
+                <TextBlock Grid.Row="7" Text="Predicates and planner estimate error - index candidates, and columns the planner misjudges" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="8" x:Name="PgPredicateStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="9" x:Name="PgPredicateStatsGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="100"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <DataGridTextColumn Header="Column" Binding="{Binding ColumnName}" Width="150"/>
+                        <!-- The operator changes whether an index would help at all: '~~' is LIKE. -->
+                        <DataGridTextColumn Header="Op" Binding="{Binding Operator}" Width="70"/>
+                        <DataGridTextColumn Header="Filtered %" Binding="{Binding FilteredPct}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Rows Evaluated" Binding="{Binding RowsEvaluated}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <!-- Large means the plan was built on a wrong row count, which an index alone
+                             will not fix - a different problem from poor selectivity. -->
+                        <DataGridTextColumn Header="Est. Error x" Binding="{Binding WorstEstimateErrorRatio}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <!-- Usually NOT 1: the extension defaults to 1/max_connections, so these counts
+                             are a sample and the panel has to say so. -->
+                        <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
 

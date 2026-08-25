@@ -171,7 +171,7 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgStorageInnerTabIndex,
             "storage",
             "Storage",
-            new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_index_bloat", "pg_column_stats" },
+            new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_index_bloat", "pg_column_stats", "pg_predicate_stats" },
             /* One tab, because both panels answer the same question — where is the space going and is it
                earning its keep — and the two remedies compete for the same maintenance window. Bloat is
                deliberately NOT on the Vacuum tab despite being what vacuum lag costs: that tab is the

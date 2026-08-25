@@ -255,6 +255,7 @@ public partial class ViewerServerTab
         await LoadPgLockStatsAsync(startUtc, endUtc);
         await LoadPgWaitSamplingAsync(startUtc, endUtc);
         await LoadPgKernelStatsAsync(startUtc, endUtc);
+        await LoadPgPredicateStatsAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -376,6 +377,43 @@ public partial class ViewerServerTab
                   ? " One or more counters RESET inside this window, so those rows cover only the "
                     + "time since the reset."
                   : string.Empty);
+    }
+
+    /// <summary>
+    /// Predicates evaluated and how badly the planner estimated them (#2603).
+    ///
+    /// <para>The note leads with the SAMPLE RATE because it is the number most likely to mislead: the
+    /// extension defaults to 1/max_connections, so a small count means the sampler fired rarely rather
+    /// than the predicate being rare.</para>
+    /// </summary>
+    private async Task LoadPgPredicateStatsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_predicate_stats"))
+        {
+            PgPredicateStatsGrid.ItemsSource = null;
+            PgPredicateStatsNote.Text = PanelNote("pg_predicate_stats", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgPredicateStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgPredicateStatsGrid.ItemsSource = rows;
+
+        var sampled = rows.Count == 0 ? 1.0 : rows[0].SampleRate;
+        var misestimated = rows.Count(r => r.WorstEstimateErrorRatio >= 10);
+
+        PgPredicateStatsNote.Text = rows.Count == 0
+            ? PanelNote("pg_predicate_stats", 0,
+                "No predicate statistics for this server in this window. pg_qualstats is created PER "
+                + "DATABASE, so it may be installed in one database and not another - the Extensions "
+                + "panel says which. Note also that its sample_rate defaults to 1/max_connections, so a "
+                + "lightly-used database can genuinely record nothing.")
+            : $"{rows.Count:N0} predicate(s), sampled at {sampled:P2} of executions - these counts are a "
+              + "SAMPLE, so a small number means the sampler fired rarely rather than the predicate "
+              + "being rare. Filtered % with no supporting index is the index candidate. "
+              + $"{misestimated:N0} predicate(s) show an estimate error of 10x or worse, which is a "
+              + "different problem: the planner does not understand that column, and an index will not "
+              + "fix a plan built on a wrong row count.";
     }
 
     /// <summary>

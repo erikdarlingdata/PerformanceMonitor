@@ -154,6 +154,7 @@ public static class PgMigrations
         new Migration(95, "pg-per-database-attribution", V95Sql),
         new Migration(96, "pg-wait-sampling", V96Sql),
         new Migration(97, "pg-kernel-stats", V97Sql),
+        new Migration(98, "pg-predicate-stats", V98Sql),
     };
 
     /// <summary>
@@ -2270,6 +2271,50 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V98 — <c>collect.pg_predicate_stats</c> (#2603): which columns are filtered on, how selectively, and
+    /// where the planner's estimate was wrong, from <c>pg_qualstats</c>.
+    ///
+    /// <para><c>pg_index_usage_stats</c> records indexes that were USED. This records predicates that were
+    /// EVALUATED, including the ones with no index behind them — which is the index-candidate signal, and is
+    /// invisible to everything else here because nothing records a scan that had no index to record.</para>
+    ///
+    /// <para><b><c>sample_rate</c> is stored per row and is usually not 1.</b> The extension defaults to
+    /// <c>1/max_connections</c> — 0.01 on the rig, where <c>pg_qualstats()</c> returned ZERO rows on a server
+    /// that had just run the queries it was meant to record. Counts read as complete are the failure this
+    /// column prevents.</para>
+    ///
+    /// <para><b><c>worst_estimate_error_ratio</c> is the reason to look</b> — measured at 57.9x on one
+    /// predicate beside 1.04x on another. Selectivity says an index might help; the error ratio says the
+    /// planner does not understand the column.</para>
+    ///
+    /// <para>Per database, because <c>lrelid</c>/<c>lattnum</c> are OIDs meaningful only inside their own
+    /// database while <c>pg_class</c> and <c>pg_attribute</c> are per-database catalogs. Unscoped, the join
+    /// either silently drops other databases' rows or resolves them against whatever local object shares the
+    /// OID and reports a confident wrong column name.</para>
+    /// </summary>
+    private const string V98Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_predicate_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    column_name text,
+    operator text,
+    query_id bigint,
+    sample_count bigint,
+    rows_evaluated bigint,
+    rows_filtered bigint,
+    worst_estimate_error_ratio double precision,
+    sample_rate double precision
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_predicate_stats_time
+    ON collect.pg_predicate_stats(server_id, collection_time);";
 
     /// <summary>
     /// V97 — <c>collect.pg_kernel_stats</c> (#2603): operating-system CPU and disk per query, from
