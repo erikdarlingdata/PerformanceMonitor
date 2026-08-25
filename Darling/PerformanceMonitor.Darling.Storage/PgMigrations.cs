@@ -147,6 +147,7 @@ public static class PgMigrations
         new Migration(88, "pg-write-stats", V88Sql),
         new Migration(89, "pg-extension-availability", V89Sql),
         new Migration(90, "pg-lock-stats", V90Sql),
+        new Migration(91, "pg-column-stats", V91Sql),
     };
 
     /// <summary>
@@ -2134,6 +2135,49 @@ CREATE TABLE IF NOT EXISTS collect.pg_lock_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_lock_stats_time
     ON collect.pg_lock_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V91 — <c>collect.pg_column_stats</c> (#2543): the per-column planner statistics that explain WHY a
+    /// plan was chosen, as opposed to what it did.
+    ///
+    /// <para><b>The value-bearing columns are deliberately absent.</b> <c>most_common_vals</c> and
+    /// <c>histogram_bounds</c> hold raw column values — measured on a realistic table, they returned
+    /// customer names, an identifier fragment and live email addresses. Collecting them would copy customer
+    /// data into the monitoring store under our retention, the same exposure as the <c>auto_explain</c>
+    /// literals on #2538. Only <c>most_common_freqs[1]</c> survives, as
+    /// <c>top_value_frequency</c>: frequency carries the entire parameter-sensitivity signal (a top value at
+    /// 0.60 means one value covers 60% of the table) and carries no value itself.
+    /// <c>histogram_bounds</c> was also the largest column by bytes, so dropping both is cheaper as well as
+    /// safer.</para>
+    ///
+    /// <para><c>n_distinct</c> is <c>double precision</c> and NOT an integer count: negatives are a RATIO of
+    /// the row count, so <c>-1</c> means "distinct ≈ every row". An integer column would let a read render
+    /// "-1 distinct values".</para>
+    ///
+    /// <para>Per-database, because <c>pg_stats</c> describes the connected database only — and its rows are
+    /// filtered by <c>has_column_privilege</c>, so a monitoring role without SELECT sees nothing for a table
+    /// that exists. Zero rows therefore has two causes and the read must not report either as an absence of
+    /// problems.</para>
+    /// </summary>
+    private const string V91Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_column_stats (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    schema_name text,
+    table_name text,
+    column_name text,
+    n_distinct double precision,
+    null_frac double precision,
+    avg_width integer,
+    correlation double precision,
+    top_value_frequency double precision,
+    common_value_count integer
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_column_stats_time
+    ON collect.pg_column_stats(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

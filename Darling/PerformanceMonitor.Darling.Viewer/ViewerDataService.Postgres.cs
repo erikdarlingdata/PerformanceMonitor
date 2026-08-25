@@ -338,4 +338,13 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgLockStatsReader.PgLockStatRow>> GetPgLockStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgLockStatsReader.GetPgLockStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Storage tab - per-column planner statistics (#2543), latest per column and ranked by
+    /// suspicion rather than alphabetically: heavy skew first (the parameter-sensitivity signal), then low
+    /// correlation (why an index scan was rejected). Zero rows has TWO causes - no qualifying table, or a
+    /// monitoring role without SELECT, since pg_stats filters on has_column_privilege - and the caller must
+    /// not report either as healthy statistics.</summary>
+    public Task<List<DarlingPgColumnStatsReader.PgColumnStatRow>> GetPgColumnStatsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 100, CancellationToken cancellationToken = default) =>
+        DarlingPgColumnStatsReader.GetPgColumnStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

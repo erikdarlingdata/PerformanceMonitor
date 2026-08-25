@@ -254,5 +254,11 @@ public static class CollectorScheduleDefaults
            snapshot aggregates by (database, locktype, mode, granted, relation) - an idle server produces a
            handful of rows. */
         ["pg_lock_stats"] = new(1, 30),
+        /* #2543 column statistics. DAILY and a year, because these change only when ANALYZE runs - which is
+           autovacuum's cadence, not a minute's - and the question they answer is asked retrospectively:
+           "n_distinct on this column moved on the day the plan changed" needs a year of history and gains
+           nothing from a finer grain. This is also the widest per-row fan-out here (columns x tables x
+           databases), which the 128-page floor in the query bounds. */
+        ["pg_column_stats"] = new(1440, 365),
     };
 }
