@@ -1351,6 +1351,8 @@ public sealed class DarlingComposeTests
         var compose = Assert.IsType<JsonObject>(DarlingWebEndpoints.BuildCatalogNode()["compose"]);
         var measures = Assert.IsType<JsonArray>(compose["measures"]);
 
+        var msdbBacked = new[] { "agent_status", "job_history", "running_jobs" };
+
         var claiming = measures.Cast<JsonObject>()
             .Where(m => m!["appliesTo"]?["needsMsdb"]?.GetValue<bool>() == true)
             .Select(m => m!["source"]!.GetValue<string>())
@@ -1358,7 +1360,17 @@ public sealed class DarlingComposeTests
             .OrderBy(t => t, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(new[] { "agent_status", "job_history", "running_jobs" }, claiming);
+        /* Compared against the msdb tables that actually HAVE a measure, not against the raw set. The first
+           draft asserted the raw set and went red on agent_status, which exposes a real fact rather than a
+           typo: agent_status is a collector nothing in the compose catalog builds a measure from, so it can
+           never appear here. Asserting the raw set would have forced a fake expectation to make it pass. */
+        var sources = measures.Cast<JsonObject>()
+            .Select(m => m!["source"]!.GetValue<string>())
+            .ToHashSet(StringComparer.Ordinal);
+        var expected = msdbBacked.Where(sources.Contains).OrderBy(t => t, StringComparer.Ordinal).ToArray();
+
+        Assert.NotEmpty(expected);
+        Assert.Equal(expected, claiming);
 
         /* And each one genuinely reads msdb — so a collector rewritten off it stops matching, rather than
            the badge quietly outliving the dependency it describes. */
