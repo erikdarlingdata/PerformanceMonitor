@@ -3808,6 +3808,8 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                                            <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -3852,6 +3854,29 @@
                                     <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                                     <DataGridTextColumn Header="Stats Reset" Binding="{Binding StatsReset}" Width="140"/>
                                     <DataGridTextColumn Header="Caveats" Binding="{Binding Caveats}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <!-- #2603 kcache. Sits under the statement grid rather than on a tab of its
+                                 own because it answers the question that grid raises and cannot: elapsed
+                                 time cannot separate a statement that WAITED from one that burned CPU.
+                                 Same queryid, so the two rows are the same statement. -->
+                            <TextBlock Grid.Row="5" Text="OS CPU and disk per statement - what the kernel actually charged" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                            <TextBlock Grid.Row="6" x:Name="PgKernelStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="7" x:Name="PgKernelStatsGrid" Style="{StaticResource DarkGrid}"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="CPU (ms)" Binding="{Binding TotalCpuMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="User (ms)" Binding="{Binding ExecUserTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="System (ms)" Binding="{Binding ExecSystemTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <!-- Bytes that reached the DEVICE. Zero means the page cache served
+                                         the read, not that nothing was read. -->
+                                    <DataGridTextColumn Header="Disk Read (bytes)" Binding="{Binding ExecReadBytes}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                                    <DataGridTextColumn Header="Disk Write (bytes)" Binding="{Binding ExecWriteBytes}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                                    <DataGridTextColumn Header="Major Faults" Binding="{Binding MajorFaults}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                                    <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="*"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                         </Grid>

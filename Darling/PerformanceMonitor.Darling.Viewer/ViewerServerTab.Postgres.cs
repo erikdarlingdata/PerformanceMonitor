@@ -254,6 +254,7 @@ public partial class ViewerServerTab
 
         await LoadPgLockStatsAsync(startUtc, endUtc);
         await LoadPgWaitSamplingAsync(startUtc, endUtc);
+        await LoadPgKernelStatsAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -337,6 +338,43 @@ public partial class ViewerServerTab
               + (reset
                   ? " One or more counters RESET inside this window (a restart, or "
                     + "pg_wait_sampling_reset_profile), so those rows cover only the time since the reset."
+                  : string.Empty);
+    }
+
+    /// <summary>
+    /// The kernel's CPU and disk per query (#2603).
+    ///
+    /// <para>The note has to say what zero read bytes means, because it is the reading most likely to
+    /// be got wrong: these counters measure I/O that reached the DEVICE, so a cached read is genuinely
+    /// zero and that is the healthy case, not a broken instrument.</para>
+    /// </summary>
+    private async Task LoadPgKernelStatsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_kernel_stats"))
+        {
+            PgKernelStatsGrid.ItemsSource = null;
+            PgKernelStatsNote.Text = PanelNote("pg_kernel_stats", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgKernelStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgKernelStatsGrid.ItemsSource = rows;
+
+        var reset = rows.Any(r => r.CounterReset);
+
+        PgKernelStatsNote.Text = rows.Count == 0
+            ? PanelNote("pg_kernel_stats", 0,
+                "No kernel statistics for this server in this window. The usual cause is that "
+                + "pg_stat_kcache is not installed - the Extensions panel says whether it is available "
+                + "here. Where it IS installed, this separates a query that was WAITING from one that "
+                + "was burning processor, which elapsed time alone cannot do.")
+            : $"{rows.Count:N0} statement(s) by OS CPU. Read bytes are I/O that reached the DEVICE, so "
+              + "zero with high CPU is a cached workload behaving well rather than a missing "
+              + "measurement. Query ID joins the statement grid above."
+              + (reset
+                  ? " One or more counters RESET inside this window, so those rows cover only the "
+                    + "time since the reset."
                   : string.Empty);
     }
 
