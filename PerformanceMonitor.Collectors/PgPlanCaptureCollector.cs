@@ -126,20 +126,19 @@ LIMIT 2000";
     /// <c>pg_plan_capture_readiness</c> already reports which precondition is missing.
     /// </summary>
     /// <summary>
-    /// Self-hosted PostgreSQL only, and the exclusion is a ROUTE decision rather than a capability one.
+    /// Every PostgreSQL target — including Aurora and RDS, which reach the same table by a different road.
     ///
-    /// <para>Aurora and RDS have no filesystem: <c>pg_read_server_files</c> is not grantable and
-    /// <c>pg_read_file</c> is denied, so this query could only ever record a permission failure there —
-    /// every cycle, forever, on a target where nothing is actually wrong. Those targets get their plans
-    /// from the RDS log API instead (<c>RdsPlanIngestor</c>, #2538), which writes to this same table
-    /// through this same definition.</para>
+    /// <para><b>This deliberately does NOT gate on the engine, and the reason is worth stating.</b> Gating
+    /// here would make the capability model report plan capture as a PERMANENT GAP on Aurora, which is a
+    /// lie: those targets do capture plans, through the RDS log API (<c>RdsPlanIngestor</c>, #2538). The
+    /// route is chosen at dispatch, so this definition never actually executes against a managed target and
+    /// cannot produce the permission failure that gating was meant to avoid.</para>
     ///
-    /// <para>Gating here rather than letting it fail is what keeps the two routes from both claiming the
-    /// same target — and stops an operator reading a real permission error as a missing grant they could
-    /// fix, when the grant does not exist to give.</para>
+    /// <para>An absent grant, an unloaded module or an unlistable log directory all raise errors the host
+    /// classifies as non-fatal skips, and <c>pg_plan_capture_readiness</c> already reports which
+    /// precondition is missing.</para>
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target)
-        => target is not null && !target.IsAurora && !target.IsAwsRds;
+    public override bool AppliesTo(CollectorTargetInfo target) => true;
 
     /// <summary>Server-wide: one log holds every database's plans.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
