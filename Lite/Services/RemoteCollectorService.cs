@@ -357,6 +357,10 @@ public partial class RemoteCollectorService
     /// </summary>
     public async Task RunDueCollectorsAsync(CancellationToken cancellationToken = default)
     {
+        /* Registered for the whole sweep, including the collection_log write at the end of each collector -
+           that final write is the one that failed in the field when a reset landed mid-collection (#2594). */
+        using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
         var enabledServers = _serverManager.GetEnabledServers();
 
         if (enabledServers.Count == 0)
@@ -435,6 +439,11 @@ public partial class RemoteCollectorService
     /// </summary>
     public async Task RunAllCollectorsForServerAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {
+        /* THE path from #2594. MainWindow.ConnectToServer calls this on a bare Task.Run when a server tab is
+           opened, so unlike the scheduled sweep it was sequenced against nothing at all - and it runs EVERY
+           collector for the server, which is how a 55-second index_object_stats came to straddle a reset. */
+        using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
         var enabledSchedules = _scheduleManager.GetSchedulesForServer(server.Id)
             .Where(s => s.Enabled)
             .ToList();

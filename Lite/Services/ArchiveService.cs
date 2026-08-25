@@ -578,6 +578,26 @@ COPY (
             return;
         }
 
+        /* Wait for in-flight collections before deleting the database (#2594). The write lock below does NOT
+           exclude them: the collection path takes no lock at all, so a reset could delete monitor.duckdb
+           underneath a collector that was still writing - which is what happened in the field, via a
+           tab-open collection that is sequenced against nothing.
+
+           Null means a collection outlasted the drain timeout, and the right response is to DEFER. This is
+           size-triggered, the store is a little over a soft threshold, and the next tick will try again;
+           resetting on schedule matters far less than not resetting under a live collector. */
+        var resetScope = await CollectionResetGate.TryBeginResetAsync();
+
+        if (resetScope is null)
+        {
+            _logger?.LogInformation(
+                "Database reset deferred: {InFlight} collection(s) still running. It will be retried on the " +
+                "next archival check.",
+                CollectionResetGate.CollectionsInFlight);
+            s_archiveLock.Release();
+            return;
+        }
+
         IsArchiving = true;
         var preserveDir = Path.Combine(Path.GetTempPath(), $"pm_preserve_{Guid.NewGuid():N}");
         var preservedFiles = new Dictionary<string, string>();
@@ -730,6 +750,7 @@ COPY (
         finally
         {
             IsArchiving = false;
+            resetScope.Dispose();
             s_archiveLock.Release();
         }
     }
