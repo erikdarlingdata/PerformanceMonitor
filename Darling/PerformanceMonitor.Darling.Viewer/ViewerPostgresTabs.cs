@@ -140,7 +140,7 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgIoInnerTabIndex,
             "io",
             "I/O",
-            new[] { "pg_io_stats", "pg_write_stats" },
+            new[] { "pg_io_stats", "pg_write_stats", "pg_buffer_usage" },
             /* The write side sits on the I/O tab rather than a tab of its own because it is the same
                subject from the other end. pg_stat_io says WHO issued an I/O and in what context; the write
                panel says whether the server is keeping up with the writes it was given. They also complete

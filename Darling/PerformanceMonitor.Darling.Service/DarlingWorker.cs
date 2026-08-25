@@ -4676,6 +4676,7 @@ LIMIT 1";
         ["pg_lock_stats"] = (r, s, ct) => r.RunAsync(PgLockStatsCollector.Instance, s, ct),
         ["pg_column_stats"] = (r, s, ct) => r.RunAsync(PgColumnStatsCollector.Instance, s, ct),
         ["pg_replication_stats"] = (r, s, ct) => r.RunAsync(PgReplicationStatsCollector.Instance, s, ct),
+        ["pg_buffer_usage"] = (r, s, ct) => r.RunAsync(PgBufferUsageCollector.Instance, s, ct),
     };
 
     /// <summary>

@@ -425,6 +425,43 @@ public partial class ViewerServerTab
             + "the Overview tab says so.");
 
         await LoadPgWriteStatsAsync(startUtc, endUtc);
+        await LoadPgBufferUsageAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The buffer-pool panel (#2544) — what the memory is actually holding, the third end of the same
+    /// subject as the two grids above it.
+    ///
+    /// <para>Needs the <c>pg_buffercache</c> extension. When it is absent the collector records an
+    /// ObjectMissing outcome and this panel says so AND says the remedy is one <c>CREATE EXTENSION</c> —
+    /// which is checkable on the Overview tab's extension panel, so the two halves meet.</para>
+    /// </summary>
+    private async Task LoadPgBufferUsageAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_buffer_usage"))
+        {
+            PgBufferUsageGrid.ItemsSource = null;
+            PgBufferUsageNote.Text = PanelNote("pg_buffer_usage", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgBufferUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        PgBufferUsageGrid.ItemsSource = rows;
+
+        var total = rows.Count == 0 ? 0L : rows[0].PoolBuffersTotal;
+        var used = rows.Count == 0 ? 0L : rows[0].PoolBuffersUsed;
+
+        PgBufferUsageNote.Text = rows.Count == 0
+            ? "Nothing recorded. This panel needs the pg_buffercache extension — without it the collector "
+              + "reports the object as missing rather than failing, and the Overview tab's extension panel "
+              + "says whether it is available on this server and one CREATE EXTENSION away."
+            : $"Latest snapshot: {used:N0} of {total:N0} buffers in use "
+              + $"({(total == 0 ? 0 : 100.0 * used / total):N1}% of the pool). Residency is a LEVEL, so this "
+              + "is the newest sample rather than a window average — averaging what was resident over a day "
+              + "answers nothing. A blank Relation is another database's table or a shared catalog, not a "
+              + "missing name: the pool is cluster-wide while pg_class is per-database. Avg Usage near 0 "
+              + "means a relation is holding memory it is not earning.";
     }
 
     /// <summary>

@@ -355,4 +355,11 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgReplicationStatsReader.PgReplicationStatRow>> GetPgReplicationStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgReplicationStatsReader.GetPgReplicationStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>I/O tab - what is resident in shared buffers (#2544). Latest snapshot only, because
+    /// residency is a level rather than a counter and averaging it across a day answers nothing. A NULL
+    /// relation name means another database's relation or a shared catalog, not a missing name.</summary>
+    public Task<List<DarlingPgBufferUsageReader.PgBufferUsageRow>> GetPgBufferUsageAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        DarlingPgBufferUsageReader.GetPgBufferUsageAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 }

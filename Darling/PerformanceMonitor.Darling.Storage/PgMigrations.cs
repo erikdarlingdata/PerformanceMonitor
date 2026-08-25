@@ -149,6 +149,7 @@ public static class PgMigrations
         new Migration(90, "pg-lock-stats", V90Sql),
         new Migration(91, "pg-column-stats", V91Sql),
         new Migration(92, "pg-replication-stats", V92Sql),
+        new Migration(93, "pg-buffer-usage", V93Sql),
     };
 
     /// <summary>
@@ -2222,6 +2223,47 @@ CREATE TABLE IF NOT EXISTS collect.pg_replication_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pg_replication_stats_time
     ON collect.pg_replication_stats(server_id, collection_time);";
+
+    /// <summary>
+    /// V93 — <c>collect.pg_buffer_usage</c> (#2544, the buffers slice): what is resident in shared buffers,
+    /// by relation. A hit ratio says how often the pool worked; this says what is IN it.
+    ///
+    /// <para>Needs the <c>pg_buffercache</c> extension, so a server without it records an
+    /// <c>ObjectMissing</c> outcome — now actionable, because <c>pg_extension_availability</c> (#2545)
+    /// reports whether it is one <c>CREATE EXTENSION</c> away.</para>
+    ///
+    /// <para><b><c>relation_name</c> is NULL for two different reasons and both are honest.</b> A buffer
+    /// belonging to ANOTHER database cannot be named from here — the pool is cluster-wide while
+    /// <c>pg_class</c> is per-database, and a filenode from elsewhere can collide with a local OID and
+    /// resolve to the WRONG name, measured. Those rows keep their database name and a NULL relation rather
+    /// than being dropped, because dropping them would understate how full the pool is. Shared catalogs have
+    /// no database at all, so both columns are NULL there.</para>
+    ///
+    /// <para>The collector joins on <c>pg_relation_filenode(oid)</c> and never on <c>oid</c> or the raw
+    /// <c>relfilenode</c> column: measured, after one <c>VACUUM FULL</c> the naive OID join reported ZERO
+    /// buffers for a table holding 6,667, and mapped catalogs carry <c>relfilenode = 0</c>.</para>
+    ///
+    /// <para><c>pool_buffers_total</c> and <c>pool_buffers_used</c> repeat on every row so a share is
+    /// computable without a second read against a pool that has since moved.</para>
+    /// </summary>
+    private const string V93Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    relation_name text,
+    relation_kind text,
+    buffers bigint,
+    dirty_buffers bigint,
+    avg_usage_count double precision,
+    pool_buffers_total bigint,
+    pool_buffers_used bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
+    ON collect.pg_buffer_usage(server_id, collection_time);";
 
     /// <summary>
     /// V81 — tempdb's growth CEILING on <c>tempdb_stats</c> (#2515). <c>dm_db_file_space_usage</c>, which is

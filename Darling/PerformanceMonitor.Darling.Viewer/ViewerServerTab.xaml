@@ -4084,6 +4084,8 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -4133,6 +4135,30 @@
                         <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="230"/>
                         <DataGridTextColumn Header="Change Over Window" Binding="{Binding Value}" ElementStyle="{StaticResource NumericCell}" Width="180"/>
                         <DataGridTextColumn Header="What It Means" Binding="{Binding Note}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2544 buffer pool contents. Third end of the same subject as the two grids above:
+                     pg_stat_io says who issued an I/O, the write panel says whether the server kept up, and
+                     this says what the memory is actually holding. -->
+                <TextBlock Grid.Row="4" x:Name="PgBufferUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="5" x:Name="PgBufferUsageGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                        <!-- Blank means ANOTHER database's relation or a shared catalog, not a missing name:
+                             the pool is cluster-wide while pg_class is per-database. -->
+                        <DataGridTextColumn Header="Relation" Binding="{Binding RelationName}" Width="200"/>
+                        <DataGridTextColumn Header="Buffers" Binding="{Binding Buffers}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="% of Pool" Binding="{Binding PctOfPool}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Dirty" Binding="{Binding DirtyBuffers}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <DataGridTextColumn Header="% Dirty" Binding="{Binding PctDirty}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                        <!-- Clock-sweep usage count, 0-5. All at 0 or 1 means the relation is occupying
+                             memory it is not earning. -->
+                        <DataGridTextColumn Header="Avg Usage" Binding="{Binding AvgUsageCount}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Pool Used" Binding="{Binding PoolBuffersUsed}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Pool Total" Binding="{Binding PoolBuffersTotal}" ElementStyle="{StaticResource NumericCell}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
