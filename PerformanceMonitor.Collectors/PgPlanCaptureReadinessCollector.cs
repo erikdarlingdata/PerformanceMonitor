@@ -110,48 +110,68 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
        value is stored as TEXT exactly as the server rendered it and interpreted downstream. Casting it here
        is how a collector starts failing on one major version and not another. */
     private const string QueryText = @"
+WITH settings AS (
+    /* Every GUC this collector judges, read ONCE. Facets consume these columns and never call
+       current_setting themselves - which is the structural point, not tidiness: the shipped bug was one
+       fact (is auto_explain loaded) derived in five separate places, where the fifth simply forgot to
+       derive it and asserted the opposite of the other four. */
+    SELECT
+        current_setting('shared_preload_libraries', true)                        AS preload,
+        current_setting('auto_explain.log_min_duration', true)                   AS threshold,
+        current_setting('auto_explain.log_format', true)                         AS log_format,
+        current_setting('log_line_prefix', true)                                 AS line_prefix
+),
+probe AS (
+    SELECT
+        s.preload,
+        s.threshold,
+        s.log_format,
+        s.line_prefix,
+        /* BOUNDARY-AWARE, not a substring. shared_preload_libraries is a comma-separated list, and a plain
+           substring test reports true for any library whose name merely CONTAINS this one (measured: both
+           my_auto_explain_shim and auto_explain_extra false-positive that way). */
+        coalesce(s.preload, '') ~ '(^|,)\s*auto_explain\s*(,|$)'                 AS loaded,
+        EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain') AS catalogued,
+        (SELECT max(default_version) FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain') AS catalog_version
+    FROM settings AS s
+)
 SELECT
     'library_loaded'::text                                                        AS facet,
-    /* BOUNDARY-AWARE, not a substring. shared_preload_libraries is a comma-separated list, and a plain
-       substring test reports true for any library whose name merely CONTAINS this one (measured: both
-       my_auto_explain_shim and auto_explain_extra false-positive that way). This facet's
-       entire job is to be trustworthy about loaded-versus-not, so a match that can be fooled by a name is
-       the wrong instrument no matter how unlikely the name is today. */
-    coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)' AS is_satisfied,
-    coalesce(current_setting('shared_preload_libraries', true), '(unreadable)')    AS observed,
+    p.loaded                                                                      AS is_satisfied,
+    coalesce(p.preload, '(unreadable)')                                           AS observed,
     'auto_explain must be listed in shared_preload_libraries. On Aurora/RDS this is a custom CLUSTER '
         || 'parameter group plus a WRITER REBOOT - it cannot be turned on with SET or ALTER SYSTEM.'::text AS detail
+FROM probe AS p
 
 UNION ALL
 
 SELECT
     'capture_threshold'::text,
-    /* Satisfied means a non-negative threshold: 0 captures everything, a positive value captures the slow
-       ones. -1 is loaded-but-capturing-nothing, and NULL is the GUC not existing at all because the library
-       was never loaded. Both unsatisfied, deliberately different in `observed`. */
-    coalesce(current_setting('auto_explain.log_min_duration', true), '-1') <> '-1'
-        AND current_setting('auto_explain.log_min_duration', true) IS NOT NULL,
-    coalesce(current_setting('auto_explain.log_min_duration', true), '(setting absent - library not loaded)'),
-    /* CONDITIONAL, because one fixed sentence is WRONG in three of the four states this facet reaches.
-       Measured against a live PostgreSQL 17 while writing this: with the threshold at 0 the static text
-       still read 'log_min_duration = -1 means ... capturing NOTHING' beside is_satisfied = true, so the row
-       contradicted itself. A remedy that does not depend on what was observed is not a remedy. */
+    /* GATED ON loaded, and that gate is the whole point. A GUC named auto_explain.* can EXIST with no
+       auto_explain behind it: PostgreSQL accepts any qualified custom variable, so a parameter group (or a
+       plain SET) can define auto_explain.log_min_duration on a server where the library was never loaded.
+       Measured on a live Aurora target: threshold 60000 with shared_preload_libraries carrying no
+       auto_explain, and this facet reported SATISFIED with the words 'auto_explain is loaded and capturing
+       at this threshold' - directly contradicting library_loaded in the same result set, on the single most
+       important claim the panel makes. Reproduced locally on PostgreSQL 17 with one SET. */
+    p.loaded AND coalesce(p.threshold, '-1') <> '-1',
+    coalesce(p.threshold, '(setting absent - library not loaded)'),
     CASE
-        WHEN current_setting('auto_explain.log_min_duration', true) IS NULL
+        WHEN NOT p.loaded AND p.threshold IS NOT NULL
+            THEN 'This value is a PLACEHOLDER and nothing is reading it. auto_explain is not in '
+                 || 'shared_preload_libraries, and PostgreSQL accepts any qualified custom variable, so a '
+                 || 'parameter group can define auto_explain.log_min_duration on a server that never loaded '
+                 || 'the module. It starts taking effect once library_loaded is satisfied - fix that first.'
+        WHEN p.threshold IS NULL
             THEN 'This setting does not exist because auto_explain is not loaded. Fix library_loaded first - '
                  || 'the threshold cannot be set independently of the library.'
-        WHEN current_setting('auto_explain.log_min_duration', true) = '-1'
+        WHEN p.threshold = '-1'
             THEN 'auto_explain IS loaded but log_min_duration is -1, so it captures NOTHING - which looks '
                  || 'identical to not being loaded from the outside. Set a MILLISECOND THRESHOLD, not 0: '
                  || 'a threshold captures the statements somebody actually wants a plan for, and skips the '
                  || 'fast ones that produce the volume. On Aurora/RDS this is a parameter-group change that '
                  || 'applies WITHOUT a reboot, unlike the library itself.'
-        /* Zero renders as exactly '0' - no unit - which is why comparing the text is safe here. Measured
-           against the GUC: -1 and 0 come back bare, 250 comes back '250ms', 1000 comes back '1s' and 60000
-           comes back '1min'. current_setting renders in the largest unit that divides evenly, so anything
-           downstream that tried to read this as a number breaks on a perfectly ordinary one-second
-           threshold. That is the whole reason observed is stored as the server's own text. */
-        WHEN current_setting('auto_explain.log_min_duration', true) = '0'
+        WHEN p.threshold = '0'
             THEN 'auto_explain is capturing EVERY statement, which is the setting to move off. Measured on '
                  || 'PostgreSQL 17 (pgbench, 8 clients): capture-everything cost 31 percent of throughput '
                  || 'and wrote 772 MB of server log in 20 seconds, while the same instrumentation at a 10ms '
@@ -161,33 +181,23 @@ SELECT
         ELSE 'auto_explain is loaded and capturing at this threshold. Capture is not the same fact as the '
              || 'plans being readable by this product, which is tracked separately.'
     END
+FROM probe AS p
 
 UNION ALL
 
 SELECT
     'extension_available'::text,
-    /* CORRECTED. This shipped asking pg_available_extensions alone, and that is false on EVERY server:
-       auto_explain is a preload-only module with no CREATE EXTENSION and no control file, so it never appears
-       there - verified on PostgreSQL 17, where the module was loaded and serving a threshold of 250ms while
-       this facet reported '(not present)' and told the reader their platform could not do plan capture. That
-       is precisely the wrong-fix failure the whole collector exists to prevent, and it contradicted
-       library_loaded sitting two rows above it.
-
-       A loaded library IS proof of availability, so that alternative is now part of the test and the
-       contradiction cannot recur. The catalog check is kept rather than dropped because a managed provider
-       may ship a control file this does not know about, and finding it there is still a true positive. */
-    EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
-        OR coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)',
+    /* A loaded library IS proof of availability, so that alternative is part of the test and the earlier
+       contradiction with library_loaded cannot recur. The catalog check is kept rather than dropped because
+       a managed provider may ship a control file this does not know about. */
+    p.catalogued OR p.loaded,
     CASE
-        WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
-            THEN (SELECT max(default_version) FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
-        WHEN coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)'
-            THEN '(loaded, and therefore available - not listed as an extension)'
+        WHEN p.catalogued THEN p.catalog_version
+        WHEN p.loaded     THEN '(loaded, and therefore available - not listed as an extension)'
         ELSE '(not listed, which is the NORMAL answer and not evidence of absence)'
     END,
     CASE
-        WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'auto_explain')
-          OR coalesce(current_setting('shared_preload_libraries', true), '') ~ '(^|,)\s*auto_explain\s*(,|$)'
+        WHEN p.catalogued OR p.loaded
             THEN 'auto_explain is available on this server.'
         ELSE 'Availability could NOT be confirmed, and that is not the same as unavailable. auto_explain is a '
              || 'preload-only module with no CREATE EXTENSION, so it does not appear in pg_available_extensions '
@@ -196,45 +206,51 @@ SELECT
              || 'shared_preload_libraries on the cluster parameter group, which SQL cannot see. Do not read '
              || 'this row as a platform limitation.'
     END
+FROM probe AS p
 
 UNION ALL
 
 SELECT
     'plan_text_setting'::text,
-    current_setting('auto_explain.log_format', true) IS NOT NULL,
-    coalesce(current_setting('auto_explain.log_format', true), '(setting absent - library not loaded)'),
-    'The format auto_explain writes plans in. Recorded, not judged: any value proves capture is configured, '
-        || 'and which format is readable is settled separately.'
+    /* Gated on loaded for the same reason as capture_threshold: auto_explain.log_format is equally
+       definable as a placeholder on a server with no auto_explain. */
+    p.loaded AND p.log_format IS NOT NULL,
+    coalesce(p.log_format, '(setting absent - library not loaded)'),
+    CASE
+        WHEN NOT p.loaded AND p.log_format IS NOT NULL
+            THEN 'This value is a PLACEHOLDER - auto_explain is not loaded, so nothing is writing plans in '
+                 || 'this or any format. Fix library_loaded first.'
+        ELSE 'The format auto_explain writes plans in. Recorded, not judged: any value proves capture is '
+             || 'configured, and which format is readable is settled separately.'
+    END
+FROM probe AS p
 
 UNION ALL
 
 SELECT
     'plan_attribution'::text,
-    /* strpos, NOT like. This is a printf-style format string rather than a delimited list, so the boundary
-       regex library_loaded needs would be wrong here - but LIKE is wrong in a way that is much easier to
-       miss: '%%Q%' reads as wildcard-wildcard-Q-wildcard, so it matches ANY value containing the letter Q
-       and reports attribution working on a prefix that has none. strpos takes the two characters literally
-       and needs no escape clause to do it.
+    /* strpos, NOT like. This is a printf-style format string rather than a delimited list, so a boundary
+       regex would be wrong here - but LIKE is wrong in a way that is much easier to miss: a wildcard pattern
+       matches ANY value containing the letter Q and reports attribution working on a prefix that has none.
 
-       Case-sensitive, and that is load-bearing rather than incidental: %q and %Q are DIFFERENT log_line_prefix
-       escapes - %q stops the prefix in non-session processes, %Q is the query identifier - and %q is common
-       in real prefixes. A case-insensitive test would report attribution satisfied on a great many servers
-       that cannot attribute anything.
+       Case-sensitive, and that is load-bearing: %q and %Q are DIFFERENT log_line_prefix escapes - %q stops
+       the prefix in non-session processes, %Q is the query identifier - and %q is common in real prefixes.
 
-       Known limit, stated rather than parsed around: a prefix containing the literal-percent escape %%
-       immediately before a Q renders as literal %Q text and would read as satisfied here. Detecting that needs
-       a real scan of the escape sequence, which is not worth carrying for a prefix nobody writes. */
-    strpos(coalesce(current_setting('log_line_prefix', true), ''), '%Q') > 0,
-    coalesce(current_setting('log_line_prefix', true), '(unreadable)'),
+       NOT gated on loaded: log_line_prefix is a real core GUC that always exists and always means what it
+       says, and it is worth knowing this is wrong BEFORE the library goes on, because fixing it afterwards
+       means every plan captured in between is an orphan. */
+    strpos(coalesce(p.line_prefix, ''), '%Q') > 0,
+    coalesce(p.line_prefix, '(unreadable)'),
     CASE
-        WHEN strpos(coalesce(current_setting('log_line_prefix', true), ''), '%Q') > 0
+        WHEN strpos(coalesce(p.line_prefix, ''), '%Q') > 0
             THEN 'log_line_prefix carries %Q, so each captured plan is stamped with the query id that joins '
                  || 'it to pg_stat_statements.'
         ELSE 'log_line_prefix does NOT carry %Q. auto_explain does not put a query identifier in the plan '
              || 'itself - the id appears ONLY in the log line prefix - so plans captured without it cannot '
              || 'be joined to the statement they belong to. Add %Q to log_line_prefix; it is a dynamic '
              || 'parameter and needs no restart.'
-    END";
+    END
+FROM probe AS p";
 
     public override string Name => "pg_plan_capture_readiness";
 
