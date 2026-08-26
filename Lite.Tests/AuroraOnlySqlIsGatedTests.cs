@@ -135,7 +135,11 @@ public class AuroraOnlySqlIsGatedTests
         var source = File.ReadAllText(path);
 
         Assert.Contains("pg_stat_statements", source, StringComparison.Ordinal);
-        Assert.Contains("IsAurora", source, StringComparison.Ordinal);
+
+        /* Case-INSENSITIVE: the collector branches on context.Target.IsAurora and the text store on a
+           parameter named isAurora, and a guard that only accepted one spelling would fail on correct
+           code. It did, on exactly this file, the first time this test ran in CI. */
+        Assert.Contains("isaurora", source, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string[] FilesNamingAuroraSurfaces()
