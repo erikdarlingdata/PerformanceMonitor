@@ -3995,19 +3995,6 @@ LIMIT 1", connection);
     public const int ActiveQueriesFetchTimeoutSeconds = 30;
 
     /// <summary>
-    /// The <c>fetch_active_queries</c> command handler (headless-plan live-snapshot wave): reads the LIVE
-    /// running-request DMV snapshot from one monitored server on demand and returns the rows — the on-demand,
-    /// live counterpart of the collector's stored hourly snapshot, for the viewer's Current Active Queries tab.
-    /// The query and shredding are REUSED from the shared <see cref="QuerySnapshotsCollector"/> (via
-    /// <see cref="DarlingCollectorRunner.FetchRowsAsync"/>), so the live rows carry the SAME columns as the
-    /// stored ones. Read-only — <c>sys.dm_exec_requests</c>/<c>sessions</c> + the sql_text / query_plan DMFs — so
-    /// unlike <see cref="RunExecuteActualPlanAsync"/> it is not consent-class and takes NO collection gate (a DMV
-    /// read touches no collector state and writes nothing, so it runs concurrently with a scheduled sweep). The
-    /// up-front lookup gives a precise "not monitored" / "not connected" outcome (mirroring
-    /// <see cref="RunFetchPlanAsync"/>); a timeout / permission gap / SQL error is caught and reported as a
-    /// legible outcome rather than a raw exception (mirroring <see cref="RunExecuteActualPlanAsync"/>).
-    /// </summary>
-    /// <summary>
     /// <c>test_hypothetical_index</c> (#2612): plan one stored statement with and without a candidate index.
     ///
     /// <para>The statement text is resolved HERE, from this product's own <c>pg_statement_text</c> store,
@@ -4115,6 +4102,19 @@ LIMIT 1", connection);
         }
     }
 
+    /// <summary>
+    /// The <c>fetch_active_queries</c> command handler (headless-plan live-snapshot wave): reads the LIVE
+    /// running-request DMV snapshot from one monitored server on demand and returns the rows — the on-demand,
+    /// live counterpart of the collector's stored hourly snapshot, for the viewer's Current Active Queries tab.
+    /// The query and shredding are REUSED from the shared <see cref="QuerySnapshotsCollector"/> (via
+    /// <see cref="DarlingCollectorRunner.FetchRowsAsync"/>), so the live rows carry the SAME columns as the
+    /// stored ones. Read-only — <c>sys.dm_exec_requests</c>/<c>sessions</c> + the sql_text / query_plan DMFs — so
+    /// unlike <see cref="RunExecuteActualPlanAsync"/> it is not consent-class and takes NO collection gate (a DMV
+    /// read touches no collector state and writes nothing, so it runs concurrently with a scheduled sweep). The
+    /// up-front lookup gives a precise "not monitored" / "not connected" outcome (mirroring
+    /// <see cref="RunFetchPlanAsync"/>); a timeout / permission gap / SQL error is caught and reported as a
+    /// legible outcome rather than a raw exception (mirroring <see cref="RunExecuteActualPlanAsync"/>).
+    /// </summary>
     private async Task<CommandOutcome> RunFetchActiveQueriesLiveAsync(
         List<ServerLoopState> servers, DarlingCollectorRunner runner, int serverId, CancellationToken cancellationToken)
     {
