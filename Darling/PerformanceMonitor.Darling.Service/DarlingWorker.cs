@@ -3455,6 +3455,9 @@ LIMIT 1", connection);
 
         public Task<CommandOutcome> FetchActiveQueriesLiveAsync(int serverId, CancellationToken cancellationToken)
             => _worker.RunFetchActiveQueriesLiveAsync(_servers, _runner, serverId, cancellationToken);
+
+        public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+            => _worker.RunTestHypotheticalIndexAsync(_servers, serverId, request, cancellationToken);
     }
 
     /// <summary>
@@ -3990,6 +3993,114 @@ LIMIT 1", connection);
     /// <c>ActiveQueriesLiveTimeout</c> poll budget so the viewer sees a real "timed out" outcome rather than a
     /// poll miss, and so a wedged read cannot pin the single-threaded command loop past the stale-command reaper.</summary>
     public const int ActiveQueriesFetchTimeoutSeconds = 30;
+
+    /// <summary>
+    /// <c>test_hypothetical_index</c> (#2612): plan one stored statement with and without a candidate index.
+    ///
+    /// <para>The statement text is resolved HERE, from this product's own <c>pg_statement_text</c> store,
+    /// keyed by the queryid the caller named. It is never taken from the caller — the request carries an
+    /// identifier and a candidate, and nothing else reaches SQL.</para>
+    ///
+    /// <para>PostgreSQL only, and it says so rather than failing obscurely on a SQL Server target: hypopg
+    /// and <c>EXPLAIN (GENERIC_PLAN)</c> have no SQL Server equivalent, and the candidate this answers about
+    /// comes from a PostgreSQL-only collector.</para>
+    /// </summary>
+    private async Task<CommandOutcome> RunTestHypotheticalIndexAsync(
+        List<ServerLoopState> servers, int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken)
+    {
+        ServerLoopState? server;
+        ServerRuntime? runtime;
+        string displayName;
+        lock (_serversLock)
+        {
+            server = servers.Find(s => s.Config.ServerId == serverId);
+            runtime = server?.Runtime;
+            displayName = server?.Config.DisplayName ?? serverId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (server is null)
+        {
+            return new CommandOutcome(false, "server not monitored", JsonError($"no monitored server with server_id {serverId}"));
+        }
+
+        if (runtime is null)
+        {
+            return new CommandOutcome(false, "server not connected",
+                JsonError($"server '{displayName}' is not currently connected — a hypothetical index has to be tested against the server's own statistics, so there is nothing to answer from while it is unreachable"));
+        }
+
+        if (runtime.Target.Engine != CollectorTargetEngine.PostgreSql)
+        {
+            return new CommandOutcome(false, "not a PostgreSQL target",
+                JsonError($"server '{displayName}' is not PostgreSQL. Hypothetical indexes come from the hypopg extension and the plan comparison needs EXPLAIN (GENERIC_PLAN); neither has a SQL Server equivalent, and the index candidate this answers about comes from a PostgreSQL-only collector."));
+        }
+
+        if (!request.TryGetQueryId(out var queryId))
+        {
+            return new CommandOutcome(false, "invalid queryid", JsonError("queryid must be a signed 64-bit integer sent as a STRING"));
+        }
+
+        string? statementText;
+        await using (var lookup = _postgres!.CreateCommand(
+            "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2"))
+        {
+            lookup.Parameters.AddWithValue(serverId);
+            lookup.Parameters.AddWithValue(queryId);
+            statementText = (await lookup.ExecuteScalarAsync(cancellationToken)) as string;
+        }
+
+        if (string.IsNullOrWhiteSpace(statementText))
+        {
+            return new CommandOutcome(false, "statement text not captured",
+                JsonError($"no statement text is stored for queryid {queryId} on '{displayName}'. Text is refreshed on its own cadence and a major-version upgrade re-keys every queryid, so a statement first seen minutes ago genuinely has none yet — there is nothing to re-plan until it does."));
+        }
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            var result = await Targets.HypotheticalIndexExperiment.RunAsync(
+                connection, statementText, request.BuildCreateIndexStatement(),
+                runtime.Target.PostgresMajorVersion, cancellationToken);
+
+            _logger.LogInformation(
+                "[{Server}] test_hypothetical_index on {Schema}.{Table}: planner would {Verdict} it ({Before:N2} -> {After:N2})",
+                displayName, request.SchemaName, request.TableName,
+                result.PlannerWouldUseIt ? "USE" : "NOT use", result.CostBefore, result.CostAfter);
+
+            return new CommandOutcome(true, "hypothetical index tested", JsonSerializer.Serialize(new
+            {
+                server = displayName,
+                queryid = request.QueryId,
+                candidate = request.BuildCreateIndexStatement(),
+                planner_would_use_it = result.PlannerWouldUseIt,
+                estimated_cost_before = result.CostBefore,
+                estimated_cost_after = result.CostAfter,
+                hypothetical_index_name = result.HypotheticalIndexName,
+                explanation = result.Explanation,
+                plan_before = result.PlanBeforeJson,
+                plan_after = result.PlanAfterJson,
+            }));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PostgresException ex)
+        {
+            /* Reported rather than thrown, and the SQLSTATE travels: 42P01 here means the table named in the
+               candidate does not exist, which is a caller mistake, and 42501 means the login cannot plan
+               against it — two different conversations that a bare failure would merge. */
+            return new CommandOutcome(false, "experiment failed",
+                JsonError($"planning on '{displayName}' failed: {ex.MessageText} (SQLSTATE {ex.SqlState})"));
+        }
+        catch (Exception ex)
+        {
+            return new CommandOutcome(false, "experiment failed",
+                JsonError($"planning on '{displayName}' failed: {ex.Message}"));
+        }
+    }
 
     /// <summary>
     /// The <c>fetch_active_queries</c> command handler (headless-plan live-snapshot wave): reads the LIVE
