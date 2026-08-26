@@ -13,7 +13,7 @@
  * There are TWO, and serverTabsFor(card) picks between them from the fleet card's server-derived `is_postgres`
  * (#2530). SERVER_TABS is the SQL Server registry and also the default for a card that makes no engine claim —
  * the name is kept for that second job, because "no claim" has always rendered these tabs and still should.
- * POSTGRES_TABS is the seven-tab PostgreSQL registry; its own header says why seven is the answer and not twelve.
+ * POSTGRES_TABS is the eight-tab PostgreSQL registry; its own header says why that is the answer and not twelve.
  *
  * Every entry is `{ id, label, note?, build(server, ctx) }` and `build` returns an array of nodes, almost all of
  * them PANEL DESCRIPTORS run through the unmodified renderPanel (the #1563 seam): a `read` naming an MCP tool
@@ -1324,7 +1324,7 @@ export const SERVER_TABS = [
 /* ─────────────────────────── the PostgreSQL tabs ─────────────────────────── */
 
 /**
- * The PostgreSQL registry (#2530). SEVEN tabs against the SQL Server registry's twelve, and the difference is the
+ * The PostgreSQL registry (#2530). EIGHT tabs against the SQL Server registry's twelve, and the difference is the
  * design rather than a shortfall: parity was explicitly not the constraint. Bloat, wraparound, the xmin horizon
  * and autovacuum have no SQL Server analogue and are what actually pages a PostgreSQL DBA; tempdb, Query Store,
  * trace flags, plan cache and the system_health ring buffer have no PostgreSQL analogue, and rendering them at a
@@ -1904,6 +1904,39 @@ export const POSTGRES_TABS = [
         PG_INDEX_BLOAT_COLUMNS,
         ctx.label + ", measured by walking the index; a value in Not Measured means the collector's per-cycle budget skipped it",
         "No index was measured on this server. This collector runs DAILY and measuring walks the index, so a short window or a fresh install is legitimately empty here."
+      ),
+    ],
+  },
+
+  /* #2658. The eighth tab, and the header's argument for seven admits it: what that argument rejects is
+     reproducing SQL-Server-only CONCEPTS at a PostgreSQL target, not adding a question PostgreSQL genuinely
+     has. "What is this server set to, and what changed" is one every engine has, and it was the only
+     remaining get_pg_* pair with nowhere to land.
+
+     Changes ABOVE current settings, deliberately. Somebody opening this tab during an incident is asking
+     what moved, not what the server is; the full configuration is reference material and reads better as
+     the thing underneath it. */
+  {
+    id: "config",
+    label: "Configuration",
+    build: (server, ctx) => [
+      table(
+        "Configuration Changes",
+        "get_pg_server_config_changes",
+        { server, hours: ctx.hours },
+        "changes",
+        PG_CONFIG_CHANGE_COLUMNS,
+        ctx.label + ", newest first; the collector runs hourly, so a change happened in the hour before it was seen",
+        "No configuration parameter changed value in this window. This compares consecutive snapshots, so an unchanged server is legitimately empty here - it is a finding, not missing data."
+      ),
+      table(
+        "Settings",
+        "get_pg_server_config",
+        { server },
+        "settings",
+        PG_SERVER_CONFIG_COLUMNS,
+        "non-default first; pending restart means the file and the running server disagree",
+        "No configuration snapshot has been collected yet. This collector runs hourly, so a server registered within the last hour has not reached its first collection."
       ),
     ],
   },
@@ -2877,6 +2910,26 @@ const PG_IO_SUMMARY_STATS = [
 
    buffers_backend is here rather than buried with the other buffer counters because it is the one that
    lands on a user query: a backend writing its own dirty buffer is a query paying for the write. */
+const PG_SERVER_CONFIG_COLUMNS = [
+  { key: "name", label: "Setting" },
+  { key: "setting", label: "Value" },
+  { key: "unit", label: "Unit", small: true },
+  { key: "default_value", label: "Default", small: true },
+  { key: "source", label: "Source", small: true },
+  { key: "context", label: "Change needs", small: true },
+  { key: "pending_restart", label: "Pending restart", format: "bool", small: true },
+  { key: "category", label: "Category", small: true },
+];
+
+const PG_CONFIG_CHANGE_COLUMNS = [
+  { key: "changed_at", label: "Seen at", format: "datetime" },
+  { key: "name", label: "Setting" },
+  { key: "old_value", label: "From" },
+  { key: "new_value", label: "To" },
+  { key: "unit", label: "Unit", small: true },
+  { key: "source", label: "Source", small: true },
+];
+
 const PG_WRITE_STATS = [
   { key: "checkpoints_timed", label: "Timed", format: "int" },
   { key: "checkpoints_requested", label: "Requested", format: "int" },

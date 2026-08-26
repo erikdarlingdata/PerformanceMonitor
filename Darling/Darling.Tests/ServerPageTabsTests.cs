@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -82,6 +82,8 @@ public sealed class ServerPageTabsTests
         ["get_pg_extensions"] = "pg_extension_availability",
         ["get_pg_lock_stats"] = "pg_lock_stats",
         ["get_pg_write_stats"] = "pg_write_stats",
+        ["get_pg_server_config"] = "pg_server_config",
+        ["get_pg_server_config_changes"] = "pg_server_config",
         ["get_pg_replication_stats"] = "pg_replication_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",
             ["get_pg_plans"] = "pg_plan_capture",

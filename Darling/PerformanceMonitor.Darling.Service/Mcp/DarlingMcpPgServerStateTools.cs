@@ -364,4 +364,144 @@ public sealed class DarlingMcpPgServerStateTools
             return McpHelpers.Status("error", $"Reading PostgreSQL write stats failed: {ex.Message}");
         }
     }
+
+    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. Snapshot from the most recent collection, not a window.")]
+    public static async Task<string> GetPgServerConfig(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Maximum settings to return. Default 100.")] int limit = 100,
+        [Description("When true, include settings still at their default. Default false - the non-default ones are the answer.")] bool include_defaults = false)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return McpHelpers.Status("error", limitError);
+
+        try
+        {
+            var rows = await DarlingPgServerConfigReader.GetCurrentConfigAsync(
+                postgres, resolved.ServerId, limit);
+
+            if (rows.Count == 0)
+            {
+                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
+                    ?? McpHelpers.Status(
+                        "empty",
+                        $"No configuration snapshot has been collected for {resolved.ServerName} yet. "
+                        + "This collector runs hourly, so a server registered in the last hour has not "
+                        + "reached its first collection.");
+            }
+
+            var shown = include_defaults ? rows : rows.Where(r => !r.IsDefault).ToList();
+            var pendingRestart = rows.Where(r => r.PendingRestart).Select(r => r.Name).ToList();
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                status = "server_config",
+                /* Both counts, because they answer different questions and one without the other invites
+                   the wrong conclusion: a small returned count is reassuring only if you know it was
+                   filtered rather than truncated. */
+                settings_returned = shown.Count,
+                non_default_count = rows.Count(r => !r.IsDefault),
+                truncated = rows.Count >= limit,
+                pending_restart_count = pendingRestart.Count,
+                pending_restart_settings = pendingRestart.Count > 0 ? pendingRestart : null,
+                note = pendingRestart.Count > 0
+                    ? "One or more settings are marked PENDING RESTART: the configuration file has been "
+                      + "changed and reloaded, but the running server is still using the previous value. "
+                      + "The file and the server disagree until the next restart, at which point the "
+                      + "behaviour changes with no deployment to explain it."
+                    : "Non-default settings first. 'source' says where the value came from; 'context' says "
+                      + "what changing it would take - postmaster needs a restart, sighup a reload, user "
+                      + "nothing. Session-scoped rows are excluded: pg_settings is a per-connection view "
+                      + "and those describe the monitoring connection rather than the server.",
+                settings = shown.Select(r => new
+                {
+                    name = r.Name,
+                    setting = r.Setting,
+                    unit = r.Unit,
+                    /* The compiled-in default, so a reader can see what was moved away FROM without
+                       needing a table of defaults that would rot at every major. */
+                    default_value = r.BootValue,
+                    is_default = r.IsDefault,
+                    source = r.Source,
+                    context = r.Context,
+                    requires_restart_to_change = string.Equals(r.Context, "postmaster", StringComparison.Ordinal),
+                    pending_restart = r.PendingRestart,
+                    category = r.Category,
+                    description = r.ShortDescription,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.Status("error", $"Reading PostgreSQL server config failed: {ex.Message}");
+        }
+    }
+
+    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change.")]
+    public static async Task<string> GetPgServerConfigChanges(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Hours of history to analyze. Default 168 (one week).")] int hours_back = 168,
+        [Description("Maximum changes to return. Default 100.")] int limit = 100,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        if (error != null) return error;
+
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        if (validation != null) return validation;
+
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return McpHelpers.Status("error", limitError);
+
+        try
+        {
+            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+
+            if (rows.Count == 0)
+            {
+                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
+                    ?? McpHelpers.Status(
+                        "no_changes",
+                        $"No configuration parameter changed value on {resolved.ServerName} in the last "
+                        + $"{hours_back} hour(s). That is a real finding rather than missing data - this "
+                        + "read compares consecutive snapshots, so an unchanged server produces no rows.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                hours_back,
+                status = "config_changes",
+                change_count = rows.Count,
+                truncated = rows.Count >= limit,
+                note = "changed_at is the time of the snapshot that FIRST reported the new value, so the "
+                     + "change happened at some point in the hour before it - this collector runs hourly. "
+                     + "A setting appearing for the first time is not reported here.",
+                changes = rows.Select(r => new
+                {
+                    changed_at = r.ChangedAtUtc,
+                    name = r.Name,
+                    old_value = r.OldValue,
+                    new_value = r.NewValue,
+                    unit = r.Unit,
+                    source = r.Source,
+                    context = r.Context,
+                    description = r.ShortDescription,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.Status("error", $"Reading PostgreSQL config changes failed: {ex.Message}");
+        }
+    }
+
 }

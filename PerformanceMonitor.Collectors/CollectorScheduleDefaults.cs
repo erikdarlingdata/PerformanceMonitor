@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -139,6 +139,14 @@ public static class CollectorScheduleDefaults
            table-growth trend that usually explains it. Cheap: a handful of rows from a shared
            catalog. */
         ["pg_wraparound_stats"] = new(5, 90),
+
+        /* Hourly, and the cadence IS the design (#2658). Configuration changes when a person changes it,
+           so polling it per minute buys nothing and writes 415 rows a minute forever; an hour is inside
+           anyone's window for "what changed this afternoon". 365 days because the question this answers is
+           almost always asked long after the fact — "this got slow sometime last quarter" — and a config
+           history shorter than the memory of the incident is no history at all. It is cheap to keep: the
+           rows are small, and the changes read only ever looks at consecutive snapshots. */
+        ["pg_server_config"] = new(60, 365),
 
         /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
            indicator, and the thing an operator wants is the session or slot that appeared minutes

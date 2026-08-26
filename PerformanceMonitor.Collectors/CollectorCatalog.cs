@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -70,6 +70,7 @@ public static class CollectorCatalog
         PgWaitStatsCollector.Instance,
         PgStatementStatsCollector.Instance,
         PgWraparoundStatsCollector.Instance,
+        PgServerConfigCollector.Instance,
         PgXminHorizonCollector.Instance,
         PgReplicationSlotsCollector.Instance,
         PgAutovacuumStatsCollector.Instance,

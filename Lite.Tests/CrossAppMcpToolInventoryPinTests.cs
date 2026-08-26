@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -73,6 +73,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_pg_extensions",
         "get_pg_lock_stats",
         "get_pg_write_stats",
+        "get_pg_server_config",
+        "get_pg_server_config_changes",
         "get_pg_replication_stats",
         "get_pg_top_queries",
         "get_pg_plans",
