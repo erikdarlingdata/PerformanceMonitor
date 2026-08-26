@@ -23,6 +23,22 @@
                 <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
+                <Separator/>
+                <!-- #2645: session-scoped row marks. One handler for all four; the mark rides on Tag so
+                     the items differ only here. Marks last as long as the rows do - on a run-on-demand
+                     grid like Index Analysis that is until you run it again, which is what was asked for. -->
+                <MenuItem Header="Mark _Done" Tag="Done" Click="MarkRow_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x2705;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Mark _To Do" Tag="ToDo" Click="MarkRow_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F536;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Mark Do _Not Do" Tag="DoNot" Click="MarkRow_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x26D4;"/></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Clear _Mark" Tag="None" Click="MarkRow_Click">
+                    <MenuItem.Icon><TextBlock Text="&#x1F5D1;"/></MenuItem.Icon>
+                </MenuItem>
             </ContextMenu>
 
             <Style x:Key="DefaultRowStyle" TargetType="DataGridRow">
@@ -122,7 +138,8 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}" FontStyle="Italic"/>
 
                 <!-- Recommendations DataGrid -->
-                <DataGrid x:Name="RecommendationsDataGrid" Grid.Row="2" Margin="10,4,10,10"
+                <DataGrid x:Name="RecommendationsDataGrid"
+                              LoadingRow="MarkedGrid_LoadingRow" Grid.Row="2" Margin="10,4,10,10"
                           AutoGenerateColumns="False" IsReadOnly="True"
                           CanUserSortColumns="True" CanUserResizeColumns="True"
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -409,7 +426,8 @@
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserSortColumns="False" HeadersVisibility="Column"
                               GridLinesVisibility="Horizontal" SelectionMode="Single"
-                              MaxHeight="200" RowStyle="{StaticResource DefaultRowStyle}">
+                              MaxHeight="200" RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100"/>
                             <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="130">
@@ -474,7 +492,8 @@
                                           CanUserSortColumns="True" HeadersVisibility="Column"
                                           GridLinesVisibility="Horizontal" SelectionMode="Single"
                                           MinHeight="40" MaxHeight="200"
-                                          RowStyle="{StaticResource DefaultRowStyle}">
+                                          RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
                                         <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat='{}{0:N1}'}" Width="60">
@@ -509,7 +528,8 @@
                                           CanUserSortColumns="True" HeadersVisibility="Column"
                                           GridLinesVisibility="Horizontal" SelectionMode="Single"
                                           MinHeight="40" MaxHeight="200"
-                                          RowStyle="{StaticResource DefaultRowStyle}">
+                                          RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
                                         <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N2}'}" Width="95">
@@ -628,7 +648,8 @@
                               CanUserResizeColumns="True"
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
-                              RowStyle="{StaticResource DefaultRowStyle}">
+                              RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180">
                                 <DataGridTextColumn.Header>
@@ -816,6 +837,7 @@
                        drills into that database's object-growth heatmap (#1138 §3C). -->
                   <Grid x:Name="StorageParentView">
                     <DataGrid x:Name="StorageGrowthDataGrid"
+                              LoadingRow="MarkedGrid_LoadingRow"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               CanUserSortColumns="True"
@@ -955,7 +977,8 @@
                                 AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
                                 GridLinesVisibility="Horizontal" CanUserResizeColumns="True" HeadersVisibility="Column"
                                 SelectionMode="Single" MouseDoubleClick="ObjectGrowthGrid_DoubleClick"
-                                RowStyle="{StaticResource DefaultRowStyle}">
+                                RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                           <DataGrid.Resources>
                               <Style x:Key="RightAlign" TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                           </DataGrid.Resources>
@@ -983,7 +1006,8 @@
                       <DataGrid x:Name="ObjectIndexDetailGrid" ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                 AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
                                 GridLinesVisibility="Horizontal" CanUserResizeColumns="True" HeadersVisibility="Column"
-                                SelectionMode="Single" RowStyle="{StaticResource DefaultRowStyle}">
+                                SelectionMode="Single" RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                           <DataGrid.Resources>
                               <Style x:Key="RightAlign" TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                           </DataGrid.Resources>
@@ -1041,7 +1065,8 @@
                   <!-- View 0 (parent): top-N indexes by total lock+latch wait; the four *_wait_in_ms cells are
                        shaded per-column (log) by their wait category's hue. Double-click an index for detail. -->
                   <Grid x:Name="LockingParentView">
-                    <DataGrid x:Name="IndexLockingDataGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                    <DataGrid x:Name="IndexLockingDataGrid"
+                              LoadingRow="MarkedGrid_LoadingRow" AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserSortColumns="True" GridLinesVisibility="Horizontal" CanUserResizeColumns="True"
                               HeadersVisibility="Column" SelectionMode="Single" MouseDoubleClick="IndexLockingGrid_DoubleClick"
                               RowStyle="{StaticResource DefaultRowStyle}" ScrollViewer.HorizontalScrollBarVisibility="Auto">
@@ -1159,7 +1184,8 @@
                               CanUserResizeColumns="True"
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
-                              RowStyle="{StaticResource DefaultRowStyle}">
+                              RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Binding="{Binding DatabaseName}" Width="160">
                                 <DataGridTextColumn.Header>
@@ -1362,7 +1388,8 @@
                               CanUserResizeColumns="True"
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
-                              RowStyle="{StaticResource DefaultRowStyle}">
+                              RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Binding="{Binding DatabaseName}" Width="160">
                                 <DataGridTextColumn.Header>
@@ -1589,7 +1616,8 @@
                               CanUserResizeColumns="True"
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
-                              RowStyle="{StaticResource DefaultRowStyle}">
+                              RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <!-- Actionable columns first -->
                             <DataGridTextColumn Binding="{Binding Level}" Width="80">
@@ -1861,7 +1889,8 @@
                               CanUserResizeColumns="True"
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
-                              RowStyle="{StaticResource DefaultRowStyle}">
+                              RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Binding="{Binding ScriptType}" Width="100">
                                 <DataGridTextColumn.Header>
@@ -2049,7 +2078,8 @@
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
                                       MaxHeight="250"
-                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                      RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180">
                                         <DataGridTextColumn.Header>
@@ -2111,7 +2141,8 @@
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
                                       MaxHeight="200"
-                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                      RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding Metric}" Width="180">
                                         <DataGridTextColumn.Header>
@@ -2187,7 +2218,8 @@
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
                                       MaxHeight="250"
-                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                      RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding Category}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Category" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Category" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -2248,6 +2280,7 @@
                                            FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                             </StackPanel>
                             <DataGrid x:Name="ExpensiveQueriesDataGrid"
+                              LoadingRow="MarkedGrid_LoadingRow"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2314,7 +2347,8 @@
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
                                       MaxHeight="250"
-                                      RowStyle="{StaticResource DefaultRowStyle}">
+                                      RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DayDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Day" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -2406,7 +2440,8 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}" FontStyle="Italic"/>
 
                 <!-- High Impact DataGrid -->
-                <DataGrid x:Name="HighImpactDataGrid" Grid.Row="2" Margin="10,4,10,10"
+                <DataGrid x:Name="HighImpactDataGrid"
+                              LoadingRow="MarkedGrid_LoadingRow" Grid.Row="2" Margin="10,4,10,10"
                           AutoGenerateColumns="False" IsReadOnly="True"
                           CanUserSortColumns="True" CanUserResizeColumns="True"
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -2596,7 +2631,8 @@
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
                               HorizontalScrollBarVisibility="Auto"
-                              RowStyle="{StaticResource DefaultRowStyle}">
+                              RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Binding="{Binding ApplicationName}" Width="300">
                                 <DataGridTextColumn.Header>
@@ -2886,7 +2922,8 @@
                               CanUserResizeColumns="True"
                               HeadersVisibility="Column"
                               SelectionMode="Extended"
-                              RowStyle="{StaticResource DefaultRowStyle}">
+                              RowStyle="{StaticResource DefaultRowStyle}"
+                              LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Binding="{Binding ServerName}" Width="160">
                                 <DataGridTextColumn.Header>
