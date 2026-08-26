@@ -1085,6 +1085,14 @@ public partial class FinOpsTab : UserControl
 
     private void CopyAllRows_Click(object sender, RoutedEventArgs e) => DataGridExport.CopyAllRows(sender);
 
+    /* #2645: all four mark items, one handler — the mark rides on the menu item's Tag. */
+    private void MarkRow_Click(object sender, RoutedEventArgs e) => DataGridRowMarks.OnMarkMenuItemClicked(sender);
+
+    /* Rows are recycled as the grid scrolls, so the paint has to happen as each one is realised rather
+       than once after marking. DataGridRowMarks.Apply clears an unmarked row explicitly for the same
+       reason: a recycled container still carries the previous row's brush. */
+    private void MarkedGrid_LoadingRow(object sender, DataGridRowEventArgs e) => DataGridRowMarks.Apply(e.Row);
+
     private void ExportToCsv_Click(object sender, RoutedEventArgs e)
     {
         // FinOps shares one handler across several grids, so the file-name prefix is chosen
