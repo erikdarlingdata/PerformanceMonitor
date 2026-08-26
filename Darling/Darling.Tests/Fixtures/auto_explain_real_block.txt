@@ -1,0 +1,45 @@
+2026-08-26 15:35:52.410 UTC [3448] -2849973824032797391 LOG:  duration: 0.040 ms  plan:
+	{
+	  "Query Text": "\nSET auto_explain.log_min_duration = 0;\nSET auto_explain.log_format = json;\nSELECT count(*) FROM t13 WHERE status = 'ACME Holdings Ltd' AND amount > 4321.55;\n",
+	  "Plan": {
+	    "Node Type": "Aggregate",
+	    "Strategy": "Plain",
+	    "Partial Mode": "Simple",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Startup Cost": 7.58,
+	    "Total Cost": 7.59,
+	    "Plan Rows": 1,
+	    "Plan Width": 8,
+	    "Plans": [
+	      {
+	        "Node Type": "Index Scan",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Scan Direction": "Forward",
+	        "Index Name": "t13_status",
+	        "Relation Name": "t13",
+	        "Alias": "t13",
+	        "Startup Cost": 0.29,
+	        "Total Cost": 7.57,
+	        "Plan Rows": 1,
+	        "Plan Width": 0,
+	        "Index Cond": "(status = 'ACME Holdings Ltd'::text)",
+	        "Filter": "(amount > 4321.55)"
+	      }
+	    ]
+	  }
+	}
+2026-08-26 15:35:55.576 UTC [3408] 0 ERROR:  function aurora_stat_statements(boolean) does not exist at character 70
+2026-08-26 15:35:55.576 UTC [3408] 0 HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+2026-08-26 15:35:55.576 UTC [3408] 0 STATEMENT:  
+	SELECT
+	    s.queryid AS queryid,
+	    s.query AS query_text
+	FROM aurora_stat_statements(true) AS s
+	WHERE s.queryid IS NOT NULL
+	AND   s.query IS NOT NULL
+	AND   s.toplevel
+	ORDER BY s.total_exec_time DESC
+	LIMIT $1

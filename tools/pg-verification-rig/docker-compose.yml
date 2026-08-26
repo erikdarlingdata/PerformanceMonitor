@@ -1,0 +1,59 @@
+# The PostgreSQL verification rig: a realistic self-hosted TARGET plus a store, so the Darling service can
+# be pointed at something that behaves like a customer's server rather than like a two-table container.
+#
+#   docker compose up -d --build
+#   psql -h localhost -p 55432 -U postgres -d appdb -f seed.sql     # 40 tables, 160 indexes
+#
+# Then point a darling.json at the target on 55432 and the store on 55441. --validate-config should report
+# 23 of 24 PostgreSQL collectors applying. The one skip is pg_wait_stats, which reads Aurora own wait
+# instrumentation and has no vanilla equivalent - pg_wait_sampling answers the same question here.
+#
+# WHY THE SCALE MATTERS. Several collectors have size floors - pg_column_stats needs relpages >= 128,
+# pg_index_bloat only measures indexes worth measuring - so below the floor a healthy collector and a
+# broken one both return nothing. seed.sql exists to clear them. A two-table container finds nothing, and
+# that is exactly why these defects survived to be found here.
+
+name: pm-pg-verification-rig
+
+services:
+  target:
+    build:
+      context: .
+      args:
+        PG_MAJOR: ${PG_MAJOR:-17}
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: targetpw
+      POSTGRES_DB: appdb
+    ports:
+      - "55432:5432"
+    command:
+      # shared_preload_libraries MUST be set on the command line, not with ALTER SYSTEM: it is a
+      # list-valued GUC, and ALTER SYSTEM quotes the whole list as one name, which stops the server
+      # from starting. Measured the hard way.
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements,pg_wait_sampling,pg_stat_kcache,pg_qualstats,auto_explain
+      # auto_explain, configured the way plan capture requires. %Q is the one people miss: without the
+      # query id in the prefix, captured plans join to nothing.
+      - -c
+      - auto_explain.log_min_duration=50
+      - -c
+      - auto_explain.log_format=json
+      - -c
+      - logging_collector=on
+      - -c
+      - log_line_prefix=%m [%p] %Q 
+      # Sample every predicate rather than the default 1%, so a short verification run records something.
+      - -c
+      - pg_qualstats.sample_rate=1
+
+  store:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: darling
+      POSTGRES_DB: darling
+      POSTGRES_PASSWORD: storepw
+    ports:
+      - "55441:5432"
