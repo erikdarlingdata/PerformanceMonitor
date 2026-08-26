@@ -53,22 +53,38 @@ public class PgWaitSamplingCollectorDefinitionTests
     /// profile was background processes waiting for work — <c>AutovacuumMain</c>, <c>LogicalLauncherMain</c>,
     /// <c>WalWriterMain</c>, <c>CheckpointerMain</c> — and they accumulate forever precisely BECAUSE the
     /// server is quiet. Rank that and every healthy server reports autovacuum's idle loop as its top wait.
+    ///
+    /// <para>#2630 made that three types rather than one: <c>Client</c> and <c>Timeout</c> are the same kind
+    /// of not-work and need a live CLIENT to be idle before they dominate, which is why an idle PostgreSQL 17
+    /// did not surface them. On the first target profiled with real connections, <c>ClientRead</c> was 100.0%
+    /// of the profile. The set now comes from <see cref="PgWaitStatsCollector.IgnoredWaitTypes"/> so the two
+    /// wait collectors cannot disagree about what counts as a wait —
+    /// <see cref="PgWaitExclusionParityTests"/> owns that half.</para>
     /// </summary>
     [Fact]
     public void IdleBackgroundWaits_AreExcludedAtTheSource()
     {
-        Assert.Contains("event_type IS DISTINCT FROM 'Activity'", Sql, StringComparison.Ordinal);
+        Assert.Contains("'Activity'", Sql, StringComparison.Ordinal);
+        Assert.Contains("'Client'", Sql, StringComparison.Ordinal);
+        Assert.Contains("'Timeout'", Sql, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// <c>IS DISTINCT FROM</c>, never <c>&lt;&gt;</c>. A NULL event type means the backend was not waiting,
-    /// and <c>NULL &lt;&gt; 'Activity'</c> is NULL rather than true — so a plain inequality would silently
-    /// discard every on-CPU sample, which is real signal and is deliberately kept and labelled.
+    /// The filter must survive a NULL event type, which means a backend that was NOT waiting — real signal,
+    /// deliberately kept and labelled <c>CPU</c>.
+    ///
+    /// <para>It was <c>IS DISTINCT FROM</c> for exactly this reason: <c>NULL &lt;&gt; 'Activity'</c> is NULL
+    /// rather than true, so a plain inequality would silently discard every on-CPU sample. #2630 widened the
+    /// filter to a three-type list and the same trap reappears one step along — NULL against a list is also
+    /// NULL — so the type is <c>coalesce</c>d to <c>'CPU'</c> BEFORE it is compared, and <c>CPU</c> is not in
+    /// the excluded set.</para>
     /// </summary>
     [Fact]
     public void TheActivityFilter_IsNullSafe()
     {
         Assert.DoesNotMatch(new Regex(@"event_type\s*<>\s*'Activity'"), Sql);
+        Assert.DoesNotMatch(new Regex(@"(?<!coalesce\()p\.event_type\s+NOT IN"), Sql);
+        Assert.Contains("coalesce(p.event_type, 'CPU') NOT IN", Sql, StringComparison.Ordinal);
         Assert.Contains("coalesce(p.event_type, 'CPU')", Sql, StringComparison.Ordinal);
         Assert.Contains("coalesce(p.event, 'Running')", Sql, StringComparison.Ordinal);
     }
