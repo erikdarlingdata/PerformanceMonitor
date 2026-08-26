@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -323,6 +323,14 @@ public sealed partial class ViewerDataService
     public Task<DarlingPgWriteStatsReader.PgWriteStatsRow?> GetPgWriteStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
         DarlingPgWriteStatsReader.GetPgWriteStatsAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+
+    /// <summary>Overview tab - the server's own configuration from pg_settings (#2658), non-default first.
+    /// Anchored on the newest snapshot rather than the toolbar window, deliberately: a configuration is the
+    /// state NOW, and an hours filter would return nothing for a server whose hourly collector last ran just
+    /// outside it - which reads as "this server has no configuration" rather than "ask again".</summary>
+    public Task<List<DarlingPgServerConfigReader.PgConfigRow>> GetPgServerConfigAsync(
+        int serverId, int limit = 500, CancellationToken cancellationToken = default) =>
+        DarlingPgServerConfigReader.GetCurrentConfigAsync(_dataSource, serverId, limit, cancellationToken);
 
     /// <summary>Overview tab - which extensions this target has, could have, or cannot have (#2545). Latest
     /// state per extension rather than the history: installing one is a rare deliberate act, so the window

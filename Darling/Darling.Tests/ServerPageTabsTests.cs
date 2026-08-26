@@ -31,7 +31,7 @@ namespace Darling.Tests;
 /// stale list of its own.</para>
 ///
 /// <para><b>Two registries since #2530.</b> <c>SERVER_TABS</c> is the SQL Server set and the default for a
-/// server whose engine the store makes no claim about; <c>POSTGRES_TABS</c> is the seven-tab PostgreSQL set, and
+/// server whose engine the store makes no claim about; <c>POSTGRES_TABS</c> is the eight-tab PostgreSQL set, and
 /// <c>serverTabsFor(card)</c> is the only thing that chooses. Several pins below scan ONE registry's region of
 /// the file rather than the whole file, because the two sets have different rules — a <c>get_pg_*</c> read is
 /// correct in one and a defect in the other — and a whole-file scan cannot tell them apart.</para>
@@ -651,7 +651,7 @@ public sealed class ServerPageTabsTests
         /* Ids are unique WITHIN a registry — two tabs sharing one id makes the second unreachable and the bar's
            active state lie. ACROSS registries they may and do collide (overview, activity, waits, io), which is
            deliberate: those are the deep links that survive a server turning out to be the other engine. */
-        foreach (var (registry, expected) in new[] { ("SERVER_TABS", 12), ("POSTGRES_TABS", 7) })
+        foreach (var (registry, expected) in new[] { ("SERVER_TABS", 12), ("POSTGRES_TABS", 8) })
         {
             var ids = TabIdsIn(RegistryRegion(ServerTabsJs, registry));
             /* An exact count, not a floor. A floor would have let the prose in the CHANGELOG, the commit and

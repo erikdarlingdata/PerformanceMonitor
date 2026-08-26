@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -51,7 +51,7 @@ public sealed class PgSchemaGeneratorTests
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(66, CollectorCatalog.All.Count);
+        Assert.Equal(67, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -636,6 +636,7 @@ public sealed class PgSchemaGeneratorTests
             (97, PgKernelStatsCollector.Instance),
             (98, PgPredicateStatsCollector.Instance),
             (99, PgPlanCaptureCollector.Instance),
+            (102, PgServerConfigCollector.Instance),
         };
 
         /* Every PostgreSQL collector must appear above. One added without a rung listed here would

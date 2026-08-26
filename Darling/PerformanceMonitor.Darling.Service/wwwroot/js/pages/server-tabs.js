@@ -2922,7 +2922,7 @@ const PG_SERVER_CONFIG_COLUMNS = [
 ];
 
 const PG_CONFIG_CHANGE_COLUMNS = [
-  { key: "changed_at", label: "Seen at", format: "datetime" },
+  { key: "changed_at", label: "Seen at", format: "time" },
   { key: "name", label: "Setting" },
   { key: "old_value", label: "From" },
   { key: "new_value", label: "To" },

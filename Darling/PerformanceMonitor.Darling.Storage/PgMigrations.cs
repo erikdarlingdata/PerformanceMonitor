@@ -2293,10 +2293,15 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     /// <c>source</c> lets the read state which rows are server configuration and which are not. The rule
     /// lives at the read, where it can be enforced and explained.</para>
     ///
-    /// <para><b>Not a hypertable, and this one genuinely is not.</b> Every other collector table here is a
-    /// time series of measurements; this is a snapshot of a thing that changes when a person changes it.
-    /// The rows are wide-ish text and nearly all identical from one hour to the next, which is what the
-    /// retention setting is for rather than a compression policy.</para>
+    /// <para><b>It IS a hypertable, like every collector table</b> — <c>TimescaleSupport.HypertableTables</c>
+    /// is <c>CollectorCatalog.All</c>, so membership follows from being a collector and is not a per-table
+    /// choice. Worth stating because the shape argues the other way: this is a snapshot of something a
+    /// person changes, not a series of measurements, and the rows are wide-ish text that is nearly
+    /// identical from one hour to the next. Chunking and compression still earn their place on exactly that
+    /// data — a year of hourly near-duplicates is what compresses best — and the alternative would be a
+    /// special case in the one place that currently has none. It does mean CI's worker sizing moves:
+    /// <c>CiClusterWorkerSizingTests</c> derives the cluster's worker counts from the catalog count, so
+    /// adding a collector is also a workflow edit.</para>
     ///
     /// <para><b>All value columns nullable</b>, including <c>name</c>, because the generated schema is what
     /// a fresh store builds from and it declares them that way — see
