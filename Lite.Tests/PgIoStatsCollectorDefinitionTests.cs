@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -98,9 +98,14 @@ public class PgIoStatsCollectorDefinitionTests
     }
 
     /// <summary>
-    /// PG18 REMOVED op_bytes (replaced by read_bytes / write_bytes / extend_bytes). Selecting it there
-    /// would fail with "column does not exist" and take the whole collection down, so it is substituted —
-    /// and the substitution must keep the column count identical so the stored shape cannot drift.
+    /// PG18 REMOVED op_bytes. Selecting it there would fail with "column does not exist" and take the
+    /// whole collection down, so it is substituted — and the substitution must keep the column count
+    /// identical so the stored shape cannot drift.
+    ///
+    /// <para>Since V101 (#2655) the exchange runs BOTH ways, which is the point of pinning both arms: 18
+    /// loses op_bytes and gains the three measured byte columns, while 17 and below select op_bytes and
+    /// NULL for the three. Same shape either way, and each server generation carries whichever quantity it
+    /// actually has.</para>
     /// </summary>
     [Fact]
     public void SubstitutesOpBytesOnPg18WithoutChangingShape()
@@ -111,6 +116,12 @@ public class PgIoStatsCollectorDefinitionTests
         Assert.Contains("    op_bytes  ", pg17, StringComparison.Ordinal);
         Assert.Contains("NULL::bigint", pg18, StringComparison.Ordinal);
         Assert.Equal(pg17.Split(" AS ").Length, pg18.Split(" AS ").Length);
+
+        /* The measured columns are real on 18 and NULL below it — never the other way round, which is the
+           failure that would make a pre-18 store claim byte totals it never had. */
+        Assert.Contains("    read_bytes  ", pg18, StringComparison.Ordinal);
+        Assert.Contains("NULL::numeric", pg17, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULL::numeric", pg18, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -161,12 +172,22 @@ public class PgIoStatsCollectorDefinitionTests
     {
         var columns = PgIoStatsCollector.Instance.PayloadColumns;
 
-        Assert.Equal(18, columns.Count);
+        Assert.Equal(21, columns.Count);
         Assert.Equal("backend_type", columns[0].Name);
         Assert.Equal("context", columns[2].Name);
         Assert.Equal("reads", columns[3].Name);
         Assert.Equal(CollectorColumnType.Double, columns[4].Type);      // read_time_ms
         Assert.Equal(CollectorColumnType.Timestamp, columns[17].Type);  // stats_reset
+
+        /* V101 (#2655): PostgreSQL 18's measured byte totals, appended so no stored ordinal moved.
+           Decimal, not BigInt — PostgreSQL declares them `numeric` while the counts beside them are
+           `bigint`, and a byte total is exactly the quantity that outgrows a narrowing nobody promised. */
+        Assert.Equal("read_bytes", columns[18].Name);
+        Assert.Equal("write_bytes", columns[19].Name);
+        Assert.Equal("extend_bytes", columns[20].Name);
+        Assert.Equal(CollectorColumnType.Decimal, columns[18].Type);
+        Assert.Equal(CollectorColumnType.Decimal, columns[19].Type);
+        Assert.Equal(CollectorColumnType.Decimal, columns[20].Type);
     }
 
     /// <summary>
@@ -248,7 +269,7 @@ public class PgIoStatsCollectorDefinitionTests
         PgIoStatsCollector.Instance.WritePayload(
             new PgIoStatsCollector.Row(
                 "client backend", "relation", "normal", 1, 1.0, null, null, null, null,
-                0, 0.0, 8192, 2, 0, 0, null, null, null),
+                0, 0.0, 8192, 2, 0, 0, null, null, null, null, null, null),
             new RecordingCollectorRowWriter(),
             MakeContext(deltas: deltas));
 
@@ -264,7 +285,7 @@ public class PgIoStatsCollectorDefinitionTests
         PgIoStatsCollector.Instance.WritePayload(
             new PgIoStatsCollector.Row(
                 "client backend", "relation", "bulkread", 5, 2.5, null, null, null, null,
-                null, null, 8192, 7, null, 3, null, null, null),
+                null, null, 8192, 7, null, 3, null, null, null, null, null, null),
             writer,
             MakeContext());
 

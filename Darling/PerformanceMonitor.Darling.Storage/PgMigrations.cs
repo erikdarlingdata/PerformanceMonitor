@@ -157,6 +157,7 @@ public static class PgMigrations
         new Migration(98, "pg-predicate-stats", V98Sql),
         new Migration(99, "pg-plan-capture", V99Sql),
         new Migration(100, "pg-major-version", V100Sql),
+        new Migration(101, "pg18-io-bytes", V101Sql),
     };
 
     /// <summary>
@@ -2273,6 +2274,43 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V101 — the measured I/O byte totals PostgreSQL 18 gave <c>pg_stat_io</c> (#2655).
+    ///
+    /// <para><b>Why this is an upgrade and not a workaround.</b> 18 removed <c>op_bytes</c>, and
+    /// <see cref="PgIoStatsCollector"/> substituted NULL for it so a collection would not fail outright. That
+    /// kept the store readable and lost the answer: both byte figures the read serves are derived from
+    /// <c>op_bytes</c>, so on 18 they came back NULL with nothing saying why. The three columns 18 replaced it
+    /// with are strictly better than what was lost — <c>op_bytes</c> was the per-operation BLOCK SIZE, which
+    /// the read multiplied by a count to ESTIMATE volume; these are measured byte totals.
+    ///
+    /// <para><b>The estimate is not merely less precise on 18, it is wrong.</b> 18 also introduced vectored
+    /// reads, so one entry in <c>reads</c> can cover several blocks and <c>reads * block_size</c> undercounts.
+    /// Measured on a real 18.6: 479 reads against 4,440,064 read bytes — 542 blocks, not 479. That is the
+    /// reason the column was removed rather than merely renamed, and the reason these are stored separately
+    /// instead of being back-filled into <c>op_bytes</c>: they are a different quantity and a reader must be
+    /// able to tell which one it has.</para>
+    ///
+    /// <para><b><c>numeric</c>, not <c>bigint</c></b>, because that is what PostgreSQL declares them
+    /// (verified on 18.6 — <c>reads</c> is <c>bigint</c> while <c>read_bytes</c> is <c>numeric</c>). Storing
+    /// them as bigint would be a narrowing the catalog never promised; a byte total across a long uptime is
+    /// exactly the quantity that outgrows the assumption.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> — as V69 and every counter rung since. These are
+    /// cumulative counters differenced at read time, and PostgreSQL itself uses NULL for "this counter does
+    /// not apply to this combination" (WAL rows report no <c>extend_bytes</c>, verified on 18.6). A NOT NULL
+    /// 0 would turn "not reported" into a measurement, which is the one thing the I/O read works hardest not
+    /// to do. Below 18 they stay NULL forever and <c>op_bytes</c> remains the answer.</para>
+    ///
+    /// <para>No view refresh: <c>collect.pg_io_stats</c> has no <c>v_</c> passthrough freezing a column
+    /// list.</para>
+    /// </summary>
+    private const string V101Sql = @"
+ALTER TABLE collect.pg_io_stats
+    ADD COLUMN IF NOT EXISTS read_bytes numeric,
+    ADD COLUMN IF NOT EXISTS write_bytes numeric,
+    ADD COLUMN IF NOT EXISTS extend_bytes numeric;";
 
     /// <summary>
     /// V100 — the PostgreSQL major version on the <c>collect.servers</c> registry (#2653). V82 gave the

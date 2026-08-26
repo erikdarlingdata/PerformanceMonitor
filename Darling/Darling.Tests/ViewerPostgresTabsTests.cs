@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -704,7 +704,10 @@ public sealed class ViewerPostgresTabsTests
         var aurora = PgDisplay.Io(new PerformanceMonitor.Darling.Storage.DarlingPgIoReader.PgIoRow(
             "client backend", "relation", "normal", Reads: 10, ReadTimeMs: 1.0, Hits: 5, Extends: 0,
             ExtendTimeMs: 0, Evictions: 0, Reuses: 0, Writes: 0, WriteTimeMs: 0, OpBytes: 8192,
-            WriteCountersTracked: false, StatsReset: null), totalReadTimeMs: 1.0);
+            WriteCountersTracked: false, StatsReset: null,
+            /* A pre-18 server: op_bytes is the byte answer and the measured columns do not exist. */
+            ReadBytes: 0, WriteBytes: 0, ExtendBytes: 0, ByteCountersTracked: false),
+            totalReadTimeMs: 1.0);
 
         Assert.Equal("not tracked", aurora.Writes);
         Assert.Equal("not tracked", aurora.WriteTimeMs);
@@ -712,7 +715,9 @@ public sealed class ViewerPostgresTabsTests
         var selfManaged = PgDisplay.Io(new PerformanceMonitor.Darling.Storage.DarlingPgIoReader.PgIoRow(
             "client backend", "relation", "normal", Reads: 10, ReadTimeMs: 1.0, Hits: 5, Extends: 0,
             ExtendTimeMs: 0, Evictions: 0, Reuses: 0, Writes: 0, WriteTimeMs: 0, OpBytes: 8192,
-            WriteCountersTracked: true, StatsReset: null), totalReadTimeMs: 1.0);
+            WriteCountersTracked: true, StatsReset: null,
+            ReadBytes: 0, WriteBytes: 0, ExtendBytes: 0, ByteCountersTracked: false),
+            totalReadTimeMs: 1.0);
 
         Assert.Equal("0", selfManaged.Writes);
     }

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -112,14 +112,34 @@ public sealed class DarlingMcpPgIoTools
                     writes = r.WriteCountersTracked ? r.Writes : (long?)null,
                     write_time_ms = r.WriteCountersTracked ? Math.Round(r.WriteTimeMs, 1) : (double?)null,
                     write_counters_tracked = r.WriteCountersTracked,
+                    /* The block size an operation moves. Gone from 18, where a read is no longer one
+                       block, so it is null there and read_bytes below is measured instead of derived. */
                     block_bytes = r.OpBytes > 0 ? r.OpBytes : (long?)null,
-                    read_bytes = r.OpBytes > 0 ? r.Reads * r.OpBytes : (long?)null,
+                    /* One name for the volume answer, and bytes_source says how it was arrived at. From 18
+                       these are measured totals; below 18 they are reads x block size. Never both, and
+                       never silently swapped: the two are different quantities, and on 18 the old estimate
+                       would UNDERCOUNT because a vectored read covers several blocks. */
+                    read_bytes = r.ByteCountersTracked
+                        ? r.ReadBytes
+                        : (r.OpBytes > 0 ? r.Reads * r.OpBytes : (decimal?)null),
+                    write_bytes = r.ByteCountersTracked
+                        ? r.WriteBytes
+                        : (r.OpBytes > 0 && r.WriteCountersTracked ? r.Writes * r.OpBytes : (decimal?)null),
+                    extend_bytes = r.ByteCountersTracked ? r.ExtendBytes : (decimal?)null,
+                    bytes_source = r.ByteCountersTracked
+                        ? "measured"
+                        : (r.OpBytes > 0 ? "estimated_from_block_size" : "unavailable"),
                     stats_reset = r.StatsReset,
                 };
             })
             .ToList();
 
             var anyWritesTracked = rows.Any(r => r.WriteCountersTracked);
+            /* #2655: PostgreSQL 18 replaced op_bytes with measured byte totals. Said once at the top for
+               the same reason the write flag is: a caller has to know which quantity it is reading before
+               it compares two servers, and the two are not comparable. */
+            var bytesMeasured = rows.Any(r => r.ByteCountersTracked);
+            var bytesEstimated = !bytesMeasured && rows.Any(r => r.OpBytes > 0);
 
             return JsonSerializer.Serialize(new
             {
@@ -134,12 +154,27 @@ public sealed class DarlingMcpPgIoTools
                    and a caller needs to know the write side is unmeasured before it concludes anything
                    from the absence of writes. */
                 write_counters_tracked_anywhere = anyWritesTracked,
+                bytes_source = bytesMeasured
+                    ? "measured"
+                    : (bytesEstimated ? "estimated_from_block_size" : "unavailable"),
                 note = anyWritesTracked
                     ? "All counters are windowed differences, clamped per interval so a stats reset cannot "
                     + "produce a negative figure."
                     : "All counters are windowed differences. This server tracks NO write counters — the "
                     + "signature of Amazon Aurora, where backends do not write data files and the storage "
                     + "layer does. Absent writes here mean unmeasured, not zero.",
+                bytes_note = bytesMeasured
+                    ? "Byte totals are MEASURED, from PostgreSQL 18's read_bytes/write_bytes/extend_bytes. "
+                      + "They are not comparable with the figures a pre-18 server reports, which are "
+                      + "reads x block size - 18 reads several blocks per operation, so the older estimate "
+                      + "undercounts."
+                    : (bytesEstimated
+                        ? "Byte totals are ESTIMATED as count x block_bytes, which is exact below "
+                          + "PostgreSQL 18 because one operation moves one block. PostgreSQL 18 measures "
+                          + "them directly instead."
+                        : "This server reports no byte figures at all: op_bytes is absent and the measured "
+                          + "columns PostgreSQL 18 replaced it with are not being collected. The counts and "
+                          + "times above are unaffected."),
                 combinations,
             }, McpHelpers.JsonOptions);
         }
