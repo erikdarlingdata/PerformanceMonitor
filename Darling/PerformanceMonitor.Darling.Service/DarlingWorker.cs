@@ -2168,6 +2168,10 @@ public sealed class DarlingWorker : BackgroundService
     /// Reads <c>(queryid, query)</c> from the monitored PostgreSQL server with <c>showtext = true</c> (#2219).
     /// Capped, and ordered by total execution time so a catalog larger than the cap keeps the text for the
     /// queries anyone would actually look at rather than an arbitrary slice.
+    /// <para>#2651: the SOURCE is chosen by flavor. This read was Aurora-only, so off Aurora the text table
+    /// was never populated at all — which made get_pg_top_queries return a null query_text on every row
+    /// forever, and made test_hypothetical_index (#2612) unable to resolve a statement on the one platform
+    /// it can be tested against.</para>
     /// </summary>
     private static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
         ServerRuntime runtime, CancellationToken cancellationToken)
@@ -2177,7 +2181,9 @@ public sealed class DarlingWorker : BackgroundService
 
         await using var connection = new Npgsql.NpgsqlConnection(runtime.ConnectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new Npgsql.NpgsqlCommand(PgStatementText.FetchSql, connection) { CommandTimeout = 60 };
+        await using var command = new Npgsql.NpgsqlCommand(
+            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion),
+            connection) { CommandTimeout = 60 };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

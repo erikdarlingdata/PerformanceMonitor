@@ -79,7 +79,12 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
     /// filtered rather than grouped — a nested statement shares its parent's text and would only duplicate the
     /// row it upserts into.</para>
     /// </summary>
-    public const string FetchSql = @"
+    public const string FetchSql = AuroraFetchSql;
+
+    /// <summary>
+    /// Aurora's extended function. Kept as its own constant now that there are two sources (#2651).
+    /// </summary>
+    public const string AuroraFetchSql = @"
 SELECT
     s.queryid AS queryid,
     s.query AS query_text
@@ -89,6 +94,63 @@ AND   s.query IS NOT NULL
 AND   s.toplevel
 ORDER BY s.total_exec_time DESC
 LIMIT $1";
+
+    /// <summary>
+    /// The vanilla view, for every PostgreSQL that is not Aurora (#2651).
+    ///
+    /// <para>Without this the table is never populated off Aurora, and two things fail SILENTLY:
+    /// <c>get_pg_top_queries</c> returns <c>query_text: null</c> on every row forever — while the field's
+    /// own documentation says null means "not captured YET", which is true on Aurora and a lie here — and
+    /// <c>test_hypothetical_index</c> (#2612) cannot resolve a statement at all, so it answers "no
+    /// statement text is stored" and blames a refresh cadence for a missing source.</para>
+    ///
+    /// <para>Strictly simpler than the Aurora arm: the two columns this needs are the two both sources
+    /// have, so there is no NULL-filling and no ordinal to keep in step.</para>
+    /// </summary>
+    public const string VanillaFetchSql = @"
+SELECT
+    queryid,
+    query_text
+FROM
+(
+    /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
+       (queryid, userid, dbid, toplevel), so ONE queryid comes back once per user and database that ran
+       it - and the upsert below keys on (server_id, queryid), which meets those duplicates as
+       '21000: ON CONFLICT DO UPDATE command cannot affect row a second time' and abandons the whole
+       batch. Measured: the first cut of this shipped without it and the refresh failed every cycle,
+       logging and storing nothing, which is a quieter failure than it sounds because the caller
+       deliberately treats a text-refresh error as non-fatal.
+
+       Any of the duplicates would do - the text is the normalized statement and is identical across
+       them - so the costliest is taken, which is the same thing the outer ORDER BY is choosing for. */
+    SELECT DISTINCT ON (s.queryid)
+        s.queryid AS queryid,
+        s.query AS query_text,
+        s.total_exec_time AS total_exec_time
+    FROM public.pg_stat_statements AS s
+    WHERE s.queryid IS NOT NULL
+    AND   s.query IS NOT NULL
+    AND   {TOPLEVEL}
+    ORDER BY s.queryid, s.total_exec_time DESC
+) AS d
+ORDER BY d.total_exec_time DESC
+LIMIT $1";
+
+    /// <summary>
+    /// The fetch for a target, by flavor.
+    ///
+    /// <para><c>toplevel</c> arrived in <c>pg_stat_statements</c> 1.9 (PostgreSQL 14). Before that nested
+    /// tracking did not exist, so every row IS top level and <c>true</c> is the correct predicate rather
+    /// than a fallback — the same guard <c>PgStatementStatsCollector</c> already applies, and without it
+    /// the query fails on a 13 target instead of degrading.</para>
+    /// </summary>
+    public static string FetchSqlFor(bool isAurora, int postgresMajorVersion)
+        => isAurora
+            ? AuroraFetchSql
+            : VanillaFetchSql.Replace(
+                "{TOPLEVEL}",
+                postgresMajorVersion >= 14 ? "s.toplevel" : "true",
+                System.StringComparison.Ordinal);
 
     /// <summary>
     /// Whether this server is due a text fetch — asked of the STORE rather than remembered in the service, so a
