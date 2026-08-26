@@ -569,16 +569,25 @@ internal static class PgDisplay
             : string.Create(CultureInfo.CurrentCulture, $"{row.TotalExecTimeMs / (double)row.Calls:N1}"),
         MaxExecTimeMs = Math.Round(row.MaxExecTimeMs, 1),
         RowsReturned = Count(row.RowsReturned),
-        CacheHitPct = Percent(
-            row.SharedBlocksHit + row.OrcacheBlocksHit,
-            row.SharedBlocksHit + row.OrcacheBlocksHit + row.SharedBlocksRead + row.StorageBlocksRead),
+        /* #2625: the Aurora-only halves are NULL on a self-hosted target, where there is no Optimized
+           Reads tier and no storage volume to read from. Treating them as zero would still produce a
+           NUMBER here — a cache-hit ratio computed over shared blocks alone, presented in the same column
+           as Aurora's four-way one, with nothing saying the two mean different things. So the ratio is
+           computed only when the split is present, and reads as not-applicable when it is not. */
+        CacheHitPct = row.OrcacheBlocksHit is { } orcacheHit && row.StorageBlocksRead is { } storageRead
+            ? Percent(
+                row.SharedBlocksHit + orcacheHit,
+                row.SharedBlocksHit + orcacheHit + row.SharedBlocksRead + storageRead)
+            : NotApplicableText,
         /* BLOCKS, and labelled as such — both of them. The block size is a compile-time setting of the
            server, so multiplying by an assumed 8kB would put a fabricated byte count next to real ones.
            Temp READ sits beside temp written because a spill that is written and never read back is a
            different (and cheaper) event than one the query then re-reads. */
         TempRead = Blocks(row.TempBlocksRead),
         TempWritten = Blocks(row.TempBlocksWritten),
-        PeakMemory = Bytes(row.MaxPeakMemBytes),
+        /* Aurora-only too: core PostgreSQL has no per-statement peak-memory figure at all, so this is
+           not-applicable rather than a zero-byte grant. */
+        PeakMemory = row.MaxPeakMemBytes is { } peak ? Bytes(peak) : NotApplicableText,
         WalWritten = Bytes(row.WalBytes),
         /* Null is "no text captured for this queryid yet" — text refreshes hourly, and a major-version
            upgrade re-keys every queryid — which is a different statement from an empty query. */

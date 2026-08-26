@@ -849,13 +849,13 @@ public sealed class ViewerPostgresTabsTests
                 + "has no query duration at all, so showing both invites reading the wrong one",
 
             ["PgStatementRow.SharedBlocksHit"] = "CacheHitPct — one ratio over both cache tiers and both miss sources",
-            ["PgStatementRow.OrcacheBlocksHit"] = "CacheHitPct — Aurora's Optimized Read cache, same ratio",
+            ["PgStatementRow.OrcacheBlocksHit"] = "CacheHitPct — Aurora's Optimized Read cache, same ratio; null off Aurora, where the ratio reads not-applicable rather than being computed over shared blocks alone (#2625)",
             ["PgStatementRow.SharedBlocksRead"] = "CacheHitPct — the miss side of that ratio",
-            ["PgStatementRow.StorageBlocksRead"] = "CacheHitPct — Aurora's storage-layer miss, same ratio",
+            ["PgStatementRow.StorageBlocksRead"] = "CacheHitPct — Aurora's storage-layer miss, same ratio; null off Aurora (#2625)",
             ["PgStatementRow.TempBlocksRead"] = "TempRead — labelled in blocks, not converted to bytes",
             ["PgStatementRow.TempBlocksWritten"] = "TempWritten — labelled in blocks, not converted to bytes",
             ["PgStatementRow.WalBytes"] = "WalWritten — the same number, formatted",
-            ["PgStatementRow.MaxPeakMemBytes"] = "PeakMemory — the same number, formatted",
+            ["PgStatementRow.MaxPeakMemBytes"] = "PeakMemory — the same number, formatted; null off Aurora, where core PostgreSQL has no per-statement peak-memory figure at all (#2625)",
             ["PgStatementRow.TotalExecTimeMs"] = "TotalExecTimeMs is shown; AvgExecTimeMs derives from it and Calls",
 
             ["PgDatabaseRow.BlksHit"] = "CacheHitPct — the hit side of that ratio",
