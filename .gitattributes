@@ -20,3 +20,10 @@
 # A captured PostgreSQL log is a FIXTURE of real bytes: the parser keys on the exact line endings
 # and the tab-indented continuation, so line-ending normalisation would change what it is evidence of.
 Darling/Darling.Tests/Fixtures/auto_explain_real_block.txt -text
+
+# The PostgreSQL verification rig runs INSIDE Linux containers. A Dockerfile whose RUN lines carry a
+# trailing CR breaks the shell that executes them, and the seed is fed to psql in the container the same
+# way - so these keep LF regardless of the repo-wide eol=crlf default.
+tools/pg-verification-rig/Dockerfile text eol=lf
+tools/pg-verification-rig/*.yml text eol=lf
+tools/pg-verification-rig/*.sql text eol=lf
