@@ -75,6 +75,14 @@ public sealed class ServerPageTabsTests
             ["get_pg_wait_stats"] = "pg_wait_stats",
             ["get_pg_wait_sampling"] = "pg_wait_sampling",
             ["get_pg_kernel_stats"] = "pg_kernel_stats",
+        ["get_pg_predicate_stats"] = "pg_predicate_stats",
+        ["get_pg_index_bloat"] = "pg_index_bloat",
+        ["get_pg_column_stats"] = "pg_column_stats",
+        ["get_pg_buffer_usage"] = "pg_buffer_usage",
+        ["get_pg_extensions"] = "pg_extension_availability",
+        ["get_pg_lock_stats"] = "pg_lock_stats",
+        ["get_pg_write_stats"] = "pg_write_stats",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",
             ["get_pg_plans"] = "pg_plan_capture",
             ["get_pg_blocking"] = "pg_blocking",
@@ -159,11 +167,11 @@ public sealed class ServerPageTabsTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        /* Eleven before this PR, nine after the two it closes. Lower it as each is closed; it must never
-           be raised. One of the nine — pg_plan_capture_readiness — is the legitimate case the ratchet is
-           built to tolerate: its output is one row of configuration state, which is a panel rather than a
-           question anyone asks an agent. */
-        const int KnownUnreadable = 9;
+        /* Eleven, then nine, now ONE. The one left is pg_plan_capture_readiness, which is the legitimate
+           case this ratchet was built to tolerate: its output is a single row of configuration state, a
+           panel rather than a question anyone asks an agent. Every other PostgreSQL collector is now
+           served. It must never be raised. */
+        const int KnownUnreadable = 1;
 
         Assert.True(
             unreadable.Length <= KnownUnreadable,
