@@ -35,12 +35,16 @@ public static class DarlingPgStatementReader
         double MaxExecTimeMs,
         long SharedBlocksHit,
         long SharedBlocksRead,
-        long StorageBlocksRead,
-        long OrcacheBlocksHit,
+        /* Nullable from #2625 on: these three come only from aurora_stat_statements(). On a self-hosted
+           target the collector writes NULL, and 0 here would be a claim ABOUT AURORA made about a server
+           that is not Aurora — "the storage volume served no reads" rather than "there is no storage
+           volume". The read preserves the distinction end to end; the JSON emits null. */
+        long? StorageBlocksRead,
+        long? OrcacheBlocksHit,
         long TempBlocksRead,
         long TempBlocksWritten,
         long WalBytes,
-        long MaxPeakMemBytes,
+        long? MaxPeakMemBytes,
         /* #2219: the statement text, or null when none has been captured for this queryid yet. Null is the
            HONEST answer rather than a placeholder: text is refreshed hourly, so a statement first seen minutes
            ago genuinely has none, and after a major-version upgrade re-keys queryid the new ids have none until
@@ -84,6 +88,13 @@ public static class DarlingPgStatementReader
                 delta_rows,
                 max_exec_time_ms,
                 max_exec_peakmem_bytes,
+                /* Carried RAW alongside their deltas (#2625). The aggregate below has to separate two
+                   states that both arrive as a NULL sum: a series with one sample in the window (no
+                   measurable interval, so 0 is right) and a source that never reported the column at all
+                   (self-hosted PostgreSQL, where 0 would be a false statement about Aurora hardware).
+                   Only the undifferenced column can tell them apart. */
+                storage_blks_read AS raw_storage_blks_read,
+                orcache_blks_hit  AS raw_orcache_blks_hit,
                 GREATEST(shared_blks_hit    - LAG(shared_blks_hit)    OVER series, 0) AS d_shared_blks_hit,
                 GREATEST(shared_blks_read   - LAG(shared_blks_read)   OVER series, 0) AS d_shared_blks_read,
                 GREATEST(storage_blks_read  - LAG(storage_blks_read)  OVER series, 0) AS d_storage_blks_read,
@@ -117,8 +128,12 @@ public static class DarlingPgStatementReader
                has no measurable interval, and its increment happened before the window began. */
             CAST(coalesce(SUM(d_shared_blks_hit), 0) AS bigint) AS shared_blks_hit,
             CAST(coalesce(SUM(d_shared_blks_read), 0) AS bigint) AS shared_blks_read,
-            CAST(coalesce(SUM(d_storage_blks_read), 0) AS bigint) AS storage_blks_read,
-            CAST(coalesce(SUM(d_orcache_blks_hit), 0) AS bigint) AS orcache_blks_hit,
+            /* NULL when the source never reported it, 0 when it did and the window holds no interval.
+               COUNT ignores NULLs, so COUNT(raw_*) = 0 means every sample was silent. */
+            CASE WHEN COUNT(raw_storage_blks_read) = 0 THEN NULL
+                 ELSE CAST(coalesce(SUM(d_storage_blks_read), 0) AS bigint) END AS storage_blks_read,
+            CASE WHEN COUNT(raw_orcache_blks_hit) = 0 THEN NULL
+                 ELSE CAST(coalesce(SUM(d_orcache_blks_hit), 0) AS bigint) END AS orcache_blks_hit,
             CAST(coalesce(SUM(d_temp_blks_read), 0) AS bigint) AS temp_blks_read,
             CAST(coalesce(SUM(d_temp_blks_written), 0) AS bigint) AS temp_blks_written,
             CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) AS wal_bytes,
@@ -164,12 +179,13 @@ public static class DarlingPgStatementReader
                 reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                /* null, not 0 — see PgStatementRow. */
+                reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                reader.IsDBNull(9) ? null : reader.GetInt64(9),
                 reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+                reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 /* #2219: null stays null — see PgStatementRow.QueryText for why an empty string would be a lie. */
                 reader.IsDBNull(14) ? null : reader.GetString(14)));
         }

@@ -134,8 +134,9 @@ public sealed class DarlingCliCommandsTests
 
     /// <summary>
     /// The case the count exists for. A stock-PostgreSQL 15 reader is the worst realistic target: no
-    /// Aurora functions, no pg_stat_io, and autovacuum stats that read as all zeros on a standby. Finding
-    /// that out at pre-flight is the difference between "this is configured" and "this will collect".
+    /// Aurora wait instrumentation, no pg_stat_io, and autovacuum stats that read as all zeros on a
+    /// standby. Finding that out at pre-flight is the difference between "this is configured" and "this
+    /// will collect" — which is why the negative assertion below matters as much as the positive ones.
     /// </summary>
     [Fact]
     public void FormatProbeLine_StockPostgresReader_NamesTheCollectorsThatWillNotRun()
@@ -153,13 +154,18 @@ public sealed class DarlingCliCommandsTests
         Assert.Contains("reader (in recovery)", line, StringComparison.Ordinal);
         Assert.Contains("not Aurora", line, StringComparison.Ordinal);
 
-        /* The Aurora-only pair, the writer-only one and the 16+ one — each named, so nobody has to
+        /* The Aurora-only one, the writer-only one and the 16+ one — each named, so nobody has to
            reverse-engineer an empty table later. */
         Assert.Contains("skipped:", line, StringComparison.Ordinal);
         Assert.Contains("pg_wait_stats", line, StringComparison.Ordinal);
-        Assert.Contains("pg_statement_stats", line, StringComparison.Ordinal);
         Assert.Contains("pg_autovacuum_stats", line, StringComparison.Ordinal);
         Assert.Contains("pg_io_stats", line, StringComparison.Ordinal);
+
+        /* pg_statement_stats was in that list until #2625 gave it a vanilla pg_stat_statements path. It
+           must NOT be skipped here — this pre-flight line is where an operator learns what a target will
+           and will not collect, and listing a collector that now runs would tell them to stop expecting
+           the one answer this change exists to deliver. */
+        Assert.DoesNotContain("pg_statement_stats", line, StringComparison.Ordinal);
     }
 
     /// <summary>

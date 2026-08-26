@@ -38,10 +38,12 @@ namespace Darling.Tests;
 /// </para>
 ///
 /// <para><b>And the capability gate on the THROW path.</b> The gate sat inside <c>if (rows.Count == 0)</c>,
-/// so it could only speak when the query succeeded and returned nothing. On a stock-PostgreSQL target — where
-/// <c>pg_statement_stats</c> can never run, its <c>AppliesTo</c> being Aurora-only — a throw produced a raw
-/// SQL error where the sibling <c>get_pg_wait_stats</c> gives the honest "does not run on that engine, and
-/// never will". Guarding that is the awkward half of this class: once the ambiguity is fixed the read no
+/// so it could only speak when the query succeeded and returned nothing. On a target that excludes this
+/// collector, a throw produced a raw SQL error where the sibling <c>get_pg_wait_stats</c> gives the honest
+/// "does not run on that engine, and never will". (The excluded target used to be stock PostgreSQL; #2625
+/// gave <c>pg_statement_stats</c> a vanilla <c>pg_stat_statements</c> path, so the gate is now exercised on
+/// the DIALECT branch — a SQL Server target — and stock PostgreSQL joined Aurora as a capable engine whose
+/// faults must still read as faults.) Guarding that is the awkward half of this class: once the ambiguity is fixed the read no
 /// longer throws, so an assertion written against the ordinary empty path would pass with or WITHOUT the
 /// catch-path fix and prove nothing. So the throw is INDUCED, deterministically and without touching shared
 /// DDL, by seeding <c>delta_calls</c> at <c>bigint</c> extremes: <c>SUM()</c> over them widens to numeric and
@@ -151,14 +153,26 @@ public sealed class DarlingPgTopQueriesLiveTests
             var auroraFault = JsonDocument.Parse(await DarlingMcpPgTopQueries(dataSource)).RootElement;
             Assert.Equal("error", auroraFault.GetProperty("status").GetString());
 
-            /* Stock PostgreSQL: pg_statement_stats is Aurora-only, so the honest answer to the same fault is
-               the permanent capability gap — not a SQL error the operator would go and chase. */
+            /* Stock PostgreSQL is now a SECOND capable engine, not the gap case (#2625): pg_statement_stats
+               reads the vanilla pg_stat_statements view here, so the same induced fault must still read as a
+               fault. This assertion used to expect not_collected, and flipping it is the point — it is the
+               one place in the suite that would have kept insisting stock PostgreSQL cannot answer this. */
             await SetEngineKindAsync(connection, ct, MonitoredEngineKind.Postgres);
 
             var stockFault = JsonDocument.Parse(await DarlingMcpPgTopQueries(dataSource)).RootElement;
-            Assert.Equal("not_collected", stockFault.GetProperty("status").GetString());
+            Assert.Equal("error", stockFault.GetProperty("status").GetString());
 
-            var gapText = stockFault.GetProperty("message").GetString()!;
+            /* And the catch-path GATE still has to speak, or #2532's fix rots the moment its only witness
+               moves. With no PostgreSQL flavor left that excludes this collector, the surviving exclusion is
+               the DIALECT one: a SQL Server target never receives a PostgreSQL collector at all, and the same
+               throw must produce the sentence rather than the SQLSTATE. Different branch of the same gate,
+               same guarantee. */
+            await SetEngineKindAsync(connection, ct, MonitoredEngineKind.SqlServer);
+
+            var dialectFault = JsonDocument.Parse(await DarlingMcpPgTopQueries(dataSource)).RootElement;
+            Assert.Equal("not_collected", dialectFault.GetProperty("status").GetString());
+
+            var gapText = dialectFault.GetProperty("message").GetString()!;
             Assert.Contains("pg_statement_stats", gapText, StringComparison.Ordinal);
             Assert.Contains("never will", gapText, StringComparison.Ordinal);
 
