@@ -872,28 +872,6 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No PVS rows. The collector reads a SQL Server 2019+ DMV, and a server with Accelerated Database Recovery off has nothing to report."
       ),
-      /* #2629: what the I/O above is reading INTO, and what is writing it back out. Residency and
-         checkpoint pressure are the two halves of a page's life either side of the I/O counters this tab
-         already shows, so all three belong together. */
-      table(
-        "Buffer Pool Residency",
-        "get_pg_buffer_usage",
-        { server, hours: ctx.hours, limit: 25 },
-        "relations",
-        PG_BUFFER_USAGE_COLUMNS,
-        ctx.label + ", residency is not read volume - a small hot table and a large one scanned once read alike",
-        "No buffer pool contents recorded. This needs the pg_buffercache extension in the database the collector connects to."
-      ),
-      /* stat, not table: this read answers with ONE object describing the whole window, not a row set. */
-      stat(
-        "Checkpoints and WAL",
-        "get_pg_write_stats",
-        { server, hours: ctx.hours },
-        PG_WRITE_STATS,
-        ctx.label + ", requested checkpoints mean write volume filled max_wal_size before the interval elapsed",
-        2,
-        "No checkpoint or WAL activity differenced yet. These are differenced across snapshots, so a single collection has nothing to difference against and the window fills on the second."
-      ),
     ],
   },
 
@@ -1181,27 +1159,6 @@ export const SERVER_TABS = [
         INDEX_COLUMNS,
         "daily collection",
         "No index usage rows recorded. Index and object stats are collected daily."
-      ),
-      /* #2629: what the queries above actually FILTER on. Placed on Activity rather than Storage because
-         it is evidence about the workload, not about the disk — and it belongs beside top queries, since
-         a predicate row and a query row are two views of the same execution. */
-      table(
-        "Predicate Selectivity",
-        "get_pg_predicate_stats",
-        { server, hours: ctx.hours, limit: 25 },
-        "predicates",
-        PG_PREDICATE_COLUMNS,
-        ctx.label + ", SAMPLED counts - scale by 1/sample rate and treat the product as an estimate",
-        "No predicate statistics in this window. pg_qualstats samples executions (1% by default) and needs shared_preload_libraries plus a restart, so an empty panel here usually means it is not loaded."
-      ),
-      table(
-        "Column Statistics",
-        "get_pg_column_stats",
-        { server, hours: ctx.hours, limit: 25 },
-        "columns",
-        PG_COLUMN_STATS_COLUMNS,
-        ctx.label + ", the numbers the planner turns into row estimates; n_distinct is a ratio when negative",
-        "No column statistics in this window. This collector runs DAILY and reads only tables above a size floor, and pg_stats is privilege-filtered - a login without SELECT on a table sees nothing for it."
       ),
     ],
   },
@@ -1602,6 +1559,27 @@ export const POSTGRES_TABS = [
         ctx.label + ", a sample of pg_locks rather than an event log; ungranted rows are the contended ones",
         "No lock activity sampled in this window. This is a SAMPLE, so a lock taken and released between two captures does not appear - an empty grid is the healthy state, not proof nothing was ever locked."
       ),
+      /* #2629: what the queries above actually FILTER on. Placed on Activity rather than Storage because
+         it is evidence about the workload, not about the disk — and it belongs beside top queries, since
+         a predicate row and a query row are two views of the same execution. */
+      table(
+        "Predicate Selectivity",
+        "get_pg_predicate_stats",
+        { server, hours: ctx.hours, limit: 25 },
+        "predicates",
+        PG_PREDICATE_COLUMNS,
+        ctx.label + ", SAMPLED counts - scale by 1/sample rate and treat the product as an estimate",
+        "No predicate statistics in this window. pg_qualstats samples executions (1% by default) and needs shared_preload_libraries plus a restart, so an empty panel here usually means it is not loaded."
+      ),
+      table(
+        "Column Statistics",
+        "get_pg_column_stats",
+        { server, hours: ctx.hours, limit: 25 },
+        "columns",
+        PG_COLUMN_STATS_COLUMNS,
+        ctx.label + ", the numbers the planner turns into row estimates; n_distinct is a ratio when negative",
+        "No column statistics in this window. This collector runs DAILY and reads only tables above a size floor, and pg_stats is privilege-filtered - a login without SELECT on a table sees nothing for it."
+      ),
     ],
   },
 
@@ -1798,6 +1776,28 @@ export const POSTGRES_TABS = [
             "No I/O in this window. pg_stat_io needs PostgreSQL 16 or newer; on an older major the collector does not run at all, and the Collection Health panels on the Overview tab are where that shows.",
         },
       ]),
+      /* #2629: what the I/O above is reading INTO, and what is writing it back out. Residency and
+         checkpoint pressure are the two halves of a page's life either side of the I/O counters this tab
+         already shows, so all three belong together. */
+      table(
+        "Buffer Pool Residency",
+        "get_pg_buffer_usage",
+        { server, hours: ctx.hours, limit: 25 },
+        "relations",
+        PG_BUFFER_USAGE_COLUMNS,
+        ctx.label + ", residency is not read volume - a small hot table and a large one scanned once read alike",
+        "No buffer pool contents recorded. This needs the pg_buffercache extension in the database the collector connects to."
+      ),
+      /* stat, not table: this read answers with ONE object describing the whole window, not a row set. */
+      stat(
+        "Checkpoints and WAL",
+        "get_pg_write_stats",
+        { server, hours: ctx.hours },
+        PG_WRITE_STATS,
+        ctx.label + ", requested checkpoints mean write volume filled max_wal_size before the interval elapsed",
+        2,
+        "No checkpoint or WAL activity differenced yet. These are differenced across snapshots, so a single collection has nothing to difference against and the window fills on the second."
+      ),
     ],
   },
 
