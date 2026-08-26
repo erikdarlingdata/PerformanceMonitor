@@ -212,8 +212,9 @@ if (args.Length > 0 && DarlingCliCommands.IsEnableMcpVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("--enable-mcp requires Windows (DPAPI + firewall).");
-        return 1;
+        /* #2626: the refusal names the path that WORKS on this host, not just the platform it is not. */
+        return DarlingCliCommands.WriteEndpointVerbPlatformRefusal(
+            isMcp: true, enable: true, args.Length > 1 ? args[1] : null, Console.Error);
     }
 
     var configPath = args.Length > 1 ? args[1] : null;
@@ -224,8 +225,9 @@ if (args.Length > 0 && DarlingCliCommands.IsDisableMcpVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("--disable-mcp requires Windows (DPAPI + firewall).");
-        return 1;
+        /* #2626: the refusal names the path that WORKS on this host, not just the platform it is not. */
+        return DarlingCliCommands.WriteEndpointVerbPlatformRefusal(
+            isMcp: true, enable: false, args.Length > 1 ? args[1] : null, Console.Error);
     }
 
     var configPath = args.Length > 1 ? args[1] : null;
@@ -236,8 +238,9 @@ if (args.Length > 0 && DarlingCliCommands.IsEnableWebVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("--enable-web requires Windows (DPAPI + firewall).");
-        return 1;
+        /* #2626: the refusal names the path that WORKS on this host, not just the platform it is not. */
+        return DarlingCliCommands.WriteEndpointVerbPlatformRefusal(
+            isMcp: false, enable: true, args.Length > 1 ? args[1] : null, Console.Error);
     }
 
     var configPath = args.Length > 1 ? args[1] : null;
@@ -248,8 +251,9 @@ if (args.Length > 0 && DarlingCliCommands.IsDisableWebVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("--disable-web requires Windows (DPAPI + firewall).");
-        return 1;
+        /* #2626: the refusal names the path that WORKS on this host, not just the platform it is not. */
+        return DarlingCliCommands.WriteEndpointVerbPlatformRefusal(
+            isMcp: false, enable: false, args.Length > 1 ? args[1] : null, Console.Error);
     }
 
     var configPath = args.Length > 1 ? args[1] : null;
