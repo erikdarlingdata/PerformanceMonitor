@@ -207,9 +207,54 @@ FROM @probe_failures
 ORDER BY
     name;";
 
+    /* #2643: TWO sources, and the second one cannot be referenced unless it exists.
+
+       sys.database_files is database-scoped, so on Azure SQL DB this collector reported the connected
+       database and nothing else. Correct, and indistinguishable from a collector that found only master:
+       a reporter with fifty databases pointed the Viewer at master, saw master's two files, and filed it.
+
+       sys.resource_stats is a MASTER-ONLY view carrying storage_in_megabytes per database with roughly
+       fourteen days of history. Verified against a live Azure SQL Database rather than taken from
+       documentation - so the sizes ARE reachable from one connection, and only the per-FILE breakdown is
+       not. That shows in the projection: file_id NULL and a file_name that says so, never a fabricated
+       file.
+
+       The second arm runs through sp_executesql, and that is not stylistic. sys.resource_stats does not
+       EXIST in a user database, and name resolution happens at PARSE time - so a plain UNION guarded by
+       WHERE DB_NAME() = N'master' still fails with 208 on every user database, which is the common case.
+       Measured: it did, immediately, the first time this was run from somewhere other than master.
+
+       A table variable rather than two branches each repeating the file SELECT: the file rows are
+       collected identically either way, and duplicating that projection is how the two copies drift. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+DECLARE
+    @database_sizes TABLE
+(
+    database_name nvarchar(128) NULL,
+    database_id int NULL,
+    file_id int NULL,
+    file_type_desc nvarchar(60) NULL,
+    file_name nvarchar(128) NULL,
+    physical_name nvarchar(260) NULL,
+    total_size_mb decimal(19,2) NULL,
+    used_size_mb decimal(19,2) NULL,
+    auto_growth_mb decimal(19,2) NULL,
+    max_size_mb decimal(19,2) NULL,
+    recovery_model_desc nvarchar(12) NULL,
+    compatibility_level int NULL,
+    state_desc nvarchar(60) NULL,
+    volume_mount_point nvarchar(256) NULL,
+    volume_total_mb decimal(19,2) NULL,
+    volume_free_mb decimal(19,2) NULL,
+    is_percent_growth bit NULL,
+    growth_pct int NULL,
+    vlf_count int NULL
+);
+
+INSERT
+    @database_sizes
 SELECT
     database_name = DB_NAME(),
     database_id = DB_ID(),
@@ -253,9 +298,64 @@ SELECT
         CASE WHEN df.is_percent_growth = 1 THEN df.growth ELSE NULL END,
     vlf_count =
         CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
-FROM sys.database_files AS df
+FROM sys.database_files AS df;
+
+/* The sibling databases, on the one connection that can see them. Newest sample per database: the older
+   ones are a growth series worth having later, and taking them all would multiply every database by the
+   retention window. The connected database is excluded because the arm above already reported it with
+   real files. */
+IF DB_NAME() = N'master'
+BEGIN
+    INSERT
+        @database_sizes
+    (
+        database_name, file_type_desc, file_name, total_size_mb, state_desc
+    )
+    EXEC sys.sp_executesql N'
+SELECT
+    rs.database_name,
+    file_type_desc = N''ROWS'',
+    file_name = N''(whole database)'',
+    total_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes),
+    state_desc = N''ONLINE''
+FROM
+(
+    SELECT
+        r.database_name,
+        r.storage_in_megabytes,
+        rn = ROW_NUMBER() OVER (PARTITION BY r.database_name ORDER BY r.end_time DESC)
+    FROM sys.resource_stats AS r
+    WHERE r.database_name <> DB_NAME()
+    AND   r.storage_in_megabytes IS NOT NULL
+) AS rs
+WHERE rs.rn = 1;';
+END;
+
+SELECT
+    ds.database_name,
+    ds.database_id,
+    ds.file_id,
+    ds.file_type_desc,
+    ds.file_name,
+    ds.physical_name,
+    ds.total_size_mb,
+    ds.used_size_mb,
+    ds.auto_growth_mb,
+    ds.max_size_mb,
+    ds.recovery_model_desc,
+    ds.compatibility_level,
+    ds.state_desc,
+    ds.volume_mount_point,
+    ds.volume_total_mb,
+    ds.volume_free_mb,
+    ds.is_percent_growth,
+    ds.growth_pct,
+    ds.vlf_count
+FROM @database_sizes AS ds
 ORDER BY
-    df.file_id
+    CASE WHEN ds.file_id IS NULL THEN 1 ELSE 0 END,
+    ds.database_name,
+    ds.file_id
 OPTION(RECOMPILE);";
 
     public override string Name => "database_size_stats";
