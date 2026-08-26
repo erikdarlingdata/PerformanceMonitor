@@ -2709,9 +2709,7 @@ public static class DarlingCliCommands
 
         if (!postgres.Managed)
         {
-            error.WriteLine(
-                $"{verb} applies to the managed store only. In bring-your-own mode (postgres.connectionString), the " +
-                $"endpoint enable flags live in YOUR PostgreSQL's config.config_service ({column}) — toggle them there.");
+            error.WriteLine(ByoEndpointToggleMessage(verb, column, enable));
             return 1;
         }
 
@@ -2798,6 +2796,60 @@ public static class DarlingCliCommands
     };
 
     /// <summary>The verb spelling for a toggle (for error + handoff text).</summary>
+    /// <summary>
+    /// What a bring-your-own deployment is told instead of a toggle: the flags live in the operator's own
+    /// PostgreSQL, and the UPDATE is the whole procedure. Composed here rather than inline because #2626
+    /// needs the SAME sentence from a second caller — the platform guard, which is the one a non-Windows
+    /// operator actually reaches.
+    /// </summary>
+    private static string ByoEndpointToggleMessage(string verb, string column, bool enable) =>
+        $"{verb} applies to the managed store only. In bring-your-own mode (postgres.connectionString), the "
+        + $"endpoint enable flags live in YOUR PostgreSQL's config.config_service ({column}) — toggle them "
+        + $"there:\n    UPDATE config.config_service SET {column} = {(enable ? "true" : "false")};\n"
+        + "The service picks that up within one sweep; no restart is needed.";
+
+    /// <summary>
+    /// The message for an endpoint-toggle verb invoked on a non-Windows host (#2626).
+    ///
+    /// <para>
+    /// "requires Windows" alone is true of the verb and MISLEADING about the situation. The two Windows
+    /// dependencies — the DPAPI-protected owner credential and the firewall reconcile — are both MANAGED-mode
+    /// concerns, and a non-Windows deployment is necessarily bring-your-own, where the verb would refuse
+    /// anyway with the message that actually helps. Reading the platform message on macOS or Linux, an
+    /// operator concludes the DASHBOARD is Windows-only; it is not, and one UPDATE turns it on.
+    /// </para>
+    ///
+    /// <para>
+    /// So the config is loaded here, best effort, purely to decide which sentence to print. A config that
+    /// cannot be loaded, or a managed one (which on a non-Windows host should not exist), gets the platform
+    /// sentence — the honest answer when we cannot tell.
+    /// </para>
+    /// </summary>
+    public static int WriteEndpointVerbPlatformRefusal(
+        bool isMcp, bool enable, string? configPath, TextWriter error)
+    {
+        var endpoint = isMcp ? EndpointKind.Mcp : EndpointKind.Web;
+        var verb = VerbName(endpoint, enable);
+        var column = isMcp ? "mcp_enabled" : "web_enabled";
+
+        var managed = true;
+        try
+        {
+            managed = DarlingConfig.Load(configPath).Postgres?.Managed ?? true;
+        }
+        catch
+        {
+            /* Deliberately swallowed: this method exists to pick a sentence, and a config we cannot read is
+               not a reason to fail differently than we already are. */
+        }
+
+        error.WriteLine(managed
+            ? $"{verb} requires Windows (DPAPI + firewall)."
+            : ByoEndpointToggleMessage(verb, column, enable));
+
+        return 1;
+    }
+
     private static string VerbName(EndpointKind endpoint, bool enable) => (endpoint, enable) switch
     {
         (EndpointKind.Mcp, true) => "--enable-mcp",
