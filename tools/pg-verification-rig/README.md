@@ -53,6 +53,34 @@ defects survived long enough to be found here.
   EXECUTE; a superuser must grant it explicitly. That grant also exposes `pg_hba.conf`, which is why the
   plan-capture collector reports its absence as a grant the operator must choose to give.
 
+## Two majors at once, for version drift
+
+```bash
+docker compose --profile multiversion up -d    # adds a plain PostgreSQL 18 target on 55418
+```
+
+Some of what this product reads is not stable across majors, and every one of those differences is silent:
+17 gutted `pg_stat_bgwriter`, moving five columns to `pg_stat_checkpointer` and deleting `buffers_backend`
+outright; 18 removed `pg_stat_io`'s `op_bytes` and replaced it with measured `read_bytes` / `write_bytes` /
+`extend_bytes`. A collector that guards the difference correctly and a read that quietly returns NULL look
+identical from one server.
+
+Register **both** targets in `darling.json` and the difference becomes an observable, which is how #2653 and
+#2655 were found and verified:
+
+- the registry stamps `postgres_major_version` 17 and 18 side by side
+- `pg_io_stats` splits cleanly — 17's rows carry `op_bytes` and no `read_bytes`, 18's the reverse
+- `get_pg_io_stats` answers `estimated_from_block_size` for one and `measured` for the other
+
+It also quantifies things reasoning gets wrong. 18's vectored reads mean one entry in `reads` can cover
+several blocks, so the pre-18 `reads x block_size` estimate undercounts — measured here, by **10× to 16×**,
+not the few percent it sounds like.
+
+The 18 target is the **plain image**, not the extension build. The PGDG extension packages do not track a
+new major immediately, and pinning to them would make the rig fail to build on the day a major ships —
+exactly when this target is most useful. It exercises the core catalog views, which is where version drift
+lives; the extension-backed collectors belong on the 17 target.
+
 ## Reproducing the Aurora-only paths
 
 You cannot, from here, and that is fine. `pg_wait_stats` and the RDS log API need a managed target. Their

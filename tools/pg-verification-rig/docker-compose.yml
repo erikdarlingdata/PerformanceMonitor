@@ -48,6 +48,29 @@ services:
       - -c
       - pg_qualstats.sample_rate=1
 
+  # A SECOND target, pinned to the newest major, for the version-difference work. Some of what this
+  # product reads is not stable across majors and the differences are silent: 17 gutted pg_stat_bgwriter
+  # and 18 removed pg_stat_io's op_bytes outright, replacing it with measured byte totals (#2655). A
+  # collector can only be checked against that by having both majors present AT ONCE - one target shows a
+  # column missing, two show which one has it and which quantity each is reporting.
+  #
+  # Deliberately the PLAIN image, not the extension build above. The PGDG extension packages do not track
+  # a new major immediately, and pinning this to them would make the whole rig fail to build on the day a
+  # major ships - exactly when this target is most useful. It exercises the CORE catalog views, which is
+  # what version drift lives in; the extension-backed collectors belong on the 17 target.
+  #
+  # Opt-in, so the default `up -d` stays a two-container rig:
+  #   docker compose --profile multiversion up -d
+  target18:
+    image: postgres:18
+    profiles: ["multiversion"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: targetpw
+      POSTGRES_DB: appdb
+    ports:
+      - "55418:5432"
+
   store:
     image: postgres:17
     restart: unless-stopped
