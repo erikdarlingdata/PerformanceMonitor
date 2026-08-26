@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -156,6 +156,7 @@ public static class PgMigrations
         new Migration(97, "pg-kernel-stats", V97Sql),
         new Migration(98, "pg-predicate-stats", V98Sql),
         new Migration(99, "pg-plan-capture", V99Sql),
+        new Migration(100, "pg-major-version", V100Sql),
     };
 
     /// <summary>
@@ -2272,6 +2273,45 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V100 — the PostgreSQL major version on the <c>collect.servers</c> registry (#2653). V82 gave the
+    /// registry <c>engine_kind</c>, which answers <i>which engine</i>; this answers <i>which version of
+    /// it</i>, and without it the read layer cannot explain its own NULLs.
+    ///
+    /// <para><b>The gap this closes.</b> Seven PostgreSQL collectors branch on
+    /// <c>postgresMajorVersion</c> and emit <c>NULL::bigint</c> for columns the target's version does not
+    /// have — <c>PgWriteStatsCollector</c> alone has nine, because 17 removed <c>buffers_backend</c> and
+    /// <c>buffers_backend_fsync</c> from <c>pg_stat_bgwriter</c> with no successor there. The collectors get
+    /// the version from the live probe and are correct. The READS have no connection and no column to read
+    /// it from, so a structurally-absent column arrives as a naked NULL and is indistinguishable from a
+    /// measurement that did not happen — the failure #2511 and #2623 exist to prevent, on the version
+    /// axis.</para>
+    ///
+    /// <para><b>Not inferable from the data.</b> Deriving "17 or later" from
+    /// <c>buffers_backend IS NULL</c> would work for that one column and is the wrong fix twice over: it
+    /// makes every read re-derive a fact the connector already held, and for any column where absent-on-this
+    /// -version and genuinely-NULL are both possible it cannot tell them apart.</para>
+    ///
+    /// <para><b>Integer, not the version string.</b> The major is what every gate in the collectors compares
+    /// against (<c>&gt;= 17</c>, <c>&gt;= 16</c>, <c>&gt;= 14</c>); <c>server_version_num</c> and the full
+    /// text are diagnostic detail that would have to be re-parsed at every use. <c>sql_major_version</c> next
+    /// door is the same choice for the same reason, which also settles why this is a second column rather
+    /// than a reuse of that one: a reader joining the two engines' versions in one integer has no way to
+    /// know which vocabulary a given number belongs to, and 17 is a real major in both.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> — as V82. NULL says "no connect has stamped this yet"
+    /// and the readers treat it as no claim rather than as a version. The registry upsert runs on every
+    /// successful connect, so the column populates itself within one collection cycle for every live server.
+    /// It stays NULL forever on a SQL Server target, which is correct: it is not a fact about that server.
+    /// </para>
+    ///
+    /// <para>No view refresh: <c>collect.servers</c> is a registry, not a hypertable, and has no
+    /// <c>v_</c> passthrough freezing a <c>SELECT *</c> column list.</para>
+    /// </summary>
+    private const string V100Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS postgres_major_version integer;";
 
     /// <summary>
     /// V99 — <c>collect.pg_plan_capture</c> (#2566, part of #2538): execution plans captured by

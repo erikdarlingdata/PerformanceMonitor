@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -37,8 +37,8 @@ public static class DarlingObservability
        registration (same storage name, different engine) has to correct it. Internal so a pure test can pin
        the shape without a live store. */
     internal const string UpsertServerSql = @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd)
-VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8)
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version)
+VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name,
     display_name = EXCLUDED.display_name,
@@ -46,7 +46,8 @@ ON CONFLICT (server_id) DO UPDATE SET
     sql_major_version = EXCLUDED.sql_major_version,
     engine_kind = EXCLUDED.engine_kind,
     modified_date = EXCLUDED.modified_date,
-    monthly_cost_usd = EXCLUDED.monthly_cost_usd;";
+    monthly_cost_usd = EXCLUDED.monthly_cost_usd,
+    postgres_major_version = EXCLUDED.postgres_major_version;";
 
     /* Mirror the DESIRED config (config.config_monitored_servers) onto the OBSERVED registry
        (collect.servers) for the two fields the viewer/FinOps read straight off collect.servers: is_enabled
@@ -142,6 +143,15 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
             /* Per-server FinOps budget from darling.json (0 = hide cost in the viewer, like Lite). */
             command.Parameters.AddWithValue(server.Config.MonthlyCostUsd);
+            /* The probed PostgreSQL major (V100, #2653), so a READ can explain a column the target's version
+               does not have. DBNull rather than 0 off a PostgreSQL target: the reads treat NULL as "no claim",
+               and a 0 would be a version nobody runs asserted as fact. Guarded on Engine as well as on the
+               value because 0 is also what a PostgreSQL probe that failed before reading server_version_num
+               leaves behind. */
+            command.Parameters.AddWithValue(
+                server.Target.Engine == CollectorTargetEngine.PostgreSql && server.Target.PostgresMajorVersion > 0
+                    ? server.Target.PostgresMajorVersion
+                    : (object)DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

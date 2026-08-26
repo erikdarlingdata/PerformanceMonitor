@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -164,9 +164,17 @@ public sealed class MonitoredEngineKindStoreTests
         Assert.Contains("engine_kind = EXCLUDED.engine_kind", sql, StringComparison.Ordinal);
 
         /* The positional parameters have to stay in step with the column list — this is a $n INSERT and a
-           miscount puts the timestamp in the engine column. Eight distinct placeholders, ten columns, because
-           $7 is bound twice (created_date/modified_date) and is_enabled is a literal TRUE. */
-        Assert.Contains("VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8)", sql, StringComparison.Ordinal);
+           miscount puts the timestamp in the engine column. $7 is bound twice
+           (created_date/modified_date) and is_enabled is a literal TRUE, so placeholders are fewer than
+           columns.
+
+           What this arm owns is that engine_kind is still $6: V100 (#2653) appended
+           postgres_major_version as $9, and appending is the ONLY safe way to add one here, because Npgsql
+           binds positionally in add order and inserting a placeholder mid-list would silently shift this
+           column's value to its neighbour's. The whole-VALUES literal this used to pin moved to
+           PostgresMajorVersionRegistryTests, which asserts the same invariant without a literal that every
+           future column has to edit. */
+        Assert.Contains("VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
