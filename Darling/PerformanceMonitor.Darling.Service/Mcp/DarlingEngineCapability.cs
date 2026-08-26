@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -108,5 +108,49 @@ WHERE server_id = $1";
         var edition = reader.IsDBNull(0) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(0);
         var kind = reader.IsDBNull(1) ? null : reader.GetString(1);
         return (edition, kind);
+    }
+
+    /// <summary>The registry's PostgreSQL major for one server (V100, #2653). $1 server_id.</summary>
+    public const string PostgresMajorVersionSql = @"
+SELECT postgres_major_version
+FROM servers
+WHERE server_id = $1";
+
+    /// <summary>
+    /// The target's probed PostgreSQL major, or <c>null</c> when the registry makes no claim — no row, a
+    /// server no connect has stamped since V100 landed, or a SQL Server target, where it is not a fact about
+    /// that server at all.
+    ///
+    /// <para><b>Null is not an error and must not be rendered as a version.</b> Callers use this to decide
+    /// whether they may state that a column is absent on this server's version; with no claim they say
+    /// nothing about the version instead of guessing, because a wrong version in an explanation is worse
+    /// than an unexplained NULL.</para>
+    ///
+    /// <para>A registry read that FAILS answers null for the same reason
+    /// <see cref="NotCollectedStatusAsync"/> does: this runs on a path that already has its data, and a
+    /// capability probe must never turn a good answer into a read error.</para>
+    /// </summary>
+    public static async Task<int?> PostgresMajorVersionAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(PostgresMajorVersionSql);
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            {
+                return null;
+            }
+
+            return reader.GetInt32(0);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 }

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -26,6 +26,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgServerStateTools
 {
+    /// <summary>
+    /// The major that removed <c>buffers_backend</c> and <c>buffers_backend_fsync</c> from
+    /// <c>pg_stat_bgwriter</c> (#2653). They moved nowhere in that view - the fact lives in
+    /// <c>pg_stat_io</c> from 17 on - so <see cref="PgWriteStatsCollector"/> writes NULL for both at this
+    /// major and above, and this read names that rather than letting a structural absence read as a missing
+    /// measurement.
+    /// </summary>
+    private const int BuffersBackendRemovedInMajor = 17;
+
     [McpServerTool(Name = "get_pg_buffer_usage"), Description("Gets what is actually resident in the PostgreSQL shared buffer pool, per relation, from the pg_buffercache extension: how many buffers each table or index occupies, how many of those are dirty, and the average usage count that PostgreSQL's clock-sweep eviction reads. This answers which objects the cache is actually spent on, which is a different question from which objects are read most - a small hot table and a large one scanned once can produce similar read counts and completely different residency. High dirty counts concentrated in one relation point at write pressure. Note that scanning pg_buffercache takes a lock on the buffer mapping, so the collector runs it sparingly.")]
     public static async Task<string> GetPgBufferUsage(
         NpgsqlDataSource postgres,
@@ -256,7 +265,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. Returns one row describing the whole window, not a series.")]
+    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries - PostgreSQL 17 removed that column from pg_stat_bgwriter, so it is null on 17 and later and the note says so. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. Returns one row describing the whole window, not a series.")]
     public static async Task<string> GetPgWriteStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -289,6 +298,14 @@ public sealed class DarlingMcpPgServerStateTools
             var timed = row.CheckpointsTimed ?? 0;
             var requested = row.CheckpointsRequested ?? 0;
 
+            /* #2653: 17 removed buffers_backend / buffers_backend_fsync from pg_stat_bgwriter with no
+               successor there, so the collector writes NULL for them and the fact now lives in pg_stat_io.
+               Without the registry's major this read cannot tell that structural absence from a measurement
+               that did not happen, and its note explained a column that will never have a value here. */
+            var postgresMajor = await DarlingEngineCapability.PostgresMajorVersionAsync(
+                postgres, resolved.ServerId);
+            var backendCountersRemoved = postgresMajor >= BuffersBackendRemovedInMajor;
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
@@ -310,6 +327,12 @@ public sealed class DarlingMcpPgServerStateTools
                    paying for the write because no clean buffer was free. */
                 buffers_backend = row.BuffersBackend,
                 buffers_backend_fsync = row.BuffersBackendFsync,
+                /* Named only when the registry actually carries a major that removed them: absent from the
+                   payload otherwise, so a server whose version is unknown gets no claim rather than a
+                   guessed one. */
+                buffers_backend_availability = backendCountersRemoved
+                    ? $"not_collected: removed from pg_stat_bgwriter in PostgreSQL 17 (this server runs {postgresMajor}); the fact now lives in pg_stat_io, read by get_pg_io_stats"
+                    : null,
                 buffers_alloc = row.BuffersAlloc,
                 maxwritten_clean = row.MaxwrittenClean,
                 wal_records = row.WalRecords,
@@ -320,9 +343,16 @@ public sealed class DarlingMcpPgServerStateTools
                 wal_sync_time_ms = row.WalSyncTimeMs,
                 counter_reset = row.ResetDuringWindow,
                 note = "Requested checkpoints mean max_wal_size filled before the scheduled interval, so a "
-                     + "high requested share means write volume is forcing them. buffers_backend is a "
-                     + "write a QUERY had to perform itself for want of a clean buffer. wal_fpi counts "
-                     + "full-page images, which is why WAL volume spikes just after each checkpoint."
+                     + "high requested share means write volume is forcing them. "
+                     + (backendCountersRemoved
+                         ? "buffers_backend and buffers_backend_fsync are NULL because PostgreSQL 17 removed "
+                           + "them from pg_stat_bgwriter, not because nothing was measured: the question they "
+                           + "answered - whether backends are writing their own buffers - is answered on this "
+                           + "server by pg_stat_io, which get_pg_io_stats reads. "
+                         : "buffers_backend is a write a QUERY had to perform itself for want of a clean "
+                           + "buffer. ")
+                     + "wal_fpi counts full-page images, which is why WAL volume spikes just after each "
+                     + "checkpoint."
                      + (row.ResetDuringWindow
                          ? " The counters were RESET inside this window, so these figures cover only the "
                            + "time since the reset."
