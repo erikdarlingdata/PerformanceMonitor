@@ -54,6 +54,32 @@
              latch/spinlock, CPU scheduler, plan cache, System Events, …) gets it. Copy/Export delegate to the
              shared PerformanceMonitor.Ui DataGridExport (ViewerServerTab.CopyExport.cs). Defined before
              DarkGridRow so the StaticResource resolves. -->
+        <!-- #2612: the predicate grid's own menu. The shared DataGridContextMenu deliberately stays
+             read-only - it is on every grid in the Viewer, and an ACTION that reaches the monitored server
+             does not belong on all of them. This one exists only where the candidate does, which is also
+             exactly how the feature was scoped: driven from a specific predicate row a human is already
+             looking at, never swept. -->
+        <ContextMenu x:Key="PredicateStatsContextMenu">
+            <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy _Row" Click="CopyRow_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4C4;"/></MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Copy _All Rows" Click="CopyAllRows_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4D1;"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="_Export to CSV..." Click="ExportToCsv_Click">
+                <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
+            </MenuItem>
+            <Separator/>
+            <MenuItem Header="_Test an index on this column..." Click="TestHypotheticalIndex_Click"
+                      ToolTip="Asks the server whether the planner would use an index on this column. Nothing is executed and no index is built - the candidate is visible only inside one session and is discarded before the answer comes back.">
+                <MenuItem.Icon><TextBlock Text="&#x1F9EA;"/></MenuItem.Icon>
+            </MenuItem>
+        </ContextMenu>
+
         <ContextMenu x:Key="DataGridContextMenu">
             <MenuItem Header="Copy _Cell" Click="CopyCell_Click">
                 <MenuItem.Icon><TextBlock Text="&#x1F4CB;"/></MenuItem.Icon>
@@ -4452,6 +4478,7 @@
                 <TextBlock Grid.Row="8" x:Name="PgPredicateStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="9" x:Name="PgPredicateStatsGrid" Style="{StaticResource DarkGrid}"
+                          ContextMenu="{StaticResource PredicateStatsContextMenu}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
