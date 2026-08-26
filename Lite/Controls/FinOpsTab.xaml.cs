@@ -511,7 +511,38 @@ public partial class FinOpsTab : UserControl
             _dbSizesFilterMgr!.UpdateData(data);
 
             NoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            DbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s)" : "";
+
+            /* #2640: on Azure SQL DB this grid can only ever show ONE database, and saying so is the whole
+               fix. The collector reads sys.database_files on the connected database — deliberately, because
+               the enumeration it replaced went to master, which is the one database an Azure login reaching
+               the server through a DATABASE-level firewall rule cannot open (#1631). So two rows named for
+               whichever database the connection points at is CORRECT, and it reads exactly like a collector
+               that only found master. A reporter connected to master saw "master data_0 / master log" and
+               filed it as a bug, which is the reasonable reading of a grid headed "All Servers" that shows
+               one database's files and explains nothing.
+
+               The engine fact is read from the stored server properties, the same source and the same
+               EngineEdition == 5 test the index-analysis path above already uses. */
+            var scopeNote = string.Empty;
+
+            if (data.Count > 0 && _dataService != null)
+            {
+                var properties = await _dataService.GetLatestServerPropertiesAsync(serverId);
+
+                if (properties?.EngineEdition == 5)
+                {
+                    var only = data.Select(d => d.DatabaseName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+                    scopeNote = only.Count == 1
+                        ? $" — Azure SQL Database: only the CONNECTED database ('{only[0]}') is visible from "
+                          + "this connection, so its siblings are not missing, they are unreachable. Add a server "
+                          + "entry per database to see more."
+                        : " — Azure SQL Database: each connection sees only its own database, so this grid "
+                          + "covers the databases you have registered rather than every database on the server.";
+                }
+            }
+
+            DbSizeCountIndicator.Text = data.Count > 0 ? $"{data.Count} file(s){scopeNote}" : "";
         }
         catch (Exception ex)
         {
