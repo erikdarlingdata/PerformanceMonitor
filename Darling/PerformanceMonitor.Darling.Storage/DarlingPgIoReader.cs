@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -34,7 +34,15 @@ public static class DarlingPgIoReader
         double WriteTimeMs,
         long OpBytes,
         bool WriteCountersTracked,
-        DateTime? StatsReset);
+        DateTime? StatsReset,
+        /* PG18's measured byte totals (#2655), summed over the window like every other counter here.
+           ByteCountersTracked is to these what WriteCountersTracked is to the write side: below 18 the
+           columns are NULL and GREATEST(NULL, 0) flattens them to 0, so the zero alone cannot say whether
+           nothing was read or bytes are simply not measured on this version. */
+        decimal ReadBytes,
+        decimal WriteBytes,
+        decimal ExtendBytes,
+        bool ByteCountersTracked);
 
     /// <summary>
     /// Positive-difference-per-interval, summed over the window — the same rule the statement read uses,
@@ -70,9 +78,16 @@ public static class DarlingPgIoReader
                 GREATEST(writes     - LAG(writes)     OVER series, 0) AS d_writes,
                 GREATEST(write_time_ms  - LAG(write_time_ms)  OVER series, 0) AS d_write_time_ms,
                 op_bytes,
+                GREATEST(read_bytes   - LAG(read_bytes)   OVER series, 0) AS d_read_bytes,
+                GREATEST(write_bytes  - LAG(write_bytes)  OVER series, 0) AS d_write_bytes,
+                GREATEST(extend_bytes - LAG(extend_bytes) OVER series, 0) AS d_extend_bytes,
                 /* Whether this combination tracks writes AT ALL, as opposed to having written nothing.
                    Aurora reports NULL here across the board; a self-managed target reports numbers. */
-                (writes IS NOT NULL) AS writes_tracked
+                (writes IS NOT NULL) AS writes_tracked,
+                /* Whether the server measures bytes at all — PG18 and above. read_bytes is the probe for
+                   all three: WAL rows legitimately report no extend_bytes, so extend_bytes IS NOT NULL
+                   would answer "not measured" for a row that simply does not extend. */
+                (read_bytes IS NOT NULL) AS byte_counters_tracked
             FROM pg_io_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -97,7 +112,11 @@ public static class DarlingPgIoReader
             coalesce(SUM(d_write_time_ms), 0)              AS write_time_ms,
             CAST(coalesce(MAX(op_bytes), 0) AS bigint)     AS op_bytes,
             bool_or(writes_tracked)                        AS write_counters_tracked,
-            MAX(stats_reset)                               AS stats_reset
+            MAX(stats_reset)                               AS stats_reset,
+            coalesce(SUM(d_read_bytes), 0)                 AS read_bytes,
+            coalesce(SUM(d_write_bytes), 0)                AS write_bytes,
+            coalesce(SUM(d_extend_bytes), 0)               AS extend_bytes,
+            bool_or(byte_counters_tracked)                 AS byte_counters_tracked
         FROM differenced
         GROUP BY backend_type, object_type, context
         /* Anything that moved, ordered by the work that actually costs time. A combination with no
@@ -141,7 +160,11 @@ public static class DarlingPgIoReader
                 reader.GetDouble(11),
                 reader.GetInt64(12),
                 !reader.IsDBNull(13) && reader.GetBoolean(13),
-                reader.IsDBNull(14) ? null : reader.GetDateTime(14)));
+                reader.IsDBNull(14) ? null : reader.GetDateTime(14),
+                reader.GetDecimal(15),
+                reader.GetDecimal(16),
+                reader.GetDecimal(17),
+                !reader.IsDBNull(18) && reader.GetBoolean(18)));
         }
 
         return rows;

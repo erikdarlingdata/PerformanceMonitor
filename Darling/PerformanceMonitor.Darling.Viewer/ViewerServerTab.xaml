@@ -1,4 +1,4 @@
-<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
+﻿<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
@@ -4232,6 +4232,8 @@
                         <DataGridTextColumn Header="Writes" Binding="{Binding Writes}" Width="120"/>
                         <DataGridTextColumn Header="Write Time (ms)" Binding="{Binding WriteTimeMs}" Width="130"/>
                         <DataGridTextColumn Header="Op Size" Binding="{Binding OpSize}" Width="100"/>
+                        <DataGridTextColumn Header="Read Volume" Binding="{Binding ReadVolume}" Width="120"/>
+                        <DataGridTextColumn Header="Write Volume" Binding="{Binding WriteVolume}" Width="120"/>
                         <DataGridTextColumn Header="Stats Reset" Binding="{Binding StatsReset}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>

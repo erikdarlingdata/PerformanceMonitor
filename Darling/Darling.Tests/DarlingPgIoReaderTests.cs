@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -63,8 +63,11 @@ public class DarlingPgIoReaderTests
     [Fact]
     public void ClampCountMatchesTheDifferencedColumnCount()
     {
-        Assert.Equal(9, Sql.Split("GREATEST(").Length - 1);
-        Assert.Equal(9, Sql.Split("OVER series, 0)").Length - 1);
+        /* 9 counters before V101 (#2655) plus the three byte totals PostgreSQL 18 measures. Every
+           differenced column needs its own clamp: these are cumulative, so an unclamped one goes negative
+           on a stats reset or a restart and drags the window's sum below what actually happened. */
+        Assert.Equal(12, Sql.Split("GREATEST(").Length - 1);
+        Assert.Equal(12, Sql.Split("OVER series, 0)").Length - 1);
     }
 
     /// <summary>

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -59,17 +59,29 @@ public sealed class PgIoStatsCollector : PostgresCollectorDefinitionBase<PgIoSta
         long? Reuses,
         long? Fsyncs,
         double? FsyncTimeMs,
-        DateTime? StatsReset);
+        DateTime? StatsReset,
+        /* PG18's measured byte totals (#2655). NULL below 18, where op_bytes is the answer instead.
+           decimal, not long, because PostgreSQL declares these `numeric` while `reads` beside them is
+           `bigint` — verified on 18.6. */
+        decimal? ReadBytes,
+        decimal? WriteBytes,
+        decimal? ExtendBytes);
 
     /* Two version concerns, both about keeping the stored shape constant:
 
          PG16+  : the view itself. Gated in AppliesTo rather than here.
          PG18   : op_bytes was REMOVED and replaced by read_bytes / write_bytes / extend_bytes. Selecting
                   op_bytes on 18 would fail with "column does not exist" and take the whole collection
-                  with it, so it is substituted. The replacement columns are deliberately NOT added
-                  speculatively — they are a different measure (total bytes per operation class, not the
-                  per-op block size) and deserve their own columns, decided against a real PG18 target
-                  rather than guessed at now.
+                  with it, so it is substituted. The replacements now have their own columns (V101, #2655),
+                  decided against a real 18.6 as this note asked: they are `numeric` where the counts beside
+                  them are `bigint`, and they are a DIFFERENT quantity, not a rename. op_bytes was the
+                  per-operation block size that a reader multiplies by a count to estimate volume; these are
+                  measured totals. 18 also introduced vectored reads, so one entry in `reads` can cover
+                  several blocks and the old estimate UNDERCOUNTS — 479 reads against 4,440,064 read bytes
+                  on 18.6 is 542 blocks, not 479. That is why the column went rather than being renamed, and
+                  why a reader has to be able to tell which quantity it holds.
+
+                  Appended to the SELECT rather than slotted beside op_bytes so no existing ordinal moves.
 
        Verified identical on Aurora 16.11 and 17.7: 18 columns, same names, same order. The enum VALUES do
        differ between them — 17.7 showed a `walreplay` context and Aurora-specific backend types
@@ -81,6 +93,10 @@ public sealed class PgIoStatsCollector : PostgresCollectorDefinitionBase<PgIoSta
     private static string BuildQueryText(int postgresMajorVersion)
     {
         var opBytes = postgresMajorVersion >= 18 ? "NULL::bigint" : "op_bytes";
+        var hasMeasuredBytes = postgresMajorVersion >= 18;
+        var readBytes = hasMeasuredBytes ? "read_bytes" : "NULL::numeric";
+        var writeBytes = hasMeasuredBytes ? "write_bytes" : "NULL::numeric";
+        var extendBytes = hasMeasuredBytes ? "extend_bytes" : "NULL::numeric";
 
         return $@"
 SELECT
@@ -101,7 +117,10 @@ SELECT
     reuses                                  AS reuses,
     fsyncs                                  AS fsyncs,
     fsync_time                              AS fsync_time_ms,
-    (stats_reset AT TIME ZONE 'UTC')        AS stats_reset
+    (stats_reset AT TIME ZONE 'UTC')        AS stats_reset,
+    {readBytes}                             AS read_bytes,
+    {writeBytes}                            AS write_bytes,
+    {extendBytes}                           AS extend_bytes
 FROM pg_stat_io
 ORDER BY backend_type, object, context";
     }
@@ -155,6 +174,17 @@ ORDER BY backend_type, object, context";
         new CollectorColumn("fsync_time_ms", CollectorColumnType.Double),
         /* The explicit reset signal, so a read does not have to infer one from a counter going backwards. */
         new CollectorColumn("stats_reset", CollectorColumnType.Timestamp),
+        /* PG18's measured byte totals (#2655), NULL below 18. Decimal because PostgreSQL declares them
+           `numeric` while the counts beside them are `bigint`; storing a byte total as bigint is a
+           narrowing the catalog never promised.
+
+           Scale 0 — these are whole bytes. Precision 28 rather than the 38 a DECIMAL can hold, because
+           C# decimal tops out at 29 significant digits and a declared width the runtime type cannot carry
+           would be a promise broken at the reader rather than at the store. 10^28 bytes is past absurd for
+           a counter that resets on restart. */
+        new CollectorColumn("read_bytes", CollectorColumnType.Decimal, 28, 0),
+        new CollectorColumn("write_bytes", CollectorColumnType.Decimal, 28, 0),
+        new CollectorColumn("extend_bytes", CollectorColumnType.Decimal, 28, 0),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -181,7 +211,10 @@ ORDER BY backend_type, object, context";
                 Reuses: Long(reader, 14),
                 Fsyncs: Long(reader, 15),
                 FsyncTimeMs: Double(reader, 16),
-                StatsReset: reader.IsDBNull(17) ? null : reader.GetDateTime(17)));
+                StatsReset: reader.IsDBNull(17) ? null : reader.GetDateTime(17),
+                ReadBytes: Decimal(reader, 18),
+                WriteBytes: Decimal(reader, 19),
+                ExtendBytes: Decimal(reader, 20)));
         }
 
         return rows;
@@ -192,6 +225,7 @@ ORDER BY backend_type, object, context";
            garbage interval — so NULL, which propagates through the subtraction and drops out of the sum. */
         static long? Long(DbDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetInt64(ordinal);
         static double? Double(DbDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetDouble(ordinal);
+        static decimal? Decimal(DbDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetDecimal(ordinal);
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -214,6 +248,9 @@ ORDER BY backend_type, object, context";
             .Value(row.Reuses)
             .Value(row.Fsyncs)
             .Value(row.FsyncTimeMs)
-            .Value(row.StatsReset);
+            .Value(row.StatsReset)
+            .Value(row.ReadBytes)
+            .Value(row.WriteBytes)
+            .Value(row.ExtendBytes);
     }
 }

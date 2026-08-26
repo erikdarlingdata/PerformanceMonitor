@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -336,7 +336,18 @@ internal static class PgDisplay
         public string Reuses { get; init; } = "";
         public string Writes { get; init; } = "";
         public string WriteTimeMs { get; init; } = "";
+        /// <summary>The per-operation block size. PostgreSQL 18 removed it, so it reads "n/a" there rather
+        /// than 0 — on 18 a read is no longer one block and there is no single size to report.</summary>
         public string OpSize { get; init; } = "";
+
+        /// <summary>Bytes actually moved. MEASURED on PostgreSQL 18, which reports byte totals directly;
+        /// below 18 it is count x block size, which is exact there because one operation moves one block.
+        /// The two are not the same quantity — 18's vectored reads make the old estimate undercount by an
+        /// order of magnitude — so the estimate says so in the cell rather than passing for a
+        /// measurement.</summary>
+        public string ReadVolume { get; init; } = "";
+
+        public string WriteVolume { get; init; } = "";
         public string StatsReset { get; init; } = "";
     }
 
@@ -380,7 +391,18 @@ internal static class PgDisplay
         WriteTimeMs = row.WriteCountersTracked
             ? Math.Round(row.WriteTimeMs, 1).ToString("N1", CultureInfo.CurrentCulture)
             : "not tracked",
-        OpSize = Bytes(row.OpBytes),
+        OpSize = row.ByteCountersTracked ? "n/a" : Bytes(row.OpBytes),
+        /* Measured beats derived, and the estimate is labelled rather than silently equated with one.
+           "not measured" is the third state: a server with neither op_bytes nor the 18 columns, which is
+           not the same as having moved no bytes. */
+        ReadVolume = row.ByteCountersTracked
+            ? Bytes((long)row.ReadBytes)
+            : (row.OpBytes > 0 ? Bytes(row.Reads * row.OpBytes) + " (est.)" : "not measured"),
+        WriteVolume = row.ByteCountersTracked
+            ? Bytes((long)row.WriteBytes)
+            : (row.OpBytes > 0 && row.WriteCountersTracked
+                ? Bytes(row.Writes * row.OpBytes) + " (est.)"
+                : "not measured"),
         StatsReset = Timestamp(row.StatsReset),
     };
 

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -704,7 +704,10 @@ public sealed class ViewerPostgresTabsTests
         var aurora = PgDisplay.Io(new PerformanceMonitor.Darling.Storage.DarlingPgIoReader.PgIoRow(
             "client backend", "relation", "normal", Reads: 10, ReadTimeMs: 1.0, Hits: 5, Extends: 0,
             ExtendTimeMs: 0, Evictions: 0, Reuses: 0, Writes: 0, WriteTimeMs: 0, OpBytes: 8192,
-            WriteCountersTracked: false, StatsReset: null), totalReadTimeMs: 1.0);
+            WriteCountersTracked: false, StatsReset: null,
+            /* A pre-18 server: op_bytes is the byte answer and the measured columns do not exist. */
+            ReadBytes: 0, WriteBytes: 0, ExtendBytes: 0, ByteCountersTracked: false),
+            totalReadTimeMs: 1.0);
 
         Assert.Equal("not tracked", aurora.Writes);
         Assert.Equal("not tracked", aurora.WriteTimeMs);
@@ -712,7 +715,9 @@ public sealed class ViewerPostgresTabsTests
         var selfManaged = PgDisplay.Io(new PerformanceMonitor.Darling.Storage.DarlingPgIoReader.PgIoRow(
             "client backend", "relation", "normal", Reads: 10, ReadTimeMs: 1.0, Hits: 5, Extends: 0,
             ExtendTimeMs: 0, Evictions: 0, Reuses: 0, Writes: 0, WriteTimeMs: 0, OpBytes: 8192,
-            WriteCountersTracked: true, StatsReset: null), totalReadTimeMs: 1.0);
+            WriteCountersTracked: true, StatsReset: null,
+            ReadBytes: 0, WriteBytes: 0, ExtendBytes: 0, ByteCountersTracked: false),
+            totalReadTimeMs: 1.0);
 
         Assert.Equal("0", selfManaged.Writes);
     }
@@ -831,6 +836,10 @@ public sealed class ViewerPostgresTabsTests
 
             ["PgIoRow.WriteCountersTracked"] = "Writes / WriteTimeMs — they read 'not tracked' rather than 0",
             ["PgIoRow.OpBytes"] = "OpSize — the same number, formatted",
+            ["PgIoRow.ReadBytes"] = "ReadVolume — measured on 18, or the estimate marked '(est.)' below it",
+            ["PgIoRow.WriteBytes"] = "WriteVolume — same",
+            ["PgIoRow.ExtendBytes"] = "not shown: Extends carries the count, and extend VOLUME has no reading the other two do not already give",
+            ["PgIoRow.ByteCountersTracked"] = "ReadVolume / WriteVolume — they read '(est.)' or 'not measured' rather than passing an estimate off as a measurement",
 
             ["PgSlotRow.FirstRetainedWalBytes"] = "RetainedWalTrend — the window's start, as a signed delta",
             ["PgSlotRow.FirstSeenAt"] = "RetainedWalTrend — the delta's other end; the window is the toolbar's",
