@@ -9,6 +9,8 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using Xunit;
@@ -126,6 +128,75 @@ public class AzureDeadlockTelemetryTests
     {
         Assert.Contains("source_database_name = CONVERT(nvarchar(128), NULL)", AzureSql, StringComparison.Ordinal);
         Assert.Contains("source_database_name = CONVERT(nvarchar(128), NULL)", ServerScopedSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The column is read by ORDINAL, and it is the last one.
+    ///
+    /// <para>The reader contract in this codebase is positional — the test fake throws from
+    /// <c>GetName</c> deliberately, so that a collector cannot quietly depend on a capability the
+    /// production readers have and the fixtures do not. My first version read the column by name and
+    /// passed every SQL assertion here while failing the two existing ReadAsync fixtures.</para>
+    ///
+    /// <para>Which ordinal moves with <c>CapturePlanXml</c>, because the victim plan is spliced in at 3
+    /// only when it is on — so this is the same conditional the plan column uses, one place along.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false, 3)]
+    [InlineData(true, 4)]
+    public void TheColumnIsReadByOrdinal_AndItMovesWithThePlanCapture(bool capturePlan, int expected)
+    {
+        var ordinal = typeof(DeadlocksCollector)
+            .GetMethod("SourceDatabaseNameOrdinal", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, new object[] { new CollectorContext
+            {
+                ServerId = 1,
+                ServerName = "s",
+                CollectionTime = new DateTime(2026, 8, 26, 0, 0, 0, DateTimeKind.Utc),
+                Deltas = new Helpers.RecordingCollectorDeltaCalculator(),
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+                CapturePlanXml = capturePlan,
+            } });
+
+        Assert.Equal(expected, ordinal);
+    }
+
+    /// <summary>
+    /// The behaviour, not only the SQL: a telemetry row carries its own database and that database WINS
+    /// over the connection's, while a ring-buffer row (NULL in that column) still falls back to it.
+    ///
+    /// <para>This is the assertion that matters. The telemetry arm is read while connected to
+    /// <c>master</c>, so <c>CurrentDatabaseName</c> is <c>"master"</c> for every row of it — and taking
+    /// the connection's database would report every deadlock on a fifty-database server as
+    /// <c>master</c>'s, which is a more convincing wrong answer than the empty grid it replaced.</para>
+    /// </summary>
+    [Fact]
+    public async Task ATelemetryRowsOwnDatabaseWins_AndARingBufferRowStillFallsBack()
+    {
+        var context = new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "azure-server",
+            CollectionTime = new DateTime(2026, 8, 26, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = new Helpers.RecordingCollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+            /* What the per-database loop stamps while reading the telemetry arm from master. */
+            CurrentDatabaseName = "master",
+        };
+
+        var deadlockTime = new DateTime(2026, 8, 26, 12, 13, 15, DateTimeKind.Utc);
+
+        using var reader = new Helpers.FakeCollectorDataReader(
+            /* telemetry arm: the event named the user database */
+            new object[] { deadlockTime, "process20a9deb0478", "<deadlock/>", "AppDb" },
+            /* ring-buffer arm: no source database of its own */
+            new object[] { deadlockTime, "process20a9deb0479", "<deadlock/>", DBNull.Value });
+
+        var rows = await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal("AppDb", rows[0].DatabaseName);
+        Assert.Equal("master", rows[1].DatabaseName);
     }
 
     /// <summary>

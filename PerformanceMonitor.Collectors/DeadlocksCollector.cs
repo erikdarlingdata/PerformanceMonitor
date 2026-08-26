@@ -293,6 +293,11 @@ OUTER APPLY
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var sourceDbOrdinal = SourceDatabaseNameOrdinal(context);
+            var sourceDatabaseName = reader.FieldCount > sourceDbOrdinal && !reader.IsDBNull(sourceDbOrdinal)
+                ? reader.GetString(sourceDbOrdinal)
+                : null;
+
             var victimProcessId = reader.IsDBNull(1) ? null : reader.GetString(1);
             var graphXml = reader.IsDBNull(2) ? null : reader.GetString(2);
             var victim = ExtractVictimFields(graphXml, victimProcessId);
@@ -314,7 +319,7 @@ OUTER APPLY
 
                    Otherwise unchanged: per-database path takes the capture database (authoritative for
                    a database-scoped session), server-scoped falls back to the victim's currentdbname. */
-                DatabaseName = SourceDatabaseName(reader, context) ?? context.CurrentDatabaseName ?? victim.DatabaseName,
+                DatabaseName = sourceDatabaseName ?? context.CurrentDatabaseName ?? victim.DatabaseName,
             });
         }
 
@@ -322,27 +327,19 @@ OUTER APPLY
     }
 
     /// <summary>
-    /// The <c>source_database_name</c> column, when the projection carries one and the row filled it.
+    /// The ordinal <c>source_database_name</c> sits at.
     ///
-    /// <para>Only the Azure telemetry arm ever does. Read by NAME rather than ordinal because the
-    /// projection's width moves with <c>CapturePlanXml</c> — the victim plan is spliced in at ordinal 3
-    /// only when it is on, so a fixed ordinal for the column after it is right in one configuration and
-    /// silently wrong in the other.</para>
+    /// <para>It is the LAST column of every arm, and the projection's width moves with
+    /// <c>CapturePlanXml</c> — the victim plan is spliced in at ordinal 3 only when it is on. So the same
+    /// conditional the plan column itself uses, one place along, rather than <c>FieldCount - 1</c>: an
+    /// explicit ordinal goes wrong loudly when someone appends a column, and the relative one goes wrong
+    /// silently by reading whatever they appended.</para>
+    ///
+    /// <para>By ordinal and not by name because the reader contract here is positional — the test fake
+    /// throws from <c>GetName</c> deliberately, to stop a collector quietly depending on a capability the
+    /// production readers have and the fixtures do not.</para>
     /// </summary>
-    private static string? SourceDatabaseName(DbDataReader reader, CollectorContext context)
-    {
-        _ = context;
-
-        for (var i = 0; i < reader.FieldCount; i++)
-        {
-            if (string.Equals(reader.GetName(i), "source_database_name", StringComparison.OrdinalIgnoreCase))
-            {
-                return reader.IsDBNull(i) ? null : reader.GetString(i);
-            }
-        }
-
-        return null;
-    }
+    private static int SourceDatabaseNameOrdinal(CollectorContext context) => context.CapturePlanXml ? 4 : 3;
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
