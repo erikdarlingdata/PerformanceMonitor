@@ -61,6 +61,46 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
+    /// #2638: and it names WHICH database, because extensions are per-database and "create it somewhere" is
+    /// not an instruction.
+    ///
+    /// <para>Measured on the fleet: <c>pg_buffercache</c> was installed on the cluster — in a different
+    /// database from the one the collector connects to — while the collector reported it missing. Both
+    /// statements were true. An operator who checked the obvious database would have found the extension
+    /// already there and concluded the collector was broken.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("42P01")]
+    [InlineData("42883")]
+    public void AMissingObjectNamesTheDatabaseItIsMissingFrom(string sqlState)
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), "pg_buffer_usage", "appdb");
+
+        Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("CREATE EXTENSION in 'appdb'", explanation, StringComparison.Ordinal);
+
+        /* The half that makes the name worth printing: it says the extension may exist elsewhere on the
+           same cluster, which is the situation the message used to leave someone to discover alone. */
+        Assert.Contains("DIFFERENT database on the same cluster", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And an unknown database degrades to what the sentence always said, rather than inventing a name — a
+    /// message that confidently names the wrong database is worse than one that names none.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AnUnknownDatabaseFallsBackRatherThanGuessing(string? connectedDatabase)
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(Pg("42P01"), "pg_buffer_usage", connectedDatabase);
+
+        Assert.Contains("in the connected database", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("database ''", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Aurora does not implement some community sources at all (0A000 for pg_stat_wal) and gates others by
     /// parameter group (55006). Neither will change until the platform or the parameter group does, so
     /// neither is worth an error every cycle — and neither is a grant.

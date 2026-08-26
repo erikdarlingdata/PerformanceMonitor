@@ -4438,6 +4438,16 @@ LIMIT 1";
     };
 
     /// <summary>
+    /// Where the missing extension has to be created, named when we know it (#2638).
+    /// </summary>
+    private static string WhereToCreateIt(string? connectedDatabase)
+        => string.IsNullOrWhiteSpace(connectedDatabase)
+            ? "in the connected database (CREATE EXTENSION ...). "
+            : $"in database '{connectedDatabase}', which is the one this collector connects to — an "
+              + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
+              + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
+
+    /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
     /// <para>The store has five statuses and none of them is "this feature is not installed", so the
     /// non-fatal-degradation bucket (PERMISSIONS) carries those cases and the MESSAGE distinguishes them —
@@ -4445,7 +4455,7 @@ LIMIT 1";
     /// general handler have it", which keeps the genuinely unexpected loud.</para>
     /// </summary>
     internal static (string Status, string Explanation) PostgresFaultOutcome(
-        PostgresException ex, string collectorName)
+        PostgresException ex, string collectorName, string? connectedDatabase = null)
     {
         var fault = PostgresTargetProvider.Instance.Classify(
             ex, CollectorCatalog.YieldsOnLockTimeout(collectorName));
@@ -4458,12 +4468,18 @@ LIMIT 1";
 
             /* 42P01 / 42883: the relation or function is not there. Overwhelmingly an extension that was
                never created in the connected database rather than anything to do with privileges. */
+            /* #2638: the database is NAMED. Extensions are per-database, and on a real fleet one was
+               installed in a different database on the same cluster from the one this collector connects
+               to — so an operator who checked the obvious database found it already there and concluded
+               the collector was broken. "Create it somewhere" is not an instruction; naming the database
+               makes it one. Threaded from ServerRuntime.ConnectedDatabase; when that is unknown the
+               sentence degrades to what it always said rather than inventing a name. */
             CollectorTargetFault.ObjectMissing => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the source object does not exist on this "
-                + "target. This is NOT a missing grant: it is normally an extension that was never "
-                + "created in the connected database (CREATE EXTENSION pg_stat_statements), so the "
-                + "collector will keep degrading until it is. Recorded as a non-fatal skip rather than an "
-                + "error so it does not fill the log every cycle."),
+                + "target. This is NOT a missing grant: it is normally an extension that was never created "
+                + WhereToCreateIt(connectedDatabase)
+                + "The collector will keep degrading until it is. Recorded as a non-fatal skip rather than "
+                + "an error so it does not fill the log every cycle."),
 
             /* 0A000 / 55000 / 55006: the server will not do this, permanently or by configuration —
                pg_stat_wal on Aurora, or an optimized-reads cache that is switched off. */
@@ -4657,7 +4673,7 @@ LIMIT 1";
             return 0;
         }
         catch (PostgresException ex) when (
-            PostgresFaultOutcome(ex, collectorName) is { Status: not "ERROR" } outcome)
+            PostgresFaultOutcome(ex, collectorName, runtime.ConnectedDatabase) is { Status: not "ERROR" } outcome)
         {
             /* PostgreSQL faults classified by SQLSTATE through the same ITargetProvider.Classify the
                engine seam already exposes, so the runner and the provider cannot disagree about what an
