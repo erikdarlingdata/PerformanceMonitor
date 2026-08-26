@@ -87,7 +87,10 @@ OPTION(RECOMPILE);
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
     victim_process_id = evt.value('(data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
-    deadlock_graph_xml = CONVERT(nvarchar(max), evt.query('data[@name=""xml_report""]/value/deadlock'))/*DL_PLAN_SELECT*/
+    deadlock_graph_xml = CONVERT(nvarchar(max), evt.query('data[@name=""xml_report""]/value/deadlock'))/*DL_PLAN_SELECT*/,
+    /* NULL on this arm: a database-scoped session's events belong to the connected database, which the
+       runner already stamps from CurrentDatabaseName. The telemetry arm below knows better and says so. */
+    source_database_name = CONVERT(nvarchar(128), NULL)
 FROM
 (
     SELECT
@@ -96,6 +99,36 @@ FROM
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""database_xml_deadlock_report""]') AS q(evt)/*DL_PLAN_APPLY*/
 WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+
+UNION ALL
+
+/* #2641: the DURABLE half, and the one that made the field report. The session above is
+   DATABASE-SCOPED, so a connection to master captures only master's deadlocks — a reporter with
+   fifty user databases got essentially none of theirs — and its ring buffer is memory-resident, so an
+   Azure failover empties it without notice.
+
+   sys.fn_xe_telemetry_blob_target_read_file is Azure's own file-backed telemetry. Verified against a
+   live Azure SQL Database rather than from documentation: it returns database_xml_deadlock_report with
+   the event timestamp, the USER database's name, the victim process id and the full graph, backed by a
+   .xel blob rather than memory.
+
+   It is MASTER-SCOPED, which is the whole trick and the thing that cost two wrong conclusions before it
+   was found: from a user database the identical call returns zero rows, silently. Guarded on DB_NAME()
+   so a user-database connection does not pay for a blob read that cannot return anything — and so the
+   zero it would get is never mistaken for an absence of deadlocks. */
+SELECT
+    deadlock_time = tel.evt.value('(/event/@timestamp)[1]', 'datetime2'),
+    victim_process_id = tel.evt.value('(/event/data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
+    deadlock_graph_xml = CONVERT(nvarchar(max), tel.evt.query('/event/data[@name=""xml_report""]/value/deadlock'))/*DL_PLAN_SELECT*/,
+    source_database_name = tel.evt.value('(/event/data[@name=""database_name""]/value)[1]', 'nvarchar(128)')
+FROM
+(
+    SELECT evt = TRY_CAST(t.event_data AS xml)
+    FROM sys.fn_xe_telemetry_blob_target_read_file('dl', NULL, NULL, NULL) AS t
+    WHERE DB_NAME() = N'master'
+) AS tel
+WHERE tel.evt IS NOT NULL
+AND   tel.evt.value('(/event/@timestamp)[1]', 'datetime2') > @cutoff_time
 OPTION(RECOMPILE);";
 
     /* On-prem / Azure MI / AWS RDS: read from ring_buffer (server-scoped session)
@@ -126,7 +159,11 @@ OPTION(RECOMPILE);
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
     victim_process_id = evt.value('(data[@name=""xml_report""]/value/deadlock/victim-list/victimProcess/@id)[1]', 'varchar(50)'),
-    deadlock_graph_xml = CONVERT(nvarchar(max), evt.query('data[@name=""xml_report""]/value/deadlock'))/*DL_PLAN_SELECT*/
+    deadlock_graph_xml = CONVERT(nvarchar(max), evt.query('data[@name=""xml_report""]/value/deadlock'))/*DL_PLAN_SELECT*/,
+    /* Always NULL here: on a server-scoped session the graph's own currentdbname is the only database
+       fact, and ReadAsync already falls back to it. Present so BOTH engines project the same ordinals
+       and one reader serves them (#2641). */
+    source_database_name = CONVERT(nvarchar(128), NULL)
 FROM
 (
     SELECT
@@ -269,13 +306,42 @@ OUTER APPLY
                 /* victim_query_plan_xml rides at ordinal 3 only when CapturePlanXml spliced it into
                    the projection; the short-circuit skips it entirely when off. */
                 VictimQueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(3) ? reader.GetString(3) : null,
-                /* Per-database path: the capture database is authoritative (see the Row comment);
-                   server-scoped: the victim's currentdbname, null when the graph doesn't carry it. */
-                DatabaseName = context.CurrentDatabaseName ?? victim.DatabaseName,
+                /* #2641: a row that KNOWS its own database wins, and only the Azure telemetry arm
+                   does. That arm is read from master while CurrentDatabaseName is "master", so taking
+                   the connection's database would stamp every deadlock on the server as master's —
+                   turning the one source that spans all fifty databases into fifty rows about the
+                   wrong one.
+
+                   Otherwise unchanged: per-database path takes the capture database (authoritative for
+                   a database-scoped session), server-scoped falls back to the victim's currentdbname. */
+                DatabaseName = SourceDatabaseName(reader, context) ?? context.CurrentDatabaseName ?? victim.DatabaseName,
             });
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The <c>source_database_name</c> column, when the projection carries one and the row filled it.
+    ///
+    /// <para>Only the Azure telemetry arm ever does. Read by NAME rather than ordinal because the
+    /// projection's width moves with <c>CapturePlanXml</c> — the victim plan is spliced in at ordinal 3
+    /// only when it is on, so a fixed ordinal for the column after it is right in one configuration and
+    /// silently wrong in the other.</para>
+    /// </summary>
+    private static string? SourceDatabaseName(DbDataReader reader, CollectorContext context)
+    {
+        _ = context;
+
+        for (var i = 0; i < reader.FieldCount; i++)
+        {
+            if (string.Equals(reader.GetName(i), "source_database_name", StringComparison.OrdinalIgnoreCase))
+            {
+                return reader.IsDBNull(i) ? null : reader.GetString(i);
+            }
+        }
+
+        return null;
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
