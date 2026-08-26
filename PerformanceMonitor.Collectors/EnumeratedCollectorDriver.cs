@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -268,6 +269,42 @@ public static class EnumeratedCollectorDriver
         "abandoned after exceeding its {0} per-database wall-clock budget; the range was not "
         + "collected and will be re-read next cycle (the watermark did not advance)";
 
+    /// <summary>
+    /// The collection-log note for a per-database cycle where SOME databases failed and the rest
+    /// succeeded (#2623). <c>{0}</c> = how many failed, <c>{1}</c> = how many were attempted,
+    /// <c>{2}</c> = up to <see cref="MaxNamedFailedDatabases"/> of their names, <c>{3}</c> = the first
+    /// error's message.
+    ///
+    /// <para>
+    /// Tolerating the failure is right - one unreachable database must not cost the other twenty-nine -
+    /// but before this note the cycle recorded SUCCESS, whatever the survivors produced, and NOTHING
+    /// else. When the failing database is the only one with data, that is SUCCESS with zero rows, which
+    /// is exactly the shape of a target that genuinely has nothing to report. Three collectors were
+    /// broken that way for three schema versions (#2622); the one that surfaced as an ERROR did so only
+    /// because it happened to fail in every database, tripping the all-failed escalation.
+    /// </para>
+    ///
+    /// <para>
+    /// Names, not just a count, unlike <see cref="ProbeFailureNoteFormat"/>: a probe failure is usually
+    /// one login problem repeated across every database, where the names add nothing, while THIS is
+    /// usually a few specific databases and the name is the whole lead. Capped for the case where it
+    /// is not.
+    /// </para>
+    /// </summary>
+    public const string PartialDatabaseFailureNoteFormat =
+        "{0} of {1} database(s) failed and were skipped ({2}) - any rows this cycle are from the "
+        + "survivors ONLY, so a low or zero row count here is not evidence the server is quiet; "
+        + "first error: {3}";
+
+    /// <summary>
+    /// How many failed database names <see cref="BuildPartialFailureNote"/> spells out before collapsing
+    /// the rest into "and N more". The note column is a one-line summary read at a glance.
+    /// </summary>
+    public const int MaxNamedFailedDatabases = 3;
+
+    /// <summary><see cref="PartialDatabaseFailureNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_partialFailureNote = CompositeFormat.Parse(PartialDatabaseFailureNoteFormat);
+
     /// <summary><see cref="ProbeFailureNoteFormat"/> parsed once (CA1863) — the const stays the greppable, pinnable text.</summary>
     private static readonly CompositeFormat s_probeFailureNote = CompositeFormat.Parse(ProbeFailureNoteFormat);
 
@@ -384,6 +421,55 @@ public static class EnumeratedCollectorDriver
             (true, not null) => $"{EmptyEnumerationMessage}; {probeNote}",
             (false, _) => probeNote,
         };
+    }
+
+    /// <summary>
+    /// Composes <see cref="PartialDatabaseFailureNoteFormat"/> for a per-database cycle that lost SOME
+    /// databases but not all. Returns null when nothing failed, and null when EVERYTHING failed - the
+    /// all-failed case rethrows the first failure so the run is classified as an error, and a note on a
+    /// row about to be marked ERROR would only compete with the error message.
+    /// </summary>
+    public static string? BuildPartialFailureNote(
+        int failed, int attempted, IReadOnlyList<string> failedDatabases, string? firstError)
+    {
+        if (failed <= 0 || attempted <= 0 || failed >= attempted)
+        {
+            return null;
+        }
+
+        var named = failedDatabases.Count <= MaxNamedFailedDatabases
+            ? string.Join(", ", failedDatabases)
+            : string.Join(", ", failedDatabases.Take(MaxNamedFailedDatabases))
+              + $", and {failedDatabases.Count - MaxNamedFailedDatabases} more";
+
+        if (string.IsNullOrWhiteSpace(named))
+        {
+            named = UnnamedItem;
+        }
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            s_partialFailureNote,
+            failed,
+            attempted,
+            named,
+            string.IsNullOrWhiteSpace(firstError) ? NoErrorText : firstError);
+    }
+
+    /// <summary>
+    /// Joins two collection-log notes, either of which may be null. Shared because both hosts now compose
+    /// a cycle note from two independent sources - probe failures and skipped databases - and a cycle can
+    /// legitimately have both; whichever host wrote its own join would be the one that silently dropped
+    /// one of them.
+    /// </summary>
+    public static string? MergeNotes(string? first, string? second)
+    {
+        if (string.IsNullOrWhiteSpace(first))
+        {
+            return string.IsNullOrWhiteSpace(second) ? null : second;
+        }
+
+        return string.IsNullOrWhiteSpace(second) ? first : $"{first}; {second}";
     }
 
     /// <summary>
