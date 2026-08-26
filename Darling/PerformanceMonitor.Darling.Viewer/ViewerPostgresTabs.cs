@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -80,7 +80,7 @@ internal static class ViewerPostgresTabs
             ViewerServerTab.PgOverviewInnerTabIndex,
             "overview",
             "Overview",
-            new[] { "pg_extension_availability" },
+            new[] { "pg_extension_availability", "pg_server_config" },
             /* No collector of its own: it reports on every one of them, from collection_log joined to the
                catalog.
                That join is the point — a collector gated off for this engine writes NO collection_log row

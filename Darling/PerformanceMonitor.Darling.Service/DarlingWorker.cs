@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -4819,6 +4819,7 @@ LIMIT 1";
         ["pg_wait_stats"] = (r, s, ct) => r.RunAsync(PgWaitStatsCollector.Instance, s, ct),
         ["pg_statement_stats"] = (r, s, ct) => r.RunAsync(PgStatementStatsCollector.Instance, s, ct),
         ["pg_wraparound_stats"] = (r, s, ct) => r.RunAsync(PgWraparoundStatsCollector.Instance, s, ct),
+        ["pg_server_config"] = (r, s, ct) => r.RunAsync(PgServerConfigCollector.Instance, s, ct),
         ["pg_xmin_horizon"] = (r, s, ct) => r.RunAsync(PgXminHorizonCollector.Instance, s, ct),
         ["pg_replication_slots"] = (r, s, ct) => r.RunAsync(PgReplicationSlotsCollector.Instance, s, ct),
         ["pg_autovacuum_stats"] = (r, s, ct) => r.RunAsync(PgAutovacuumStatsCollector.Instance, s, ct),

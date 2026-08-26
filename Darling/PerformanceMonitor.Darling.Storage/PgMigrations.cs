@@ -158,6 +158,7 @@ public static class PgMigrations
         new Migration(99, "pg-plan-capture", V99Sql),
         new Migration(100, "pg-major-version", V100Sql),
         new Migration(101, "pg18-io-bytes", V101Sql),
+        new Migration(102, "pg-server-config", V102Sql),
     };
 
     /// <summary>
@@ -2277,6 +2278,61 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V102 — <c>collect.pg_server_config</c>, the server's own configuration from <c>pg_settings</c>
+    /// (#2658). SQL Server answers this three ways and PostgreSQL had no answer at all: nothing stored a
+    /// setting, so both "what is <c>work_mem</c> here" and "what changed last Tuesday" were unanswerable
+    /// after the fact — the second permanently, because no other part of the stack can reconstruct a
+    /// configuration history that was never recorded.
+    ///
+    /// <para><b>Every column is stored and nothing is filtered at collection.</b> <c>pg_settings</c> is a
+    /// per-BACKEND view, so <c>source</c> ranges from <c>default</c> through <c>configuration file</c> to
+    /// <c>client</c> — and a <c>client</c> row is the collector's own session, not the server. Dropping
+    /// those here would make them unrecoverable and would still leave the read guessing; keeping
+    /// <c>source</c> lets the read state which rows are server configuration and which are not. The rule
+    /// lives at the read, where it can be enforced and explained.</para>
+    ///
+    /// <para><b>It IS a hypertable, like every collector table</b> — <c>TimescaleSupport.HypertableTables</c>
+    /// is <c>CollectorCatalog.All</c>, so membership follows from being a collector and is not a per-table
+    /// choice. Worth stating because the shape argues the other way: this is a snapshot of something a
+    /// person changes, not a series of measurements, and the rows are wide-ish text that is nearly
+    /// identical from one hour to the next. Chunking and compression still earn their place on exactly that
+    /// data — a year of hourly near-duplicates is what compresses best — and the alternative would be a
+    /// special case in the one place that currently has none. It does mean CI's worker sizing moves:
+    /// <c>CiClusterWorkerSizingTests</c> derives the cluster's worker counts from the catalog count, so
+    /// adding a collector is also a workflow edit.</para>
+    ///
+    /// <para><b>All value columns nullable</b>, including <c>name</c>, because the generated schema is what
+    /// a fresh store builds from and it declares them that way — see
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>, which requires this
+    /// text to be column-for-column identical to what the generator walks out of
+    /// <c>PgServerConfigCollector.PayloadColumns</c>. A NOT NULL added by hand here and not there is the
+    /// permanent, invisible divergence that test exists to catch.</para>
+    /// </summary>
+    private const string V102Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_server_config (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    name text,
+    setting text,
+    unit text,
+    category text,
+    context text,
+    vartype text,
+    source text,
+    boot_val text,
+    reset_val text,
+    sourcefile text,
+    sourceline integer,
+    pending_restart boolean,
+    short_desc text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_server_config_time
+    ON collect.pg_server_config(server_id, collection_time);";
 
     /// <summary>
     /// V101 — the measured I/O byte totals PostgreSQL 18 gave <c>pg_stat_io</c> (#2655).

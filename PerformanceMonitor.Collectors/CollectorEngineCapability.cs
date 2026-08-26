@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -171,6 +171,7 @@ public static class CollectorEngineCapability
             ["pg_extension_availability"] = "the per-database extension inventory",
             ["pg_lock_stats"] = "the sampled pg_locks activity",
             ["pg_write_stats"] = "the checkpoint and WAL write counters",
+            ["pg_server_config"] = "the server's pg_settings configuration snapshot",
             ["pg_replication_stats"] = "the pg_stat_replication connected-replica states",
             /* Named for the LOG, because that is where the gap actually is: auto_explain writes
                plans nowhere else, and on Aurora and RDS there is no filesystem to read them from

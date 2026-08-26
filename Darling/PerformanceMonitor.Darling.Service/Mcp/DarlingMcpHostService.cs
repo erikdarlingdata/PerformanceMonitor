@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -641,6 +641,18 @@ public sealed class DarlingMcpHostService : BackgroundService
                    idle-in-transaction session that looks identical is holding nothing at all, because a
                    READ COMMITTED transaction that only read has already released its snapshot. */
                 .WithGeminiCompatibleTools<DarlingMcpPgSessionStatesTools>()
+                /* #2659: these six shipped REGISTERED NOWHERE. They were implemented, documented, dispatched
+                   by the web API and counted in the instructions census, and an agent could not call one of
+                   them — the web dashboard could, which is why it went unnoticed. Registration here is
+                   per-class and explicit, with no assembly scan, so a tools class is reachable only if
+                   someone remembers this line and nothing failed when they did not.
+                   McpToolTypeRegistrationTests now derives the check by reflection instead of trusting it. */
+                .WithGeminiCompatibleTools<DarlingMcpPgServerStateTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgIndexTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgKernelStatsTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgPredicateTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgReplicationStatsTools>()
+                .WithGeminiCompatibleTools<DarlingMcpPgWaitSamplingTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

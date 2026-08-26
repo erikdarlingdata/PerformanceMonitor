@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -1146,6 +1146,8 @@ public static class DarlingWebEndpoints
             ["get_pg_extensions"] = R(CatData, "Which PostgreSQL extensions are installed, outdated, available or absent, per database. Usually the reason another read is empty.", PServer(), PHours(168), PLimit(50), PAsOf()),
             ["get_pg_lock_stats"] = R(CatData, "Sampled PostgreSQL lock activity by type, mode and relation. A sample of pg_locks, not an event log; for who blocks whom use get_pg_blocking.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_write_stats"] = R(CatData, "Checkpoint and WAL write activity across the window: timed versus requested checkpoints, buffers written by whom, and WAL volume.", PServer(), PHours(24), PAsOf()),
+            ["get_pg_server_config"] = R(CatData, "The PostgreSQL server's configuration from pg_settings, non-default first, saying where each value came from and whether changing it needs a restart. Reports pending_restart, where the file and the running server disagree.", PServer(), PLimit(100), PBool("include_defaults", false)),
+            ["get_pg_server_config_changes"] = R(CatData, "PostgreSQL configuration parameters whose value CHANGED in the window, old beside new. Nothing else can reconstruct this after the fact.", PServer(), PHours(168), PLimit(100), PAsOf()),
             ["get_pg_replication_stats"] = R(CatData, "Health of CONNECTED replicas from pg_stat_replication, with the worst lag in the window beside the latest. Counterpart of get_pg_replication_slots.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_blocking"] = R(CatData, "PostgreSQL blocking chains that were sampled, with the root blocker attributed. A sample, not an event log.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_pg_database_stats"] = R(CatData, "PostgreSQL per-database temp-file spills, cache hit ratio, deadlocks and commit/rollback split, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
@@ -1622,6 +1624,8 @@ public static class DarlingWebEndpoints
             ["get_pg_extensions"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgExtensions(pg, Server(c), Hours(c, 168), Rows(c, "limit", 50), as_of: AsOf(c)),
             ["get_pg_lock_stats"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgLockStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_pg_write_stats"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgWriteStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_pg_server_config"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgServerConfig(pg, Server(c), Rows(c, "limit", 100), QueryBool(c, "include_defaults", false)),
+            ["get_pg_server_config_changes"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgServerConfigChanges(pg, Server(c), Hours(c, 168), Rows(c, "limit", 100), as_of: AsOf(c)),
             ["get_pg_replication_stats"] = (c, pg, an) => DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_pg_blocking"] = (c, pg, an) => DarlingMcpPgBlockingTools.GetPgBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
             ["get_pg_database_stats"] = (c, pg, an) => DarlingMcpPgDatabaseTools.GetPgDatabaseStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),

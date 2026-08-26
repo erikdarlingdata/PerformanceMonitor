@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -156,6 +156,7 @@ public partial class ViewerServerTab
             ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts);
 
         await LoadPgExtensionsAsync(startUtc, endUtc);
+        await LoadPgServerConfigAsync();
     }
 
     /// <summary>
@@ -196,6 +197,52 @@ public partial class ViewerServerTab
                       : string.Empty)
                   + "  \u201cInstalled\u201d is scoped to the database this server entry connects to — "
                   + "pg_extension is per-database while the server's offer is cluster-wide.");
+    }
+
+    /// <summary>
+    /// The server's own configuration (#2658), under the extension axis because it is the same kind of fact
+    /// one layer in: extensions say what this server CAN do, settings say what it was told to do.
+    ///
+    /// <para><b>Not scoped to the toolbar window, unlike every other panel on this tab.</b> A configuration
+    /// is the state NOW rather than something that happened during an interval, and filtering it by the
+    /// window would return nothing for a server whose HOURLY collector last ran just outside it — which on
+    /// this screen reads as "this server has no configuration" rather than "widen the window".</para>
+    ///
+    /// <para>The note leads with pending_restart when there is one, because that is the only row here that
+    /// reports a DISAGREEMENT rather than a value: the file has been changed and reloaded, the running
+    /// server is still on the old value, and nothing else in the product would ever mention it.</para>
+    /// </summary>
+    private async Task LoadPgServerConfigAsync()
+    {
+        if (PgCollectorIsGatedOff("pg_server_config"))
+        {
+            PgServerConfigGrid.ItemsSource = null;
+            PgServerConfigNote.Text = PanelNote("pg_server_config", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgServerConfigAsync(_server.ServerId);
+
+        /* Non-default only in the grid: several hundred parameters sorted alphabetically is a dump, and the
+           ones somebody chose are the answer. The full set stays one MCP call away for anyone who wants it. */
+        var chosen = rows.Where(r => !r.IsDefault).ToList();
+        PgServerConfigGrid.ItemsSource = chosen;
+
+        var pendingRestart = rows.Where(r => r.PendingRestart).Select(r => r.Name).ToList();
+
+        PgServerConfigNote.Text = PanelNote("pg_server_config", chosen.Count,
+            "This collector runs HOURLY, so a server added in the last hour has nothing here yet.")
+            + (chosen.Count == 0
+                ? string.Empty
+                : $"  {chosen.Count} setting(s) differ from the compiled-in default; the rest are omitted "
+                  + "rather than truncated.")
+            + (pendingRestart.Count > 0
+                ? $"  {pendingRestart.Count} setting(s) are PENDING RESTART — "
+                  + string.Join(", ", pendingRestart)
+                  + " — meaning the configuration file has been changed and reloaded but the running "
+                  + "server is still using the previous value. The file and the server disagree until the "
+                  + "next restart, at which point behaviour changes with no deployment to explain it."
+                : string.Empty);
     }
 
     /// <summary>
