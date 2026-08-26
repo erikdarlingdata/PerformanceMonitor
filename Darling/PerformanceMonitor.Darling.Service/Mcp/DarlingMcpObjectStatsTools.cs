@@ -79,20 +79,54 @@ public sealed class DarlingMcpObjectStatsTools
         }
     }
 
-    [McpServerTool(Name = "get_index_usage"), Description("Gets per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classifying each index as Unused, Write-only, or Active. Unused and write-only indexes are listed first - these are drop candidates. Counters are cumulative since the last instance restart.")]
+    [McpServerTool(Name = "get_index_usage"), Description("Gets per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classifying each index as Unused, Write-only, or Active. Unused and write-only indexes are listed FIRST because they are drop candidates - which means that on a server with many unused indexes the row limit can be filled entirely by one database's unused indexes, hiding every Active index elsewhere. Pass database_name to ask about one database, which is almost always what you want; the response carries matching_index_count and truncated so a short answer is never mistaken for an absent one. Counters are cumulative since the last instance restart.")]
     public static async Task<string> GetIndexUsage(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Strongly recommended: without it, unused-first ordering can fill the whole result from one database.")] string? database_name = null,
+        [Description("Maximum rows to return. Default 200.")] int limit = IndexUsageTop)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
+        var validation = McpHelpers.ValidateTop(limit);
+        if (validation != null) return validation;
+
         try
         {
-            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, IndexUsageTop);
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+
+            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, limit, database);
             if (rows.Count == 0)
+            {
+                /* #2636: a database filter that matches nothing is a DIFFERENT answer from a server that
+                   collects no index stats, and the reporter hit the first while being told the second. The
+                   capability check still runs first — a wrong-engine target has no index_object_stats at all
+                   — and only then does the filter get blamed for its own empty result. */
+                if (database is not null)
+                {
+                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId);
+
+                    if (anyOnServer > 0)
+                    {
+                        return McpHelpers.Status(
+                            "empty",
+                            $"No index usage rows for database '{database}' on {resolved.ServerName} at the "
+                            + $"latest snapshot, though the server has {anyOnServer:N0} across its other "
+                            + "databases. Check the database name against get_database_sizes — the filter "
+                            + "matches exactly, and an excluded or renamed database looks identical to one "
+                            + "with no indexes.");
+                    }
+                }
+
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats")
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
+            }
+
+            /* Counted BEFORE the cap, by a second query. A count taken over the returned rows is a count of
+               the page, which is the whole defect this answers. */
+            var matching = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, database);
+            var truncated = matching > rows.Count;
 
             var result = rows.Select(r => new
             {
@@ -115,6 +149,17 @@ public sealed class DarlingMcpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = database,
+                returned_index_count = rows.Count,
+                matching_index_count = matching,
+                truncated,
+                note = truncated
+                    ? $"TRUNCATED: {matching:N0} indexes match and {rows.Count:N0} were returned. Rows are "
+                      + "ordered UNUSED FIRST across the whole server, so the ones omitted are the ACTIVE "
+                      + "indexes and they may be concentrated in databases with no rows here at all. This is "
+                      + "not evidence that a database was not collected — pass database_name to ask about "
+                      + "one, or raise limit."
+                    : "Complete: every index matching this filter at the latest snapshot is included.",
                 indexes = result
             }, McpHelpers.JsonOptions);
         }
