@@ -332,6 +332,15 @@ public sealed partial class ViewerDataService
         int serverId, int limit = 500, CancellationToken cancellationToken = default) =>
         DarlingPgServerConfigReader.GetCurrentConfigAsync(_dataSource, serverId, limit, cancellationToken);
 
+    /// <summary>Activity tab - PostgreSQL deadlocks reported in the window (#2661), one row per distinct
+    /// report. Windowed on when the deadlock HAPPENED rather than when it was collected: the collector
+    /// re-reads an overlapping log tail, so a report is found minutes later and found again for as long as
+    /// it stays in the window, and filtering on collection time would place it wrongly and move it.</summary>
+    public Task<List<DarlingPgDeadlockReader.PgDeadlockRow>> GetPgDeadlocksAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 100,
+        CancellationToken cancellationToken = default) =>
+        DarlingPgDeadlockReader.GetDeadlocksAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
     /// <summary>Overview tab - which extensions this target has, could have, or cannot have (#2545). Latest
     /// state per extension rather than the history: installing one is a rare deliberate act, so the window
     /// holds the same answer repeated daily. Monitoring-relevant extensions sort first, and within them the

@@ -1580,6 +1580,18 @@ export const POSTGRES_TABS = [
         ctx.label + ", the numbers the planner turns into row estimates; n_distinct is a ratio when negative",
         "No column statistics in this window. This collector runs DAILY and reads only tables above a size floor, and pg_stats is privilege-filtered - a login without SELECT on a table sees nothing for it."
       ),
+      /* #2661 deadlocks, on Activity beside blocking because they are the same subject at its limit: a
+         blocking chain that resolved, and one the server had to break by cancelling somebody. Below
+         blocking rather than above it because blocking is the far more common finding. */
+      table(
+        "Deadlocks",
+        "get_pg_deadlocks",
+        { server, hours: ctx.hours },
+        "deadlocks",
+        PG_DEADLOCK_COLUMNS,
+        ctx.label + ", newest first; Sightings counts re-reads of the same report, not repeats",
+        "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the plan-capture readiness panel reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
+      ),
     ],
   },
 
@@ -2910,6 +2922,16 @@ const PG_IO_SUMMARY_STATS = [
 
    buffers_backend is here rather than buried with the other buffer counters because it is the one that
    lands on a user query: a backend writing its own dirty buffer is a query paying for the write. */
+const PG_DEADLOCK_COLUMNS = [
+  { key: "occurred_at", label: "When", format: "time" },
+  { key: "victim_pid", label: "Victim PID", format: "int" },
+  { key: "participant_count", label: "Sessions", format: "int" },
+  { key: "lock_modes", label: "Lock Modes" },
+  { key: "resources", label: "Resources" },
+  { key: "victim_statement", label: "Victim Statement" },
+  { key: "times_seen", label: "Sightings", format: "int", small: true },
+];
+
 const PG_SERVER_CONFIG_COLUMNS = [
   { key: "name", label: "Setting" },
   { key: "setting", label: "Value" },

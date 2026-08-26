@@ -148,6 +148,13 @@ public static class CollectorScheduleDefaults
            rows are small, and the changes read only ever looks at consecutive snapshots. */
         ["pg_server_config"] = new(60, 365),
 
+        /* Every 5 minutes against a 4 MB tail, matching pg_plan_capture: the two read the same file the
+           same way, and a deadlock is an EVENT rather than a level, so the cadence has to be short enough
+           that a report is still inside the window when the read comes round. 90 days because deadlocks
+           are asked about in retrospect - "we had a spike last month" - and a shorter horizon answers that
+           with silence. The overlapping window is deliberate and the hash is what makes it free. */
+        ["pg_deadlocks"] = new(5, 90),
+
         /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
            indicator, and the thing an operator wants is the session or slot that appeared minutes
            ago, before it has cost anything. At most five rows a cycle. 30 days matches the other

@@ -83,6 +83,8 @@ public sealed class ServerPageTabsTests
         ["get_pg_lock_stats"] = "pg_lock_stats",
         ["get_pg_write_stats"] = "pg_write_stats",
         ["get_pg_server_config"] = "pg_server_config",
+        ["get_pg_deadlocks"] = "pg_deadlocks",
+        ["get_pg_deadlock_detail"] = "pg_deadlocks",
         ["get_pg_server_config_changes"] = "pg_server_config",
         ["get_pg_replication_stats"] = "pg_replication_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",
