@@ -164,6 +164,14 @@ public static class CollectorEngineCapability
             ["pg_statement_stats"] = "the aurora_stat_statements() per-statement history",
             ["pg_wait_sampling"] = "the pg_wait_sampling extension's sampled wait profile",
             ["pg_kernel_stats"] = "the pg_stat_kcache extension's per-statement OS CPU and device I/O",
+            ["pg_predicate_stats"] = "the pg_qualstats extension's sampled predicate selectivity",
+            ["pg_index_bloat"] = "the pgstattuple extension's measured index leaf density and fragmentation",
+            ["pg_column_stats"] = "the pg_stats per-column distribution statistics",
+            ["pg_buffer_usage"] = "the pg_buffercache extension's shared buffer pool contents",
+            ["pg_extension_availability"] = "the per-database extension inventory",
+            ["pg_lock_stats"] = "the sampled pg_locks activity",
+            ["pg_write_stats"] = "the checkpoint and WAL write counters",
+            ["pg_replication_stats"] = "the pg_stat_replication connected-replica states",
             /* Named for the LOG, because that is where the gap actually is: auto_explain writes
                plans nowhere else, and on Aurora and RDS there is no filesystem to read them from
                (#2538). A generic phrasing here would say the collector did not run and leave the

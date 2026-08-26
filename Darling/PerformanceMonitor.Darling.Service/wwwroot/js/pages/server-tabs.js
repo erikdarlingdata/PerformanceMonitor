@@ -1434,6 +1434,19 @@ export const POSTGRES_TABS = [
         "individual runs, newest first, over the selected window",
         "No collector runs in the selected window. A collector gated off for this engine writes no log row at all rather than a zero-row success, so an absence here is the gate working."
       ),
+      /* #2629: the extension inventory. On Overview because this is the "what IS this server" tab, and
+         because it is the answer to most of the empty panels elsewhere on the page — a state of
+         'available' means the files are there and one CREATE EXTENSION fills a grid that currently reads
+         as a permanent absence. */
+      table(
+        "Extensions",
+        "get_pg_extensions",
+        { server, hours: ctx.hours, limit: 50 },
+        "extensions",
+        PG_EXTENSION_COLUMNS,
+        ctx.label + ", per DATABASE not per cluster; 'available' means CREATE EXTENSION would work",
+        "No extension inventory in this window. This collector runs DAILY, so a short window can be empty on a healthy server."
+      ),
     ],
   },
 
@@ -1533,6 +1546,40 @@ export const POSTGRES_TABS = [
             "No per-database activity in this window. These are windowed DIFFERENCES, so a single snapshot is not enough — the panel above says which of the two it is.",
         },
       ]),
+      /* #2629: sampled lock activity. On Activity rather than a Blocking tab because PostgreSQL has no
+         Blocking tab — get_pg_blocking's chains live here too — and because this answers a different
+         question from that one: which modes and relations are contended OVER TIME, rather than who is
+         blocking whom right now. */
+      table(
+        "Lock Activity (sampled)",
+        "get_pg_lock_stats",
+        { server, hours: ctx.hours, limit: 25 },
+        "locks",
+        PG_LOCK_STATS_COLUMNS,
+        ctx.label + ", a sample of pg_locks rather than an event log; ungranted rows are the contended ones",
+        "No lock activity sampled in this window. This is a SAMPLE, so a lock taken and released between two captures does not appear - an empty grid is the healthy state, not proof nothing was ever locked."
+      ),
+      /* #2629: what the queries above actually FILTER on. Placed on Activity rather than Storage because
+         it is evidence about the workload, not about the disk — and it belongs beside top queries, since
+         a predicate row and a query row are two views of the same execution. */
+      table(
+        "Predicate Selectivity",
+        "get_pg_predicate_stats",
+        { server, hours: ctx.hours, limit: 25 },
+        "predicates",
+        PG_PREDICATE_COLUMNS,
+        ctx.label + ", SAMPLED counts - scale by 1/sample rate and treat the product as an estimate",
+        "No predicate statistics in this window. pg_qualstats samples executions (1% by default) and needs shared_preload_libraries plus a restart, so an empty panel here usually means it is not loaded."
+      ),
+      table(
+        "Column Statistics",
+        "get_pg_column_stats",
+        { server, hours: ctx.hours, limit: 25 },
+        "columns",
+        PG_COLUMN_STATS_COLUMNS,
+        ctx.label + ", the numbers the planner turns into row estimates; n_distinct is a ratio when negative",
+        "No column statistics in this window. This collector runs DAILY and reads only tables above a size floor, and pg_stats is privilege-filtered - a login without SELECT on a table sees nothing for it."
+      ),
     ],
   },
 
@@ -1729,6 +1776,28 @@ export const POSTGRES_TABS = [
             "No I/O in this window. pg_stat_io needs PostgreSQL 16 or newer; on an older major the collector does not run at all, and the Collection Health panels on the Overview tab are where that shows.",
         },
       ]),
+      /* #2629: what the I/O above is reading INTO, and what is writing it back out. Residency and
+         checkpoint pressure are the two halves of a page's life either side of the I/O counters this tab
+         already shows, so all three belong together. */
+      table(
+        "Buffer Pool Residency",
+        "get_pg_buffer_usage",
+        { server, hours: ctx.hours, limit: 25 },
+        "relations",
+        PG_BUFFER_USAGE_COLUMNS,
+        ctx.label + ", residency is not read volume - a small hot table and a large one scanned once read alike",
+        "No buffer pool contents recorded. This needs the pg_buffercache extension in the database the collector connects to."
+      ),
+      /* stat, not table: this read answers with ONE object describing the whole window, not a row set. */
+      stat(
+        "Checkpoints and WAL",
+        "get_pg_write_stats",
+        { server, hours: ctx.hours },
+        PG_WRITE_STATS,
+        ctx.label + ", requested checkpoints mean write volume filled max_wal_size before the interval elapsed",
+        2,
+        "No checkpoint or WAL activity differenced yet. These are differenced across snapshots, so a single collection has nothing to difference against and the window fills on the second."
+      ),
     ],
   },
 
@@ -1756,6 +1825,18 @@ export const POSTGRES_TABS = [
             "No replication slots on this server. An inactive slot retains WAL forever and is the usual way a PostgreSQL instance fills its disk with nobody watching, so an empty grid here is good news.",
         },
       ]),
+      /* #2629: the connected replicas, beside the slots. Two different questions and the DANGEROUS case is
+         the disagreement — a slot that persists after its replica stops connecting retains WAL forever,
+         and neither panel alone shows that. Slots first because that is the one that fills a disk. */
+      table(
+        "Connected Replicas",
+        "get_pg_replication_stats",
+        { server, hours: ctx.hours, limit: 25 },
+        "replicas",
+        PG_REPLICATION_STATS_COLUMNS,
+        ctx.label + ", worst-in-window beside latest; lag is spiky and one sample catches one instant",
+        "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely."
+      ),
     ],
   },
 
@@ -1810,6 +1891,20 @@ export const POSTGRES_TABS = [
             "No index of at least 64 KB was recorded on this server, so there is nothing here to judge. This collector runs daily and is gated off on read replicas, where scan counts are the replica's own rather than the writer's.",
         },
       ]),
+      /* #2629: MEASURED index bloat, beside the ESTIMATED table bloat above and the usage counts. The
+         three answer one question in sequence — how much space, is it earning its keep, and is the index
+         itself wasting it — and measured bloat sits last deliberately: it is the only one of the three
+         that is not an estimate, so a reader who has just been warned about estimates meets the real
+         measurement immediately after. */
+      table(
+        "Index Bloat (measured)",
+        "get_pg_index_bloat",
+        { server, hours: ctx.hours, limit: 25 },
+        "indexes",
+        PG_INDEX_BLOAT_COLUMNS,
+        ctx.label + ", measured by walking the index; a value in Not Measured means the collector's per-cycle budget skipped it",
+        "No index was measured on this server. This collector runs DAILY and measuring walks the index, so a short window or a fresh install is legitimately empty here."
+      ),
     ],
   },
 ];
@@ -2771,6 +2866,116 @@ const PG_IO_SUMMARY_STATS = [
    opposite emphasis from PG_WAIT_COLUMNS above — that one reports measured time, this one reports how many
    times a periodic profiler caught a backend in a state. Leading with the estimate would present a derived
    number as the observation and hide that its error grows as the event gets rarer. */
+/* #2629 column sets for the eight reads that reached the web only now. */
+
+/* Density leads, not size: a huge index at 90% density is fine and a small one at 40% is the finding.
+   skipped_reason is last and always present — a blank there is a measurement, a value there is an index
+   nobody looked at, and the two must never be confused for one another. */
+/* The checkpoint story in reading order: how many, how many were FORCED, and who paid for the writes.
+   pct_checkpoints_requested leads the pair because the raw counts mean little apart — twenty checkpoints is
+   healthy or alarming entirely depending on how many of them the server asked for.
+
+   buffers_backend is here rather than buried with the other buffer counters because it is the one that
+   lands on a user query: a backend writing its own dirty buffer is a query paying for the write. */
+const PG_WRITE_STATS = [
+  { key: "checkpoints_timed", label: "Timed", format: "int" },
+  { key: "checkpoints_requested", label: "Requested", format: "int" },
+  { key: "pct_checkpoints_requested", label: "% Requested", format: "num1" },
+  { key: "checkpoint_write_time_ms", label: "Checkpoint write", format: "ms" },
+  { key: "buffers_written_checkpoint", label: "Buffers (checkpoint)", format: "int" },
+  { key: "buffers_clean", label: "Buffers (bgwriter)", format: "int" },
+  { key: "buffers_backend", label: "Buffers (backend)", format: "int" },
+  { key: "wal_records", label: "WAL records", format: "int" },
+  { key: "wal_fpi", label: "WAL full-page images", format: "int" },
+  { key: "counter_reset", label: "Counters reset", format: "bool", small: true },
+];
+
+const PG_INDEX_BLOAT_COLUMNS = [
+  { key: "schema_name", label: "Schema" },
+  { key: "table_name", label: "Table" },
+  { key: "index_name", label: "Index" },
+  { key: "index_mb", label: "Size", format: "mb" },
+  { key: "avg_leaf_density", label: "Leaf Density %", format: "num1" },
+  { key: "leaf_fragmentation", label: "Fragmentation %", format: "num1" },
+  { key: "estimated_reclaimable_mb", label: "Reclaimable", format: "mb" },
+  { key: "skipped_reason", label: "Not Measured" },
+];
+
+/* n_distinct and correlation are the two the planner actually turns into a row estimate, so they lead.
+   num2 throughout: correlation lives between -1 and 1 and num1 would round most real values to 0.0 or 1.0,
+   which is the difference between "clustered" and "not" rendered as the same number. */
+const PG_COLUMN_STATS_COLUMNS = [
+  { key: "schema_name", label: "Schema" },
+  { key: "table_name", label: "Table" },
+  { key: "column_name", label: "Column" },
+  { key: "n_distinct", label: "n_distinct", format: "num2" },
+  { key: "correlation", label: "Correlation", format: "num2" },
+  { key: "null_frac", label: "Null Frac", format: "num2" },
+  { key: "top_value_frequency", label: "Top Value Freq", format: "num2" },
+  { key: "avg_width", label: "Avg Width", format: "int" },
+];
+
+/* filtered_pct is the recommendation and worst_estimate_error_ratio is the counter-argument: high filtering
+   says index this, a high error ratio says the planner is wrong about it and an index may not help. Both on
+   the same row so neither is read alone. */
+const PG_PREDICATE_COLUMNS = [
+  { key: "schema_name", label: "Schema" },
+  { key: "table_name", label: "Table" },
+  { key: "column_name", label: "Column" },
+  { key: "operator", label: "Op" },
+  { key: "rows_evaluated", label: "Rows Evaluated", format: "int" },
+  { key: "rows_filtered", label: "Rows Filtered", format: "int" },
+  { key: "filtered_pct", label: "Filtered %", format: "num1" },
+  { key: "worst_estimate_error_ratio", label: "Worst Est. Error", format: "num2" },
+  { key: "sample_rate", label: "Sample Rate", format: "num2" },
+];
+
+const PG_BUFFER_USAGE_COLUMNS = [
+  { key: "relation_name", label: "Relation" },
+  { key: "relation_kind", label: "Kind" },
+  { key: "buffer_mb", label: "Resident", format: "mb" },
+  { key: "pct_of_pool", label: "% of Pool", format: "num1" },
+  { key: "dirty_buffers", label: "Dirty", format: "int" },
+  { key: "pct_dirty", label: "% Dirty", format: "num1" },
+  { key: "avg_usage_count", label: "Avg Usage", format: "num2" },
+];
+
+/* State first: it is the only column anyone scans for, and "available" is the one that means a one-line fix
+   is waiting. */
+const PG_EXTENSION_COLUMNS = [
+  { key: "state", label: "State" },
+  { key: "extension_name", label: "Extension" },
+  { key: "database_name", label: "Database" },
+  { key: "installed_version", label: "Installed" },
+  { key: "default_version", label: "Default" },
+  { key: "monitoring_relevant", label: "We Use It", format: "bool" },
+];
+
+/* granted is second, right beside the mode, because an ungranted lock is the entire finding and burying it
+   among the counts would make a contended server look like a busy one. */
+const PG_LOCK_STATS_COLUMNS = [
+  { key: "mode", label: "Mode" },
+  { key: "granted", label: "Granted", format: "bool" },
+  { key: "lock_type", label: "Type" },
+  { key: "relation_name", label: "Relation" },
+  { key: "captures", label: "Captures", format: "int" },
+  { key: "max_backends", label: "Max Backends", format: "int" },
+  { key: "max_wait_ms", label: "Worst Wait", format: "ms" },
+];
+
+/* worst_* beside latest on every lag measure. Lag is spiky, a sample catches one instant, and a grid showing
+   only the latest value reports a replica that fell an hour behind and caught up as perfectly healthy. */
+const PG_REPLICATION_STATS_COLUMNS = [
+  { key: "application_name", label: "Replica" },
+  { key: "state", label: "State" },
+  { key: "sync_state", label: "Sync" },
+  { key: "replay_lag_ms", label: "Replay Lag", format: "ms" },
+  { key: "worst_replay_lag_ms", label: "Worst Lag", format: "ms" },
+  { key: "replay_bytes_behind", label: "Bytes Behind", format: "int" },
+  { key: "worst_replay_bytes_behind", label: "Worst Behind", format: "int" },
+  { key: "samples", label: "Samples", format: "int" },
+];
+
 const PG_WAIT_SAMPLING_COLUMNS = [
   { key: "event_type", label: "Type" },
   { key: "wait_event", label: "Event" },
