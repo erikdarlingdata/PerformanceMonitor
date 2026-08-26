@@ -1588,7 +1588,10 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats (
     reuses bigint,
     fsyncs bigint,
     fsync_time_ms double precision,
-    stats_reset timestamp
+    stats_reset timestamp,
+    read_bytes numeric(28,0),
+    write_bytes numeric(28,0),
+    extend_bytes numeric(28,0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_io_stats_time
@@ -2309,6 +2312,16 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     /// not apply to this combination" (WAL rows report no <c>extend_bytes</c>, verified on 18.6). A NOT NULL
     /// 0 would turn "not reported" into a measurement, which is the one thing the I/O read works hardest not
     /// to do. Below 18 they stay NULL forever and <c>op_bytes</c> remains the answer.</para>
+    ///
+    /// <para><b>The columns are added in TWO places and both are required.</b> A store's tables come from
+    /// one of two texts depending on when it was created: a fresh store builds them from V1's generated
+    /// schema, walked from the collector catalog, while an existing store has whatever its rungs built. So
+    /// the <c>pg_io_stats</c> CREATE TABLE rung gains the three columns for the fresh population — that is
+    /// what <c>PgSchemaGeneratorTests</c> enforces, column for column — and THIS rung's ALTER carries the
+    /// existing one. Neither is redundant: the CREATE is <c>IF NOT EXISTS</c> and never re-runs on a store
+    /// that already has the table, and the ALTER is <c>ADD COLUMN IF NOT EXISTS</c> and is a no-op on the
+    /// fresh store that just created them. Dropping either leaves one population permanently without the
+    /// columns, which is exactly the invisible divergence that test exists to prevent.</para>
     ///
     /// <para>No view refresh: <c>collect.pg_io_stats</c> has no <c>v_</c> passthrough freezing a column
     /// list.</para>
