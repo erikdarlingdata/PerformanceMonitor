@@ -69,9 +69,12 @@ public sealed class DarlingMcpPgStatementTools
                         postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
                     ?? McpHelpers.Status(
                         "unavailable",
-                        "No PostgreSQL query statistics for this server and window. On Aurora, check that "
-                        + "pg_stat_statements is installed in the database the collector connects to — on some "
-                        + "clusters it exists only in the application database, not in postgres. Otherwise the "
+                        "No PostgreSQL query statistics for this server and window. Check that "
+                        + "pg_stat_statements is installed in the database the collector connects to — it is "
+                        + "not installed by default, and on some clusters it exists only in the application "
+                        + "database, not in postgres. Also expect an empty window from a SINGLE snapshot: the "
+                        + "counters here are per-interval deltas, so the first collection after a restart has "
+                        + "nothing to difference against and the window fills on the second. Otherwise the "
                         + "store has not recorded this server's engine yet, and a target it cannot classify may "
                         + "not be a PostgreSQL one at all — check list_servers.");
             }
@@ -82,9 +85,11 @@ public sealed class DarlingMcpPgStatementTools
         {
             /* #2554: a THROW is a miss too, and until now it was the one miss the capability answer could
                not reach. The gate sat inside `if (rows.Count == 0)`, so it only ever spoke when the query
-               SUCCEEDED and returned nothing — and a stock-PostgreSQL caller, for whom pg_statement_stats
-               can never run at all (its AppliesTo is Aurora-only), got a raw SQL error where its sibling
-               get_pg_wait_stats gives the honest "does not run on that engine, and never will".
+               SUCCEEDED and returned nothing — and a caller on a target that excludes pg_statement_stats got
+               a raw SQL error where its sibling get_pg_wait_stats gives the honest "does not run on that
+               engine, and never will". (That caller was on stock PostgreSQL until #2625, which gave the
+               collector a vanilla pg_stat_statements path; the gate now answers the DIALECT exclusion, and a
+               stock-PostgreSQL fault correctly reads as a fault.)
 
                Consulted HERE rather than moved ahead of the read, which is what it looks like it should be.
                DarlingEngineCapability's contract is explicit that every call site asks AFTER its read came
@@ -124,6 +129,8 @@ public sealed class DarlingMcpPgStatementTools
 
         var result = rows.Take(limit).Select(r =>
         {
+            /* Null when the source did not report the split at all (self-hosted PostgreSQL, #2625), which
+               is a different answer from zero and must not become a 0% cache-hit ratio. */
             var storageAndCache = r.StorageBlocksRead + r.OrcacheBlocksHit;
             return new
             {
@@ -157,7 +164,7 @@ public sealed class DarlingMcpPgStatementTools
                 storage_blks_read = r.StorageBlocksRead,
                 orcache_blks_hit = r.OrcacheBlocksHit,
                 orcache_hit_pct_of_reads = storageAndCache > 0
-                    ? Math.Round((double)r.OrcacheBlocksHit / storageAndCache * 100, 1)
+                    ? Math.Round((double)r.OrcacheBlocksHit!.Value / storageAndCache.Value * 100, 1)
                     : (double?)null,
                 /* Spills. temp blocks are sort/hash spill to disk, NOT temporary tables - those are
                    the local_blks_* family and a different problem. */

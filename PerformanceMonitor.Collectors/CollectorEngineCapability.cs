@@ -383,6 +383,42 @@ public static class CollectorEngineCapability
         "enabling a collector or starting a capture cannot change it.";
 
     /// <summary>
+    /// Where the same question IS answered on this target, for the gaps that have a sibling (#2625).
+    ///
+    /// <para>
+    /// "and never will" is the right thing to say about the SOURCE and the wrong thing to leave an operator
+    /// with when another collector covers the question. A stock-PostgreSQL operator reading the
+    /// <c>pg_wait_stats</c> gap message learns that Aurora's wait instrumentation is unreachable, which is
+    /// true, and concludes that wait analysis is unavailable, which is false - <c>pg_wait_sampling</c> has
+    /// been sampling the same events all along.
+    /// </para>
+    ///
+    /// <para>
+    /// Deliberately sparse. An entry is a promise that the named collector answers substantially the same
+    /// question on the same target, and a pointer at something merely adjacent is worse than none: it sends
+    /// the reader to a panel that does not answer what they asked, and spends the credibility the rest of
+    /// this message depends on. A gap with no honest sibling gets no pointer.
+    /// </para>
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> CoveredInsteadBy =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            /* Aurora's aurora_stat_system_waits() vs. the pg_wait_sampling extension: different sources,
+               same question - which wait events this server is spending time in. */
+            ["pg_wait_stats"] = "pg_wait_sampling",
+        };
+
+    /// <summary>
+    /// The sentence appended to a permanent-gap message when <see cref="CoveredInsteadBy"/> names a sibling,
+    /// and nothing at all when it does not.
+    /// </summary>
+    private static string CoveredInsteadSuffix(string collectorName) =>
+        CoveredInsteadBy.TryGetValue(collectorName, out var sibling)
+            ? $" The same question IS answered on this server by the {sibling} collector, which reads a " +
+              $"different source for it — check that panel rather than this one."
+            : string.Empty;
+
+    /// <summary>
     /// True when SOME server of this engine edition runs <paramref name="collectorName"/> — i.e. the
     /// collector is not excluded by the engine alone.
     /// <para>Unknown (0) editions answer TRUE. So does an unknown collector name, matching
@@ -556,7 +592,8 @@ public static class CollectorEngineCapability
                        $"The {collectorName} collector is written against " +
                        $"{DescribeTargetEngine(definition.TargetEngine)} and the dispatch gate's engine half never " +
                        $"sends it at another engine, so this server does not collect " +
-                       $"{CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}";
+                       $"{CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}" +
+                       CoveredInsteadSuffix(collectorName);
             }
 
             /* Deliberately the edition axis's own wording, verbatim past the engine name: the two are the
@@ -565,7 +602,7 @@ public static class CollectorEngineCapability
             return engine +
                    $"The {collectorName} collector does not run on that engine — its own AppliesTo gate " +
                    $"excludes it — so this server does not collect {CapturePathOf(collectorName)}, and never " +
-                   $"will. {PermanentGapEpilogue}";
+                   $"will. {PermanentGapEpilogue}" + CoveredInsteadSuffix(collectorName);
         }
 
         if (IsCollectedOnEngineEdition(definition, engineEdition))
@@ -580,7 +617,7 @@ public static class CollectorEngineCapability
         return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}). " +
                $"The {collectorName} collector does not run on that engine — its own AppliesTo gate excludes it — " +
                $"so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
-               PermanentGapEpilogue;
+               PermanentGapEpilogue + CoveredInsteadSuffix(collectorName);
     }
 
     /// <summary>What a gated-off collector would have captured. No entry is a vaguer sentence, never a wrong

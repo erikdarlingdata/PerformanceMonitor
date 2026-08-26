@@ -25,10 +25,21 @@ namespace PerformanceMonitor.Collectors;
 /// arithmetically misleading on Aurora, because a "read" may have been a fast local hit. And it
 /// reports <b>peak memory per statement</b>, which is the closest thing PostgreSQL has to SQL Server's
 /// memory-grant data; core PostgreSQL has no grant concept at all.</para>
-/// <para>Not gated on Aurora being present for the *statements* themselves — plain
-/// <c>pg_stat_statements</c> would serve those — but this definition reads the Aurora-extended
-/// function, so it is Aurora-only like its wait sibling. A stock-PostgreSQL variant reading the
-/// vanilla view would be a separate definition.</para>
+/// <para>#2625: it reads BOTH sources. On Aurora it reads <c>aurora_stat_statements(false)</c>; on any
+/// other PostgreSQL it reads the vanilla <c>pg_stat_statements</c> view and reports the Aurora-only
+/// columns as NULL. One collector, one table, chosen at query-build time — because the Aurora function
+/// is <c>pg_stat_statements</c> plus columns, so the vanilla read is a strict subset rather than a
+/// different measurement, and splitting it in two would have meant two tables, two readers, two panels
+/// and two MCP tools for one question.</para>
+/// <para>It was Aurora-only until a self-hosted PostgreSQL target existed to notice. The cost of that
+/// gate was not a missing column — it was that "which queries cost the most", the question a database
+/// monitor exists to answer, had NO answer at all on stock PostgreSQL, while the collectors either side
+/// of it happily gathered OS CPU and predicate selectivity keyed by the very queryids it was not
+/// identifying.</para>
+/// <para><b>NULL is load-bearing here.</b> The Aurora-only columns are written NULL rather than zero on
+/// the vanilla path: zero would say Aurora measured no storage reads for this statement, which is a
+/// claim about the server, not about the source. Every consumer of those columns already tolerates NULL
+/// because Aurora itself returns NULL for a statement with no such activity.</para>
 /// </summary>
 public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<PgStatementStatsCollector.Row>
 {
@@ -57,15 +68,17 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
         long TempBlocksWritten,
         double BlockReadTimeMs,
         double BlockWriteTimeMs,
-        long StorageBlocksRead,
-        long OrcacheBlocksHit,
-        double StorageBlockReadTimeMs,
-        double OrcacheBlockReadTimeMs,
+        /* Nullable from #2625 on: these six exist only in aurora_stat_statements(). NULL means "this
+           source does not report it", which is not the same statement as zero. */
+        long? StorageBlocksRead,
+        long? OrcacheBlocksHit,
+        double? StorageBlockReadTimeMs,
+        double? OrcacheBlockReadTimeMs,
         long WalRecords,
         long WalFpi,
         long WalBytes,
-        long TotalExecPeakMemBytes,
-        long MaxExecPeakMemBytes);
+        long? TotalExecPeakMemBytes,
+        long? MaxExecPeakMemBytes);
 
     /* Column names DIFFER between PostgreSQL 16 and 17 and our fleet spans both, so the query is
        built per major rather than SELECT *-ed. Verified against live 16.11 and 17.7:
@@ -80,10 +93,56 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
        Explicit casts pin the reader's types: wal_bytes is numeric in PostgreSQL (bigint cannot hold
        its declared 10^20 range, though no real statement approaches it), and Npgsql's type checking
        is strict enough that reading numeric with GetInt64 throws. */
-    private static string BuildQueryText(int postgresMajorVersion)
+    private static string BuildQueryText(int postgresMajorVersion, bool isAurora)
     {
         var readTime = postgresMajorVersion >= 17 ? "shared_blk_read_time" : "blk_read_time";
         var writeTime = postgresMajorVersion >= 17 ? "shared_blk_write_time" : "blk_write_time";
+
+        /* #2625, the vanilla path. The ORDINALS are identical to Aurora's on purpose: the six columns
+           only Aurora reports are selected as typed NULL literals rather than omitted, so ReadAsync,
+           PayloadColumns and WritePayload stay one implementation with one ordering. A shorter SELECT
+           here would mean a second reader whose ordinals could drift from this one, which is the exact
+           failure the per-major column naming above already documents.
+
+           toplevel arrived in pg_stat_statements 1.9 (PostgreSQL 14). Before that every row IS a top
+           level statement - nested tracking is what 1.9 added - so `true` is the correct value on an
+           older server, not a fallback. */
+        var topLevel = postgresMajorVersion >= 14 ? "toplevel" : "true";
+
+        if (!isAurora)
+        {
+            return $@"
+SELECT
+    queryid::bigint                    AS queryid,
+    dbid::bigint                       AS dbid,
+    userid::bigint                     AS userid,
+    {topLevel}                         AS toplevel,
+    calls::bigint                      AS calls,
+    total_exec_time                    AS total_exec_time,
+    min_exec_time                      AS min_exec_time,
+    max_exec_time                      AS max_exec_time,
+    mean_exec_time                     AS mean_exec_time,
+    rows::bigint                       AS rows_returned,
+    shared_blks_hit::bigint            AS shared_blks_hit,
+    shared_blks_read::bigint           AS shared_blks_read,
+    shared_blks_dirtied::bigint        AS shared_blks_dirtied,
+    shared_blks_written::bigint        AS shared_blks_written,
+    temp_blks_read::bigint             AS temp_blks_read,
+    temp_blks_written::bigint          AS temp_blks_written,
+    {readTime}                         AS blk_read_time,
+    {writeTime}                        AS blk_write_time,
+    NULL::bigint                       AS storage_blks_read,
+    NULL::bigint                       AS orcache_blks_hit,
+    NULL::double precision             AS storage_blk_read_time,
+    NULL::double precision             AS orcache_blk_read_time,
+    wal_records::bigint                AS wal_records,
+    wal_fpi::bigint                    AS wal_fpi,
+    wal_bytes::bigint                  AS wal_bytes,
+    NULL::bigint                       AS total_exec_peakmem,
+    NULL::bigint                       AS max_exec_peakmem
+FROM public.pg_stat_statements
+WHERE calls > 0";
+        }
 
         return $@"
 SELECT
@@ -123,13 +182,23 @@ WHERE calls > 0";
     public override string TargetTable => "pg_statement_stats";
 
     /// <summary>
-    /// Aurora only: this reads <c>aurora_stat_statements()</c>, the Aurora-extended function, not the
-    /// vanilla <c>pg_stat_statements</c> view.
+    /// Every PostgreSQL target (#2625). The SOURCE differs by flavor - Aurora's extended function or the
+    /// vanilla view - and that is a <see cref="BuildQuery"/> decision, not an applicability one.
+    /// <para><c>AppliesTo</c> means permanent incapability, and stock PostgreSQL is perfectly capable of
+    /// reporting per-statement execution statistics. Returning false here told every operator of a
+    /// non-Aurora target that this server "does not collect per-query-shape execution statistics, and
+    /// never will" - a sentence composed by the capability machinery precisely so that a real gap reads
+    /// as final and is not chased. It was not a real gap.</para>
+    /// <para><c>pg_stat_statements</c> is not installed by default, so a target without it fails the
+    /// read with SQLSTATE 42P01 and lands in the ObjectMissing vocabulary - "the source object does not
+    /// exist on this target" - which is the correct, actionable answer (CREATE EXTENSION) and is exactly
+    /// how <c>pg_wait_sampling</c> and <c>pg_kernel_stats</c> already report the same situation. An
+    /// uninstalled extension is a target-configuration fact, not an incapability.</para>
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => target.IsAurora;
+    public override bool AppliesTo(CollectorTargetInfo target) => true;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
-        => new(BuildQueryText(context.Target.PostgresMajorVersion));
+        => new(BuildQueryText(context.Target.PostgresMajorVersion, context.Target.IsAurora));
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -194,20 +263,26 @@ WHERE calls > 0";
                 TempBlocksWritten: reader.GetInt64(15),
                 BlockReadTimeMs: Dbl(reader, 16),
                 BlockWriteTimeMs: Dbl(reader, 17),
-                StorageBlocksRead: reader.GetInt64(18),
-                OrcacheBlocksHit: reader.GetInt64(19),
-                StorageBlockReadTimeMs: Dbl(reader, 20),
-                OrcacheBlockReadTimeMs: Dbl(reader, 21),
+                /* NullableLong/NullableDbl, not Dbl: on the vanilla path these six ARRIVE null, and
+                   coalescing them to zero here would erase the distinction the whole change rests on. */
+                StorageBlocksRead: NullableLong(reader, 18),
+                OrcacheBlocksHit: NullableLong(reader, 19),
+                StorageBlockReadTimeMs: NullableDbl(reader, 20),
+                OrcacheBlockReadTimeMs: NullableDbl(reader, 21),
                 WalRecords: reader.GetInt64(22),
                 WalFpi: reader.GetInt64(23),
                 WalBytes: reader.GetInt64(24),
-                TotalExecPeakMemBytes: reader.GetInt64(25),
-                MaxExecPeakMemBytes: reader.GetInt64(26)));
+                TotalExecPeakMemBytes: NullableLong(reader, 25),
+                MaxExecPeakMemBytes: NullableLong(reader, 26)));
         }
 
         return rows;
 
         static double Dbl(DbDataReader r, int ordinal) => r.IsDBNull(ordinal) ? 0 : r.GetDouble(ordinal);
+
+        static long? NullableLong(DbDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetInt64(ordinal);
+
+        static double? NullableDbl(DbDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetDouble(ordinal);
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)

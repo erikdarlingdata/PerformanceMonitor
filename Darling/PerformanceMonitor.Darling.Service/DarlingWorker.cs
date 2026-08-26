@@ -3785,11 +3785,12 @@ LIMIT 1", connection);
 
                 /* WITHIN-engine gates get the same treatment, on EVERY engine.
                    EngineMatches above drops the wrong DIALECT; it says nothing about a collector that is
-                   right-dialect but inapplicable to this particular target — pg_wait_stats and
-                   pg_statement_stats read Aurora-only functions, so on stock PostgreSQL they dispatched, came
-                   back with 0 rows, and RunOneAsync recorded SUCCESS. Two collectors at a 1-minute cadence is
-                   ~2,880 fake successes a day per server, and the PR promised "a graceful skip with an
-                   explanation" instead.
+                   right-dialect but inapplicable to this particular target — pg_wait_stats reads Aurora's own
+                   wait instrumentation, so on stock PostgreSQL it dispatched, came back with 0 rows, and
+                   RunOneAsync recorded SUCCESS. At a 1-minute cadence that is ~1,440 fake successes a day per
+                   server, and the PR promised "a graceful skip with an explanation" instead. (pg_statement_stats
+                   was the second such collector until #2625 gave it a vanilla pg_stat_statements path; it now
+                   applies to every PostgreSQL target and reaches this gate on none of them.)
 
                    #2579 EXTENDS THIS TO SQL SERVER, which the PostgreSQL change deliberately left alone as
                    "its own decision" because it changes a shipping SKU's log semantics for the Azure-gated

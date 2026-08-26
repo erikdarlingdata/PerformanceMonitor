@@ -510,13 +510,16 @@ public sealed class CollectorEngineCapabilityMovingGateTests
     [Fact]
     public void AuroraOnlySurfaces_ArePermanentGapsOnStockPostgres_AndTheFixableGatesAreNot()
     {
-        foreach (var auroraOnly in new[] { "pg_wait_stats", "pg_statement_stats" })
+        /* pg_statement_stats was here until #2625 gave it a vanilla pg_stat_statements path. It is now a
+           control, below, for the opposite reason: a collector whose SOURCE varies by flavor is not a
+           capability gap, and if it ever reads as one again the gate has come back. */
+        foreach (var auroraOnly in new[] { "pg_wait_stats" })
         {
             Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(auroraOnly, MonitoredEngineKind.Postgres), auroraOnly);
             Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(auroraOnly, MonitoredEngineKind.AuroraPostgres), auroraOnly);
         }
 
-        foreach (var fixable in new[] { "pg_io_stats", "pg_autovacuum_stats", "pg_blocking" })
+        foreach (var fixable in new[] { "pg_io_stats", "pg_autovacuum_stats", "pg_blocking", "pg_statement_stats" })
         {
             Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(fixable, MonitoredEngineKind.Postgres), fixable);
             Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(fixable, MonitoredEngineKind.AuroraPostgres), fixable);

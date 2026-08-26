@@ -316,9 +316,10 @@ public sealed class ServerPageTabsTests
     /// <summary>
     /// A PostgreSQL read whose collector is Aurora-only sits on a tab that SAYS it is Aurora-only.
     ///
-    /// <para>Two of the eight are: <c>pg_wait_stats</c> reads <c>aurora_stat_system_waits()</c> and
-    /// <c>pg_statement_stats</c> reads <c>aurora_stat_statements()</c>, and core PostgreSQL has an equivalent
-    /// of neither in any version. Both panels self-explain — #2532 made the reads answer that state with
+    /// <para>One of the eight is: <c>pg_wait_stats</c> reads <c>aurora_stat_system_waits()</c>, and core
+    /// PostgreSQL has no equivalent in any version — <c>pg_wait_sampling</c> answers the same question from a
+    /// different source, which is why the gap sentence now points at it. (<c>pg_statement_stats</c> was the
+    /// second until #2625 gave it a vanilla <c>pg_stat_statements</c> path.) The panel self-explains — #2532 made the reads answer that state with
     /// <c>not_collected</c> naming the server, the engine and the collector — but a note is what the reader
     /// meets BEFORE clicking, and it is what makes "shown at stock PostgreSQL" a decision rather than an
     /// oversight. It matters most on Activity, where the rest of the tab DOES fill, so one empty grid among

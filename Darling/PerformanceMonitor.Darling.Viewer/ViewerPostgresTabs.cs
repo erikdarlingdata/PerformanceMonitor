@@ -53,9 +53,12 @@ internal sealed record ViewerPostgresTab(
 /// horizon, vacuum backlog, WAL retention — have no SQL Server analogue either. A PostgreSQL surface built
 /// by asking "what does the SQL Server viewer have" would have missed most of them.</para>
 ///
-/// <para><b>The Aurora-only panels are SHOWN, not hidden.</b> <c>pg_wait_stats</c> and
-/// <c>pg_statement_stats</c> both gate on <c>CollectorTargetInfo.IsAurora</c>, so on stock PostgreSQL they
-/// can never have content — and since #2532 the reason is a sentence
+/// <para><b>The Aurora-only panel is SHOWN, not hidden.</b> <c>pg_wait_stats</c> gates on
+/// <c>CollectorTargetInfo.IsAurora</c> — it reads Aurora's own wait instrumentation, and
+/// <c>pg_wait_sampling</c> is the stock-PostgreSQL answer to the same question — so on stock PostgreSQL it
+/// can never have content. (<c>pg_statement_stats</c> was in this paragraph until #2625, when it learned to
+/// read the vanilla <c>pg_stat_statements</c> view; its panel now fills on every PostgreSQL target.) Since
+/// #2532 the reason is a sentence
 /// (<see cref="CollectorEngineCapability.NotCollectedMessage"/>) naming the server, the engine, the
 /// collector and the exact Aurora surface, ending "and never will". The defect #2530 is about is
 /// UNEXPLAINED emptiness, not emptiness: a panel that says that is the opposite of the twelve blank SQL

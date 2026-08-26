@@ -110,11 +110,15 @@ public sealed class ViewerPostgresTabsTests
 
     /// <summary>
     /// The Aurora-only collectors are on the tab set, not hidden from it — the decision #2547 made for the
-    /// web, pinned here so the viewer cannot quietly diverge. <c>pg_wait_stats</c> and
-    /// <c>pg_statement_stats</c> gate on <c>IsAurora</c>, so on stock PostgreSQL they can never have
-    /// content; since #2532 they answer with a sentence naming the exact Aurora surface instead of a blank,
-    /// so the defect this issue is about — UNEXPLAINED emptiness — is closed by showing them, and hiding
-    /// them would make the tab strip a different shape on two PostgreSQL servers in one fleet.
+    /// web, pinned here so the viewer cannot quietly diverge. <c>pg_wait_stats</c> gates on
+    /// <c>IsAurora</c>, so on stock PostgreSQL it can never have content; since #2532 it answers with a
+    /// sentence naming the exact Aurora surface instead of a blank, so the defect this issue is about —
+    /// UNEXPLAINED emptiness — is closed by showing it, and hiding it would make the tab strip a different
+    /// shape on two PostgreSQL servers in one fleet.
+    /// <para>The count is ONE from #2625 on, not two: <c>pg_statement_stats</c> learned to read the vanilla
+    /// <c>pg_stat_statements</c> view and is no longer Aurora-only. The assertion is derived, so it moved on
+    /// its own — which is the point of deriving it. A hardcoded pair would have failed here and been
+    /// "fixed" by editing the number, hiding that a whole capability had crossed over.</para>
     /// <para>Derived from the shipped gates rather than named: this reads which collectors are Aurora-only
     /// out of <see cref="CollectorEngineCapability"/> and requires each to be placed.</para>
     /// </summary>
@@ -128,9 +132,9 @@ public sealed class ViewerPostgresTabsTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        Assert.True(auroraOnly.Count >= 2,
-            "Expected at least two Aurora-only PostgreSQL collectors (pg_wait_stats and pg_statement_stats " +
-            "both read an aurora_stat_* surface). Found: " + string.Join(", ", auroraOnly));
+        Assert.True(auroraOnly.Count >= 1,
+            "Expected at least one Aurora-only PostgreSQL collector (pg_wait_stats reads an aurora_stat_* " +
+            "surface with no vanilla equivalent). Found: " + string.Join(", ", auroraOnly));
 
         var placed = ViewerPostgresTabs.All.SelectMany(t => t.Collectors).ToHashSet(StringComparer.Ordinal);
         var hidden = auroraOnly.Where(n => !placed.Contains(n)).ToList();
