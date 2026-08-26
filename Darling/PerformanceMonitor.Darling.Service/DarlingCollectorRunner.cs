@@ -425,6 +425,11 @@ public sealed class DarlingCollectorRunner
             var failed = 0;
             Exception? firstFailure = null;
 
+            /* #2623: the names, not just the count. A partial loss composes a note naming which databases
+               were skipped, because the count alone does not tell an operator whether the ONE database
+               that matters is in the collected set or the skipped one. */
+            var failedDatabases = new List<string>();
+
             /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
                log cap are decided for the cycle after the loop rather than inside it — see
                CycleProbeFailures for why neither generalizes from the single-read plain path. */
@@ -665,6 +670,7 @@ public sealed class DarlingCollectorRunner
                     var budgetFailure = EnumeratedCollectorDriver.ItemBudgetException(
                         definition.PerItemWallClockBudget!.Value);
                     failed++;
+                    failedDatabases.Add(databaseName);
                     firstFailure ??= budgetFailure;
 
                     /* Same #2111 stamp the generic arm makes, and it MATTERS more here: this is what turns
@@ -687,6 +693,7 @@ public sealed class DarlingCollectorRunner
                     /* OOM is filtered OUT of this per-database skip and propagates: it is fatal, not a
                        routine one-database miss. */
                     failed++;
+                    failedDatabases.Add(databaseName);
                     firstFailure ??= ex;
 
                     /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
@@ -708,7 +715,10 @@ public sealed class DarlingCollectorRunner
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
                which is exactly what this path carried before. */
-            collectionNote = cycleProbeFailures.Note;
+            collectionNote = EnumeratedCollectorDriver.MergeNotes(
+                cycleProbeFailures.Note,
+                EnumeratedCollectorDriver.BuildPartialFailureNote(
+                    failed, attempted, failedDatabases, firstFailure?.Message));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
