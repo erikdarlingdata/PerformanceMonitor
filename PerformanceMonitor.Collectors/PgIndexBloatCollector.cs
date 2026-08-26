@@ -260,6 +260,7 @@ ORDER BY k.index_bytes DESC";
         /* No deltas. Bloat is a level, and the history is what distinguishes an index that has been bloated
            since it was built from one that got that way this month. */
         writer
+            .Value(row.DatabaseName)
             .Value(row.SchemaName)
             .Value(row.TableName)
             .Value(row.IndexName)

@@ -198,6 +198,7 @@ LIMIT 5000";
            so somebody can see that n_distinct moved on the day a plan changed, which is the question this
            gets opened for. */
         writer
+            .Value(row.DatabaseName)
             .Value(row.SchemaName)
             .Value(row.TableName)
             .Value(row.ColumnName)
