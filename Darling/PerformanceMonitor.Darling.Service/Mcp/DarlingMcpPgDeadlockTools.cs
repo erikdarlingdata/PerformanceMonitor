@@ -89,52 +89,61 @@ public sealed class DarlingMcpPgDeadlockTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_deadlock_detail"), Description("Gets one PostgreSQL deadlock in full, by the deadlock_hash that get_pg_deadlocks returns: the complete wait graph as PostgreSQL wrote it, naming every participant, the lock each was waiting for, who blocked whom, and each participant's entire statement text. This carries MORE than a SQL Server deadlock graph does - PostgreSQL names the SQL of every session in the cycle, where the SQL Server graph often leaves the non-victim side as a handle. The graph is stored verbatim rather than reassembled, so a lock type the parser does not break out is still readable here.")]
+    [McpServerTool(Name = "get_pg_deadlock_detail"), Description("Gets PostgreSQL deadlock graphs in full: the complete wait graph as the server wrote it, naming every participant, the lock each was waiting for, who blocked whom, and each participant's entire statement text. Pass a deadlock_hash from get_pg_deadlocks for one specific report, or omit it to get the most recent graphs. This carries MORE than a SQL Server deadlock graph does - PostgreSQL names the SQL of every session in the cycle, where the SQL Server graph often leaves the non-victim side as a handle. The graph is stored verbatim rather than reassembled, so a lock type the parser does not break out separately is still readable here.")]
     public static async Task<string> GetPgDeadlockDetail(
         NpgsqlDataSource postgres,
-        [Description("The deadlock_hash from get_pg_deadlocks.")] string deadlock_hash,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("A deadlock_hash from get_pg_deadlocks. Omit for the most recent graphs.")] string? deadlock_hash = null,
+        [Description("Maximum graphs to return when no hash is given. Default 5.")] int limit = 5)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
-        if (string.IsNullOrWhiteSpace(deadlock_hash))
-        {
-            return McpHelpers.Status(
-                "error",
-                "deadlock_hash is required. Call get_pg_deadlocks first - each row carries the hash that "
-                + "identifies it here.");
-        }
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return McpHelpers.Status("error", limitError);
 
         try
         {
-            var row = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(
-                postgres, resolved.ServerId, deadlock_hash.Trim());
+            var rows = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(
+                postgres, resolved.ServerId, deadlock_hash, limit);
 
-            if (row is null)
+            if (rows.Count == 0)
             {
-                return McpHelpers.Status(
-                    "empty",
-                    $"No deadlock with hash '{deadlock_hash}' is stored for {resolved.ServerName}. The hash "
-                    + "identifies one report on one server, so a hash from a different server will not "
-                    + "resolve here - and a report can age out of retention while a hash you are holding "
-                    + "does not.");
+                return string.IsNullOrWhiteSpace(deadlock_hash)
+                    ? await DarlingEngineCapability.NotCollectedStatusAsync(
+                          postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks")
+                      ?? McpHelpers.Status(
+                          "empty",
+                          $"No deadlock graph is stored for {resolved.ServerName}. Either the server had no "
+                          + "deadlocks, which is the healthy answer, or its log could not be read - "
+                          + "get_pg_database_stats carries pg_stat_database's cumulative deadlock counter, "
+                          + "which tells those apart.")
+                    : McpHelpers.Status(
+                          "empty",
+                          $"No deadlock with hash '{deadlock_hash}' is stored for {resolved.ServerName}. A "
+                          + "hash identifies one report on ONE server, so one from a different server will "
+                          + "not resolve here - and a report can age out of retention while a hash you are "
+                          + "holding does not.");
             }
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 status = "deadlock_detail",
-                deadlock_hash = deadlock_hash.Trim(),
-                occurred_at = row.Value.OccurredAtUtc,
-                victim_pid = row.Value.VictimPid,
-                participant_count = row.Value.ParticipantCount,
-                lock_modes = row.Value.LockModes,
-                resources = row.Value.Resources,
+                graph_count = rows.Count,
                 note = "graph is PostgreSQL's own DETAIL block, verbatim apart from stripped tab indenting. "
                      + "It reads as: one line per wait edge naming who waits for what and who blocks them, "
                      + "then each participant's process ID followed by its full statement.",
-                graph = row.Value.GraphText,
+                deadlocks = rows.Select(r => new
+                {
+                    deadlock_hash = r.DeadlockHash,
+                    occurred_at = r.OccurredAtUtc,
+                    victim_pid = r.VictimPid,
+                    participant_count = r.ParticipantCount,
+                    lock_modes = r.LockModes,
+                    resources = r.Resources,
+                    graph = r.GraphText,
+                }),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

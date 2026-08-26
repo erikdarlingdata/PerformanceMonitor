@@ -35,7 +35,8 @@ public static class DarlingPgDeadlockReader
         int ParticipantCount,
         string? LockModes,
         string? Resources,
-        string? GraphText);
+        string? GraphText,
+        string DeadlockHash);
 
     /// <summary>
     /// Deadlocks in the window, newest first, one row per distinct report.
@@ -70,22 +71,34 @@ public static class DarlingPgDeadlockReader
         """;
 
     /// <summary>
-    /// One report in full, including the graph text the collector stored verbatim. Keyed by hash because
-    /// that is what the summary read returns and what identifies a report across sightings.
+    /// Reports in full, including the graph text the collector stored verbatim.
+    ///
+    /// <para><b>The hash is optional</b>, and that is what lets this be a panel as well as a drill-down.
+    /// With one it answers about a single report; without one it returns the most recent graphs, which is
+    /// the shape the SQL Server "Deadlock Graphs" panel already has and the reason a reader does not have to
+    /// call the summary first just to see a graph.</para>
+    ///
+    /// <para><c>DISTINCT ON (deadlock_hash)</c> for the same reason every read here groups: the collector
+    /// re-reads an overlapping tail, so without it the newest few rows are frequently the same report
+    /// several times over.</para>
     /// </summary>
     public const string DeadlockDetailSql = """
-        SELECT
+        SELECT DISTINCT ON (d.deadlock_hash)
             d.occurred_at,
             d.victim_pid,
             d.participant_count,
             d.lock_modes,
             d.resources,
-            d.graph_text
+            d.graph_text,
+            d.deadlock_hash
         FROM pg_deadlocks AS d
         WHERE d.server_id = $1
-        AND   d.deadlock_hash = $2
-        ORDER BY d.collection_time
-        LIMIT 1
+        AND   ($2::text IS NULL OR d.deadlock_hash = $2::text)
+        AND   d.deadlock_hash IS NOT NULL
+        /* The DISTINCT ON key must lead the sort; the earliest sighting of each report is the one closest
+           to when it actually happened. */
+        ORDER BY d.deadlock_hash, d.collection_time
+        LIMIT $3
         """;
 
     public static async Task<List<PgDeadlockRow>> GetDeadlocksAsync(
@@ -118,26 +131,30 @@ public static class DarlingPgDeadlockReader
         return rows;
     }
 
-    public static async Task<PgDeadlockDetailRow?> GetDeadlockDetailAsync(
-        NpgsqlDataSource postgres, int serverId, string deadlockHash,
+    public static async Task<List<PgDeadlockDetailRow>> GetDeadlockDetailAsync(
+        NpgsqlDataSource postgres, int serverId, string? deadlockHash, int limit,
         CancellationToken cancellationToken = default)
     {
+        var rows = new List<PgDeadlockDetailRow>();
         await using var command = postgres.CreateCommand(DeadlockDetailSql);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(deadlockHash);
+        command.Parameters.AddWithValue(
+            string.IsNullOrWhiteSpace(deadlockHash) ? (object)DBNull.Value : deadlockHash.Trim());
+        command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        if (!await reader.ReadAsync(cancellationToken))
+        while (await reader.ReadAsync(cancellationToken))
         {
-            return null;
+            rows.Add(new PgDeadlockDetailRow(
+                reader.IsDBNull(0) ? default : reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetString(6)));
         }
 
-        return new PgDeadlockDetailRow(
-            reader.IsDBNull(0) ? default : reader.GetDateTime(0),
-            reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-            reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-            reader.IsDBNull(3) ? null : reader.GetString(3),
-            reader.IsDBNull(4) ? null : reader.GetString(4),
-            reader.IsDBNull(5) ? null : reader.GetString(5));
+        return rows;
     }
 }

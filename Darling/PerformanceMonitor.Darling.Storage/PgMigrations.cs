@@ -160,6 +160,7 @@ public static class PgMigrations
         new Migration(101, "pg18-io-bytes", V101Sql),
         new Migration(102, "pg-server-config", V102Sql),
         new Migration(103, "pg-deadlocks", V103Sql),
+        new Migration(104, "pg-deadlock-identity-index", V104Sql),
     };
 
     /// <summary>
@@ -2281,6 +2282,30 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
 
     /// <summary>
+    /// V104 — the lookup index for <c>collect.pg_deadlocks</c> (#2661), and a SEPARATE rung on purpose.
+    ///
+    /// <para><c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> requires a
+    /// collector's rung to be column-for-column and index-for-index what <c>PgSchemaGenerator</c> emits, and
+    /// the generator emits exactly one index per collector. An extra index inside V103 is not a drafting
+    /// error the pin should tolerate — it is the pin working, because a fresh store builds from the
+    /// generated schema and would silently not have it. Putting it in its own rung gives BOTH populations
+    /// the index, which is what was actually wanted.</para>
+    ///
+    /// <para><b>Why the index earns its place.</b> The collector re-reads an OVERLAPPING tail of the server
+    /// log every cycle, deliberately, so a report cut in half at one edge is whole in the next. Every read
+    /// therefore groups or filters on <c>deadlock_hash</c> to answer once per deadlock rather than once per
+    /// sighting, and the detail read looks a report up by hash directly.</para>
+    ///
+    /// <para><b>Not UNIQUE.</b> Two servers legitimately produce identical graph text — the same query pair
+    /// deadlocking with the same process ids on two hosts is not impossible — and a unique constraint would
+    /// also let a partial write during a crash block the next cycle's insert. Deduplication is a READ
+    /// concern here, and the reads already do it.</para>
+    /// </summary>
+    private const string V104Sql = @"
+CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_identity
+    ON collect.pg_deadlocks(server_id, deadlock_hash);";
+
+    /// <summary>
     /// V103 — <c>collect.pg_deadlocks</c>, the deadlock reports PostgreSQL writes to its server log (#2661).
     /// We collected the COUNT (<c>pg_stat_database.deadlocks</c>) and nothing else: a number that goes up.
     /// This is which sessions, holding what, running what SQL.
@@ -2321,14 +2346,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_deadlocks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
-    ON collect.pg_deadlocks(server_id, collection_time);
-
-/* The dedupe index. Both transports re-read an overlapping window, so the same report arrives every cycle
-   until it falls out of the tail; this is what the read groups on to answer once per deadlock rather than
-   once per sighting. Not UNIQUE: two servers legitimately produce the same graph text, and a partial write
-   during a crash should not be able to block the next cycle's insert. */
-CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_identity
-    ON collect.pg_deadlocks(server_id, deadlock_hash);";
+    ON collect.pg_deadlocks(server_id, collection_time);";
 
     /// <summary>
     /// V102 — <c>collect.pg_server_config</c>, the server's own configuration from <c>pg_settings</c>
