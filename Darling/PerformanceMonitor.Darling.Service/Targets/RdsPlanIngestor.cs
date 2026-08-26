@@ -67,13 +67,23 @@ public sealed class RdsPlanIngestor
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* Warn, not Error, and the message names the target. An IAM gap or a failing-over cluster is a
-               state an operator can act on; taking the cycle down for it would be the wrong trade. */
+            /* #2633: RETHROWN, not returned as zero rows. The warning below stays — it names the target and
+               carries the AWS message — but the app log is not where collection health is read. Returning 0
+               made the runner write SUCCESS with "no new auto_explain plans in the RDS log window", which
+               is a claim that the log was opened. On the monitoring host the truth was
+               rds:DescribeDBLogFiles denied: nothing was opened at all, and the row said the collector was
+               fine.
+
+               Still tolerated at the cycle level — the runner degrades an authorization refusal to
+               PERMISSIONS and moves on, exactly as the pg_read_file route already does for its own 42501.
+               What changes is that the cycle now says WHICH kind of nothing it found. */
             _logger?.LogWarning(
                 "RDS plan log unavailable for {Server}: {Message} — plan capture is skipped for this target "
                 + "this cycle; every other collector is unaffected.",
                 storageName, ex.Message);
-            return 0;
+
+            throw new RdsLogUnavailableException(
+                ex.Message, RdsLogUnavailableException.IsAuthorizationRefusal(ex), ex);
         }
 
         if (chunk is null || string.IsNullOrEmpty(chunk.Value.Text))

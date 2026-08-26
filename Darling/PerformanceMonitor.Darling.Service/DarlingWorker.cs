@@ -4477,6 +4477,30 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, 0, 0, ex.Message, fanout: null, _logger, cancellationToken);
             return 0;
         }
+        catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
+        {
+            /* #2633: the AWS call was DENIED, so nothing was read. Degraded to PERMISSIONS rather than
+               ERROR for the same reason a 42501 from the pg_read_file route is — a least-privilege
+               deployment is an expected state an operator can act on, and screaming every cycle about it
+               would bury real faults — but it must NOT be recorded as a successful empty read, which is
+               what returning zero rows used to make it.
+
+               Only the authorization case lands here. A throttle, a failover or an endpoint that stopped
+               resolving falls through to the general handler and stays loud, because a permanent-sounding
+               status on a transient fault is how an outage gets read as a configuration choice. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the RDS log API refused the call",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0,
+                $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
+                + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
+                + "the RDS API, so the role needs rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
+                + "on the target instance. Nothing was read this cycle — this is NOT 'no plans were "
+                + "captured'.",
+                fanout: null, _logger, cancellationToken);
+            return 0;
+        }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
             /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside

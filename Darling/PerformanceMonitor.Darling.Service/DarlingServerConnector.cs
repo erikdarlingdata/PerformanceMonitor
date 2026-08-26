@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
@@ -370,6 +371,15 @@ SELECT
                 PostgresMajorVersion = majorVersion,
                 PostgresVersionNum = versionNum,
                 IsAurora = isAurora,
+                /* #2633: derived from the ENDPOINT, because nothing else here can see it. IsAwsRds is
+                   probed with a T-SQL detection query on the SQL Server path, so before this it was
+                   silently false for every PostgreSQL target — which made the second half of
+                   pg_plan_capture's `IsAurora || IsAwsRds` dispatch unreachable and sent plain RDS
+                   PostgreSQL down the pg_read_file route, where a managed instance has no filesystem to
+                   read and the failure names a grant that would never have helped. Aurora was unaffected
+                   because IsAurora carries it, which is why the fleet never showed this. */
+                IsAwsRds = RdsEndpoint.TryParse(
+                    new NpgsqlConnectionStringBuilder(connectionString).Host) is not null,
                 IsInRecovery = isInRecovery,
             },
             StorageName = storageName,
