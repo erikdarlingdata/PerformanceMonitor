@@ -1675,6 +1675,29 @@ export const POSTGRES_TABS = [
         ctx.label + ", background-worker and client-idle waits already excluded by the collector",
         "No wait events in this window."
       ),
+      /* #2629: the same tab carries the stock-PostgreSQL answer, so the two are read TOGETHER rather than
+         one being a consolation for the other's blank. Exactly one of them fills on any given target — the
+         Aurora grid above on Aurora, this one wherever pg_wait_sampling is loaded — and each explains its
+         own emptiness in its own words, which is what makes a permanently-empty panel informative rather
+         than a defect. */
+      table(
+        "Sampled Waits (pg_wait_sampling)",
+        "get_pg_wait_sampling",
+        { server, hours: ctx.hours, limit: 20 },
+        "waits",
+        PG_WAIT_SAMPLING_COLUMNS,
+        ctx.label + ", sample counts from a periodic profiler; event type CPU means running, not waiting",
+        "No sampled waits in this window."
+      ),
+      table(
+        "OS CPU by Query (pg_stat_kcache)",
+        "get_pg_kernel_stats",
+        { server, hours: ctx.hours, limit: 20 },
+        "queries",
+        PG_KERNEL_COLUMNS,
+        ctx.label + ", CPU measured by the operating system; device bytes are not logical I/O",
+        "No per-query OS resource usage in this window."
+      ),
     ],
   },
 
@@ -2743,6 +2766,38 @@ const PG_IO_SUMMARY_STATS = [
 ];
 
 /* ─────────────────────────── PostgreSQL column descriptors ─────────────────────────── */
+
+/* #2629: the stock-PostgreSQL wait grid. Samples FIRST and the estimate beside it, deliberately the
+   opposite emphasis from PG_WAIT_COLUMNS above — that one reports measured time, this one reports how many
+   times a periodic profiler caught a backend in a state. Leading with the estimate would present a derived
+   number as the observation and hide that its error grows as the event gets rarer. */
+const PG_WAIT_SAMPLING_COLUMNS = [
+  { key: "event_type", label: "Type" },
+  { key: "wait_event", label: "Event" },
+  { key: "queryid", label: "Query ID" },
+  { key: "samples", label: "Samples", format: "int" },
+  { key: "estimated_wait_ms", label: "Est. Wait", format: "ms" },
+  { key: "backends", label: "Backends", format: "int" },
+  { key: "pct_of_samples", label: "% of Samples", format: "num1" },
+];
+
+/* #2629: OS CPU per query shape. Total first because it is the ranking, then the user/system split, because
+   system time dominated by kernel work is a different finding from user time dominated by the planner.
+   Device bytes are labelled "Device" rather than "Read"/"Write" — they are not logical I/O, and a zero here
+   means the page cache served it. */
+const PG_KERNEL_COLUMNS = [
+  { key: "queryid", label: "Query ID" },
+  { key: "database_name", label: "Database" },
+  { key: "cpu_ms", label: "CPU", format: "ms" },
+  { key: "user_cpu_ms", label: "User CPU", format: "ms" },
+  { key: "system_cpu_ms", label: "System CPU", format: "ms" },
+  { key: "pct_of_total_cpu", label: "% of CPU", format: "num1" },
+  /* mb, from the _mb fields the tool emits beside the byte counts — "bytes" is not one of the renderer's
+     formats, and an unrecognised one falls through to raw text rather than erroring. */
+  { key: "device_read_mb", label: "Device Read", format: "mb" },
+  { key: "device_write_mb", label: "Device Write", format: "mb" },
+  { key: "major_faults", label: "Major Faults", format: "int" },
+];
 
 const PG_WAIT_COLUMNS = [
   { key: "wait_type", label: "Type" },

@@ -6,8 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -94,7 +96,24 @@ public sealed class PgWaitSamplingCollector : PostgresCollectorDefinitionBase<Pg
 
        queryid is NOT filtered. Unattributed waits are real waits, and dropping them would make the stored
        profile disagree with the server's own totals for no gain. */
-    private const string QueryText = @"
+    /* #2630: the SAME exclusion set the Aurora sibling applies, spliced from its single definition rather
+       than restated. Excluding only 'Activity' here was measurably wrong the first time a target with real
+       clients was profiled: ClientRead was 2,717,290 of 2,717,989 samples - 100.0% - and every real event
+       rounded to zero. Client is the application idling on its socket and Timeout is a deliberate sleep;
+       neither is the database doing anything, and both need a CLIENT to be idle before they dominate,
+       which is why no container or CI run ever surfaced it.
+
+       Quoted from a C# set rather than hardcoded so the two collectors cannot drift on what counts as a
+       wait - they answer the same question from different sources, and #2625 tells operators to read this
+       one INSTEAD of that one on stock PostgreSQL.
+
+       coalesce FIRST, so a NULL event_type - a backend on CPU, this collector's distinctive signal -
+       becomes 'CPU' and survives a filter that would otherwise be NULL and discard it. That is the same
+       trap `IS DISTINCT FROM` was written for, one step further along. */
+    private static readonly string IgnoredTypeList =
+        string.Join(", ", PgWaitStatsCollector.IgnoredWaitTypes.OrderBy(t => t, StringComparer.Ordinal).Select(t => $"'{t}'"));
+
+    private static string QueryText => @"
 SELECT
     /* A NULL wait event means the backend was NOT waiting - it was on CPU. That is PostgreSQL's own
        convention (pg_stat_activity.wait_event_type is NULL for a running backend) and it is real signal
@@ -113,7 +132,7 @@ SELECT
         10)                                                  AS profile_period_ms,
     count(DISTINCT p.pid)::int                               AS backend_count
 FROM pg_wait_sampling_profile AS p
-WHERE p.event_type IS DISTINCT FROM 'Activity'
+WHERE coalesce(p.event_type, 'CPU') NOT IN (" + IgnoredTypeList + @")
 GROUP BY coalesce(p.event_type, 'CPU'), coalesce(p.event, 'Running'), p.queryid
 ORDER BY sum(p.count) DESC, coalesce(p.event_type, 'CPU'), coalesce(p.event, 'Running')
 LIMIT 500";

@@ -56,6 +56,45 @@ public sealed class ServerPageTabsTests
     private static string AppJs => ReadRepoFile(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js"));
 
+    private static string EditorJs => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js"));
+
+    /// <summary>
+    /// Which collector each served <c>get_pg_*</c> read is served FROM.
+    ///
+    /// <para>The one half of this file that is a naming fact with no table anywhere: each read passes its
+    /// collector's name to <c>DarlingEngineCapability.NotCollectedStatusAsync</c> as a string literal.
+    /// Hoisted to a field because two pins now consume it — the Aurora-only tab-note check and the
+    /// unreadable-collector ratchet — and two copies of a naming fact is how the fact stops being one.</para>
+    ///
+    /// <para>Asserted to cover EVERY served read, so it cannot go stale quietly: an unmapped read would be
+    /// silently SKIPPED by its consumers rather than caught by them.</para>
+    /// </summary>
+    private static readonly Dictionary<string, string> CollectorForRead = new(StringComparer.Ordinal)
+    {
+            ["get_pg_wait_stats"] = "pg_wait_stats",
+            ["get_pg_wait_sampling"] = "pg_wait_sampling",
+            ["get_pg_kernel_stats"] = "pg_kernel_stats",
+            ["get_pg_top_queries"] = "pg_statement_stats",
+            ["get_pg_plans"] = "pg_plan_capture",
+            ["get_pg_blocking"] = "pg_blocking",
+            ["get_pg_io_stats"] = "pg_io_stats",
+            ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
+            ["get_pg_replication_slots"] = "pg_replication_slots",
+            ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
+            ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
+            ["get_pg_database_stats"] = "pg_database_stats",
+            ["get_pg_index_usage"] = "pg_index_usage_stats",
+            ["get_pg_table_bloat"] = "pg_table_bloat_stats",
+            /* Not Aurora-only — pg_session_states reads pg_stat_activity, which every PostgreSQL has — so
+               it contributes nothing to the auroraOnly set below. It is mapped anyway because the
+               staleness assertion above covers EVERY served get_pg_* read: an unmapped one would be
+               skipped by the check rather than caught by it, which is the failure this map is here to
+               prevent. */
+            ["get_pg_session_states"] = "pg_session_states",
+    };
+
+
     /// <summary>
     /// Every read name the tab module mentions is a read the service actually serves.
     ///
@@ -77,6 +116,107 @@ public sealed class ServerPageTabsTests
             unknown.Length == 0,
             "server-tabs.js names reads that GET /api/read/{name} does not serve — each renders as a broken " +
             "panel at runtime and looks fine on inspection: " + string.Join(", ", unknown));
+    }
+
+    /// <summary>
+    /// A PostgreSQL collector that is worth a Viewer panel is worth a READ.
+    ///
+    /// <para>#2629: nine of them were not. <c>pg_wait_sampling</c>, <c>pg_kernel_stats</c>,
+    /// <c>pg_predicate_stats</c>, <c>pg_column_stats</c>, <c>pg_index_bloat</c>, <c>pg_buffer_usage</c>,
+    /// <c>pg_extension_availability</c>, <c>pg_lock_stats</c> and <c>pg_write_stats</c> each had a WPF panel
+    /// and nothing else — collected on every cycle, stored, and reachable only from a Windows GUI. On a
+    /// Linux host, and for any agent anywhere, that data did not exist.</para>
+    ///
+    /// <para>Each one arrived individually reasonable: the panel was the deliverable, the read was the next
+    /// PR, and there was no next PR. Nothing watched the aggregate, which is exactly the shape of drift a
+    /// count catches and a review does not. So this asserts the count only ever goes DOWN — a ratchet, not a
+    /// list, because listing the nine would need editing every time one is closed and the edit is where a
+    /// tenth quietly joins.</para>
+    ///
+    /// <para>It is deliberately not "every collector must have a read". Some genuinely should not: a
+    /// collector whose whole output is one row of configuration state is a panel, not a question anyone asks
+    /// an agent. The ratchet lets that stand while making a NEW one impossible.</para>
+    /// </summary>
+    [Fact]
+    public void ThePostgresCollectorsWithNoServedRead_OnlyEverShrink()
+    {
+        /* Named by the dispatch, resolved through the same map the Aurora-only pin verifies. */
+        var served = DarlingWebEndpoints.BuildReadDispatch().Keys
+            .Where(n => n.StartsWith("get_pg", StringComparison.Ordinal))
+            .Select(n => CollectorForRead.TryGetValue(n, out var c) ? c : null)
+            .Where(c => c is not null)
+            .ToHashSet(StringComparer.Ordinal)!;
+
+        Assert.True(served.Count >= 10, "The read-to-collector map resolved almost nothing — the guard would pass vacuously.");
+
+        /* From the catalog, not from ViewerPostgresTabs.PostgresCollectors(): that lives in the Windows-only
+           Viewer assembly, and a guard about a Windows-only surface leaking into everything else should not
+           itself need it. Same set — that helper is this query. */
+        var unreadable = CollectorCatalog.All
+            .Where(d => d.TargetEngine == CollectorTargetEngine.PostgreSql)
+            .Select(d => d.Name)
+            .Where(n => !served.Contains(n))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        /* Eleven before this PR, nine after the two it closes. Lower it as each is closed; it must never
+           be raised. One of the nine — pg_plan_capture_readiness — is the legitimate case the ratchet is
+           built to tolerate: its output is one row of configuration state, which is a panel rather than a
+           question anyone asks an agent. */
+        const int KnownUnreadable = 9;
+
+        Assert.True(
+            unreadable.Length <= KnownUnreadable,
+            $"{unreadable.Length} PostgreSQL collectors have no served read, up from {KnownUnreadable} (#2629). " +
+            "A collector reachable only from the Windows Viewer is invisible on a Linux host and to every " +
+            "agent. Add the read, or if this one genuinely answers no question worth asking, say so here and " +
+            "raise the constant deliberately: " + string.Join(", ", unreadable));
+
+        Assert.True(
+            unreadable.Length == KnownUnreadable,
+            $"Only {unreadable.Length} PostgreSQL collectors now lack a served read, down from {KnownUnreadable}. " +
+            "Lower KnownUnreadable to " + unreadable.Length + " so the ratchet holds the ground that was won.");
+    }
+
+    /// <summary>
+    /// Every <c>format:</c> a column declares is one the renderer knows.
+    ///
+    /// <para>An unrecognised format does not throw and does not warn — <c>panels.js</c> falls through to raw
+    /// text, so the column renders, looks populated, and is simply wrong: a byte count where a size was
+    /// meant, unaligned, unrounded, unlabelled. I wrote <c>format: "bytes"</c> into this file believing it
+    /// existed, and the page would have shipped rendering nine-digit integers in a size column.</para>
+    ///
+    /// <para>The vocabulary is taken from <c>editor.js</c>'s <c>FORMAT_OPTIONS</c>, which is the list the
+    /// custom-view editor already offers users — one source, so adding a format to the renderer without
+    /// offering it in the editor (or the reverse) is caught here rather than by someone noticing a
+    /// misrendered column.</para>
+    /// </summary>
+    [Fact]
+    public void EveryColumnFormat_IsOneTheRendererKnows()
+    {
+        var known = Regex.Match(EditorJs, @"const FORMAT_OPTIONS = \[(?<list>[^\]]*)\]")
+            is { Success: true } match
+            ? Regex.Matches(match.Groups["list"].Value, @"""(?<name>[a-z0-9]+)""")
+                .Select(m => m.Groups["name"].Value)
+                .ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
+
+        Assert.True(known.Count >= 8, "FORMAT_OPTIONS was not parsed out of editor.js — the guard would pass vacuously.");
+
+        var used = Regex.Matches(ServerTabsJs, @"format:\s*""(?<name>[a-z0-9]+)""")
+            .Select(m => m.Groups["name"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.NotEmpty(used);
+
+        var unknown = used.Where(n => !known.Contains(n)).ToArray();
+        Assert.True(
+            unknown.Length == 0,
+            "server-tabs.js declares column format(s) the renderer does not know: " + string.Join(", ", unknown) +
+            ". An unknown format falls through to raw text — the column still renders, so this is invisible " +
+            "on inspection. Known formats: " + string.Join(", ", known.OrderBy(n => n, StringComparer.Ordinal)));
     }
 
     /// <summary>
@@ -339,28 +479,7 @@ public sealed class ServerPageTabsTests
     [Fact]
     public void EveryAuroraOnlyPostgresRead_SitsOnATabThatSaysSo()
     {
-        /* The naming fact. Verified against the dispatch below rather than trusted. */
-        var collectorOf = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["get_pg_wait_stats"] = "pg_wait_stats",
-            ["get_pg_top_queries"] = "pg_statement_stats",
-            ["get_pg_plans"] = "pg_plan_capture",
-            ["get_pg_blocking"] = "pg_blocking",
-            ["get_pg_io_stats"] = "pg_io_stats",
-            ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
-            ["get_pg_replication_slots"] = "pg_replication_slots",
-            ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
-            ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
-            ["get_pg_database_stats"] = "pg_database_stats",
-            ["get_pg_index_usage"] = "pg_index_usage_stats",
-            ["get_pg_table_bloat"] = "pg_table_bloat_stats",
-            /* Not Aurora-only — pg_session_states reads pg_stat_activity, which every PostgreSQL has — so
-               it contributes nothing to the auroraOnly set below. It is mapped anyway because the
-               staleness assertion above covers EVERY served get_pg_* read: an unmapped one would be
-               skipped by the check rather than caught by it, which is the failure this map is here to
-               prevent. */
-            ["get_pg_session_states"] = "pg_session_states",
-        };
+        var collectorOf = CollectorForRead;
 
         var served = DarlingWebEndpoints.BuildReadDispatch().Keys
             .Where(n => n.StartsWith("get_pg_", StringComparison.Ordinal))

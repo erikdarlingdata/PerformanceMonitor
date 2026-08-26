@@ -162,6 +162,8 @@ public static class CollectorEngineCapability
                mechanism that engine does not have. */
             ["pg_wait_stats"] = "the aurora_stat_system_waits() cumulative wait counters",
             ["pg_statement_stats"] = "the aurora_stat_statements() per-statement history",
+            ["pg_wait_sampling"] = "the pg_wait_sampling extension's sampled wait profile",
+            ["pg_kernel_stats"] = "the pg_stat_kcache extension's per-statement OS CPU and device I/O",
             /* Named for the LOG, because that is where the gap actually is: auto_explain writes
                plans nowhere else, and on Aurora and RDS there is no filesystem to read them from
                (#2538). A generic phrasing here would say the collector did not run and leave the

@@ -62,6 +62,10 @@ public sealed class CrossAppMcpToolInventoryPinTests
            nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
+        /* #2629: the stock-PostgreSQL counterparts. Same entry, same reason — Lite has no PostgreSQL
+           target at all, so these are a SKU boundary rather than a porting to-do. */
+        "get_pg_wait_sampling",
+        "get_pg_kernel_stats",
         "get_pg_top_queries",
         "get_pg_plans",
         "get_pg_wraparound_risk",
