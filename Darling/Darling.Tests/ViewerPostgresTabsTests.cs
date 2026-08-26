@@ -836,6 +836,10 @@ public sealed class ViewerPostgresTabsTests
 
             ["PgIoRow.WriteCountersTracked"] = "Writes / WriteTimeMs — they read 'not tracked' rather than 0",
             ["PgIoRow.OpBytes"] = "OpSize — the same number, formatted",
+            ["PgIoRow.ReadBytes"] = "ReadVolume — measured on 18, or the estimate marked '(est.)' below it",
+            ["PgIoRow.WriteBytes"] = "WriteVolume — same",
+            ["PgIoRow.ExtendBytes"] = "not shown: Extends carries the count, and extend VOLUME has no reading the other two do not already give",
+            ["PgIoRow.ByteCountersTracked"] = "ReadVolume / WriteVolume — they read '(est.)' or 'not measured' rather than passing an estimate off as a measurement",
 
             ["PgSlotRow.FirstRetainedWalBytes"] = "RetainedWalTrend — the window's start, as a signed delta",
             ["PgSlotRow.FirstSeenAt"] = "RetainedWalTrend — the delta's other end; the window is the toolbar's",

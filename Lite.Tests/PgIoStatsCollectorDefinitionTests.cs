@@ -209,6 +209,9 @@ public class PgIoStatsCollectorDefinitionTests
                 10_150_937_570L, 0L, 0L,                        // hits, evictions, reuses
                 DBNull.Value, DBNull.Value,                     // fsyncs, fsync_time — NULL on Aurora
                 new DateTime(2026, 5, 18, 7, 4, 22, DateTimeKind.Unspecified),
+                /* A pre-18 server, so the measured byte columns do not exist and the collector selects
+                   NULL for them (#2655). op_bytes above is the byte answer here. */
+                DBNull.Value, DBNull.Value, DBNull.Value,       // read_bytes, write_bytes, extend_bytes
             });
 
         var rows = await PgIoStatsCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
@@ -246,6 +249,7 @@ public class PgIoStatsCollectorDefinitionTests
                 DBNull.Value,                                   // hits does not apply either
                 DBNull.Value, DBNull.Value,
                 DBNull.Value, DBNull.Value, DBNull.Value,
+                DBNull.Value, DBNull.Value, DBNull.Value,       // read_bytes, write_bytes, extend_bytes
             });
 
         var rows = await PgIoStatsCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);

@@ -2295,7 +2295,14 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     /// <para><b><c>numeric</c>, not <c>bigint</c></b>, because that is what PostgreSQL declares them
     /// (verified on 18.6 — <c>reads</c> is <c>bigint</c> while <c>read_bytes</c> is <c>numeric</c>). Storing
     /// them as bigint would be a narrowing the catalog never promised; a byte total across a long uptime is
-    /// exactly the quantity that outgrows the assumption.</para>
+    /// exactly the quantity that outgrows the assumption.
+    ///
+    /// <para>The <c>(28,0)</c> is not decoration and is not free to differ from the collector's declared
+    /// precision: <c>PgSchemaGeneratorTests</c> renders the schema from <c>PayloadColumns</c> and requires
+    /// every rung to match it exactly, so a bare <c>numeric</c> here and a <c>Decimal(28, 0)</c> there is a
+    /// build failure, correctly. Scale 0 because these are whole bytes; 28 rather than the 38 a DECIMAL can
+    /// hold because C# <c>decimal</c> tops out near 29 significant digits, and a declared width the runtime
+    /// type cannot carry is a promise broken at the reader rather than at the store.</para></para>
     ///
     /// <para><b>Nullable, no DEFAULT, no backfill</b> — as V69 and every counter rung since. These are
     /// cumulative counters differenced at read time, and PostgreSQL itself uses NULL for "this counter does
@@ -2308,9 +2315,9 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     /// </summary>
     private const string V101Sql = @"
 ALTER TABLE collect.pg_io_stats
-    ADD COLUMN IF NOT EXISTS read_bytes numeric,
-    ADD COLUMN IF NOT EXISTS write_bytes numeric,
-    ADD COLUMN IF NOT EXISTS extend_bytes numeric;";
+    ADD COLUMN IF NOT EXISTS read_bytes numeric(28,0),
+    ADD COLUMN IF NOT EXISTS write_bytes numeric(28,0),
+    ADD COLUMN IF NOT EXISTS extend_bytes numeric(28,0);";
 
     /// <summary>
     /// V100 — the PostgreSQL major version on the <c>collect.servers</c> registry (#2653). V82 gave the

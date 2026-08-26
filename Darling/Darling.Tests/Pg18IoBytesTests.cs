@@ -51,9 +51,12 @@ public sealed class Pg18IoBytesTests
         var sql = PgMigrations.Scripts.Single(s => s.Version == 101).Sql;
 
         Assert.Contains("ALTER TABLE collect.pg_io_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ADD COLUMN IF NOT EXISTS read_bytes numeric", sql, StringComparison.Ordinal);
-        Assert.Contains("ADD COLUMN IF NOT EXISTS write_bytes numeric", sql, StringComparison.Ordinal);
-        Assert.Contains("ADD COLUMN IF NOT EXISTS extend_bytes numeric", sql, StringComparison.Ordinal);
+        /* (28,0) must match the collector's declared Decimal(28, 0) exactly — PgSchemaGeneratorTests
+           renders the schema from PayloadColumns and compares it to the ladder, so a bare `numeric` here
+           fails the build. */
+        Assert.Contains("ADD COLUMN IF NOT EXISTS read_bytes numeric(28,0)", sql, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS write_bytes numeric(28,0)", sql, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS extend_bytes numeric(28,0)", sql, StringComparison.Ordinal);
 
         /* bigint would compile and silently narrow; pin the absence so a later edit cannot "tidy" it. */
         Assert.DoesNotContain("bigint", sql, StringComparison.Ordinal);
