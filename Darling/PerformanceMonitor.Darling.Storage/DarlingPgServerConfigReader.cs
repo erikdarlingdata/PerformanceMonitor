@@ -28,6 +28,15 @@ public static class DarlingPgServerConfigReader
     /// whitelist of what to exclude rather than of what to keep: PostgreSQL adds source values between
     /// majors, and an unknown one is far more likely to be a real server source than a new kind of
     /// session state, so an unrecognised value should show up rather than vanish.
+    ///
+    /// <para><b>Spelled out inline in both statements rather than substituted into them.</b> The first
+    /// version of this reader used a <c>SESSION_SCOPED</c> token replaced at call time, which meant the
+    /// SQL constants were not SQL: <c>DarlingPgReadSqlParsesLiveTests</c> runs parse analysis on every
+    /// shipped read against a real server and both failed with <c>42703 column "session_scoped" does not
+    /// exist</c>. A read whose text only becomes valid after a string substitution cannot be checked by
+    /// anything, which is worth more than the deduplication. The list stays honest because
+    /// <c>PgServerConfigTests</c> asserts both statements contain <c>NOT IN (</c> plus this exact
+    /// string.</para>
     /// </summary>
     public const string SessionScopedSources = "'client', 'session', 'override'";
 
@@ -93,7 +102,7 @@ public static class DarlingPgServerConfigReader
                   SELECT MAX(collection_time)
                   FROM pg_server_config
                   WHERE server_id = $1)
-        AND   coalesce(c.source, '') NOT IN (SESSION_SCOPED)
+        AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
         /* Non-default first: 415 settings sorted alphabetically is a dump, not an answer. pending_restart
            outranks even that, because it is the one row that says the file and the running server
            disagree. */
@@ -129,7 +138,7 @@ public static class DarlingPgServerConfigReader
             WHERE c.server_id = $1
             AND   c.collection_time >= $2
             AND   c.collection_time <= $3
-            AND   coalesce(c.source, '') NOT IN (SESSION_SCOPED)
+            AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
         )
         SELECT
             collection_time,
@@ -151,8 +160,7 @@ public static class DarlingPgServerConfigReader
         NpgsqlDataSource postgres, int serverId, int limit, CancellationToken cancellationToken = default)
     {
         var rows = new List<PgConfigRow>();
-        await using var command = postgres.CreateCommand(
-            CurrentConfigSql.Replace("SESSION_SCOPED", SessionScopedSources, StringComparison.Ordinal));
+        await using var command = postgres.CreateCommand(CurrentConfigSql);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -182,8 +190,7 @@ public static class DarlingPgServerConfigReader
         CancellationToken cancellationToken = default)
     {
         var rows = new List<PgConfigChangeRow>();
-        await using var command = postgres.CreateCommand(
-            ConfigChangesSql.Replace("SESSION_SCOPED", SessionScopedSources, StringComparison.Ordinal));
+        await using var command = postgres.CreateCommand(ConfigChangesSql);
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then converts these naive columns at the store session's

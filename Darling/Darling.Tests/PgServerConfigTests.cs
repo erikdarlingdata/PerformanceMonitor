@@ -89,8 +89,14 @@ public sealed class PgServerConfigTests
         Assert.Contains("'client'", DarlingPgServerConfigReader.SessionScopedSources, StringComparison.Ordinal);
         Assert.Contains("'session'", DarlingPgServerConfigReader.SessionScopedSources, StringComparison.Ordinal);
 
-        Assert.Contains("SESSION_SCOPED", DarlingPgServerConfigReader.CurrentConfigSql, StringComparison.Ordinal);
-        Assert.Contains("SESSION_SCOPED", DarlingPgServerConfigReader.ConfigChangesSql, StringComparison.Ordinal);
+        /* Spelled out inline in both statements, so the constants are real SQL that parse analysis can
+           check — an earlier version substituted a SESSION_SCOPED token at call time and both reads failed
+           DarlingPgReadSqlParsesLiveTests with 42703. This assertion is what keeps the inline list and the
+           named constant from drifting now that they are written twice. */
+        var expected = "NOT IN (" + DarlingPgServerConfigReader.SessionScopedSources + ")";
+
+        Assert.Contains(expected, DarlingPgServerConfigReader.CurrentConfigSql, StringComparison.Ordinal);
+        Assert.Contains(expected, DarlingPgServerConfigReader.ConfigChangesSql, StringComparison.Ordinal);
     }
 
     /// <summary>
