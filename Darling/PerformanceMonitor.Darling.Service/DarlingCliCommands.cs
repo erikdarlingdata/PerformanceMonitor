@@ -2795,7 +2795,6 @@ public static class DarlingCliCommands
         _ => throw new ArgumentOutOfRangeException(nameof(endpoint)),
     };
 
-    /// <summary>The verb spelling for a toggle (for error + handoff text).</summary>
     /// <summary>
     /// What a bring-your-own deployment is told instead of a toggle: the flags live in the operator's own
     /// PostgreSQL, and the UPDATE is the whole procedure. Composed here rather than inline because #2626
@@ -2850,6 +2849,7 @@ public static class DarlingCliCommands
         return 1;
     }
 
+    /// <summary>The verb spelling for a toggle (for error + handoff text).</summary>
     private static string VerbName(EndpointKind endpoint, bool enable) => (endpoint, enable) switch
     {
         (EndpointKind.Mcp, true) => "--enable-mcp",
