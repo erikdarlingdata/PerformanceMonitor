@@ -4438,13 +4438,6 @@ LIMIT 1";
     };
 
     /// <summary>
-    /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
-    /// <para>The store has five statuses and none of them is "this feature is not installed", so the
-    /// non-fatal-degradation bucket (PERMISSIONS) carries those cases and the MESSAGE distinguishes them —
-    /// the same division the Azure service-objective hint already uses. Returning "ERROR" means "let the
-    /// general handler have it", which keeps the genuinely unexpected loud.</para>
-    /// </summary>
-    /// <summary>
     /// Where the missing extension has to be created, named when we know it (#2638).
     /// </summary>
     private static string WhereToCreateIt(string? connectedDatabase)
@@ -4454,6 +4447,13 @@ LIMIT 1";
               + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
               + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
 
+    /// <summary>
+    /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
+    /// <para>The store has five statuses and none of them is "this feature is not installed", so the
+    /// non-fatal-degradation bucket (PERMISSIONS) carries those cases and the MESSAGE distinguishes them —
+    /// the same division the Azure service-objective hint already uses. Returning "ERROR" means "let the
+    /// general handler have it", which keeps the genuinely unexpected loud.</para>
+    /// </summary>
     internal static (string Status, string Explanation) PostgresFaultOutcome(
         PostgresException ex, string collectorName, string? connectedDatabase = null)
     {
