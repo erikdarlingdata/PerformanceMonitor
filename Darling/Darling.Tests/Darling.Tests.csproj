@@ -36,8 +36,9 @@
     <!-- #2538: a REAL auto_explain block, captured from a PostgreSQL container with auto_explain
          loaded. Real rather than hand-written because the parser's whole job is the log's exact
          shape - the tab-indented continuation, the %Q query id in the prefix, the JSON body - and a
-         fixture I typed would agree with whatever I believed that shape was. -->
-    <None Include="Fixtures\auto_explain_real_block.log" CopyToOutputDirectory="PreserveNewest" />
+         fixture I typed would agree with whatever I believed that shape was. 
+         Named .txt rather than .log because *.log is gitignored - correctly, and a fixture is not a log. -->
+    <None Include="Fixtures\auto_explain_real_block.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- The SHIPPED bring-your-own-Postgres provisioning script, copied beside the test binary so
          ProvisionRolesAclDriftTests can parse the REAL file (never a stale second copy) from
          AppContext.BaseDirectory, with no repo-root path walking. Same Link+copy delivery the Service

@@ -16,3 +16,7 @@
 *.parquet binary
 *.zip binary
 *.duckdb binary
+
+# A captured PostgreSQL log is a FIXTURE of real bytes: the parser keys on the exact line endings
+# and the tab-indented continuation, so line-ending normalisation would change what it is evidence of.
+Darling/Darling.Tests/Fixtures/auto_explain_real_block.txt -text

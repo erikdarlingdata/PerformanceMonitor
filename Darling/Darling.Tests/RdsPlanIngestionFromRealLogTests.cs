@@ -42,7 +42,7 @@ namespace Darling.Tests;
 public sealed class RdsPlanIngestionFromRealLogTests
 {
     private static string RealLog =>
-        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "auto_explain_real_block.log"));
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "auto_explain_real_block.txt"));
 
     [Fact]
     public void TheRealBlockParses_WithItsQueryIdAndDuration()
