@@ -323,10 +323,10 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// Prints a paste-ready remote-viewer connection string and the server TLS certificate for the opt-in store
-    /// network endpoint (darling-network-endpoints D8). It DPAPI-decrypts the credential of the role
-    /// <c>postgres.network.role</c> names (default <c>viewer</c>, read-only) and reads the generated
-    /// <c>server.crt</c>, so it must run ON the managed store's host under an account that can decrypt them —
+    /// Prints a paste-ready remote-viewer connection string PER ADMITTED ROLE (#2665) and the server TLS
+    /// certificate for the opt-in store network endpoint (darling-network-endpoints D8). It DPAPI-decrypts the
+    /// credential of every role <c>postgres.network.role</c> names (default <c>viewer</c>, read-only) and reads
+    /// the generated <c>server.crt</c>, so it must run ON the managed store's host under an account that can decrypt them —
     /// hence Windows-only (the caller is <c>OperatingSystem.IsWindows()</c>-guarded, mirroring
     /// <c>--encrypt-password</c>). The operator pastes the string into the VIEWER machine's darling.json
     /// (<c>postgres.managed = false</c>, into <c>postgres.connectionString</c>, consumed verbatim — no viewer
@@ -351,9 +351,9 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var handoff = await ResolveViewerHandoffAsync(
+        var handoffs = await ResolveViewerHandoffsAsync(
             config, "--print-viewer-connection", "print", error, cancellationToken);
-        if (handoff is null)
+        if (handoffs is null)
         {
             return 1;
         }
@@ -362,8 +362,6 @@ public static class DarlingCliCommands
            VIEWER machine (a bare filename resolves against the folder holding the viewer's darling.json —
            #1970; an absolute path also works). Kept as a literal so the printed string is paste-ready. */
         const string clientCertificatePath = ViewerClientCertificateFileName;
-        var connectionString = BuildViewerConnectionString(
-            handoff.Host, handoff.Port, handoff.Role, handoff.Password, clientCertificatePath);
 
         /* Read the cert BEFORE anything reaches STDOUT: every STDERR line — including the missing-cert NOTE —
            must be emitted ahead of the payload (#1953 item 3). The field report watched the live password scroll
@@ -372,27 +370,43 @@ public static class DarlingCliCommands
            carries the fixed chain shape — that is what verify-full's Root Certificate must anchor
            on. A legacy store has no root.crt, and its single self-signed server.crt remains the
            right (if Windows-hostile) thing to print. */
-        var distributableCertPath = DarlingManagedPostgres.RootCertificatePathFor(handoff.CertificatePath);
+        var certificateSource = handoffs[0].CertificatePath;
+        var distributableCertPath = DarlingManagedPostgres.RootCertificatePathFor(certificateSource);
         if (!File.Exists(distributableCertPath))
         {
-            distributableCertPath = handoff.CertificatePath;
+            distributableCertPath = certificateSource;
         }
 
         var certificate = File.Exists(distributableCertPath)
             ? (await File.ReadAllTextAsync(distributableCertPath, cancellationToken)).Trim()
             : null;
 
+        var admitsAdmin = handoffs.Any(h => string.Equals(h.Role, "admin", StringComparison.Ordinal));
+        var roleList = string.Join("', '", handoffs.Select(h => h.Role));
+        var many = handoffs.Count > 1;
+
         /* Guidance + the live-secret warning go to STDERR, so redirecting STDOUT to a file or the clipboard
-           captures the connection string + cert WITHOUT swallowing the warning (D8). */
+           captures the connection string + cert WITHOUT swallowing the warning (D8). ALL of it is emitted
+           before the first STDOUT byte, including for a multi-role exposure — interleaving a warning between
+           two printed strings would put half the advice after a password had already scrolled past (#1953
+           item 3). */
         error.WriteLine();
         error.WriteLine(
-            $"WARNING: the connection string below contains a LIVE database password (the '{handoff.Role}' role), written " +
+            $"WARNING: the connection {(many ? "strings" : "string")} below {(many ? "contain" : "contains")} a LIVE " +
+            $"database password (the '{roleList}' {(many ? "roles" : "role")}), written " +
             "to STDOUT. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell " +
             "scrollback, CI logs, or a screenshare.");
         error.WriteLine("  Example (file):      PerformanceMonitor.Darling.Service.exe --print-viewer-connection > viewer-connection.txt");
         error.WriteLine("  Example (clipboard): PerformanceMonitor.Darling.Service.exe --print-viewer-connection | clip");
         error.WriteLine("  Example (no paste):  PerformanceMonitor.Darling.Service.exe --export-viewer-config   (writes the whole viewer folder for you)");
-        if (string.Equals(handoff.Role, "admin", StringComparison.Ordinal))
+        if (many)
+        {
+            error.WriteLine(
+                $"  NOTE: postgres.network.role admits {handoffs.Count} roles (#2665), so one string is printed per role, " +
+                "each a DIFFERENT credential. Give each seat only the one it needs — they are not interchangeable.");
+        }
+
+        if (admitsAdmin)
         {
             error.WriteLine(
                 "  NOTE: 'admin' is a WRITE credential holding the config-table pivot surface. Prefer the default " +
@@ -408,17 +422,24 @@ public static class DarlingCliCommands
         else
         {
             error.WriteLine(
-                $"NOTE: the server TLS certificate ({handoff.CertificatePath}) does not exist yet — the service generates it " +
+                $"NOTE: the server TLS certificate ({certificateSource}) does not exist yet — the service generates it " +
                 "on its first managed start with postgres.network exposed. Enable postgres.network, restart the " +
                 "service, then re-run this command to emit the cert for verify-full.");
         }
 
         error.WriteLine();
 
-        output.WriteLine(
-            "# Paste into the viewer machine's darling.json -> postgres.connectionString (with postgres.managed = false):");
-        output.WriteLine(connectionString);
-        output.WriteLine();
+        /* One paste-ready string per admitted role, each labelled with the role it authenticates as — the
+           strings differ only in Username= and Password=, so an unlabelled pair is impossible to tell apart
+           after the fact and the reader would have to guess which seat to hand where. */
+        foreach (var handoff in handoffs)
+        {
+            output.WriteLine(
+                $"# Paste into the viewer machine's darling.json -> postgres.connectionString (with postgres.managed = false) — the '{handoff.Role}' seat:");
+            output.WriteLine(BuildViewerConnectionString(
+                handoff.Host, handoff.Port, handoff.Role, handoff.Password, clientCertificatePath));
+            output.WriteLine();
+        }
 
         /* Emit the server cert PEM so the operator can copy it to the viewer machine. */
         if (certificate is not null)
@@ -641,16 +662,22 @@ public static class DarlingCliCommands
         string Host, int Port, string Role, string Password, string CertificatePath);
 
     /// <summary>
-    /// Resolves the remote-viewer handoff material (D8), writing every refusal + warning to
+    /// Resolves the remote-viewer handoff material (D8) for EVERY role the exposure admits (#2665), in
+    /// <see cref="DarlingNetwork.NormalizeNetworkRoles"/>' order, writing every refusal + warning to
     /// <paramref name="error"/> and returning null when the caller must exit 1. Managed-mode only: the DPAPI
     /// credential files and the generated TLS cert it reads exist only there — in BYO the operator's own
     /// PostgreSQL governs exposure + credentials (D-BYO). Windows-only (DPAPI-LocalMachine). The two string
     /// parameters shape message WORDING only — never the logic, so both verbs resolve identically.
+    /// <para>Fail-closed on the FIRST role whose credential is missing or will not decrypt, rather than
+    /// returning the roles that worked. Both credentials are provisioned in the same act by
+    /// <c>DarlingManagedRoles</c>, so one missing means the store's bootstrap did not complete — which is
+    /// what the shared missing-credential diagnostic below actually explains. A partial handoff would bury
+    /// that under an export that looks like it succeeded.</para>
     /// </summary>
     /// <param name="verb">The CLI verb to name in refusals, e.g. <c>--export-viewer-config</c>.</param>
     /// <param name="action">What the verb would have produced, e.g. "print" / "export", for the no-remote-connection refusal.</param>
     [SupportedOSPlatform("windows")]
-    private static async Task<ViewerHandoff?> ResolveViewerHandoffAsync(
+    private static async Task<IReadOnlyList<ViewerHandoff>?> ResolveViewerHandoffsAsync(
         DarlingConfig config, string verb, string action, TextWriter error, CancellationToken cancellationToken)
     {
         var postgres = config.Postgres;
@@ -669,16 +696,17 @@ public static class DarlingCliCommands
             return null;
         }
 
-        /* The pg_hba login role the network exposure names — default viewer (read-only, the secure default).
+        /* Every pg_hba login role the network exposure names — default viewer (read-only, the secure default).
            An explicitly-invalid value is a hard error: the store degrades to loopback for it, so no remote
            connection exists at all. */
         var network = postgres.Network;
-        var role = DarlingNetwork.NormalizeNetworkRole(network?.Role);
-        if (role is null)
+        var roles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
+        if (roles is null || roles.Count == 0)
         {
             error.WriteLine(
-                $"postgres.network.role '{network?.Role}' is invalid — it must be \"viewer\" (default, read-only) " +
-                $"or \"admin\". The store degrades to loopback for an unknown role, so there is no remote connection to {action}.");
+                $"postgres.network.role '{network?.Role}' is invalid — it must be \"viewer\" (default, read-only), " +
+                $"\"admin\", or both (e.g. \"admin,viewer\"). The store degrades to loopback for an unknown role, so " +
+                $"there is no remote connection to {action}.");
             return null;
         }
 
@@ -694,44 +722,70 @@ public static class DarlingCliCommands
 
         var host = ResolveViewerHost(network?.Listen);
 
-        /* Decrypt the role's DPAPI-LocalMachine credential (Windows-only; the caller is IsWindows-guarded).
-           The cert lives in the same directory as the credential (ParentOf(dataDirectory)). */
+        /* Decrypt each role's DPAPI-LocalMachine credential (Windows-only; the caller is IsWindows-guarded).
+           Every credential and the cert live in the same directory (ParentOf(dataDirectory)), so the cert
+           path is role-independent. */
         var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(postgres);
-        var credentialPath = string.Equals(role, "admin", StringComparison.Ordinal)
-            ? DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory)
-            : DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+        var certificatePath = Path.Combine(
+            Path.GetDirectoryName(DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory))!,
+            DarlingManagedPostgres.ServerCertFileName);
 
-        if (!File.Exists(credentialPath))
+        var handoffs = new List<ViewerHandoff>(roles.Count);
+        foreach (var role in roles)
         {
-            /* #2197: which of the two things this means is decided from the store's own files, not assumed.
-               A bootstrap that has already failed produces this same absence, and telling THAT operator to
-               start the service again is the dead end the field report walked into. */
-            error.WriteLine(DarlingStoreBootstrapEvidence.MissingCredentialMessage(
-                $"The '{role}' role credential ({credentialPath})",
-                "provisions the least-privilege roles and their credentials",
-                dataDirectory));
-            return null;
+            var credentialPath = string.Equals(role, "admin", StringComparison.Ordinal)
+                ? DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory)
+                : DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+
+            if (!File.Exists(credentialPath))
+            {
+                /* #2197: which of the two things this means is decided from the store's own files, not assumed.
+                   A bootstrap that has already failed produces this same absence, and telling THAT operator to
+                   start the service again is the dead end the field report walked into. */
+                error.WriteLine(DarlingStoreBootstrapEvidence.MissingCredentialMessage(
+                    $"The '{role}' role credential ({credentialPath})",
+                    "provisions the least-privilege roles and their credentials",
+                    dataDirectory));
+                return null;
+            }
+
+            string password;
+            try
+            {
+                password = DarlingSecrets.Unprotect((await File.ReadAllTextAsync(credentialPath, cancellationToken)).Trim());
+            }
+            catch (Exception ex)
+            {
+                error.WriteLine(
+                    $"Could not decrypt the '{role}' credential at {credentialPath}: {ex.Message} (DPAPI-LocalMachine — " +
+                    "run this on the same machine as the service, under an account that can read the credential).");
+                return null;
+            }
+
+            handoffs.Add(new ViewerHandoff(host, postgres.Port, role, password, certificatePath));
         }
 
-        string password;
-        try
+        return handoffs;
+    }
+
+    /// <summary>
+    /// The single seat <c>--export-viewer-config</c> writes when the exposure admits both roles (#2665): the
+    /// LEAST-PRIVILEGE one. The verb produces one folder holding one live credential, and the folder is what
+    /// gets handed to somebody else — so where there is a choice it must be the read-only seat, the same call
+    /// D7 makes for the default. The admin string stays one <c>--print-viewer-connection</c> away, and the
+    /// verb says so rather than leaving the choice invisible. Pure.
+    /// </summary>
+    private static ViewerHandoff SelectExportSeat(IReadOnlyList<ViewerHandoff> handoffs)
+    {
+        foreach (var handoff in handoffs)
         {
-            password = DarlingSecrets.Unprotect((await File.ReadAllTextAsync(credentialPath, cancellationToken)).Trim());
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine(
-                $"Could not decrypt the '{role}' credential at {credentialPath}: {ex.Message} (DPAPI-LocalMachine — " +
-                "run this on the same machine as the service, under an account that can read the credential).");
-            return null;
+            if (string.Equals(handoff.Role, "viewer", StringComparison.Ordinal))
+            {
+                return handoff;
+            }
         }
 
-        return new ViewerHandoff(
-            host,
-            postgres.Port,
-            role,
-            password,
-            Path.Combine(Path.GetDirectoryName(credentialPath)!, DarlingManagedPostgres.ServerCertFileName));
+        return handoffs[0];
     }
 
     /// <summary>
@@ -863,11 +917,24 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        var handoff = await ResolveViewerHandoffAsync(
+        var handoffs = await ResolveViewerHandoffsAsync(
             config, "--export-viewer-config", "export", error, cancellationToken);
-        if (handoff is null)
+        if (handoffs is null)
         {
             return 1;
+        }
+
+        /* One folder holds one live credential, so a multi-role exposure has to CHOOSE — and the folder is
+           what gets handed to somebody else, so the choice is the read-only seat (see SelectExportSeat).
+           Saying which, and where the other one is, because an operator who set "admin,viewer" and got a
+           folder back would otherwise have no way to know a seat was picked for them. */
+        var handoff = SelectExportSeat(handoffs);
+        if (handoffs.Count > 1)
+        {
+            error.WriteLine(
+                $"NOTE: postgres.network.role admits '{string.Join("', '", handoffs.Select(h => h.Role))}'. This folder is the " +
+                $"'{handoff.Role}' seat (the least-privileged of them). For another role's connection string, run " +
+                "--print-viewer-connection, which prints one per admitted role.");
         }
 
         string certificate;
@@ -1547,7 +1614,8 @@ public static class DarlingCliCommands
 
         output.WriteLine("Current exposure:");
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
-            "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr, storeNow.Role, storeNow.DegradeReason));
+            "Store", storeNow.Exposed, storeNow.ListenIp, storeNow.Cidr,
+            storeNow.Roles is null ? null : string.Join(", ", storeNow.Roles), storeNow.DegradeReason));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
@@ -1953,9 +2021,12 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// Gathers listen / allowFrom / role for the store, RE-PROMPTING with the store resolver's own degrade
+    /// Gathers listen / allowFrom / role(s) for the store, RE-PROMPTING with the store resolver's own degrade
     /// reason until it accepts them (or the operator cancels). The whitespace-in-path degrade is a config
     /// problem the loop cannot fix, so it is reported and the surface is abandoned. Returns null on cancel.
+    /// <para>The returned Role is the resolver's CANONICAL joined list (#2665): <c>"viewer + admin"</c> comes
+    /// back as <c>"admin,viewer"</c>, so darling.json holds the text the service would itself compute and a
+    /// re-run of the wizard is a no-op rather than a reorder.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static (string Listen, string AllowFrom, string Role)? GatherStoreInputs(
@@ -1977,15 +2048,21 @@ public static class DarlingCliCommands
                 return null;
             }
 
-            output.WriteLine("Remote pg_hba role: 'viewer' (read-only, the secure default) or 'admin' (remote WRITES).");
-            var role = Prompt(input, output, "Role", "viewer");
+            output.WriteLine("Remote pg_hba role(s): 'viewer' (read-only, the secure default), 'admin' (remote WRITES),");
+            output.WriteLine("or BOTH as 'admin,viewer' — that writes one hostssl rule per role inside the managed block, so");
+            output.WriteLine("an admin seat and read-only seats can reach the same store and a later CIDR narrowing tightens");
+            output.WriteLine("all of them together (#2665).");
+            var role = Prompt(input, output, "Role(s)", "viewer");
             if (role is null)
             {
                 output.WriteLine("Cancelled — no changes made.");
                 return null;
             }
 
-            if (string.Equals(role, "admin", StringComparison.OrdinalIgnoreCase))
+            /* Warn off the NORMALIZED value, not the typed text. A check for the string being exactly "admin"
+               goes silent for every list form ("admin,viewer", "viewer+admin") — which is the case where the
+               operator most needs to read it, because they may be thinking about the viewer half. */
+            if (string.Equals(DarlingNetwork.NormalizeNetworkRole(role), "admin", StringComparison.Ordinal))
             {
                 output.WriteLine("  WARNING: 'admin' is a remote WRITE credential holding the config-table service-credential pivot.");
                 output.WriteLine("           Prefer 'viewer' unless you specifically need remote writes.");
@@ -1997,7 +2074,7 @@ public static class DarlingCliCommands
             {
                 /* Write the resolver's canonical values (parsed IP, host-bits-zeroed CIDR, normalized role)
                    so the file matches what the service would compute. */
-                return (decision.ListenIp!, decision.Cidr!, decision.Role!);
+                return (decision.ListenIp!, decision.Cidr!, string.Join(",", decision.Roles!));
             }
 
             var reason = decision.DegradeReason ?? "the store resolver rejected these values";

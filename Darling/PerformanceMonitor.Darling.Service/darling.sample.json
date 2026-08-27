@@ -68,7 +68,8 @@
     // secure default (loopback-only, byte-for-byte today's behavior: no pg_hba network rule, no
     // firewall rule, ssl=off). When present with a non-loopback "listen", the service reconciles it
     // on every start: it adds the bind IP to listen_addresses, generates a self-signed TLS cert for
-    // verify-full, writes a marked `hostssl darling <role> <allowFrom> scram-sha-256` pg_hba rule +
+    // verify-full, writes a marked `hostssl darling <role> <allowFrom> scram-sha-256` pg_hba rule
+    // per admitted role +
     // reloads, and best-effort adds a firewall rule (also add the exact scoped rule yourself; see
     // Darling/README.md). Reconciliation is symmetric (delete the block to close the box) and
     // fail-closed: any invalid/incomplete field degrades the store to loopback + a critical log line,
@@ -79,9 +80,13 @@
     //   "listen": "192.168.1.205",      // the specific bind IP (preferred; = the cert's iPAddress SAN).
     //                                    // "0.0.0.0" = all interfaces (then connect by a cert SAN name).
     //   "allowFrom": "192.168.1.0/24",  // pg_hba + firewall CIDR (its address family must match "listen").
-    //   "role": "viewer"                // "viewer" (default, read-only remote — the secure default) or
+    //   "role": "viewer"                // "viewer" (default, read-only remote — the secure default),
     //                                    // "admin" (full remote WRITES; the service warns, because admin
-    //                                    // holds the config-table service-credential pivot). Never the superuser.
+    //                                    // holds the config-table service-credential pivot), or BOTH as
+    //                                    // "admin,viewer" — one hostssl line per role, so an admin seat
+    //                                    // and read-only seats reach the same store, and narrowing
+    //                                    // allowFrom later tightens every one of them. Never the
+    //                                    // superuser, never all; one bad element rejects the whole value.
     // }
   },
   // SEEDED ONCE, then read-only. This list bootstraps config.config_monitored_servers on the first

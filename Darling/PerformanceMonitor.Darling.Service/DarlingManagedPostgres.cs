@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -1699,7 +1700,7 @@ public sealed class DarlingManagedPostgres
         NetworkMode Mode,
         string? ListenIp,
         string? Cidr,
-        string? Role,
+        IReadOnlyList<string>? Roles,
         string? CertPath,
         string? KeyPath,
         string? DegradeReason)
@@ -1707,8 +1708,8 @@ public sealed class DarlingManagedPostgres
         public static NetworkPlan Loopback(string? degradeReason = null)
             => new(NetworkMode.Loopback, null, null, null, null, null, degradeReason);
 
-        public static NetworkPlan Exposed(string listenIp, string cidr, string role, string certPath, string keyPath)
-            => new(NetworkMode.Exposed, listenIp, cidr, role, certPath, keyPath, null);
+        public static NetworkPlan Exposed(string listenIp, string cidr, IReadOnlyList<string> roles, string certPath, string keyPath)
+            => new(NetworkMode.Exposed, listenIp, cidr, roles, certPath, keyPath, null);
     }
 
     /// <summary>
@@ -1718,7 +1719,7 @@ public sealed class DarlingManagedPostgres
     /// ListenIp/Cidr/Role.
     /// </summary>
     internal sealed record NetworkExposureDecision(
-        bool Exposed, string? ListenIp, string? Cidr, string? Role, string? DegradeReason);
+        bool Exposed, string? ListenIp, string? Cidr, IReadOnlyList<string>? Roles, string? DegradeReason);
 
     /// <summary>
     /// PURE validation of postgres.network into a <see cref="NetworkExposureDecision"/> — NO I/O and NO cert
@@ -1755,11 +1756,15 @@ public sealed class DarlingManagedPostgres
                 $"postgres.network.allowFrom '{network.AllowFrom}' address family does not match listen '{listenRaw}'");
         }
 
-        var role = DarlingNetwork.NormalizeNetworkRole(network.Role);
-        if (role is null)
+        /* #2665: one rule per role, so an admin Viewer and read-only ones can reach the same store. Null
+           when ANY element is unrecognised rather than keeping the ones it understood — a typo in one of two
+           roles must not open the store with the other and leave somebody believing both are reachable. */
+        var roles = DarlingNetwork.NormalizeNetworkRoles(network.Role);
+        if (roles is null || roles.Count == 0)
         {
             return Degrade(
-                $"postgres.network.role '{network.Role}' must be 'viewer' or 'admin' (never the superuser)");
+                $"postgres.network.role '{network.Role}' must be 'viewer', 'admin', or both "
+                + "(e.g. \"admin,viewer\") — never the superuser");
         }
 
         /* The cert path rides the -o string, which cannot nest-quote a space -> a spaced path fail-DEADS
@@ -1772,7 +1777,7 @@ public sealed class DarlingManagedPostgres
         }
 
         /* Canonical base/prefix form (IPNetwork requires zeroed host bits) for the pg_hba line + firewall. */
-        return new NetworkExposureDecision(true, listenIp.ToString(), $"{cidr.BaseAddress}/{cidr.PrefixLength}", role, null);
+        return new NetworkExposureDecision(true, listenIp.ToString(), $"{cidr.BaseAddress}/{cidr.PrefixLength}", roles, null);
 
         static NetworkExposureDecision Degrade(string reason) => new(false, null, null, null, reason);
     }
@@ -1804,7 +1809,7 @@ public sealed class DarlingManagedPostgres
             return NetworkPlan.Loopback($"could not generate/read the store TLS cert ({ex.Message})");
         }
 
-        return NetworkPlan.Exposed(decision.ListenIp!, decision.Cidr!, decision.Role!, certPath, keyPath);
+        return NetworkPlan.Exposed(decision.ListenIp!, decision.Cidr!, decision.Roles!, certPath, keyPath);
     }
 
     private static bool ContainsWhitespace(string value)
@@ -2001,6 +2006,19 @@ public sealed class DarlingManagedPostgres
         => $"hostssl {DatabaseName} {role} {cidr} scram-sha-256";
 
     /// <summary>
+    /// The managed pg_hba block for every admitted role (#2665) — one <c>hostssl</c> line each, in the
+    /// order <see cref="DarlingNetwork.NormalizeNetworkRoles"/> settled on, so the text is identical however
+    /// the field was written and the reconciler does not rewrite-and-reload on a reordering.
+    ///
+    /// <para>Each line still names exactly one role and one CIDR: never <c>all</c>, never the superuser
+    /// (D5/D6). A list admits more roles, it does not widen what any one line grants — and because these
+    /// live INSIDE the managed block, tightening <c>allowFrom</c> narrows all of them, which is exactly what
+    /// a hand-added second line outside the markers would not do.</para>
+    /// </summary>
+    internal static string BuildNetworkPgHbaLines(IReadOnlyList<string> roles, string cidr)
+        => string.Join("\n", roles.Select(role => BuildNetworkPgHbaLine(role, cidr)));
+
+    /// <summary>
     /// Whether the live pg_hba.conf needs reconciling (darling-network-endpoints): true when there is a rule
     /// to apply (<paramref name="desiredLine"/> non-null = exposing) OR the file still carries a Darling
     /// managed block to remove (<see cref="PgHbaBeginMarker"/> present = a disable edge). FALSE for a store
@@ -2015,9 +2033,12 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// Pure marked-block reconcile for pg_hba.conf (D5): returns <paramref name="existing"/> with the
     /// Darling-managed block (between <see cref="PgHbaBeginMarker"/> and <see cref="PgHbaEndMarker"/>) set
-    /// to a single <paramref name="desiredRuleLine"/> when non-empty, or REMOVED when null/empty (disable).
+    /// to <paramref name="desiredRuleLine"/> when non-empty, or REMOVED when null/empty (disable).
     /// Every non-marked line is preserved verbatim; a narrowing CIDR REPLACES the block (old removed, new
     /// appended); idempotent (re-running with the same desired yields identical text).
+    /// <para>Since #2665 the desired text may be SEVERAL newline-separated rules (one per admitted role,
+    /// from <see cref="BuildNetworkPgHbaLines"/>). That needs no code change here — this always replaced the
+    /// whole block rather than a line — but it is why the parameter is a block, not a rule.</para>
     /// </summary>
     public static string ReconcilePgHba(string existing, string? desiredRuleLine)
     {
@@ -2087,7 +2108,7 @@ public sealed class DarlingManagedPostgres
         try
         {
             var exposed = plan.Mode == NetworkMode.Exposed;
-            var desiredLine = exposed ? BuildNetworkPgHbaLine(plan.Role!, plan.Cidr!) : null;
+            var desiredLine = exposed ? BuildNetworkPgHbaLines(plan.Roles!, plan.Cidr!) : null;
 
             var hbaPath = Path.Combine(_dataDirectory, "pg_hba.conf");
             if (!File.Exists(hbaPath))
@@ -2165,9 +2186,9 @@ public sealed class DarlingManagedPostgres
 
     /// <summary>
     /// Confirms the live pg_hba rules match intent via <c>pg_hba_file_rules</c>: no rule has a parse error,
-    /// and the Darling hostssl rule for the network role is PRESENT when exposed / ABSENT when
-    /// loopback. A mismatch is logged critical (a reload delivers a SIGHUP that Postgres may then reject).
-    /// Best-effort — a query failure degrades to a warning, not a throw.
+    /// and a Darling hostssl rule exists for EVERY admitted network role when exposed / for none of them
+    /// when loopback (#2665). A mismatch is logged critical (a reload delivers a SIGHUP that Postgres may
+    /// then reject). Best-effort — a query failure degrades to a warning, not a throw.
     /// </summary>
     private async Task VerifyPgHbaAsync(string ownerConnectionString, NetworkPlan plan, bool reloaded, CancellationToken cancellationToken)
     {
@@ -2193,24 +2214,35 @@ public sealed class DarlingManagedPostgres
             long present;
             if (exposed)
             {
+                /* EVERY admitted role must be live, not just one (#2665): a rule that failed to apply for the
+                   second role leaves those clients locked out while the exposure looks healthy.
+
+                   Counting DISTINCT ROLE NAMES rather than matching ROWS, because rows do not answer the
+                   question. `count(*) ... WHERE user_name && $2` is satisfied by two rules naming the SAME
+                   role, and that is the expected shape on an upgraded box: #2665's own workaround was a
+                   hand-added second hostssl line outside the markers, which ReconcilePgHba deliberately
+                   preserves. Such a file with a stale viewer line and no live admin rule counts 2 of 2 and
+                   passes, which is precisely the failure this check exists to catch. Unnesting and counting
+                   distinct names is >= Roles.Count only when every admitted role really has a rule. */
                 await using var command = new NpgsqlCommand(
-                    "SELECT count(*) FROM pg_hba_file_rules WHERE type = 'hostssl' AND $1 = ANY(database) AND $2 = ANY(user_name)",
+                    "SELECT count(DISTINCT u) FROM pg_hba_file_rules AS r, unnest(r.user_name) AS u "
+                    + "WHERE r.type = 'hostssl' AND $1 = ANY(r.database) AND u = ANY($2::text[])",
                     connection);
                 command.Parameters.AddWithValue(DatabaseName);
-                command.Parameters.AddWithValue(plan.Role!);
+                command.Parameters.AddWithValue(plan.Roles!.ToArray());
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
-                if (present == 0)
+                if (present < plan.Roles!.Count)
                 {
                     _logger.LogCritical(
-                        "pg_hba verification: the expected 'hostssl {Db} {Role} {Cidr} scram-sha-256' rule is NOT live after reload — the store is not accepting network clients as intended",
-                        DatabaseName, plan.Role, plan.Cidr);
+                        "pg_hba verification: only {Present} of the {Expected} configured role(s) '{Roles}' have a live 'hostssl {Db} <role> {Cidr} scram-sha-256' rule after reload — the store is not accepting network clients as intended",
+                        present, plan.Roles!.Count, string.Join(", ", plan.Roles!), DatabaseName, plan.Cidr);
                     return;
                 }
 
                 _logger.LogInformation(
-                    "Store network access reconciled: exposed to {Cidr} as '{Role}' over TLS (pg_hba {Verb}).",
-                    plan.Cidr, plan.Role, reloaded ? "reloaded + verified" : "already current");
+                    "Store network access reconciled: exposed to {Cidr} as '{Roles}' over TLS (pg_hba {Verb}).",
+                    plan.Cidr, string.Join(", ", plan.Roles!), reloaded ? "reloaded + verified" : "already current");
             }
             else
             {

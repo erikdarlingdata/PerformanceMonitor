@@ -571,6 +571,80 @@ public sealed class DarlingPrintViewerConnectionTests
     }
 
     /// <summary>
+    /// #2665: an exposure admitting both roles prints one paste-ready string PER ROLE. The two credentials
+    /// are deliberately different here, because the failure worth catching is not "only one string printed"
+    /// but a string carrying the WRONG role's password — which is invisible in a fixture where both
+    /// passwords are the same, and which would hand a teammate admin while the label said viewer. The
+    /// certificate is shared by both seats, so it must appear ONCE, not per string.
+    /// </summary>
+    [Fact]
+    public async Task PrintViewerConnectionAsync_BothRoles_PrintsOneStringPerRole_WithEachRolesOwnPassword()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-printconn-roles-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var viewerCredential = PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(viewerCredential, PerformanceMonitor.Darling.Service.DarlingSecrets.Protect("viewer-secret-pw"));
+            File.WriteAllText(
+                PerformanceMonitor.Darling.Service.DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory),
+                PerformanceMonitor.Darling.Service.DarlingSecrets.Protect("admin-secret-pw"));
+
+            var certPath = Path.Combine(
+                Path.GetDirectoryName(viewerCredential)!,
+                PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ServerCertFileName);
+            const string pem = "-----BEGIN CERTIFICATE-----\nMIIBTESTCERTPEM\n-----END CERTIFICATE-----";
+            File.WriteAllText(certPath, pem);
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            var json = $$"""
+                {
+                  "postgres": {
+                    "managed": true,
+                    "port": 5641,
+                    "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}},
+                    "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "role": "viewer,admin" }
+                  },
+                  "servers": [ { "name": "SQL2022", "host": "SQL2022" } ]
+                }
+                """;
+            await File.WriteAllTextAsync(configPath, json);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.PrintViewerConnectionAsync(configPath, output, error, CancellationToken.None);
+            var stdout = output.ToString();
+            var stderr = error.ToString();
+
+            Assert.Equal(0, exit);
+
+            /* One string per role, each pairing its OWN credential. */
+            Assert.Contains("Username=admin;Password=admin-secret-pw", stdout, StringComparison.Ordinal);
+            Assert.Contains("Username=viewer;Password=viewer-secret-pw", stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("Username=admin;Password=viewer-secret-pw", stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain("Username=viewer;Password=admin-secret-pw", stdout, StringComparison.Ordinal);
+
+            /* Each is labelled with the seat it authenticates as — the strings differ only in those two
+               fields, so an unlabelled pair cannot be told apart after it leaves the screen. */
+            Assert.Contains("the 'admin' seat:", stdout, StringComparison.Ordinal);
+            Assert.Contains("the 'viewer' seat:", stdout, StringComparison.Ordinal);
+
+            /* The shared cert is emitted once, not once per seat. */
+            Assert.Equal(1, CountOccurrences(stdout, pem));
+
+            /* Both notices: that there is more than one credential here, and the admin pivot caveat. */
+            Assert.Contains("admits 2 roles", stderr, StringComparison.Ordinal);
+            Assert.Contains("'admin' is a WRITE credential", stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
     /// #2117's print-verb half, pinned on the CHAIN-shaped store the sibling test cannot see (it lays down
     /// only the legacy server.crt): when root.crt exists beside server.crt, the verb must emit the ROOT —
     /// that is what verify-full's Root Certificate anchors on against a chain-serving store — and the
@@ -632,6 +706,19 @@ public sealed class DarlingPrintViewerConnectionTests
             root.Delete(recursive: true);
         }
     }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
+    }
 }
 
 /// <summary>
@@ -684,12 +771,53 @@ public sealed class DarlingConfigureNetworkTests
             Assert.True(decision.Exposed);
             Assert.Equal("192.168.1.205", decision.ListenIp);
             Assert.Equal("192.168.1.0/24", decision.Cidr);
-            Assert.Equal("viewer", decision.Role);
+            Assert.Equal("viewer", decision.Roles?[0]);
 
             /* A timestamped backup exists, and the commented template survived the edit. */
             Assert.NotEmpty(Directory.GetFiles(root.FullName, "darling.json.bak-*"));
             Assert.Contains("// \"network\": {", written, StringComparison.Ordinal);
             Assert.Contains("Backup saved", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #2665: the wizard admits BOTH roles, and writes the resolver's CANONICAL text rather than what was
+    /// typed — so a messy "viewer + admin" lands as "admin,viewer" and a later re-run of the wizard is a
+    /// no-op instead of a reorder that rewrites pg_hba and reloads the server. The admin pivot warning must
+    /// still appear: it is keyed on the normalized value, so a check for the literal string "admin" would go
+    /// silent for exactly the list forms this feature adds.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureNetwork_Store_BothRoles_WritesCanonicalListAndStillWarnsAboutAdmin()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard queries the Windows service + uses DPAPI.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-roles-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+
+            /* choice=Store, bind IP, CIDR, both roles typed in the "wrong" order and spacing, decline restart. */
+            var input = Script("1", "192.168.1.205", "192.168.1.0/24", "viewer + admin", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var written = await File.ReadAllTextAsync(configPath);
+            Assert.Contains("\"role\": \"admin,viewer\"", written, StringComparison.Ordinal);
+
+            var config = DarlingConfig.Parse(written);
+            var decision = DarlingManagedPostgres.ResolveNetworkExposure(config.Postgres.Network, CertPath, KeyPath);
+            Assert.True(decision.Exposed);
+            Assert.Equal(new[] { "admin", "viewer" }, decision.Roles!);
+
+            Assert.Contains("WARNING: 'admin' is a remote WRITE credential", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {

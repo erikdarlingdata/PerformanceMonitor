@@ -97,7 +97,7 @@ public sealed class DarlingNetworkConfigEditorTests
         Assert.True(decision.Exposed);
         Assert.Equal("192.168.1.205", decision.ListenIp);
         Assert.Equal("192.168.1.0/24", decision.Cidr);
-        Assert.Equal("viewer", decision.Role);
+        Assert.Equal("viewer", decision.Roles?[0]);
 
         /* The live block lands AFTER connectAs (the deliberate insert anchor). */
         var regions = Editor.Classify(edited);
@@ -255,7 +255,7 @@ public sealed class DarlingNetworkConfigEditorTests
         Assert.True(decision.Exposed);
         Assert.Equal("10.9.9.9", decision.ListenIp);
         Assert.Equal("10.9.9.0/24", decision.Cidr);
-        Assert.Equal("admin", decision.Role);
+        Assert.Equal("admin", decision.Roles?[0]);
 
         /* The LIVE block holds the second value and NOT the first (replaced in place, not appended). The
            first value survives only in the sample's commented template, so scope the check to the live span. */
