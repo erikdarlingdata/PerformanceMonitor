@@ -821,6 +821,18 @@ export const SERVER_TABS = [
         "daily collection",
         "No lock-wait rows recorded. Index and object stats are collected daily."
       ),
+      /* #2663 the first PostgreSQL time series. The single-window panels above rank what this server waits
+         on; this follows ONE of them over time, which is the question they cannot answer. Parameterised by
+         event, so it needs one chosen - the toolbar default is the event that dominates the window. */
+      table(
+        "Wait Trend",
+        "get_pg_wait_trend",
+        { server, hours: ctx.hours },
+        "points",
+        PG_WAIT_TREND_COLUMNS,
+        ctx.label + ", the event that dominates this window, over time; estimates from a sampling profiler, so the shape is the finding",
+        "No samples for this wait event in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled."
+      ),
     ],
   },
 
@@ -1591,6 +1603,18 @@ export const POSTGRES_TABS = [
         PG_DEADLOCK_COLUMNS,
         ctx.label + ", newest first; Sightings counts re-reads of the same report, not repeats",
         "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the plan-capture readiness panel reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
+      ),
+      /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
+         The statement grid above ranks by total time across the window, which hides a step change - a query
+         that doubled halfway through still ranks where its average puts it. */
+      table(
+        "Query Duration Trend",
+        "get_pg_query_duration_trend",
+        { server, hours: ctx.hours },
+        "points",
+        PG_QUERY_DURATION_TREND_COLUMNS,
+        ctx.label + ", the statement with the most execution time in this window; a step that persists is a plan or index change",
+        "No statement recorded execution time in this window, so there is nothing to follow."
       ),
       /* The graphs themselves, under the summary - the same pairing the SQL Server Deadlocks tab makes.
          The read takes an optional hash, so this panel needs no drill-down plumbing: without one it
@@ -2934,6 +2958,22 @@ const PG_IO_SUMMARY_STATS = [
 
    buffers_backend is here rather than buried with the other buffer counters because it is the one that
    lands on a user query: a backend writing its own dirty buffer is a query paying for the write. */
+const PG_WAIT_TREND_COLUMNS = [
+  { key: "collection_time", label: "When", format: "time" },
+  { key: "estimated_wait_ms_per_second", label: "Est. wait ms/sec", format: "num2" },
+  { key: "sample_count", label: "Samples", format: "int" },
+  { key: "backend_count", label: "Backends", format: "int", small: true },
+  { key: "counter_reset", label: "Profile reset", format: "bool", small: true },
+];
+
+const PG_QUERY_DURATION_TREND_COLUMNS = [
+  { key: "collection_time", label: "When", format: "time" },
+  { key: "mean_exec_ms", label: "Mean ms/exec", format: "num2" },
+  { key: "calls", label: "Calls", format: "int" },
+  { key: "calls_per_second", label: "Calls/sec", format: "num2" },
+  { key: "total_exec_ms", label: "Total ms", format: "num1", small: true },
+];
+
 const PG_DEADLOCK_GRAPH_COLUMNS = [
   { key: "occurred_at", label: "When", format: "time" },
   { key: "victim_pid", label: "Victim PID", format: "int" },
