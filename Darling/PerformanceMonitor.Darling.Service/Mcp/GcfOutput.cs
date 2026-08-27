@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json;
 using BlackwellSystems.Gcf;
 
@@ -182,7 +183,7 @@ public static class GcfOutput
                 // result stays JSON) rather than emit a wire that has silently dropped
                 // precision. A token outside the decimal range is inherently double-domain.
                 var d = e.GetDouble();
-                if (e.TryGetDecimal(out var exact) && (decimal)d != exact)
+                if (!NumberSurvivesAsDouble(e, d))
                     throw new NotSupportedException("number not exactly representable as a double");
                 return d;
 
@@ -195,5 +196,23 @@ public static class GcfOutput
             default:
                 return null; // Null / Undefined
         }
+    }
+
+    // Reports whether a double holds the JSON number token exactly, so a non-integer can
+    // be carried on the wire without silently dropping precision. A non-finite double (a
+    // token that overflowed to +/-Infinity, e.g. 1e400) never represents a finite token and
+    // is declined. Otherwise the double is exact when its shortest round-trip form
+    // reproduces the token, or, for a token in the decimal range, when the decimal it parsed
+    // to is unchanged. The shortest round-trip comparison is what makes a 16-significant-digit
+    // value such as 0.5029000043869019 (exactly representable, but 16 digits) survive: a
+    // (decimal)d cast keeps only 15 digits and would wrongly reject it.
+    private static bool NumberSurvivesAsDouble(JsonElement e, double d)
+    {
+        if (!double.IsFinite(d))
+            return false;
+        if (d.ToString("R", CultureInfo.InvariantCulture)
+            .Equals(e.GetRawText(), StringComparison.Ordinal))
+            return true;
+        return e.TryGetDecimal(out var exact) && (decimal)d == exact;
     }
 }

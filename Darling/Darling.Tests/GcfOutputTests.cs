@@ -132,6 +132,20 @@ public class GcfOutputTests : IDisposable
         );
     }
 
+    // Builds the same {rows:[{metric,server}]} shape but writes the metric as a raw JSON
+    // number token, so tokens that cannot be produced from a CLR value (an overflowing
+    // literal such as 1e400) can be fed through the encoder exactly as a collector would.
+    private static string NumberedRaw(string numberToken, int rows)
+    {
+        var items = string.Join(
+            ",",
+            Enumerable
+                .Range(0, rows)
+                .Select(_ => $"{{\"metric\":{numberToken},\"server\":\"SQLPROD01\"}}")
+        );
+        return $"{{\"rows\":[{items}]}}";
+    }
+
     [Fact]
     public void TryEncode_Keeps_Decimal_That_Fits_Double()
     {
@@ -140,6 +154,26 @@ public class GcfOutputTests : IDisposable
 
         Assert.NotNull(wire);
         Assert.Contains("33.5", wire);
+    }
+
+    [Fact]
+    public void TryEncode_Keeps_16Digit_ShortestRoundTrip_Double()
+    {
+        // 0.5029000043869019 is a real captured float8 value: a 16-significant-digit
+        // shortest-round-trip double that IS exactly representable. It must encode. The
+        // former (decimal)d guard kept only 15 digits and wrongly declined it.
+        var wire = GcfOutput.TryEncode(Numbered(0.5029000043869019, 20));
+
+        Assert.NotNull(wire);
+        Assert.Contains("0.5029000043869019", wire);
+    }
+
+    [Fact]
+    public void TryEncode_Declines_NonFinite_Double()
+    {
+        // A token that overflows double (1e400) parses to Infinity. The guard must decline
+        // it rather than silently encode Infinity where the JSON carried a finite token.
+        Assert.Null(GcfOutput.TryEncode(NumberedRaw("1e400", 20)));
     }
 
     [Fact]
