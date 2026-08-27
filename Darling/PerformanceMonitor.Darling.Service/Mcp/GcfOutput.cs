@@ -10,9 +10,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 // results. When DARLING_OUTPUT_FORMAT=gcf, a call-tool filter (GcfCallToolFilter)
 // re-encodes each tool's JSON result as a GCF generic wire: the repeated field names of
 // the record arrays these tools return (blocking events, alerts, wait stats, config, ...)
-// are factored into a single header and the indentation is dropped, cutting the token
-// cost of a result roughly in half versus the pretty-printed JSON. Opt-in, lossless, and
-// never larger than the JSON.
+// are factored into a single header, cutting the token cost of a record-heavy result by
+// roughly a quarter to a half of the server's compact JSON depending on shape (uniform
+// numeric records win most; mostly-text results win least). Opt-in, lossless, and never
+// larger than the JSON.
 public static class GcfOutput
 {
     // True when GCF output is requested. Read from the environment on each call so it can

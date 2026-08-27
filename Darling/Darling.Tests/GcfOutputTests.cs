@@ -42,7 +42,7 @@ public class GcfOutputTests : IDisposable
                 total_events = rows,
                 events,
             },
-            new JsonSerializerOptions { WriteIndented = true }
+            new JsonSerializerOptions { WriteIndented = false } // matches the server's compact MCP output
         );
     }
 
@@ -128,7 +128,7 @@ public class GcfOutputTests : IDisposable
             .ToList();
         return JsonSerializer.Serialize(
             new { rows = arr },
-            new JsonSerializerOptions { WriteIndented = true }
+            new JsonSerializerOptions { WriteIndented = false } // matches the server's compact MCP output
         );
     }
 
@@ -205,7 +205,7 @@ public class GcfOutputTests : IDisposable
             .ToList();
         var json = JsonSerializer.Serialize(
             new { rows },
-            new JsonSerializerOptions { WriteIndented = true }
+            new JsonSerializerOptions { WriteIndented = false } // matches the server's compact MCP output
         );
 
         var wire = GcfOutput.TryEncode(json);
