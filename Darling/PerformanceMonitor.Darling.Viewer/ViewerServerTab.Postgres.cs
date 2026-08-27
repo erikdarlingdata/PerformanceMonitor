@@ -304,6 +304,7 @@ public partial class ViewerServerTab
         await LoadPgKernelStatsAsync(startUtc, endUtc);
         await LoadPgPredicateStatsAsync(startUtc, endUtc);
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
+        await LoadPgDeadlocksAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -501,6 +502,41 @@ public partial class ViewerServerTab
                   ? $" {orphans:N0} plan(s) have no query id, which means log_line_prefix lacks %Q - they "
                     + "cannot be joined to a statement until that is fixed."
                   : string.Empty);
+    }
+
+    /// <summary>
+    /// Deadlocks reported in the window (#2661), last on this tab because they are blocking at its limit: a
+    /// chain the server had to break by cancelling somebody.
+    ///
+    /// <para><b>An empty grid is the healthy answer AND the shape of an unreadable log</b>, which is why the
+    /// note names the other check rather than leaving it. Deadlock reports need nothing configured on the
+    /// target — unlike plan capture there is no setting that suppresses them — so the only precondition is
+    /// being able to read the server log, which the plan-capture panel above already reports on because it
+    /// reads the same file. pg_stat_database's cumulative deadlock counter is the independent test: if that
+    /// moved and this is empty, the log is the problem rather than the server.</para>
+    /// </summary>
+    private async Task LoadPgDeadlocksAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_deadlocks"))
+        {
+            PgDeadlocksGrid.ItemsSource = null;
+            PgDeadlocksNote.Text = PanelNote("pg_deadlocks", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgDeadlocksAsync(_server.ServerId, startUtc, endUtc);
+
+        PgDeadlocksGrid.ItemsSource = rows;
+
+        PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
+            "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
+            + "unreadable server log looks like — the plan-capture panel above reads the same file and says "
+            + "which it is.")
+            + (rows.Count == 0
+                ? string.Empty
+                : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
+                  + "the log tail it re-reads; a deadlock that genuinely recurred is its own row, because "
+                  + "the process IDs differ.");
     }
 
     /// <summary>

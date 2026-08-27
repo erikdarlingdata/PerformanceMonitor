@@ -71,6 +71,7 @@ public static class CollectorCatalog
         PgStatementStatsCollector.Instance,
         PgWraparoundStatsCollector.Instance,
         PgServerConfigCollector.Instance,
+        PgDeadlocksCollector.Instance,
         PgXminHorizonCollector.Instance,
         PgReplicationSlotsCollector.Instance,
         PgAutovacuumStatsCollector.Instance,

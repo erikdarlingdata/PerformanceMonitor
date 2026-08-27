@@ -159,6 +159,8 @@ public static class PgMigrations
         new Migration(100, "pg-major-version", V100Sql),
         new Migration(101, "pg18-io-bytes", V101Sql),
         new Migration(102, "pg-server-config", V102Sql),
+        new Migration(103, "pg-deadlocks", V103Sql),
+        new Migration(104, "pg-deadlock-identity-index", V104Sql),
     };
 
     /// <summary>
@@ -2278,6 +2280,73 @@ CREATE TABLE IF NOT EXISTS collect.pg_buffer_usage (
 
 CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
+
+    /// <summary>
+    /// V104 — the lookup index for <c>collect.pg_deadlocks</c> (#2661), and a SEPARATE rung on purpose.
+    ///
+    /// <para><c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> requires a
+    /// collector's rung to be column-for-column and index-for-index what <c>PgSchemaGenerator</c> emits, and
+    /// the generator emits exactly one index per collector. An extra index inside V103 is not a drafting
+    /// error the pin should tolerate — it is the pin working, because a fresh store builds from the
+    /// generated schema and would silently not have it. Putting it in its own rung gives BOTH populations
+    /// the index, which is what was actually wanted.</para>
+    ///
+    /// <para><b>Why the index earns its place.</b> The collector re-reads an OVERLAPPING tail of the server
+    /// log every cycle, deliberately, so a report cut in half at one edge is whole in the next. Every read
+    /// therefore groups or filters on <c>deadlock_hash</c> to answer once per deadlock rather than once per
+    /// sighting, and the detail read looks a report up by hash directly.</para>
+    ///
+    /// <para><b>Not UNIQUE.</b> Two servers legitimately produce identical graph text — the same query pair
+    /// deadlocking with the same process ids on two hosts is not impossible — and a unique constraint would
+    /// also let a partial write during a crash block the next cycle's insert. Deduplication is a READ
+    /// concern here, and the reads already do it.</para>
+    /// </summary>
+    private const string V104Sql = @"
+CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_identity
+    ON collect.pg_deadlocks(server_id, deadlock_hash);";
+
+    /// <summary>
+    /// V103 — <c>collect.pg_deadlocks</c>, the deadlock reports PostgreSQL writes to its server log (#2661).
+    /// We collected the COUNT (<c>pg_stat_database.deadlocks</c>) and nothing else: a number that goes up.
+    /// This is which sessions, holding what, running what SQL.
+    ///
+    /// <para><b>The identity column is the point.</b> Both transports read a bounded TAIL of the log on a
+    /// schedule and the window OVERLAPS deliberately — a report cut in half at the edge of one read is whole
+    /// in the next — so without <c>deadlock_hash</c> the same deadlock is stored once per cycle for as long
+    /// as it stays inside the window. The hash is over the graph text rather than over
+    /// (timestamp, victim_pid): two reports in the same millisecond with the same victim pid are
+    /// vanishingly unlikely, but the graph is what actually distinguishes them, and hashing the thing
+    /// itself needs no argument about how unlikely a collision is.</para>
+    ///
+    /// <para><b><c>graph_text</c> is stored whole, beside the parsed columns.</b> The parsed fields are an
+    /// interpretation of a format that varies with the lock type — <c>transaction N</c>,
+    /// <c>relation N of database N</c>, <c>tuple (b,o) of relation N</c>, advisory locks — and the raw block
+    /// is the evidence. A shape the parser does not recognise today still arrives readable by a person
+    /// rather than as a row of NULLs.</para>
+    ///
+    /// <para><b>All value columns nullable</b>, matching the generated schema this must be identical to
+    /// (<c>PgSchemaGeneratorTests</c>). <c>occurred_at</c> is nullable for the same reason the others are:
+    /// it comes from parsing a log line, and the store's job is to record what was found rather than to
+    /// assert it was always found.</para>
+    /// </summary>
+    private const string V103Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_deadlocks (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    occurred_at timestamp,
+    victim_pid integer,
+    participant_count integer,
+    deadlock_hash text,
+    lock_modes text,
+    resources text,
+    victim_statement text,
+    graph_text text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
+    ON collect.pg_deadlocks(server_id, collection_time);";
 
     /// <summary>
     /// V102 — <c>collect.pg_server_config</c>, the server's own configuration from <c>pg_settings</c>

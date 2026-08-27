@@ -3998,7 +3998,9 @@
                                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+</Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgVacuumNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
@@ -4164,6 +4166,28 @@
                         <DataGridTextColumn Header="Satisfied" Binding="{Binding Satisfied}" Width="80"/>
                         <DataGridTextColumn Header="Observed" Binding="{Binding Observed}" Width="240"/>
                         <DataGridTextColumn Header="What it means / what to do" Binding="{Binding Detail}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- #2661 deadlocks, last on Activity because they are blocking at its limit: a chain the
+                     server had to break by cancelling somebody. Below the blocking panels because blocking
+                     is the far more common finding, and a deadlock grid is usually empty. -->
+                <TextBlock Grid.Row="16" x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="17" x:Name="PgDeadlocksGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>
+                        <!-- The session the server cancelled. It is the end whose application saw an error,
+                             which is usually the only end anybody noticed. -->
+                        <DataGridTextColumn Header="Victim PID" Binding="{Binding VictimPid}" Width="90"/>
+                        <DataGridTextColumn Header="Sessions" Binding="{Binding ParticipantCount}" Width="80"/>
+                        <DataGridTextColumn Header="Lock Modes" Binding="{Binding LockModes}" Width="150"/>
+                        <DataGridTextColumn Header="Resources" Binding="{Binding Resources}" Width="220"/>
+                        <DataGridTextColumn Header="Victim Statement" Binding="{Binding VictimStatement}" Width="*"/>
+                        <!-- Re-reads of the SAME report, not repeats: the collector re-reads an overlapping
+                             log tail on purpose, and a genuinely repeated deadlock is its own row. -->
+                        <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>

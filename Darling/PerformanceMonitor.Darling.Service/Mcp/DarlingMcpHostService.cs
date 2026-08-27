@@ -653,6 +653,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 .WithGeminiCompatibleTools<DarlingMcpPgPredicateTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPgReplicationStatsTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPgWaitSamplingTools>()
+                /* get_pg_deadlocks / get_pg_deadlock_detail (#2661) - the reports themselves, out of the
+                   server log, rather than pg_stat_database's count. */
+                .WithGeminiCompatibleTools<DarlingMcpPgDeadlockTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()

@@ -74,6 +74,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_pg_lock_stats",
         "get_pg_write_stats",
         "get_pg_server_config",
+        "get_pg_deadlocks",
+        "get_pg_deadlock_detail",
         "get_pg_server_config_changes",
         "get_pg_replication_stats",
         "get_pg_top_queries",
