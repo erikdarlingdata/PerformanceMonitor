@@ -86,6 +86,8 @@ public sealed class ServerPageTabsTests
         ["get_pg_deadlocks"] = "pg_deadlocks",
         ["get_pg_wait_trend"] = "pg_wait_sampling",
         ["get_pg_query_duration_trend"] = "pg_statement_stats",
+        ["get_pg_io_trend"] = "pg_io_stats",
+        ["get_pg_database_trend"] = "pg_database_stats",
         ["get_pg_deadlock_detail"] = "pg_deadlocks",
         ["get_pg_server_config_changes"] = "pg_server_config",
         ["get_pg_replication_stats"] = "pg_replication_stats",

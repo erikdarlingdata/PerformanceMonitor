@@ -1546,6 +1546,20 @@ export const POSTGRES_TABS = [
             "No per-database activity in this window. These are windowed DIFFERENCES, so a single snapshot is not enough — the panel above says which of the two it is.",
         },
       ]),
+      /* #2663 the same counters over TIME, directly under the window they summarise. This is where the
+         cache hit ratio becomes usable at all: pg_stat_database's counters are cumulative since the last
+         reset, so the ratio above is a lifetime average that barely moves - a database that fell off a
+         cliff an hour ago still reads 99% because of the weeks behind it. Differenced per interval, the
+         cliff is on screen. Same for spills: a weekly total cannot tell one bad afternoon from a leak. */
+      table(
+        "Database Trend",
+        "get_pg_database_trend",
+        { server, hours: ctx.hours },
+        "points",
+        PG_DATABASE_TREND_COLUMNS,
+        ctx.label + ", the biggest temp-file spiller in this window; the hit ratio here is the interval's own, not the lifetime average",
+        "No differenced intervals for this database in the window. A trend needs at least two snapshots, so a short window is legitimately empty here."
+      ),
       /* #2629: sampled lock activity. On Activity rather than a Blocking tab because PostgreSQL has no
          Blocking tab — get_pg_blocking's chains live here too — and because this answers a different
          question from that one: which modes and relations are contended OVER TIME, rather than who is
@@ -1845,6 +1859,21 @@ export const POSTGRES_TABS = [
         ctx.label + ", requested checkpoints mean write volume filled max_wal_size before the interval elapsed",
         2,
         "No checkpoint or WAL activity differenced yet. These are differenced across snapshots, so a single collection has nothing to difference against and the window fills on the second."
+      ),
+      /* #2663 the I/O time series. Everything above this line describes one window; this follows one
+         (backend_type, context) pair through it. The pair is the subject rather than the backend type alone
+         because a hit ratio summed across contexts is meaningless - bulkread deliberately bypasses the
+         buffer pool with a ring buffer, so folding its misses in with the normal context's understates both
+         and the two have opposite remedies. No drill-down plumbing: the read chooses the busiest pair when
+         the toolbar names none, and says which it chose. */
+      table(
+        "I/O Trend",
+        "get_pg_io_trend",
+        { server, hours: ctx.hours },
+        "points",
+        PG_IO_TREND_COLUMNS,
+        ctx.label + ", the busiest backend and context in this window, per second; avg read ms is blank unless the server has track_io_timing on, which is off by default",
+        "No I/O samples for this combination in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the combination is being collected."
       ),
     ],
   },
@@ -2972,6 +3001,36 @@ const PG_QUERY_DURATION_TREND_COLUMNS = [
   { key: "calls", label: "Calls", format: "int" },
   { key: "calls_per_second", label: "Calls/sec", format: "num2" },
   { key: "total_exec_ms", label: "Total ms", format: "num1", small: true },
+];
+
+/* Rates lead, counts do not appear: the interval lengths are not uniform, so two raw counts side by side
+   are not comparable and the per-second figures are. Avg read ms renders blank rather than 0.00 wherever
+   track_io_timing is off - which is the DEFAULT - because a zero there is a fact about the configuration
+   and, printed as a latency, the most reassuring wrong number on the page. */
+const PG_IO_TREND_COLUMNS = [
+  { key: "collection_time", label: "When", format: "time" },
+  { key: "reads_per_second", label: "Reads/sec", format: "num2" },
+  { key: "writes_per_second", label: "Writes/sec", format: "num2" },
+  { key: "cache_hit_pct", label: "Hit %", format: "num2" },
+  { key: "avg_read_ms", label: "Avg Read (ms)", format: "num2" },
+  { key: "read_bytes_per_second", label: "Read Bytes/sec", format: "num1", small: true },
+  { key: "evictions_per_second", label: "Evictions/sec", format: "num2", small: true },
+  { key: "counter_reset", label: "Stats Reset", format: "bool", small: true },
+];
+
+/* Temp FILES beside temp BYTES, because the split is the finding: many small spill files is a work_mem
+   slightly under what a constant plan needs, a few enormous ones is a plan or index problem no work_mem
+   makes acceptable. Deadlocks stay a count - they are discrete events, and a per-second rate would render
+   every real one as four leading zeros. */
+const PG_DATABASE_TREND_COLUMNS = [
+  { key: "collection_time", label: "When", format: "time" },
+  { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
+  { key: "temp_files", label: "Temp Files", format: "int" },
+  { key: "temp_bytes", label: "Temp Bytes", format: "int" },
+  { key: "deadlocks", label: "Deadlocks", format: "int" },
+  { key: "transactions_per_second", label: "Xact/sec", format: "num2" },
+  { key: "rollback_pct", label: "Rollback %", format: "num2", small: true },
+  { key: "counter_reset", label: "Stats Reset", format: "bool", small: true },
 ];
 
 const PG_DEADLOCK_GRAPH_COLUMNS = [
