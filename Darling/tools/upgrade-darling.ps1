@@ -167,12 +167,17 @@ function New-DarlingRollbackBackupName([datetime]$whenUtc) {
 # that by re-checking the real name after the wildcard; enumerating everything and testing the real name is
 # the same guard with the trap removed, and on a directory holding tens of entries it costs nothing.
 function Get-DarlingRollbackBackups([string]$installRoot) {
-    if ([string]::IsNullOrWhiteSpace($installRoot)) { return @() }
-    if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) { return @() }
+    # Every return is unary-comma wrapped (,@(...)) so an EMPTY result reaches the caller as an empty array
+    # rather than $null. A bare `return @()` UNROLLS on the way out of the function, the assignment collects
+    # nothing, and `$backups` becomes $null - then `@($null)` is a one-element array holding $null, which
+    # slips past a `.Count -eq 0` guard and gets indexed/subtracted downstream (#2671). The comma keeps the
+    # contract every caller here relies on: this function always hands back a list, empty or not.
+    if ([string]::IsNullOrWhiteSpace($installRoot)) { return ,@() }
+    if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) { return ,@() }
 
     $all = @(Get-ChildItem -LiteralPath $installRoot -Directory -Force -ErrorAction SilentlyContinue)
     $mine = @($all | Where-Object { Test-DarlingRollbackBackupName $_.Name })
-    return @($mine | Sort-Object -Property LastWriteTimeUtc, Name -Descending)
+    return ,@($mine | Sort-Object -Property LastWriteTimeUtc, Name -Descending)
 }
 
 # The backups past retention, given the newest-first list Get-DarlingRollbackBackups produces.
@@ -181,7 +186,9 @@ function Get-DarlingRollbackBackups([string]$installRoot) {
 # The floor of 1 is not defensive clutter: this function's output is fed straight to a recursive delete in
 # an install directory, and the one input that must never be possible is the one that selects everything.
 function Select-DarlingRollbackBackupsToPrune($backups, [int]$keep) {
-    $ordered = @($backups)
+    # Same $null filter as the recency guard: this list feeds a recursive delete, so a phantom $null element
+    # must never be counted as a backup or reach the index below (#2671).
+    $ordered = @($backups | Where-Object { $null -ne $_ })
     if ($keep -lt 1) { $keep = 1 }
     if ($ordered.Count -le $keep) { return @() }
     return @($ordered[$keep..($ordered.Count - 1)])
@@ -205,7 +212,11 @@ function Select-DarlingRollbackBackupsToPrune($backups, [int]$keep) {
 # that the prune reclaims on the next deploy, and a missing one costs the rollback this whole procedure
 # exists to provide. So anything the clock cannot vouch for falls through to taking a new backup.
 function Test-DarlingRollbackBackupIsRecent($backups, [int]$withinMinutes, [datetime]$nowUtc) {
-    $ordered = @($backups)
+    # Filter $null out before counting: a caller that passed $null (or an array carrying one) would otherwise
+    # give @($backups).Count = 1, defeat the empty guard, and reach `$nowUtc - $null` - the op_Subtraction
+    # crash in #2671. The producer now returns a real empty array, so this is defense in depth on the two
+    # steps below that index [0] and subtract.
+    $ordered = @($backups | Where-Object { $null -ne $_ })
     if ($ordered.Count -eq 0) { return $false }
     if ($withinMinutes -le 0) { return $false }
 
