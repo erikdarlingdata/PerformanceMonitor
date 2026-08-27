@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -365,7 +365,7 @@ public sealed class DarlingNetworkTests
         Assert.True(decision.Exposed);
         Assert.Equal("192.168.1.205", decision.ListenIp);
         Assert.Equal("192.168.1.0/24", decision.Cidr);
-        Assert.Equal("admin", decision.Role);
+        Assert.Equal("admin", decision.Roles?[0]);
         Assert.Null(decision.DegradeReason);
     }
 
@@ -375,7 +375,7 @@ public sealed class DarlingNetworkTests
         var decision = DarlingManagedPostgres.ResolveNetworkExposure(
             new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24" }, CertPath, KeyPath);
         Assert.True(decision.Exposed);
-        Assert.Equal("viewer", decision.Role);
+        Assert.Equal("viewer", decision.Roles?[0]);
     }
 
     [Fact]

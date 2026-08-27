@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -684,7 +684,7 @@ public sealed class DarlingConfigureNetworkTests
             Assert.True(decision.Exposed);
             Assert.Equal("192.168.1.205", decision.ListenIp);
             Assert.Equal("192.168.1.0/24", decision.Cidr);
-            Assert.Equal("viewer", decision.Role);
+            Assert.Equal("viewer", decision.Roles?[0]);
 
             /* A timestamped backup exists, and the commented template survived the edit. */
             Assert.NotEmpty(Directory.GetFiles(root.FullName, "darling.json.bak-*"));
