@@ -691,6 +691,7 @@
         "type": "Project",
         "dependencies": {
           "AWSSDK.RDS": "[4.0.104.4, )",
+          "BlackwellSystems.Gcf": "[0.2.0, )",
           "Microsoft.Data.SqlClient": "[7.0.2, )",
           "Microsoft.Extensions.Hosting": "[10.0.11, )",
           "Microsoft.Extensions.Hosting.WindowsServices": "[10.0.11, )",
@@ -761,6 +762,12 @@
         "dependencies": {
           "AWSSDK.Core": "[4.0.102.1, 5.0.0)"
         }
+      },
+      "BlackwellSystems.Gcf": {
+        "type": "CentralTransitive",
+        "requested": "[0.2.0, )",
+        "resolved": "0.2.0",
+        "contentHash": "HnL0i5xnmNDxv0j4kqGTgUxZ+uTEuRtM4S31NYS/XdL1kaQ77TfknqpW0yUALyt4KJRmzVKXgI2CmqdhvMQ9cA=="
       },
       "CredentialManagement": {
         "type": "CentralTransitive",

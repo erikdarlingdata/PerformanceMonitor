@@ -724,7 +724,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                    resolver the read tools use. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
                    config.config_monitored_servers (the encrypted_password column stays SELECT-carved) — never the
                    config pivot or a schema-wide write. */
-                .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>();
+                .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
+                /* Optional GCF (Graph Compact Format) output: a single call-tool filter that,
+                   when DARLING_OUTPUT_FORMAT=gcf, re-encodes each tool's JSON result as a GCF
+                   generic wire. Registered once; covers every tool. Opt-in, lossless, and
+                   never larger than the JSON (see GcfCallToolFilter / GcfOutput). */
+                .WithRequestFilters(filters => filters.AddCallToolFilter(GcfCallToolFilter.Instance));
 
             _app = builder.Build();
 

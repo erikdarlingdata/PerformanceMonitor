@@ -34,6 +34,7 @@
     <!-- AN4: the analysis MCP tools over Streamable HTTP — Lite's exact MCP stack/version.
          The AspNetCore package brings the Microsoft.AspNetCore.App framework reference
          (Kestrel/WebApplication) transitively, same as it does for Lite. -->
+    <PackageReference Include="BlackwellSystems.Gcf" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
   </ItemGroup>
