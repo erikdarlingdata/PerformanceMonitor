@@ -821,18 +821,6 @@ export const SERVER_TABS = [
         "daily collection",
         "No lock-wait rows recorded. Index and object stats are collected daily."
       ),
-      /* #2663 the first PostgreSQL time series. The single-window panels above rank what this server waits
-         on; this follows ONE of them over time, which is the question they cannot answer. Parameterised by
-         event, so it needs one chosen - the toolbar default is the event that dominates the window. */
-      table(
-        "Wait Trend",
-        "get_pg_wait_trend",
-        { server, hours: ctx.hours },
-        "points",
-        PG_WAIT_TREND_COLUMNS,
-        ctx.label + ", the event that dominates this window, over time; estimates from a sampling profiler, so the shape is the finding",
-        "No samples for this wait event in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled."
-      ),
     ],
   },
 
@@ -1792,6 +1780,18 @@ export const POSTGRES_TABS = [
         PG_KERNEL_COLUMNS,
         ctx.label + ", CPU measured by the operating system; device bytes are not logical I/O",
         "No per-query OS resource usage in this window."
+      ),
+      /* #2663 the first PostgreSQL time series. The single-window panels above rank what this server waits
+         on; this follows ONE of them over time, which is the question they cannot answer. Parameterised by
+         event, so it needs one chosen - the toolbar default is the event that dominates the window. */
+      table(
+        "Wait Trend",
+        "get_pg_wait_trend",
+        { server, hours: ctx.hours },
+        "points",
+        PG_WAIT_TREND_COLUMNS,
+        ctx.label + ", the event that dominates this window, over time; estimates from a sampling profiler, so the shape is the finding",
+        "No samples for this wait event in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled."
       ),
     ],
   },
