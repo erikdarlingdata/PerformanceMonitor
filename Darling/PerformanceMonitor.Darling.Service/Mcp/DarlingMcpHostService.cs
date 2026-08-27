@@ -656,6 +656,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* get_pg_deadlocks / get_pg_deadlock_detail (#2661) - the reports themselves, out of the
                    server log, rather than pg_stat_database's count. */
                 .WithGeminiCompatibleTools<DarlingMcpPgDeadlockTools>()
+                /* get_pg_wait_trend / get_pg_query_duration_trend (#2663) - the first PostgreSQL time
+                   series. Fourteen trend reads shipped and none worked on this engine. */
+                .WithGeminiCompatibleTools<DarlingMcpPgTrendTools>()
                 .WithGeminiCompatibleTools<DarlingMcpMemoryGrantTools>()
                 .WithGeminiCompatibleTools<DarlingMcpPlanCacheSchedulerTools>()
                 .WithGeminiCompatibleTools<DarlingMcpJobTools>()
