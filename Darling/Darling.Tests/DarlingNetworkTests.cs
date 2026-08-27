@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -14,9 +14,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The opt-in network-endpoint primitives (darling-network-endpoints), all PURE + ungated: the
-/// non-loopback classifier, the role normalizer, the pg_ctl <c>-o</c> arg-gen (listen/ssl), the
-/// <c>ReconcilePgHba</c> marked-block reconcile, the firewall command builders, and the store
-/// loopback-degrade decision (<c>ResolveNetworkExposure</c>). The live round-trips (an exposed
+/// non-loopback classifier, the role normalizer (single and LIST, #2665), the pg_ctl <c>-o</c> arg-gen
+/// (listen/ssl), the <c>ReconcilePgHba</c> marked-block reconcile, the firewall command builders, and the
+/// store loopback-degrade decision (<c>ResolveNetworkExposure</c>). The live round-trips (an exposed
 /// cluster actually accepts a TLS verify-full client, an off-CIDR client is refused, the mcp role is
 /// denied the secret columns) are validated on DARLING01 and in the gated
 /// <see cref="DarlingSecuritySplitLiveTests"/>.
@@ -62,6 +62,138 @@ public sealed class DarlingNetworkTests
     [InlineData("root")]
     public void NormalizeNetworkRole_RejectsAnythingElse_ToNull(string role)
         => Assert.Null(DarlingNetwork.NormalizeNetworkRole(role));
+
+    [Fact]
+    public void NormalizeNetworkRole_AnswersAdmin_WhenBothRolesAreAdmitted()
+    {
+        /* The singular overload survives #2665 to answer a yes/no question — "is write-capable access
+           reachable from the network" (DarlingWorker's D7 startup warning). With both admitted it is, so it
+           must say admin; answering 'viewer' because that is what the list happens to end with would silence
+           the pivot warning at exactly the moment admin became reachable. */
+        Assert.Equal("admin", DarlingNetwork.NormalizeNetworkRole("admin,viewer"));
+        Assert.Equal("admin", DarlingNetwork.NormalizeNetworkRole("viewer,admin"));
+        Assert.Equal("admin", DarlingNetwork.NormalizeNetworkRole("viewer + ADMIN"));
+
+        /* ...and it is unchanged for every value that existed before the field learned to take a list. */
+        Assert.Equal("viewer", DarlingNetwork.NormalizeNetworkRole("viewer"));
+        Assert.Equal("viewer", DarlingNetwork.NormalizeNetworkRole(null));
+        Assert.Equal("admin", DarlingNetwork.NormalizeNetworkRole("admin"));
+    }
+
+    /* ---- role LIST normalizer (DarlingNetwork.NormalizeNetworkRoles, #2665) ---- */
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void NormalizeNetworkRoles_BlankIsViewerAlone_NeverAdmin(string? role)
+    {
+        /* D7 has to survive the field learning to take a list: an existing configuration that never named a
+           role must not gain admin-capable network access because the parser got cleverer. */
+        var roles = DarlingNetwork.NormalizeNetworkRoles(role);
+        Assert.NotNull(roles);
+        Assert.Equal(new[] { "viewer" }, roles!);
+    }
+
+    [Theory]
+    [InlineData("viewer", "viewer")]
+    [InlineData("VIEWER", "viewer")]
+    [InlineData("admin", "admin")]
+    [InlineData(" Admin ", "admin")]
+    public void NormalizeNetworkRoles_SingleRole_IsThatRoleAlone(string role, string expected)
+        => Assert.Equal(new[] { expected }, DarlingNetwork.NormalizeNetworkRoles(role)!);
+
+    [Theory]
+    [InlineData("admin,viewer")]
+    [InlineData("viewer,admin")]              // written the other way round
+    [InlineData("admin+viewer")]              // '+' separator
+    [InlineData("viewer+admin")]
+    [InlineData("admin viewer")]              // whitespace separator
+    [InlineData("viewer\tadmin")]
+    [InlineData("Admin, VIEWER")]             // case-insensitive per element
+    [InlineData("  admin  +  viewer  ")]      // padding around the separators
+    [InlineData("viewer,admin,viewer")]       // duplicates collapse
+    [InlineData("admin,,viewer")]             // an empty element is not an unknown role
+    public void NormalizeNetworkRoles_BothRoles_NormalizeToOneStableOrder(string role)
+    {
+        /* Every spelling of "both" must produce the SAME list, because that list becomes the generated
+           pg_hba block verbatim. An order that tracked how the field was typed would mean editing
+           "admin,viewer" to "viewer,admin" rewrites pg_hba.conf and SIGHUPs the server for no change in
+           who can reach the store. */
+        Assert.Equal(new[] { "admin", "viewer" }, DarlingNetwork.NormalizeNetworkRoles(role)!);
+    }
+
+    [Fact]
+    public void NormalizeNetworkRoles_ReorderingTheField_ProducesIdenticalPgHba_SoTheReconcileIsANoOp()
+    {
+        /* The consequence the ordering rule exists for, asserted on the artifact rather than on the list:
+           the two spellings must generate byte-identical pg_hba text, and reconciling one over the other
+           must therefore change nothing (ReconcileNetworkAsync writes + reloads only when the text differs). */
+        var written = DarlingManagedPostgres.BuildNetworkPgHbaLines(
+            DarlingNetwork.NormalizeNetworkRoles("admin,viewer")!, "10.0.0.0/8");
+        var reordered = DarlingManagedPostgres.BuildNetworkPgHbaLines(
+            DarlingNetwork.NormalizeNetworkRoles("viewer,admin")!, "10.0.0.0/8");
+
+        Assert.Equal(written, reordered);
+
+        var once = DarlingManagedPostgres.ReconcilePgHba(SampleHba, written);
+        Assert.Equal(once, DarlingManagedPostgres.ReconcilePgHba(once, reordered));
+    }
+
+    [Theory]
+    [InlineData("darling")]                   // the superuser/owner: service-only, never a remote seat
+    [InlineData("postgres")]
+    [InlineData("mcp")]                       // a real store role, but not one this field may name
+    [InlineData("all")]                       // pg_hba's wildcard must never arrive as a role name
+    [InlineData("admin,darling")]             // ...and not alongside a valid one either
+    [InlineData("darling,viewer")]
+    [InlineData("viewer,all")]
+    [InlineData("admin viewer darling")]
+    [InlineData("adminviewer")]               // a missing separator is one unknown role, not two known ones
+    [InlineData("admin;viewer")]              // ';' is not a separator this accepts
+    [InlineData("admin|viewer")]
+    public void NormalizeNetworkRoles_AnyUnrecognisedElement_InvalidatesTheWholeValue(string role)
+    {
+        /* Whole-value rejection, not element filtering. Keeping the good half of "admin,darling" would
+           expose the store as admin off a value the product had already refused to read in full, and leave
+           the operator believing both halves took effect. Null degrades to loopback with the reason named. */
+        Assert.Null(DarlingNetwork.NormalizeNetworkRoles(role));
+        Assert.Null(DarlingNetwork.NormalizeNetworkRole(role));
+    }
+
+    [Theory]
+    [InlineData(",")]
+    [InlineData("+")]
+    [InlineData(" , ")]
+    [InlineData(",+,")]
+    public void NormalizeNetworkRoles_SeparatorsWithoutRoles_AreInvalid_NotTheViewerDefault(string role)
+    {
+        /* Distinct from blank: the operator WROTE a value and none of it names a role, so it fails closed
+           like a typo instead of being read as "viewer". Guessing here would expose a store off the back of
+           a malformed field. */
+        Assert.Null(DarlingNetwork.NormalizeNetworkRoles(role));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("viewer")]
+    [InlineData("admin")]
+    [InlineData("ADMIN")]
+    [InlineData("admin,viewer")]
+    [InlineData("viewer+admin")]
+    [InlineData("  admin , viewer  ")]
+    public void NormalizeNetworkRoles_NeverEmitsAnythingButViewerOrAdmin(string? role)
+    {
+        /* D6, stated over the OUTPUT rather than the input: whatever this returns is written straight into a
+           pg_hba login-role field, so no accepted spelling — including the list forms the field newly takes —
+           may reach 'darling', 'postgres' or 'all'. */
+        var roles = DarlingNetwork.NormalizeNetworkRoles(role);
+        Assert.NotNull(roles);
+        Assert.NotEmpty(roles!);
+        Assert.All(roles!, r => Assert.True(r is "viewer" or "admin", $"'{r}' is not a remote seat role"));
+    }
 
     /* ---- listen/ssl -o arg-gen (DarlingManagedPostgres.BuildServerRuntimeOptions) ---- */
 
@@ -150,6 +282,106 @@ public sealed class DarlingNetworkTests
         var line = DarlingManagedPostgres.BuildNetworkPgHbaLine("viewer", "192.168.1.0/24");
         Assert.StartsWith("hostssl ", line, StringComparison.Ordinal);   // TLS-required, never plain host
         Assert.DoesNotContain(" all ", line, StringComparison.Ordinal);   // never database=all / user=all
+    }
+
+    [Fact]
+    public void BuildNetworkPgHbaLines_OneLinePerRole_EachNamingExactlyOneRoleAndOneCidr()
+    {
+        var block = DarlingManagedPostgres.BuildNetworkPgHbaLines(new[] { "admin", "viewer" }, "192.168.1.0/24");
+        var lines = block.Split('\n');
+
+        Assert.Equal(2, lines.Length);
+        Assert.Equal("hostssl darling admin 192.168.1.0/24 scram-sha-256", lines[0]);
+        Assert.Equal("hostssl darling viewer 192.168.1.0/24 scram-sha-256", lines[1]);
+
+        /* D5/D6 are per-LINE properties, and a list must not quietly relax any of them: admitting two roles
+           means two narrow rules, never one broader one. Asserted field by field because the dangerous line
+           ("hostssl darling darling ...", or a role of 'all') is a one-token edit away from a correct one and
+           reads almost identically — note that field 1 legitimately IS 'darling', the database. */
+        foreach (var live in lines)
+        {
+            var fields = live.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+            Assert.Equal(5, fields.Length);                          // type db role cidr method, nothing more
+            Assert.Equal("hostssl", fields[0]);                      // TLS-required, never plain host
+            Assert.Equal("darling", fields[1]);                      // one database, never all
+            Assert.True(fields[2] is "admin" or "viewer", $"'{fields[2]}' is not a remote seat role");
+            Assert.Equal("192.168.1.0/24", fields[3]);               // the configured CIDR, on EVERY line
+            Assert.Equal("scram-sha-256", fields[4]);
+        }
+    }
+
+    [Fact]
+    public void BuildNetworkPgHbaLines_SingleRole_IsByteIdenticalToTheSingularBuilder()
+    {
+        /* The upgrade path: a store that has always exposed one role must generate the text it already has,
+           or every existing exposed store rewrites pg_hba.conf and reloads on first start after the upgrade
+           for no change in access. */
+        Assert.Equal(
+            DarlingManagedPostgres.BuildNetworkPgHbaLine("viewer", "10.0.0.0/8"),
+            DarlingManagedPostgres.BuildNetworkPgHbaLines(new[] { "viewer" }, "10.0.0.0/8"));
+        Assert.Equal(
+            DarlingManagedPostgres.BuildNetworkPgHbaLine("admin", "192.168.1.0/24"),
+            DarlingManagedPostgres.BuildNetworkPgHbaLines(new[] { "admin" }, "192.168.1.0/24"));
+    }
+
+    [Fact]
+    public void ReconcilePgHba_MultiRoleBlock_HoldsBothRules_NarrowsBoth_AndIsIdempotent()
+    {
+        var roles = DarlingNetwork.NormalizeNetworkRoles("admin,viewer")!;
+
+        var wide = DarlingManagedPostgres.ReconcilePgHba(
+            SampleHba, DarlingManagedPostgres.BuildNetworkPgHbaLines(roles, "192.168.0.0/16"));
+
+        Assert.Contains("hostssl darling admin 192.168.0.0/16 scram-sha-256", wide, StringComparison.Ordinal);
+        Assert.Contains("hostssl darling viewer 192.168.0.0/16 scram-sha-256", wide, StringComparison.Ordinal);
+        Assert.Contains("host  all  all  127.0.0.1/32  scram-sha-256", wide, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(wide, DarlingManagedPostgres.PgHbaBeginMarker));
+
+        /* This is the whole point of #2665. Both rules live INSIDE the managed block, so tightening allowFrom
+           narrows both — where the hand-added second hostssl line the issue describes as today's workaround
+           sits outside the markers, is preserved verbatim, and silently keeps the old wider CIDR. */
+        var narrowed = DarlingManagedPostgres.ReconcilePgHba(
+            wide, DarlingManagedPostgres.BuildNetworkPgHbaLines(roles, "192.168.1.0/24"));
+
+        Assert.DoesNotContain("192.168.0.0/16", narrowed, StringComparison.Ordinal);
+        Assert.Contains("hostssl darling admin 192.168.1.0/24 scram-sha-256", narrowed, StringComparison.Ordinal);
+        Assert.Contains("hostssl darling viewer 192.168.1.0/24 scram-sha-256", narrowed, StringComparison.Ordinal);
+
+        /* Replaced, not accumulated — one block and two rules, not two blocks or four rules. */
+        Assert.Equal(1, CountOccurrences(narrowed, DarlingManagedPostgres.PgHbaBeginMarker));
+        Assert.Equal(1, CountOccurrences(narrowed, DarlingManagedPostgres.PgHbaEndMarker));
+        Assert.Equal(2, CountOccurrences(narrowed, "hostssl darling "));
+
+        Assert.Equal(narrowed, DarlingManagedPostgres.ReconcilePgHba(
+            narrowed, DarlingManagedPostgres.BuildNetworkPgHbaLines(roles, "192.168.1.0/24")));
+    }
+
+    [Fact]
+    public void ReconcilePgHba_Disable_RemovesEveryRoleRule_NotJustTheFirst()
+    {
+        var withBoth = DarlingManagedPostgres.ReconcilePgHba(
+            SampleHba, DarlingManagedPostgres.BuildNetworkPgHbaLines(new[] { "admin", "viewer" }, "10.0.0.0/8"));
+        Assert.Equal(2, CountOccurrences(withBoth, "hostssl darling "));
+
+        var disabled = DarlingManagedPostgres.ReconcilePgHba(withBoth, null);
+
+        /* A disable that took out one of two rules would leave the store open to the surviving role while
+           reporting itself closed — the marked-block removal has to be all of it. */
+        Assert.DoesNotContain("hostssl", disabled, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.PgHbaBeginMarker, disabled, StringComparison.Ordinal);
+        Assert.Contains("host  all  all  127.0.0.1/32  scram-sha-256", disabled, StringComparison.Ordinal);
+        Assert.Equal(disabled, DarlingManagedPostgres.ReconcilePgHba(disabled, null));
+    }
+
+    [Fact]
+    public void NeedsPgHbaReconcile_TreatsAMultiRoleBlockLikeAnyOther()
+    {
+        var block = DarlingManagedPostgres.BuildNetworkPgHbaLines(new[] { "admin", "viewer" }, "10.0.0.0/8");
+        Assert.True(DarlingManagedPostgres.NeedsPgHbaReconcile(SampleHba, block));
+
+        var withBoth = DarlingManagedPostgres.ReconcilePgHba(SampleHba, block);
+        Assert.True(DarlingManagedPostgres.NeedsPgHbaReconcile(withBoth, null));   // disable edge
     }
 
     [Fact]
@@ -376,6 +608,52 @@ public sealed class DarlingNetworkTests
             new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24" }, CertPath, KeyPath);
         Assert.True(decision.Exposed);
         Assert.Equal("viewer", decision.Roles?[0]);
+    }
+
+    [Theory]
+    [InlineData("admin,viewer")]
+    [InlineData("viewer,admin")]
+    [InlineData("viewer + ADMIN")]
+    public void ResolveNetworkExposure_BothRoles_CarriesEveryAdmittedRole_InStableOrder(string role)
+    {
+        /* The decision carries the whole list, so ReconcileNetworkAsync writes a rule for each and
+           VerifyPgHbaAsync knows how many to expect. Order is the resolver's, not the field's (#2665). */
+        var decision = DarlingManagedPostgres.ResolveNetworkExposure(
+            new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Role = role },
+            CertPath, KeyPath);
+
+        Assert.True(decision.Exposed);
+        Assert.Equal("192.168.1.0/24", decision.Cidr);
+        Assert.Equal(new[] { "admin", "viewer" }, decision.Roles!);
+        Assert.Null(decision.DegradeReason);
+    }
+
+    [Theory]
+    [InlineData("viewer,darling")]        // the superuser smuggled in beside a valid role
+    [InlineData("admin,all")]             // ...and pg_hba's wildcard likewise
+    [InlineData("admin,vewier")]          // a plain typo in one of two
+    [InlineData(",")]
+    public void ResolveNetworkExposure_Degrades_WhenAnyRoleInTheListIsInvalid(string role)
+        => AssertDegraded(new PostgresNetworkConfig
+        {
+            Listen = "192.168.1.205",
+            AllowFrom = "192.168.1.0/24",
+            Role = role,
+        });
+
+    [Fact]
+    public void ResolveNetworkExposure_RoleDegradeReason_NamesTheListForm_AndRefusesTheSuperuser()
+    {
+        /* The reason is what an operator reads in the log after their store went loopback, so it has to name
+           the form they were probably reaching for as well as the rule they broke. */
+        var decision = DarlingManagedPostgres.ResolveNetworkExposure(
+            new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Role = "darling" },
+            CertPath, KeyPath);
+
+        Assert.False(decision.Exposed);
+        Assert.NotNull(decision.DegradeReason);
+        Assert.Contains("admin,viewer", decision.DegradeReason!, StringComparison.Ordinal);
+        Assert.Contains("never the superuser", decision.DegradeReason!, StringComparison.Ordinal);
     }
 
     [Fact]

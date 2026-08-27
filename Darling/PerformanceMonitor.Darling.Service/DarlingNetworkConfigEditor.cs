@@ -423,7 +423,7 @@ internal static class DarlingNetworkConfigEditor
         "\"network\": {\n" +
         FieldIndent + $"\"listen\": {JsonString(listen)},  // bind IP; 0.0.0.0 = all interfaces (connect by a cert SAN name).\n" +
         FieldIndent + $"\"allowFrom\": {JsonString(allowFrom)},  // pg_hba + firewall CIDR (address family must match listen).\n" +
-        FieldIndent + $"\"role\": {JsonString(role)}  // remote pg_hba role: viewer (read-only, default) or admin (remote writes).\n" +
+        FieldIndent + $"\"role\": {JsonString(role)}  // remote pg_hba role(s): viewer (read-only, default), admin (remote writes), or both (\"admin,viewer\").\n" +
         ChildIndent + "}";
 
     /// <summary>

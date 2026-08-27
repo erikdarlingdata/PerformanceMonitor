@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -2033,9 +2033,12 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// Pure marked-block reconcile for pg_hba.conf (D5): returns <paramref name="existing"/> with the
     /// Darling-managed block (between <see cref="PgHbaBeginMarker"/> and <see cref="PgHbaEndMarker"/>) set
-    /// to a single <paramref name="desiredRuleLine"/> when non-empty, or REMOVED when null/empty (disable).
+    /// to <paramref name="desiredRuleLine"/> when non-empty, or REMOVED when null/empty (disable).
     /// Every non-marked line is preserved verbatim; a narrowing CIDR REPLACES the block (old removed, new
     /// appended); idempotent (re-running with the same desired yields identical text).
+    /// <para>Since #2665 the desired text may be SEVERAL newline-separated rules (one per admitted role,
+    /// from <see cref="BuildNetworkPgHbaLines"/>). That needs no code change here — this always replaced the
+    /// whole block rather than a line — but it is why the parameter is a block, not a rule.</para>
     /// </summary>
     public static string ReconcilePgHba(string existing, string? desiredRuleLine)
     {
@@ -2183,9 +2186,9 @@ public sealed class DarlingManagedPostgres
 
     /// <summary>
     /// Confirms the live pg_hba rules match intent via <c>pg_hba_file_rules</c>: no rule has a parse error,
-    /// and the Darling hostssl rule for the network role is PRESENT when exposed / ABSENT when
-    /// loopback. A mismatch is logged critical (a reload delivers a SIGHUP that Postgres may then reject).
-    /// Best-effort — a query failure degrades to a warning, not a throw.
+    /// and a Darling hostssl rule exists for EVERY admitted network role when exposed / for none of them
+    /// when loopback (#2665). A mismatch is logged critical (a reload delivers a SIGHUP that Postgres may
+    /// then reject). Best-effort — a query failure degrades to a warning, not a throw.
     /// </summary>
     private async Task VerifyPgHbaAsync(string ownerConnectionString, NetworkPlan plan, bool reloaded, CancellationToken cancellationToken)
     {
@@ -2211,22 +2214,29 @@ public sealed class DarlingManagedPostgres
             long present;
             if (exposed)
             {
+                /* EVERY admitted role must be live, not just one (#2665): a rule that failed to apply for the
+                   second role leaves those clients locked out while the exposure looks healthy.
+
+                   Counting DISTINCT ROLE NAMES rather than matching ROWS, because rows do not answer the
+                   question. `count(*) ... WHERE user_name && $2` is satisfied by two rules naming the SAME
+                   role, and that is the expected shape on an upgraded box: #2665's own workaround was a
+                   hand-added second hostssl line outside the markers, which ReconcilePgHba deliberately
+                   preserves. Such a file with a stale viewer line and no live admin rule counts 2 of 2 and
+                   passes, which is precisely the failure this check exists to catch. Unnesting and counting
+                   distinct names is >= Roles.Count only when every admitted role really has a rule. */
                 await using var command = new NpgsqlCommand(
-                    /* One row per admitted role: $2 is the ARRAY of roles and the count is compared to its length, so a
-   rule that applied for one role and not the other is caught rather than passing on the first. */
-                    "SELECT count(*) FROM pg_hba_file_rules WHERE type = 'hostssl' AND $1 = ANY(database) AND user_name && $2",
+                    "SELECT count(DISTINCT u) FROM pg_hba_file_rules AS r, unnest(r.user_name) AS u "
+                    + "WHERE r.type = 'hostssl' AND $1 = ANY(r.database) AND u = ANY($2::text[])",
                     connection);
                 command.Parameters.AddWithValue(DatabaseName);
-                /* EVERY admitted role must be live, not just one (#2665): a rule that failed to apply for
-                   the second role leaves those clients locked out with the exposure looking healthy. */
                 command.Parameters.AddWithValue(plan.Roles!.ToArray());
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
                 if (present < plan.Roles!.Count)
                 {
                     _logger.LogCritical(
-                        "pg_hba verification: {Present} of {Expected} expected 'hostssl {Db} <role> {Cidr} scram-sha-256' rule(s) are live after reload for role(s) '{Roles}' — the store is not accepting network clients as intended",
-                        present, plan.Roles!.Count, DatabaseName, plan.Cidr, string.Join(", ", plan.Roles!));
+                        "pg_hba verification: only {Present} of the {Expected} configured role(s) '{Roles}' have a live 'hostssl {Db} <role> {Cidr} scram-sha-256' rule after reload — the store is not accepting network clients as intended",
+                        present, plan.Roles!.Count, string.Join(", ", plan.Roles!), DatabaseName, plan.Cidr);
                     return;
                 }
 

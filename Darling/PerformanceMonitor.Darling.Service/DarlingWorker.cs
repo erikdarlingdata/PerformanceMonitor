@@ -276,7 +276,7 @@ public sealed class DarlingWorker : BackgroundService
     /// <list type="bullet">
     /// <item>BYO mode (<c>managed=false</c>) with any <c>postgres.network.*</c> or <c>mcp.network.*</c>
     /// set — the fields are IGNORED; the operator's own PostgreSQL governs exposure.</item>
-    /// <item>Managed mode with an EXPOSED store whose <c>network.role</c> is <c>admin</c> — names the
+    /// <item>Managed mode with an EXPOSED store whose <c>network.role</c> admits <c>admin</c> — names the
     /// <c>config_command</c> / <c>config_monitored_servers</c> / <c>config_notification</c>
     /// service-credential pivot a remote admin connection can reach (D7 — the operator's informed opt-in).</item>
     /// </list>
@@ -314,8 +314,12 @@ public sealed class DarlingWorker : BackgroundService
             && DarlingNetwork.IsExposedListenAddress(network.Listen)
             && string.Equals(DarlingNetwork.NormalizeNetworkRole(network.Role), "admin", StringComparison.Ordinal))
         {
+            /* "admits" rather than "is": since #2665 the field can name both roles, and NormalizeNetworkRole
+               answers 'admin' for that too — correctly, because admin IS reachable. Wording it as "is 'admin'"
+               would read as wrong to the operator who wrote "admin,viewer" and invite them to dismiss the one
+               warning that matters here. */
             warnings.Add(
-                "postgres.network.role is 'admin' — a REMOTE admin connection can write config_command (the test_connect service-credential pivot), config_monitored_servers, and config_notification (webhook exfil). This is an explicit opt-in; the secure default is 'viewer' (read-only). Only expose admin on a trusted network.");
+                "postgres.network.role admits 'admin' — a REMOTE admin connection can write config_command (the test_connect service-credential pivot), config_monitored_servers, and config_notification (webhook exfil). This is an explicit opt-in; the secure default is 'viewer' (read-only). Only expose admin on a trusted network.");
         }
 
         return warnings;

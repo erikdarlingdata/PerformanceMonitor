@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -1178,7 +1178,11 @@ public static class DarlingNetwork
     {
         var roles = NormalizeNetworkRoles(role);
 
-        if (roles is null)
+        /* Count == 0 cannot happen today — the plural returns null or a non-empty list — but this is the one
+           caller that would INDEX the result, and a future "return the ones we understood" would turn that
+           invariant into an IndexOutOfRangeException at service startup rather than a degrade. Checked here
+           because every other caller already checks it. */
+        if (roles is null || roles.Count == 0)
         {
             return null;
         }
@@ -1215,12 +1219,15 @@ public static class DarlingNetwork
         }
 
         var parts = role.Split(
-            new[] { ',', '+', ' ', '\t' },
+            new[] { ',', '+', ' ', '\t', '\r', '\n' },
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        /* Separators and nothing else (",", "+") is NOT the blank case: the operator wrote a value and none
+           of it names a role, so it takes the same fail-closed path as a typo rather than being read as the
+           viewer default. Guessing here would expose a store off the back of a malformed field. */
         if (parts.Length == 0)
         {
-            return new[] { "viewer" };
+            return null;
         }
 
         var seen = new List<string>();
