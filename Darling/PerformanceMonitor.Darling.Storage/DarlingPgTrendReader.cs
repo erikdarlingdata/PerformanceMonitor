@@ -285,7 +285,11 @@ public static class DarlingPgTrendReader
     /// <paramref name="BytesEstimable"/> is the pre-18 alternative — <c>op_bytes</c>, the block size, times
     /// the operation count. Exactly one of the two is true on any given server, and they are different
     /// quantities: 18 moves several blocks per operation, so the older estimate undercounts there.</param>
-    public readonly record struct PgIoTrendPoint(
+    /// <remarks>A <c>sealed record</c>, not the <c>readonly record struct</c> the two trend points above
+    /// are, on the size rule <see cref="DarlingPgIoReader.PgIoRow"/> already follows: those carry five
+    /// fields and this carries twenty-four, and a struct that wide is copied whole by every LINQ pass over
+    /// a thousand-point series.</remarks>
+    public sealed record PgIoTrendPoint(
         DateTime CollectionTimeUtc,
         double IntervalSeconds,
         long Reads,
@@ -321,7 +325,9 @@ public static class DarlingPgTrendReader
     /// <param name="Deadlocks">A COUNT for the interval, deliberately not a rate. Deadlocks are discrete
     /// server-recorded events a few per hour at worst, and per-second would render every real one as a
     /// number with four leading zeros.</param>
-    public readonly record struct PgDatabaseTrendPoint(
+    /// <remarks>A <c>sealed record</c> for the same reason as <see cref="PgIoTrendPoint"/>, and so the two
+    /// reads this PR adds do not differ in a way that means nothing.</remarks>
+    public sealed record PgDatabaseTrendPoint(
         DateTime CollectionTimeUtc,
         long XactCommit,
         long XactRollback,
@@ -671,6 +677,14 @@ public static class DarlingPgTrendReader
     /// the rig the pick differs by major — <c>client backend</c>/<c>bulkread</c> on 17,
     /// <c>checkpointer</c>/<c>normal</c> on 18 — and each is genuinely the busiest thing there.</para>
     ///
+    /// <para><b>Buffer hits QUALIFY a pair but do not rank it</b>, which running it on a quiet window
+    /// forced. Operations decide the order, because physical I/O is what the trend is about — but a fully
+    /// cached workload is the healthy state, and on one every combination has hits and no operations at
+    /// all, so a filter over operations alone answered "nothing to follow" for a server that is perfectly
+    /// observable. Hits also break the tie ahead of the name, or a window where nothing touched a disk
+    /// falls through to alphabetical order — the same defect as ranking on an unmeasured read time, from a
+    /// different direction.</para>
+    ///
     /// <para><c>GREATEST(delta, 0)</c> here rather than the take-it-whole rule, because this is a RANKING
     /// over the window and not a reading of an interval: clamping bounds a reset's contribution instead of
     /// letting one restart hand the default to whichever combination happened to be reset.</para>
@@ -692,7 +706,8 @@ public static class DarlingPgTrendReader
                 context,
                 GREATEST(reads   - LAG(reads)   OVER series, 0) AS d_reads,
                 GREATEST(writes  - LAG(writes)  OVER series, 0) AS d_writes,
-                GREATEST(extends - LAG(extends) OVER series, 0) AS d_extends
+                GREATEST(extends - LAG(extends) OVER series, 0) AS d_extends,
+                GREATEST(hits    - LAG(hits)    OVER series, 0) AS d_hits
             FROM pg_io_stats
             WHERE server_id = $1
             AND   backend_type IS NOT NULL
@@ -711,9 +726,20 @@ public static class DarlingPgTrendReader
             context
         FROM sampled
         GROUP BY backend_type, context
-        HAVING coalesce(SUM(d_reads), 0) + coalesce(SUM(d_writes), 0) + coalesce(SUM(d_extends), 0) > 0
+        /* Buffer HITS qualify a pair as active, even though they rank below operations. A fully cached
+           workload is the HEALTHY state, and on one every combination has hits and no physical I/O at all -
+           so a HAVING over operations alone answered "nothing to follow" for a server that is perfectly
+           observable, and refused to draw the most reassuring chart there is. Measured: a six-hour window
+           on the rig's quieter target had 0 operations and thousands of hits. */
+        HAVING coalesce(SUM(d_reads), 0) + coalesce(SUM(d_writes), 0)
+             + coalesce(SUM(d_extends), 0) + coalesce(SUM(d_hits), 0) > 0
         ORDER BY
             coalesce(SUM(d_reads), 0) + coalesce(SUM(d_writes), 0) + coalesce(SUM(d_extends), 0) DESC,
+            /* Hits break the tie BEFORE the name does. Without this line a window where nothing touched a
+               disk falls straight through to alphabetical order, which is the same defect ranking on
+               read_time_ms would have caused - a name picked by sorting and presented as the busiest thing
+               on the server. */
+            coalesce(SUM(d_hits), 0) DESC,
             backend_type,
             context
         LIMIT 1

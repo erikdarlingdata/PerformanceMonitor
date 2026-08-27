@@ -248,13 +248,14 @@ public sealed class DarlingMcpPgTrendTools
 
             var askedBackend = string.IsNullOrWhiteSpace(backend_type) ? null : backend_type.Trim();
             var askedContext = string.IsNullOrWhiteSpace(context) ? null : context.Trim();
+            var requested = askedBackend is not null && askedContext is not null;
             string chosenBackend;
             string chosenContext;
 
-            if (askedBackend is not null && askedContext is not null)
+            if (requested)
             {
-                chosenBackend = askedBackend;
-                chosenContext = askedContext;
+                chosenBackend = askedBackend!;
+                chosenContext = askedContext!;
             }
             else
             {
@@ -273,21 +274,22 @@ public sealed class DarlingMcpPgTrendTools
                         ?? McpHelpers.Status(
                             "empty",
                             (askedBackend ?? askedContext) is null
-                                ? $"No backend type moved any I/O on {resolved.ServerName} in the last "
-                                  + $"{hours_back} hour(s), so there is nothing to follow. pg_stat_io needs "
-                                  + "PostgreSQL 16 or later - on an older major the collector never runs, "
-                                  + "which get_collection_health reports."
+                                ? $"No backend type recorded any I/O or buffer activity on "
+                                  + $"{resolved.ServerName} in the last {hours_back} hour(s), so there is "
+                                  + "nothing to follow. Buffer HITS count here, not only physical reads and "
+                                  + "writes, so this is a genuinely idle window rather than a fully cached "
+                                  + "one. pg_stat_io also needs PostgreSQL 16 or later - on an older major "
+                                  + "the collector never runs, which get_collection_health reports."
                                 : $"Nothing matching {(askedBackend is not null ? $"backend type '{askedBackend}'" : $"context '{askedContext}'")} "
-                                  + $"moved any I/O on {resolved.ServerName} in the last {hours_back} "
-                                  + "hour(s). get_pg_io_stats lists the combinations this server reports; "
-                                  + "omit both parameters to follow whichever pair is busiest.");
+                                  + $"recorded any I/O or buffer activity on {resolved.ServerName} in the "
+                                  + $"last {hours_back} hour(s). get_pg_io_stats lists the combinations "
+                                  + "this server reports; omit both parameters to follow whichever pair is "
+                                  + "busiest.");
                 }
 
                 chosenBackend = dominant.Value.BackendType;
                 chosenContext = dominant.Value.Context;
             }
-
-            var requested = askedBackend is not null && askedContext is not null;
 
             var points = await DarlingPgTrendReader.GetIoTrendAsync(
                 postgres, resolved.ServerId, chosenBackend, chosenContext, start, windowEnd);
